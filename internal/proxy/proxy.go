@@ -1,0 +1,374 @@
+package proxy
+
+import (
+	"bytes"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
+	"time"
+
+	"elida/internal/config"
+	"elida/internal/session"
+)
+
+// Proxy handles proxying requests to the backend
+type Proxy struct {
+	config    *config.Config
+	store     session.Store
+	manager   *session.Manager
+	backend   *url.URL
+	transport *http.Transport
+}
+
+// New creates a new proxy handler
+func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
+	backendURL, err := url.Parse(cfg.Backend)
+	if err != nil {
+		return nil, err
+	}
+
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true, // Keep original encoding for streaming
+	}
+
+	return &Proxy{
+		config:    cfg,
+		store:     store,
+		manager:   manager,
+		backend:   backendURL,
+		transport: transport,
+	}, nil
+}
+
+// ServeHTTP handles incoming requests
+func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+
+	// Get or create session
+	sessionID := r.Header.Get(p.config.Session.Header)
+	if sessionID == "" && p.config.Session.GenerateIfMissing {
+		sessionID = "" // Let manager generate one
+	}
+
+	sess := p.manager.GetOrCreate(sessionID, p.backend.String(), r.RemoteAddr)
+	sess.Touch()
+
+	// Check if session was killed
+	select {
+	case <-sess.KillChan():
+		slog.Warn("request rejected: session killed",
+			"session_id", sess.ID,
+			"path", r.URL.Path,
+		)
+		http.Error(w, "Session terminated", http.StatusServiceUnavailable)
+		return
+	default:
+	}
+
+	// Add session ID to response headers
+	w.Header().Set(p.config.Session.Header, sess.ID)
+
+	// Capture request body
+	var requestBody []byte
+	if r.Body != nil {
+		requestBody, _ = io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(requestBody))
+		sess.AddBytes(int64(len(requestBody)), 0)
+	}
+
+	// Determine if this is a streaming request
+	isStreaming := p.isStreamingRequest(r, requestBody)
+
+	// Create the backend request
+	backendReq := p.createBackendRequest(r, requestBody)
+
+	// Log the request
+	slog.Info("proxying request",
+		"session_id", sess.ID,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"streaming", isStreaming,
+	)
+
+	if isStreaming {
+		p.handleStreaming(w, backendReq, sess)
+	} else {
+		p.handleStandard(w, backendReq, sess)
+	}
+
+	slog.Info("request completed",
+		"session_id", sess.ID,
+		"duration", time.Since(startTime),
+		"path", r.URL.Path,
+	)
+}
+
+// isStreamingRequest determines if the request expects a streaming response
+func (p *Proxy) isStreamingRequest(r *http.Request, body []byte) bool {
+	// Check for stream parameter in body (common for chat completions)
+	if len(body) > 0 {
+		// Simple check - look for "stream":true or "stream": true
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, `"stream":true`) || strings.Contains(bodyStr, `"stream": true`) {
+			return true
+		}
+	}
+
+	// Check Accept header for SSE
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "text/event-stream") {
+		return true
+	}
+
+	return false
+}
+
+// createBackendRequest creates a new request to the backend
+func (p *Proxy) createBackendRequest(r *http.Request, body []byte) *http.Request {
+	backendURL := *p.backend
+	backendURL.Path = r.URL.Path
+	backendURL.RawQuery = r.URL.RawQuery
+
+	req, _ := http.NewRequest(r.Method, backendURL.String(), bytes.NewReader(body))
+
+	// Copy headers
+	for key, values := range r.Header {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+
+	// Set host header
+	req.Host = p.backend.Host
+
+	return req
+}
+
+// handleStandard handles non-streaming requests
+func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *session.Session) {
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		slog.Error("backend request failed",
+			"session_id", sess.ID,
+			"error", err,
+		)
+		http.Error(w, "Backend unavailable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Read response body for logging/metrics
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("failed to read response",
+			"session_id", sess.ID,
+			"error", err,
+		)
+		http.Error(w, "Failed to read backend response", http.StatusBadGateway)
+		return
+	}
+
+	sess.AddBytes(0, int64(len(responseBody)))
+
+	// Log response (truncated for large responses)
+	p.logResponse(sess.ID, responseBody)
+
+	// Write response
+	w.WriteHeader(resp.StatusCode)
+	w.Write(responseBody)
+}
+
+// handleStreaming handles streaming responses (SSE and NDJSON)
+func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *session.Session) {
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		slog.Error("backend request failed",
+			"session_id", sess.ID,
+			"error", err,
+		)
+		http.Error(w, "Backend unavailable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Get flusher for streaming
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		slog.Error("response writer does not support flushing", "session_id", sess.ID)
+		return
+	}
+
+	// Determine streaming format from content type
+	contentType := resp.Header.Get("Content-Type")
+	isSSE := strings.Contains(contentType, "text/event-stream")
+	isNDJSON := strings.Contains(contentType, "application/x-ndjson") ||
+		strings.Contains(contentType, "application/json")
+
+	slog.Debug("streaming response",
+		"session_id", sess.ID,
+		"content_type", contentType,
+		"is_sse", isSSE,
+		"is_ndjson", isNDJSON,
+	)
+
+	// Buffer for collecting chunks for logging
+	var chunks []string
+	var totalBytes int64
+
+	// Read and forward chunks
+	buf := make([]byte, 4096)
+	for {
+		// Check if session was killed
+		select {
+		case <-sess.KillChan():
+			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
+			return
+		default:
+		}
+
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			totalBytes += int64(n)
+			chunk := buf[:n]
+
+			// Store chunk for logging (limit stored chunks)
+			if len(chunks) < 100 {
+				chunks = append(chunks, string(chunk))
+			}
+
+			// Write to client
+			_, writeErr := w.Write(chunk)
+			if writeErr != nil {
+				slog.Error("failed to write chunk",
+					"session_id", sess.ID,
+					"error", writeErr,
+				)
+				return
+			}
+			flusher.Flush()
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				slog.Error("error reading stream",
+					"session_id", sess.ID,
+					"error", err,
+				)
+			}
+			break
+		}
+	}
+
+	sess.AddBytes(0, totalBytes)
+
+	// Log aggregated streaming response
+	p.logStreamingResponse(sess.ID, chunks, isSSE)
+}
+
+// logResponse logs a standard response
+func (p *Proxy) logResponse(sessionID string, body []byte) {
+	// Truncate for logging if too large
+	logBody := string(body)
+	if len(logBody) > 1000 {
+		logBody = logBody[:1000] + "...[truncated]"
+	}
+
+	slog.Debug("response",
+		"session_id", sessionID,
+		"size", len(body),
+		"body", logBody,
+	)
+}
+
+// logStreamingResponse logs an aggregated streaming response
+func (p *Proxy) logStreamingResponse(sessionID string, chunks []string, isSSE bool) {
+	// Reconstruct response from chunks
+	var response strings.Builder
+	for _, chunk := range chunks {
+		response.WriteString(chunk)
+	}
+
+	// For SSE, parse out the actual content
+	if isSSE {
+		content := parseSSEContent(response.String())
+		slog.Debug("streaming response complete",
+			"session_id", sessionID,
+			"chunks", len(chunks),
+			"content_preview", truncate(content, 500),
+		)
+	} else {
+		// NDJSON - parse out content
+		content := parseNDJSONContent(response.String())
+		slog.Debug("streaming response complete",
+			"session_id", sessionID,
+			"chunks", len(chunks),
+			"content_preview", truncate(content, 500),
+		)
+	}
+}
+
+// parseSSEContent extracts content from SSE format
+func parseSSEContent(data string) string {
+	var content strings.Builder
+	lines := strings.Split(data, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data: ") {
+			payload := strings.TrimPrefix(line, "data: ")
+			if payload == "[DONE]" {
+				continue
+			}
+			// For now, just append the data line
+			// In future, could parse JSON and extract actual content
+			content.WriteString(payload)
+		}
+	}
+	return content.String()
+}
+
+// parseNDJSONContent extracts content from NDJSON format (Ollama style)
+func parseNDJSONContent(data string) string {
+	// For now, just return the raw data
+	// In future, could parse each JSON line and extract response/message content
+	return data
+}
+
+// truncate truncates a string to maxLen
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// ReverseProxy creates a standard reverse proxy (kept for reference/fallback)
+func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = p.backend.Scheme
+			req.URL.Host = p.backend.Host
+			req.Host = p.backend.Host
+		},
+		Transport: p.transport,
+	}
+}

@@ -1,0 +1,31 @@
+# ELIDA Configuration
+# Edge Layer for Intelligent Defense of Agents
+
+# Address to listen on for proxied traffic
+listen: ":8080"
+
+# Backend URL to proxy requests to
+backend: "http://localhost:11434"
+
+# Session configuration
+session:
+  # How long before an idle session times out
+  timeout: 5m
+  # Header to use for session ID
+  header: "X-Session-ID"
+  # Generate a session ID if not provided
+  generate_if_missing: true
+
+# Control API configuration
+control:
+  # Address for the control API
+  listen: ":9090"
+  # Enable the control API
+  enabled: true
+
+# Logging configuration
+logging:
+  # Log format: json or text
+  format: json
+  # Log level: debug, info, warn, error
+  level: info
