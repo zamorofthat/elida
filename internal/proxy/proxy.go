@@ -57,6 +57,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess := p.manager.GetOrCreate(sessionID, p.backend.String(), r.RemoteAddr)
+	if sess == nil {
+		// Session was killed - reject request
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed and cannot be reused"}`))
+		return
+	}
 	sess.Touch()
 
 	// Check if session was killed
@@ -66,7 +73,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"session_id", sess.ID,
 			"path", r.URL.Path,
 		)
-		http.Error(w, "Session terminated", http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed"}`))
 		return
 	default:
 	}

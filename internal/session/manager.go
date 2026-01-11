@@ -46,7 +46,8 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// GetOrCreate retrieves an existing session or creates a new one
+// GetOrCreate retrieves an existing session or creates a new one.
+// Returns nil if the session was previously killed (caller should reject request).
 func (m *Manager) GetOrCreate(id, backend, clientAddr string) *Session {
 	if id == "" {
 		id = m.generateID()
@@ -57,7 +58,16 @@ func (m *Manager) GetOrCreate(id, backend, clientAddr string) *Session {
 		if sess.IsActive() {
 			return sess
 		}
-		// Session exists but is not active, create new one
+		// Session exists but is not active
+		if sess.GetState() == Killed {
+			// Killed sessions cannot be reused
+			slog.Warn("rejected request for killed session",
+				"session_id", id,
+				"client", clientAddr,
+			)
+			return nil
+		}
+		// TimedOut or Completed sessions - allow new session with same ID
 	}
 
 	// Create new session
