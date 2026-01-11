@@ -16,6 +16,14 @@ type Config struct {
 	Control   ControlConfig   `yaml:"control"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	Telemetry TelemetryConfig `yaml:"telemetry"`
+	Storage   StorageConfig   `yaml:"storage"`
+}
+
+// StorageConfig holds persistent storage configuration
+type StorageConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Path          string `yaml:"path"`           // SQLite database path
+	RetentionDays int    `yaml:"retention_days"` // How long to keep history
 }
 
 // SessionConfig holds session-related configuration
@@ -114,6 +122,11 @@ func defaults() *Config {
 			Endpoint:    "localhost:4317",
 			Insecure:    true,
 		},
+		Storage: StorageConfig{
+			Enabled:       false,
+			Path:          "data/elida.db",
+			RetentionDays: 30,
+		},
 	}
 }
 
@@ -162,6 +175,14 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true" {
 		c.Telemetry.Insecure = true
+	}
+
+	// Storage overrides
+	if os.Getenv("ELIDA_STORAGE_ENABLED") == "true" {
+		c.Storage.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_STORAGE_PATH"); v != "" {
+		c.Storage.Path = v
 	}
 }
 

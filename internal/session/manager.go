@@ -8,6 +8,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// SessionEndCallback is called when a session ends (before cleanup)
+type SessionEndCallback func(sess *Session)
+
 // Manager handles session lifecycle, timeouts, and cleanup
 type Manager struct {
 	store   Store
@@ -17,6 +20,9 @@ type Manager struct {
 	cleanupInterval time.Duration
 	// How long to keep completed sessions before deletion
 	retentionPeriod time.Duration
+
+	// Callback for when sessions end (for persistence)
+	onSessionEnd SessionEndCallback
 }
 
 // NewManager creates a new session manager
@@ -27,6 +33,11 @@ func NewManager(store Store, timeout time.Duration) *Manager {
 		cleanupInterval: 30 * time.Second,
 		retentionPeriod: 5 * time.Minute,
 	}
+}
+
+// SetSessionEndCallback sets a callback to be called when sessions end
+func (m *Manager) SetSessionEndCallback(cb SessionEndCallback) {
+	m.onSessionEnd = cb
 }
 
 // Run starts the session manager's background tasks
@@ -203,6 +214,10 @@ func (m *Manager) cleanup() {
 	})
 
 	for _, sess := range sessions {
+		// Call the callback before deleting (for persistence)
+		if m.onSessionEnd != nil {
+			m.onSessionEnd(sess)
+		}
 		m.store.Delete(sess.ID)
 		slog.Debug("session cleaned up", "session_id", sess.ID)
 	}

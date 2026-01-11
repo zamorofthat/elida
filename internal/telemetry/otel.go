@@ -10,9 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -45,31 +43,24 @@ func NewProvider(cfg Config) (*Provider, error) {
 		cfg.ServiceName = "elida"
 	}
 
-	// Create resource with service information
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName(cfg.ServiceName),
-			semconv.ServiceVersion("0.1.0"),
-		),
-	)
-	if err != nil {
-		return nil, err
-	}
+	slog.Info("creating exporter", "type", cfg.Exporter)
 
 	// Create exporter based on config
 	var exporter sdktrace.SpanExporter
+	var err error
 	switch cfg.Exporter {
 	case "otlp":
+		slog.Debug("creating OTLP exporter")
 		exporter, err = createOTLPExporter(cfg)
 		if err != nil {
 			return nil, err
 		}
 		slog.Info("OTLP exporter initialized", "endpoint", cfg.Endpoint)
 	case "stdout":
+		slog.Debug("creating stdout exporter")
 		exporter, err = stdouttrace.New(stdouttrace.WithPrettyPrint())
 		if err != nil {
+			slog.Error("stdout exporter creation failed", "error", err)
 			return nil, err
 		}
 		slog.Info("stdout trace exporter initialized")
@@ -81,11 +72,9 @@ func NewProvider(cfg Config) (*Provider, error) {
 		}, nil
 	}
 
-	// Create trace provider
+	// Create simple trace provider without resource (avoids schema version conflicts)
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(exporter), // Use sync exporter for simplicity
 	)
 
 	// Set as global provider

@@ -37,11 +37,13 @@ elida/
 │   │   └── manager.go          # Lifecycle, timeouts, cleanup
 │   ├── proxy/proxy.go          # Core proxy logic
 │   ├── control/api.go          # Control API endpoints
-│   └── telemetry/otel.go       # OpenTelemetry tracing
+│   ├── telemetry/otel.go       # OpenTelemetry tracing
+│   └── storage/sqlite.go       # SQLite for session history
 ├── test/
 │   ├── unit/                   # Unit tests (no external dependencies)
 │   │   ├── session_test.go
 │   │   ├── store_test.go
+│   │   ├── storage_test.go     # SQLite storage tests
 │   │   ├── manager_test.go
 │   │   ├── proxy_test.go
 │   │   └── control_test.go
@@ -69,10 +71,16 @@ elida/
 
 ### Control API (port 9090)
 - `GET /control/health` — Health check
-- `GET /control/stats` — Session statistics
+- `GET /control/stats` — Session statistics (live sessions)
 - `GET /control/sessions` — List sessions
 - `GET /control/sessions/{id}` — Session details
 - `POST /control/sessions/{id}/kill` — Kill a session
+
+### History API (requires storage enabled)
+- `GET /control/history` — List historical sessions (with filtering/pagination)
+- `GET /control/history/stats` — Aggregate statistics from history
+- `GET /control/history/timeseries` — Time series data for charts
+- `GET /control/history/{id}` — Get specific session from history
 
 ## Current State (MVP)
 
@@ -90,9 +98,9 @@ elida/
 ### Not Yet Implemented
 - [x] **Redis session store** ✓
 - [x] **OpenTelemetry integration** ✓
-- [ ] **Multi-backend routing** ← NEXT
-- [ ] SQLite for dashboard history
-- [ ] Dashboard UI
+- [x] **SQLite for dashboard history** ✓
+- [ ] **Dashboard UI** ← NEXT
+- [ ] Multi-backend routing
 - [ ] WebSocket support (for voice/real-time agents)
 - [ ] Policy engine
 - [ ] Content inspection / PII detection
@@ -391,6 +399,13 @@ make run-jaeger         # Run with Jaeger tracing
 make jaeger-up          # Start Jaeger container
 make jaeger-ui          # Open Jaeger UI in browser
 
+# Storage / History
+make run-storage        # Run with SQLite storage enabled
+make run-full           # Run with all features (storage + telemetry)
+make history            # View session history
+make history-stats      # View historical statistics
+make history-timeseries # View time series data
+
 # Code quality
 make fmt                # Format code
 make lint               # Run golangci-lint (requires golangci-lint)
@@ -412,15 +427,16 @@ curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 Tests are in `test/` directory (black-box testing using only exported APIs):
 
 ```bash
-make test              # Unit tests only (43 tests, fast)
+make test              # Unit tests only (48 tests, fast)
 make test-integration  # Integration tests (10 tests, requires Redis)
-make test-all          # All tests (53 tests)
+make test-all          # All tests (58 tests)
 ```
 
 | Directory | File | Tests |
 |-----------|------|-------|
 | `test/unit/` | `session_test.go` | Session lifecycle: New, Touch, AddBytes, Kill, SetState, Duration, IdleTime, Snapshot |
 | `test/unit/` | `store_test.go` | MemoryStore: Put, Get, Delete, List, Count, ActiveFilter |
+| `test/unit/` | `storage_test.go` | SQLiteStore: SaveAndGet, ListSessions, GetStats, GetNotFound, Cleanup |
 | `test/unit/` | `manager_test.go` | Manager: GetOrCreate, GeneratesID, RejectsKilledSession, AllowsTimedOutSessionID, Kill, ListActive, Stats |
 | `test/unit/` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, BytesTracking, HeadersForwarded |
 | `test/unit/` | `control_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
@@ -446,6 +462,8 @@ make test-all          # All tests (53 tests)
 - `ELIDA_TELEMETRY_EXPORTER` — Exporter type: `otlp`, `stdout`, or `none`
 - `ELIDA_TELEMETRY_ENDPOINT` — OTLP endpoint (default: `localhost:4317`)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — Standard OTel env var (also enables telemetry)
+- `ELIDA_STORAGE_ENABLED` — Enable SQLite storage for history (default: `false`)
+- `ELIDA_STORAGE_PATH` — SQLite database path (default: `data/elida.db`)
 
 ## Architecture Decisions
 

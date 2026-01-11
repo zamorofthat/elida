@@ -133,3 +133,23 @@ run-jaeger: build jaeger-up
 # Open Jaeger UI
 jaeger-ui:
 	open http://localhost:16686
+
+# Run with SQLite storage enabled
+run-storage: build
+	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Run with all features (storage + telemetry)
+run-full: build jaeger-up
+	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ELIDA_TELEMETRY_ENABLED=true ELIDA_TELEMETRY_EXPORTER=otlp ELIDA_TELEMETRY_ENDPOINT=localhost:4317 ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Query session history
+history:
+	curl -s http://localhost:9090/control/history | jq .
+
+# Query historical stats
+history-stats:
+	curl -s http://localhost:9090/control/history/stats | jq .
+
+# Query time series data
+history-timeseries:
+	curl -s http://localhost:9090/control/history/timeseries | jq .

@@ -29,3 +29,25 @@ logging:
   format: json
   # Log level: debug, info, warn, error
   level: info
+
+# Telemetry configuration (OpenTelemetry)
+telemetry:
+  # Enable telemetry
+  enabled: false
+  # Exporter type: otlp, stdout, or none
+  exporter: none
+  # OTLP endpoint (when exporter is otlp)
+  endpoint: "localhost:4317"
+  # Service name for traces
+  service_name: "elida"
+  # Use insecure connection (for local development)
+  insecure: true
+
+# Storage configuration (for dashboard history)
+storage:
+  # Enable SQLite storage for session history
+  enabled: false
+  # Path to SQLite database file
+  path: "data/elida.db"
+  # How many days to retain session history
+  retention_days: 30
