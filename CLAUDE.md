@@ -32,10 +32,17 @@ elida/
 │   ├── config/config.go        # Configuration loading
 │   ├── session/
 │   │   ├── session.go          # Session model
+│   │   ├── session_test.go     # Session unit tests
 │   │   ├── store.go            # Store interface + in-memory impl
-│   │   └── manager.go          # Lifecycle, timeouts, cleanup
-│   ├── proxy/proxy.go          # Core proxy logic
-│   └── control/api.go          # Control API endpoints
+│   │   ├── store_test.go       # Store unit tests
+│   │   ├── manager.go          # Lifecycle, timeouts, cleanup
+│   │   └── manager_test.go     # Manager unit tests
+│   ├── proxy/
+│   │   ├── proxy.go            # Core proxy logic
+│   │   └── proxy_test.go       # Proxy integration tests
+│   └── control/
+│       ├── api.go              # Control API endpoints
+│       └── api_test.go         # Control API tests
 ├── configs/elida.yaml          # Default configuration
 ├── Dockerfile
 ├── Makefile
@@ -379,6 +386,25 @@ curl http://localhost:8080/api/tags              # Test against Ollama
 curl http://localhost:9090/control/sessions      # Check sessions
 curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 ```
+
+## Test Coverage
+
+Tests are organized by package:
+
+| Package | File | Coverage |
+|---------|------|----------|
+| `internal/session` | `session_test.go` | Session lifecycle: New, Touch, AddBytes, Kill, SetState, Duration, IdleTime, Snapshot |
+| `internal/session` | `store_test.go` | MemoryStore: Put, Get, Delete, List, Count, ActiveFilter |
+| `internal/session` | `manager_test.go` | Manager: GetOrCreate, GeneratesID, RejectsKilledSession, AllowsTimedOutSessionID, Kill, ListActive, Stats |
+| `internal/proxy` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, StreamingDetection, BytesTracking, HeadersForwarded |
+| `internal/control` | `api_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
+
+**Key test scenarios:**
+- Killed sessions reject new requests (returns 403 with JSON error)
+- Custom session IDs are honored
+- Session bytes/requests are tracked
+- Headers are forwarded to backend
+- Streaming vs non-streaming detection works
 
 ## Environment Variables
 
