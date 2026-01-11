@@ -2,11 +2,33 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
+	"net"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// SessionEndCallback is called when a session ends (before cleanup)
+type SessionEndCallback func(sess *Session)
+
+// KillBlockMode defines how long killed sessions stay blocked
+type KillBlockMode string
+
+const (
+	KillBlockDuration        KillBlockMode = "duration"
+	KillBlockUntilHourChange KillBlockMode = "until_hour_change"
+	KillBlockPermanent       KillBlockMode = "permanent"
+)
+
+// KillBlockConfig configures kill block behavior
+type KillBlockConfig struct {
+	Mode     KillBlockMode
+	Duration time.Duration
+}
 
 // Manager handles session lifecycle, timeouts, and cleanup
 type Manager struct {
@@ -17,16 +39,41 @@ type Manager struct {
 	cleanupInterval time.Duration
 	// How long to keep completed sessions before deletion
 	retentionPeriod time.Duration
+
+	// Kill block configuration
+	killBlockConfig KillBlockConfig
+
+	// Callback for when sessions end (for persistence)
+	onSessionEnd SessionEndCallback
+
+	// Map client IPs to session IDs for IP-based session tracking
+	clientSessions   map[string]string
+	clientSessionsMu sync.RWMutex
 }
 
-// NewManager creates a new session manager
+// NewManager creates a new session manager with default kill block settings
 func NewManager(store Store, timeout time.Duration) *Manager {
+	return NewManagerWithKillBlock(store, timeout, KillBlockConfig{
+		Mode:     KillBlockUntilHourChange,
+		Duration: 30 * time.Minute,
+	})
+}
+
+// NewManagerWithKillBlock creates a new session manager with custom kill block settings
+func NewManagerWithKillBlock(store Store, timeout time.Duration, killBlock KillBlockConfig) *Manager {
 	return &Manager{
 		store:           store,
 		timeout:         timeout,
 		cleanupInterval: 30 * time.Second,
 		retentionPeriod: 5 * time.Minute,
+		killBlockConfig: killBlock,
+		clientSessions:  make(map[string]string),
 	}
+}
+
+// SetSessionEndCallback sets a callback to be called when sessions end
+func (m *Manager) SetSessionEndCallback(cb SessionEndCallback) {
+	m.onSessionEnd = cb
 }
 
 // Run starts the session manager's background tasks
@@ -83,6 +130,111 @@ func (m *Manager) GetOrCreate(id, backend, clientAddr string) *Session {
 	return sess
 }
 
+// GetOrCreateByClient retrieves or creates a session based on client IP.
+// This is used when no X-Session-ID header is provided, to group requests
+// from the same client (e.g., Claude Code) into a single session.
+func (m *Manager) GetOrCreateByClient(clientAddr, backend string) *Session {
+	// Extract IP from client address (remove port)
+	clientIP := extractIP(clientAddr)
+
+	// Generate the session ID (deterministic based on IP + time window)
+	sessionID := m.generateClientSessionID(clientIP)
+
+	// Check if session already exists in store (regardless of client mapping)
+	if sess, ok := m.store.Get(sessionID); ok {
+		if sess.IsActive() {
+			return sess
+		}
+		// Session exists but is not active - check state
+		if sess.GetState() == Killed {
+			// Check if kill block has expired based on mode
+			if m.isKillBlockActive(sess) {
+				slog.Warn("rejected request for killed client session",
+					"session_id", sessionID,
+					"client_ip", clientIP,
+					"kill_block_mode", m.killBlockConfig.Mode,
+				)
+				return nil // BLOCK - don't create new session
+			}
+			// Kill block expired - allow new session
+			slog.Info("kill block expired, allowing new session",
+				"session_id", sessionID,
+				"client_ip", clientIP,
+			)
+			m.store.Delete(sessionID)
+		} else {
+			// TimedOut or Completed - allow creating new session
+			m.store.Delete(sessionID)
+		}
+	}
+
+	// Create new session
+	sess := NewSession(sessionID, backend, clientAddr)
+	m.store.Put(sess)
+
+	// Update client mapping
+	m.clientSessionsMu.Lock()
+	m.clientSessions[clientIP] = sessionID
+	m.clientSessionsMu.Unlock()
+
+	slog.Info("client session created",
+		"session_id", sessionID,
+		"client_ip", clientIP,
+		"backend", backend,
+	)
+
+	return sess
+}
+
+// isKillBlockActive checks if a killed session should still be blocked
+func (m *Manager) isKillBlockActive(sess *Session) bool {
+	if sess.GetState() != Killed || sess.EndTime == nil {
+		return false
+	}
+
+	switch m.killBlockConfig.Mode {
+	case KillBlockPermanent:
+		// Permanent block - always active until server restart
+		return true
+
+	case KillBlockDuration:
+		// Block for a specific duration after kill
+		elapsed := time.Since(*sess.EndTime)
+		return elapsed < m.killBlockConfig.Duration
+
+	case KillBlockUntilHourChange:
+		// Block until the hour changes (session ID would regenerate)
+		// Since session ID includes the hour, if we got here with the same ID,
+		// we're still in the same hour - so block is active
+		return true
+
+	default:
+		// Unknown mode - default to blocking
+		return true
+	}
+}
+
+// generateClientSessionID creates a session ID based on client IP and timestamp
+func (m *Manager) generateClientSessionID(clientIP string) string {
+	// Create a short hash of the IP + current hour (sessions reset hourly)
+	hourKey := time.Now().Format("2006-01-02-15")
+	data := clientIP + "-" + hourKey
+	hash := sha256.Sum256([]byte(data))
+	shortHash := hex.EncodeToString(hash[:4]) // 8 char hex
+
+	return "client-" + shortHash
+}
+
+// extractIP extracts the IP address from a client address (host:port)
+func extractIP(clientAddr string) string {
+	host, _, err := net.SplitHostPort(clientAddr)
+	if err != nil {
+		// Maybe it's just an IP without port
+		return clientAddr
+	}
+	return host
+}
+
 // Get retrieves a session by ID
 func (m *Manager) Get(id string) (*Session, bool) {
 	return m.store.Get(id)
@@ -100,6 +252,14 @@ func (m *Manager) Kill(id string) bool {
 	}
 
 	sess.Kill()
+
+	// Persist the killed state (important for Redis store)
+	m.store.Put(sess)
+
+	// Publish kill signal for distributed kill switch
+	if rs, ok := m.store.(*RedisStore); ok {
+		rs.PublishKill(id)
+	}
 
 	slog.Info("session killed",
 		"session_id", id,
@@ -195,6 +355,10 @@ func (m *Manager) cleanup() {
 	})
 
 	for _, sess := range sessions {
+		// Call the callback before deleting (for persistence)
+		if m.onSessionEnd != nil {
+			m.onSessionEnd(sess)
+		}
 		m.store.Delete(sess.ID)
 		slog.Debug("session cleaned up", "session_id", sess.ID)
 	}

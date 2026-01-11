@@ -46,6 +46,9 @@ type Session struct {
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 
+	// For rate limiting - track recent request times
+	RequestTimes []time.Time `json:"-"`
+
 	// For kill signaling
 	killChan chan struct{}
 }
@@ -69,8 +72,25 @@ func NewSession(id, backend, clientAddr string) *Session {
 func (s *Session) Touch() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.LastActivity = time.Now()
+	now := time.Now()
+	s.LastActivity = now
 	s.RequestCount++
+
+	// Track request time for rate limiting (keep last 2 minutes)
+	s.RequestTimes = append(s.RequestTimes, now)
+	cutoff := now.Add(-2 * time.Minute)
+	for len(s.RequestTimes) > 0 && s.RequestTimes[0].Before(cutoff) {
+		s.RequestTimes = s.RequestTimes[1:]
+	}
+}
+
+// GetRequestTimes returns a copy of recent request times
+func (s *Session) GetRequestTimes() []time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]time.Time, len(s.RequestTimes))
+	copy(result, s.RequestTimes)
+	return result
 }
 
 // AddBytes adds bytes to the session counters

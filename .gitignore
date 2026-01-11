@@ -39,3 +39,9 @@ configs/elida.local.yaml
 
 # Temporary files
 tmp/
+
+# Data directory (SQLite databases)
+data/
+*.db
+*.db-shm
+*.db-wal

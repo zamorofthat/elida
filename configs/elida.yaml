@@ -5,7 +5,9 @@
 listen: ":8080"
 
 # Backend URL to proxy requests to
-backend: "http://localhost:11434"
+# For Ollama: "http://localhost:11434"
+# For Claude/Anthropic: "https://api.anthropic.com"
+backend: "https://api.anthropic.com"
 
 # Session configuration
 session:
@@ -15,6 +17,16 @@ session:
   header: "X-Session-ID"
   # Generate a session ID if not provided
   generate_if_missing: true
+
+  # Kill block configuration - how long killed sessions stay blocked
+  kill_block:
+    # Mode options:
+    #   "duration"          - Block for a specific duration after kill
+    #   "until_hour_change" - Block until the hour changes (session ID regenerates)
+    #   "permanent"         - Block permanently until server restart
+    mode: "duration"
+    # Duration to block (only used if mode is "duration")
+    duration: 30m
 
 # Control API configuration
 control:
@@ -29,3 +41,66 @@ logging:
   format: json
   # Log level: debug, info, warn, error
   level: info
+
+# Telemetry configuration (OpenTelemetry)
+telemetry:
+  # Enable telemetry
+  enabled: false
+  # Exporter type: otlp, stdout, or none
+  exporter: none
+  # OTLP endpoint (when exporter is otlp)
+  endpoint: "localhost:4317"
+  # Service name for traces
+  service_name: "elida"
+  # Use insecure connection (for local development)
+  insecure: true
+
+# Storage configuration (for dashboard history)
+storage:
+  # Enable SQLite storage for session history
+  enabled: false
+  # Path to SQLite database file
+  path: "data/elida.db"
+  # How many days to retain session history
+  retention_days: 30
+
+# Policy configuration (for flagging suspicious sessions)
+policy:
+  # Enable policy engine
+  enabled: false
+  # Capture request/response content for flagged sessions
+  capture_flagged: true
+  # Max bytes to capture per request (default 10KB)
+  max_capture_size: 10000
+
+  # Policy rules
+  rules:
+    - name: "suspicious_activity"
+      type: "request_count"
+      threshold: 3
+      severity: "warning"
+      description: "Session exceeded 3 requests - potential automated activity"
+
+    - name: "large_response"
+      type: "bytes_out"
+      threshold: 1048576  # 1MB
+      severity: "warning"
+      description: "Session response exceeded 1MB"
+
+    - name: "high_request_count"
+      type: "request_count"
+      threshold: 100
+      severity: "critical"
+      description: "Session exceeded 100 requests"
+
+    - name: "long_running"
+      type: "duration"
+      threshold: 600  # 10 minutes in seconds
+      severity: "warning"
+      description: "Session running longer than 10 minutes"
+
+    - name: "rate_limit"
+      type: "requests_per_minute"
+      threshold: 30
+      severity: "critical"
+      description: "Session exceeding 30 requests per minute"

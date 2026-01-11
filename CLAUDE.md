@@ -33,10 +33,31 @@ elida/
 │   ├── session/
 │   │   ├── session.go          # Session model
 │   │   ├── store.go            # Store interface + in-memory impl
-│   │   └── manager.go          # Lifecycle, timeouts, cleanup
+│   │   ├── redis_store.go      # Redis Store implementation
+│   │   └── manager.go          # Lifecycle, timeouts, cleanup, kill block
 │   ├── proxy/proxy.go          # Core proxy logic
-│   └── control/api.go          # Control API endpoints
+│   ├── control/api.go          # Control API endpoints
+│   ├── policy/policy.go        # Policy engine, rules, flagging
+│   ├── dashboard/dashboard.go  # Embedded dashboard UI serving
+│   ├── telemetry/otel.go       # OpenTelemetry tracing
+│   └── storage/sqlite.go       # SQLite for session history
+├── web/                        # Dashboard frontend source (Preact/Vite)
+│   ├── src/
+│   │   ├── App.jsx             # Main dashboard component
+│   │   └── main.jsx            # Entry point
+│   └── package.json
+├── test/
+│   ├── unit/                   # Unit tests (no external dependencies)
+│   │   ├── session_test.go
+│   │   ├── store_test.go
+│   │   ├── storage_test.go     # SQLite storage tests
+│   │   ├── manager_test.go     # Includes kill block mode tests
+│   │   ├── proxy_test.go
+│   │   └── control_test.go
+│   └── integration/            # Integration tests (requires Redis)
+│       └── redis_test.go
 ├── configs/elida.yaml          # Default configuration
+├── docker-compose.yaml         # Redis + Jaeger for development
 ├── Dockerfile
 ├── Makefile
 └── README.md
@@ -46,9 +67,21 @@ elida/
 
 ### Sessions
 - Identified by `X-Session-ID` header (generated if missing)
+- Client IP-based tracking: requests from same IP grouped into one session (for Claude Code)
 - States: `Active`, `Completed`, `Killed`, `TimedOut`
 - Track: requests, bytes in/out, duration, idle time
 - Can be killed via control API (closes `killChan`)
+
+### Kill Block Modes
+When a session is killed, subsequent requests are blocked. Three modes available:
+- `duration` — Block for specific time (e.g., 30m)
+- `until_hour_change` — Block until the hour changes (session IDs regenerate hourly)
+- `permanent` — Block until server restart
+
+### Policy Engine
+- Rules evaluate session metrics: `bytes_out`, `bytes_in`, `request_count`, `duration`, `requests_per_minute`
+- Severity levels: `info`, `warning`, `critical`
+- Flagged sessions can have request content captured for review
 
 ### Proxy
 - Handles HTTP, NDJSON streaming (Ollama), SSE streaming (OpenAI/Anthropic/Mistral)
@@ -57,10 +90,26 @@ elida/
 
 ### Control API (port 9090)
 - `GET /control/health` — Health check
-- `GET /control/stats` — Session statistics
+- `GET /control/stats` — Session statistics (live sessions)
 - `GET /control/sessions` — List sessions
 - `GET /control/sessions/{id}` — Session details
 - `POST /control/sessions/{id}/kill` — Kill a session
+
+### History API (requires storage enabled)
+- `GET /control/history` — List historical sessions (with filtering/pagination)
+- `GET /control/history/stats` — Aggregate statistics from history
+- `GET /control/history/timeseries` — Time series data for charts
+- `GET /control/history/{id}` — Get specific session from history
+
+### Flagged Sessions API (requires policy enabled)
+- `GET /control/flagged` — List flagged sessions
+- `GET /control/flagged/stats` — Flagged session statistics
+- `GET /control/flagged/{id}` — Get flagged session details with captured content
+
+### Dashboard UI
+- Accessible at `http://localhost:9090/`
+- Tabs: Live Sessions, Flagged, History
+- Built with Preact, embedded in binary
 
 ## Current State (MVP)
 
@@ -69,20 +118,20 @@ elida/
 - [x] NDJSON streaming (Ollama)
 - [x] SSE streaming (OpenAI, Anthropic, Mistral)
 - [x] Session tracking and management
+- [x] Client IP-based session tracking (for Claude Code)
 - [x] Session timeout enforcement
-- [x] Kill switch for active sessions
+- [x] Kill switch with configurable block modes
 - [x] Control API
 - [x] Structured JSON logging
-- [x] Single backend configuration
+- [x] Redis session store for horizontal scaling
+- [x] OpenTelemetry integration
+- [x] SQLite for dashboard history
+- [x] Dashboard UI (Preact, embedded)
+- [x] Policy engine with rule-based flagging
 
 ### Not Yet Implemented
-- [ ] **Redis session store** ← PRIORITY 1
-- [ ] **OpenTelemetry integration** ← PRIORITY 2
-- [ ] **Multi-backend routing** ← PRIORITY 3
-- [ ] SQLite for dashboard history
-- [ ] Dashboard UI
+- [ ] Multi-backend routing
 - [ ] WebSocket support (for voice/real-time agents)
-- [ ] Policy engine
 - [ ] Content inspection / PII detection
 - [ ] SDK for native agent integration
 
@@ -358,18 +407,40 @@ routing:
 # Build and run
 make build              # Build binary to bin/elida
 make run                # Build and run with default config
+make run-redis          # Run with Redis session store
 
 # Testing
-make test               # Run all tests
-make test-coverage      # Run tests with coverage report
-go test -v ./internal/session -run TestSessionKill  # Run a single test
+make test               # Run unit tests (fast, no dependencies)
+make test-integration   # Run integration tests (requires Redis)
+make test-all           # Run all tests
+make test-coverage      # Unit test coverage report
+go test -v ./test/unit -run TestSessionKill  # Run a single test
+
+# Redis management
+make redis-up           # Start Redis container
+make redis-down         # Stop Redis container
+make redis-keys         # View Redis keys
+make redis-flush        # Clear Redis
+
+# Telemetry / Tracing
+make run-telemetry      # Run with stdout trace exporter (debugging)
+make run-jaeger         # Run with Jaeger tracing
+make jaeger-up          # Start Jaeger container
+make jaeger-ui          # Open Jaeger UI in browser
+
+# Storage / History
+make run-storage        # Run with SQLite storage enabled
+make run-full           # Run with all features (storage + telemetry)
+make history            # View session history
+make history-stats      # View historical statistics
+make history-timeseries # View time series data
 
 # Code quality
 make fmt                # Format code
 make lint               # Run golangci-lint (requires golangci-lint)
 
-# Quick verification against Ollama
-make test-ollama        # Test basic proxy
+# Quick verification
+make test-ollama        # Test basic proxy against Ollama
 make test-stream        # Test streaming
 make sessions           # View active sessions
 make stats              # View stats
@@ -380,12 +451,52 @@ curl http://localhost:9090/control/sessions      # Check sessions
 curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 ```
 
+## Test Coverage
+
+Tests are in `test/` directory (black-box testing using only exported APIs):
+
+```bash
+make test              # Unit tests only (53 tests, fast)
+make test-integration  # Integration tests (10 tests, requires Redis)
+make test-all          # All tests (63 tests)
+```
+
+| Directory | File | Tests |
+|-----------|------|-------|
+| `test/unit/` | `session_test.go` | Session lifecycle: New, Touch, AddBytes, Kill, SetState, Duration, IdleTime, Snapshot |
+| `test/unit/` | `store_test.go` | MemoryStore: Put, Get, Delete, List, Count, ActiveFilter |
+| `test/unit/` | `storage_test.go` | SQLiteStore: SaveAndGet, ListSessions, GetStats, GetNotFound, Cleanup |
+| `test/unit/` | `manager_test.go` | Manager: GetOrCreate, GeneratesID, RejectsKilledSession, AllowsTimedOutSessionID, Kill, ListActive, Stats, KillBlock modes (duration/permanent/until_hour_change), GetOrCreateByClient |
+| `test/unit/` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, BytesTracking, HeadersForwarded |
+| `test/unit/` | `control_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
+| `test/integration/` | `redis_test.go` | RedisStore: CRUD, KillChannel, Metadata, KillPersistsAcrossRestart, KilledStateLoadsCorrectly |
+
+**Key test scenarios:**
+- Killed sessions reject new requests (returns 403 with JSON error)
+- Killed session state persists across restarts (Redis)
+- Kill block modes: duration expires after time, permanent never expires, until_hour_change blocks same hour
+- Client IP-based sessions: same IP gets same session ID, different IPs get different sessions
+- Custom session IDs are honored
+- Session bytes/requests are tracked
+- Headers are forwarded to backend
+
 ## Environment Variables
 
 - `ELIDA_LISTEN` — Proxy listen address (default: `:8080`)
 - `ELIDA_BACKEND` — Backend URL (default: `http://localhost:11434`)
 - `ELIDA_CONTROL_LISTEN` — Control API address (default: `:9090`)
 - `ELIDA_LOG_LEVEL` — Log level: debug, info, warn, error
+- `ELIDA_SESSION_STORE` — Session store: `memory` (default) or `redis`
+- `ELIDA_REDIS_ADDR` — Redis address (default: `localhost:6379`)
+- `ELIDA_REDIS_PASSWORD` — Redis password (default: empty)
+- `ELIDA_TELEMETRY_ENABLED` — Enable OpenTelemetry (default: `false`)
+- `ELIDA_TELEMETRY_EXPORTER` — Exporter type: `otlp`, `stdout`, or `none`
+- `ELIDA_TELEMETRY_ENDPOINT` — OTLP endpoint (default: `localhost:4317`)
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — Standard OTel env var (also enables telemetry)
+- `ELIDA_STORAGE_ENABLED` — Enable SQLite storage for history (default: `false`)
+- `ELIDA_STORAGE_PATH` — SQLite database path (default: `data/elida.db`)
+- `ELIDA_POLICY_ENABLED` — Enable policy engine (default: `false`)
+- `ELIDA_POLICY_CAPTURE` — Capture request content for flagged sessions (default: `true`)
 
 ## Architecture Decisions
 

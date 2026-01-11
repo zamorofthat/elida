@@ -1,4 +1,4 @@
-package control
+package unit
 
 import (
 	"encoding/json"
@@ -7,13 +7,14 @@ import (
 	"testing"
 	"time"
 
+	"elida/internal/control"
 	"elida/internal/session"
 )
 
-func newTestHandler() (*Handler, *session.Manager) {
+func newTestHandler() (*control.Handler, *session.Manager) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
-	handler := New(store, manager)
+	handler := control.New(store, manager)
 	return handler, manager
 }
 
@@ -29,7 +30,7 @@ func TestHandler_Health(t *testing.T) {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
 
-	var health HealthResponse
+	var health control.HealthResponse
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestHandler_Sessions_ListAll(t *testing.T) {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
 
-	var sessResp SessionsResponse
+	var sessResp control.SessionsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&sessResp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestHandler_Sessions_ActiveOnly(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	var sessResp SessionsResponse
+	var sessResp control.SessionsResponse
 	json.NewDecoder(w.Result().Body).Decode(&sessResp)
 
 	if sessResp.Total != 1 {
@@ -150,7 +151,7 @@ func TestHandler_Session_GetByID(t *testing.T) {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
 
-	var sessInfo SessionInfo
+	var sessInfo control.SessionInfo
 	if err := json.NewDecoder(resp.Body).Decode(&sessInfo); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}

@@ -4,31 +4,66 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"elida/internal/dashboard"
+	"elida/internal/policy"
 	"elida/internal/session"
+	"elida/internal/storage"
 )
 
 // Handler handles control API requests
 type Handler struct {
-	store   session.Store
-	manager *session.Manager
-	mux     *http.ServeMux
+	store        session.Store
+	manager      *session.Manager
+	historyStore *storage.SQLiteStore
+	policyEngine *policy.Engine
+	dashboard    *dashboard.Handler
+	mux          *http.ServeMux
 }
 
 // New creates a new control API handler
 func New(store session.Store, manager *session.Manager) *Handler {
+	return NewWithHistory(store, manager, nil)
+}
+
+// NewWithHistory creates a new control API handler with history support
+func NewWithHistory(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore) *Handler {
+	return NewWithPolicy(store, manager, historyStore, nil)
+}
+
+// NewWithPolicy creates a new control API handler with history and policy support
+func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine) *Handler {
 	h := &Handler{
-		store:   store,
-		manager: manager,
-		mux:     http.NewServeMux(),
+		store:        store,
+		manager:      manager,
+		historyStore: historyStore,
+		policyEngine: policyEngine,
+		dashboard:    dashboard.New(),
+		mux:          http.NewServeMux(),
 	}
 
+	// Dashboard UI (catch-all pattern for Go 1.22+)
+	h.mux.Handle("/{path...}", h.dashboard)
+
+	// Control API endpoints
 	h.mux.HandleFunc("/control/health", h.handleHealth)
 	h.mux.HandleFunc("/control/stats", h.handleStats)
 	h.mux.HandleFunc("/control/sessions", h.handleSessions)
 	h.mux.HandleFunc("/control/sessions/", h.handleSession)
+
+	// History endpoints (only if history store is available)
+	h.mux.HandleFunc("/control/history", h.handleHistory)
+	h.mux.HandleFunc("/control/history/stats", h.handleHistoryStats)
+	h.mux.HandleFunc("/control/history/timeseries", h.handleTimeSeries)
+	h.mux.HandleFunc("/control/history/", h.handleHistorySession)
+
+	// Policy/flagged sessions endpoints
+	h.mux.HandleFunc("/control/flagged", h.handleFlagged)
+	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
+	h.mux.HandleFunc("/control/flagged/", h.handleFlaggedSession)
 
 	return h
 }
@@ -239,4 +274,243 @@ type SessionInfo struct {
 	Backend      string            `json:"backend"`
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+}
+
+// handleHistory handles GET /control/history
+func (h *Handler) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "History storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+
+	opts := storage.ListSessionsOptions{
+		Limit:   50,
+		State:   query.Get("state"),
+		Backend: query.Get("backend"),
+	}
+
+	if limitStr := query.Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
+			opts.Limit = limit
+		}
+	}
+
+	if offsetStr := query.Get("offset"); offsetStr != "" {
+		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
+			opts.Offset = offset
+		}
+	}
+
+	if sinceStr := query.Get("since"); sinceStr != "" {
+		if since, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			opts.Since = &since
+		}
+	}
+
+	if untilStr := query.Get("until"); untilStr != "" {
+		if until, err := time.Parse(time.RFC3339, untilStr); err == nil {
+			opts.Until = &until
+		}
+	}
+
+	sessions, err := h.historyStore.ListSessions(opts)
+	if err != nil {
+		slog.Error("failed to list history", "error", err)
+		http.Error(w, "Failed to retrieve history", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"sessions": sessions,
+		"count":    len(sessions),
+	})
+}
+
+// handleHistoryStats handles GET /control/history/stats
+func (h *Handler) handleHistoryStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "History storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	var since *time.Time
+
+	if sinceStr := query.Get("since"); sinceStr != "" {
+		if s, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = &s
+		}
+	}
+
+	stats, err := h.historyStore.GetStats(since)
+	if err != nil {
+		slog.Error("failed to get history stats", "error", err)
+		http.Error(w, "Failed to retrieve stats", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleTimeSeries handles GET /control/history/timeseries
+func (h *Handler) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "History storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+
+	// Default to last 24 hours
+	since := time.Now().Add(-24 * time.Hour)
+	if sinceStr := query.Get("since"); sinceStr != "" {
+		if s, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = s
+		}
+	}
+
+	interval := query.Get("interval")
+	if interval == "" {
+		interval = "hour"
+	}
+
+	points, err := h.historyStore.GetTimeSeries(since, interval)
+	if err != nil {
+		slog.Error("failed to get time series", "error", err)
+		http.Error(w, "Failed to retrieve time series", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"interval": interval,
+		"since":    since,
+		"points":   points,
+	})
+}
+
+// handleHistorySession handles GET /control/history/{id}
+func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "History storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract session ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/control/history/")
+	if path == "" || path == "stats" || path == "timeseries" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := strings.Split(path, "/")[0]
+
+	record, err := h.historyStore.GetSession(sessionID)
+	if err != nil {
+		slog.Error("failed to get session from history", "session_id", sessionID, "error", err)
+		http.Error(w, "Failed to retrieve session", http.StatusInternalServerError)
+		return
+	}
+
+	if record == nil {
+		http.Error(w, "Session not found in history", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, record)
+}
+
+// handleFlagged handles GET /control/flagged
+func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	minSeverity := query.Get("severity")
+
+	var flagged []*policy.FlaggedSession
+	if minSeverity != "" {
+		flagged = h.policyEngine.GetFlaggedSessionsBySeverity(policy.Severity(minSeverity))
+	} else {
+		flagged = h.policyEngine.GetFlaggedSessions()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"flagged": flagged,
+		"count":   len(flagged),
+	})
+}
+
+// handleFlaggedStats handles GET /control/flagged/stats
+func (h *Handler) handleFlaggedStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	stats := h.policyEngine.Stats()
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleFlaggedSession handles GET /control/flagged/{id}
+func (h *Handler) handleFlaggedSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract session ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/control/flagged/")
+	if path == "" || path == "stats" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := strings.Split(path, "/")[0]
+
+	flagged := h.policyEngine.GetFlaggedSession(sessionID)
+	if flagged == nil {
+		http.Error(w, "Session not flagged or not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, flagged)
 }

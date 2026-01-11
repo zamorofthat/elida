@@ -1,12 +1,14 @@
-package session
+package unit
 
 import (
 	"testing"
 	"time"
+
+	"elida/internal/session"
 )
 
 func TestNewSession(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	if sess.ID != "test-id" {
 		t.Errorf("expected ID 'test-id', got %s", sess.ID)
@@ -17,7 +19,7 @@ func TestNewSession(t *testing.T) {
 	if sess.ClientAddr != "127.0.0.1" {
 		t.Errorf("expected ClientAddr '127.0.0.1', got %s", sess.ClientAddr)
 	}
-	if sess.GetState() != Active {
+	if sess.GetState() != session.Active {
 		t.Errorf("expected state Active, got %s", sess.GetState())
 	}
 	if sess.RequestCount != 0 {
@@ -26,7 +28,7 @@ func TestNewSession(t *testing.T) {
 }
 
 func TestSessionTouch(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 	initialActivity := sess.LastActivity
 
 	time.Sleep(10 * time.Millisecond)
@@ -41,7 +43,7 @@ func TestSessionTouch(t *testing.T) {
 }
 
 func TestSessionAddBytes(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	sess.AddBytes(100, 200)
 	if sess.BytesIn != 100 {
@@ -61,7 +63,7 @@ func TestSessionAddBytes(t *testing.T) {
 }
 
 func TestSessionKill(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	if !sess.IsActive() {
 		t.Error("expected session to be active initially")
@@ -72,7 +74,7 @@ func TestSessionKill(t *testing.T) {
 	if sess.IsActive() {
 		t.Error("expected session to not be active after kill")
 	}
-	if sess.GetState() != Killed {
+	if sess.GetState() != session.Killed {
 		t.Errorf("expected state Killed, got %s", sess.GetState())
 	}
 	if sess.EndTime == nil {
@@ -89,10 +91,10 @@ func TestSessionKill(t *testing.T) {
 }
 
 func TestSessionSetState(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
-	sess.SetState(Completed)
-	if sess.GetState() != Completed {
+	sess.SetState(session.Completed)
+	if sess.GetState() != session.Completed {
 		t.Errorf("expected state Completed, got %s", sess.GetState())
 	}
 	if sess.EndTime == nil {
@@ -101,7 +103,7 @@ func TestSessionSetState(t *testing.T) {
 }
 
 func TestSessionDuration(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	time.Sleep(50 * time.Millisecond)
 	duration := sess.Duration()
@@ -112,7 +114,7 @@ func TestSessionDuration(t *testing.T) {
 }
 
 func TestSessionIdleTime(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	time.Sleep(50 * time.Millisecond)
 	idleTime := sess.IdleTime()
@@ -130,7 +132,7 @@ func TestSessionIdleTime(t *testing.T) {
 }
 
 func TestSessionSnapshot(t *testing.T) {
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 	sess.SetMetadata("key", "value")
 	sess.AddBytes(100, 200)
 	sess.Touch()
@@ -156,14 +158,14 @@ func TestSessionSnapshot(t *testing.T) {
 
 func TestStateString(t *testing.T) {
 	tests := []struct {
-		state    State
+		state    session.State
 		expected string
 	}{
-		{Active, "active"},
-		{Completed, "completed"},
-		{Killed, "killed"},
-		{TimedOut, "timeout"},
-		{State(99), "unknown"},
+		{session.Active, "active"},
+		{session.Completed, "completed"},
+		{session.Killed, "killed"},
+		{session.TimedOut, "timeout"},
+		{session.State(99), "unknown"},
 	}
 
 	for _, tt := range tests {

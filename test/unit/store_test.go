@@ -1,12 +1,14 @@
-package session
+package unit
 
 import (
 	"testing"
+
+	"elida/internal/session"
 )
 
 func TestMemoryStore_PutAndGet(t *testing.T) {
-	store := NewMemoryStore()
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	store := session.NewMemoryStore()
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	store.Put(sess)
 
@@ -20,7 +22,7 @@ func TestMemoryStore_PutAndGet(t *testing.T) {
 }
 
 func TestMemoryStore_GetNotFound(t *testing.T) {
-	store := NewMemoryStore()
+	store := session.NewMemoryStore()
 
 	_, ok := store.Get("nonexistent")
 	if ok {
@@ -29,8 +31,8 @@ func TestMemoryStore_GetNotFound(t *testing.T) {
 }
 
 func TestMemoryStore_Delete(t *testing.T) {
-	store := NewMemoryStore()
-	sess := NewSession("test-id", "http://backend", "127.0.0.1")
+	store := session.NewMemoryStore()
+	sess := session.NewSession("test-id", "http://backend", "127.0.0.1")
 
 	store.Put(sess)
 	store.Delete("test-id")
@@ -42,12 +44,12 @@ func TestMemoryStore_Delete(t *testing.T) {
 }
 
 func TestMemoryStore_List(t *testing.T) {
-	store := NewMemoryStore()
+	store := session.NewMemoryStore()
 
-	sess1 := NewSession("id-1", "http://backend", "127.0.0.1")
-	sess2 := NewSession("id-2", "http://backend", "127.0.0.1")
-	sess3 := NewSession("id-3", "http://backend", "127.0.0.1")
-	sess3.SetState(Completed)
+	sess1 := session.NewSession("id-1", "http://backend", "127.0.0.1")
+	sess2 := session.NewSession("id-2", "http://backend", "127.0.0.1")
+	sess3 := session.NewSession("id-3", "http://backend", "127.0.0.1")
+	sess3.SetState(session.Completed)
 
 	store.Put(sess1)
 	store.Put(sess2)
@@ -60,18 +62,18 @@ func TestMemoryStore_List(t *testing.T) {
 	}
 
 	// List active only
-	active := store.List(ActiveFilter)
+	active := store.List(session.ActiveFilter)
 	if len(active) != 2 {
 		t.Errorf("expected 2 active sessions, got %d", len(active))
 	}
 }
 
 func TestMemoryStore_Count(t *testing.T) {
-	store := NewMemoryStore()
+	store := session.NewMemoryStore()
 
-	sess1 := NewSession("id-1", "http://backend", "127.0.0.1")
-	sess2 := NewSession("id-2", "http://backend", "127.0.0.1")
-	sess2.SetState(Killed)
+	sess1 := session.NewSession("id-1", "http://backend", "127.0.0.1")
+	sess2 := session.NewSession("id-2", "http://backend", "127.0.0.1")
+	sess2.SetState(session.Killed)
 
 	store.Put(sess1)
 	store.Put(sess2)
@@ -82,20 +84,20 @@ func TestMemoryStore_Count(t *testing.T) {
 	}
 
 	// Count active
-	if count := store.Count(ActiveFilter); count != 1 {
+	if count := store.Count(session.ActiveFilter); count != 1 {
 		t.Errorf("expected active count 1, got %d", count)
 	}
 }
 
 func TestActiveFilter(t *testing.T) {
-	active := NewSession("active", "http://backend", "127.0.0.1")
-	killed := NewSession("killed", "http://backend", "127.0.0.1")
+	active := session.NewSession("active", "http://backend", "127.0.0.1")
+	killed := session.NewSession("killed", "http://backend", "127.0.0.1")
 	killed.Kill()
 
-	if !ActiveFilter(active) {
+	if !session.ActiveFilter(active) {
 		t.Error("expected ActiveFilter to return true for active session")
 	}
-	if ActiveFilter(killed) {
+	if session.ActiveFilter(killed) {
 		t.Error("expected ActiveFilter to return false for killed session")
 	}
 }
