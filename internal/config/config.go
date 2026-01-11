@@ -17,6 +17,7 @@ type Config struct {
 	Logging   LoggingConfig   `yaml:"logging"`
 	Telemetry TelemetryConfig `yaml:"telemetry"`
 	Storage   StorageConfig   `yaml:"storage"`
+	Policy    PolicyConfig    `yaml:"policy"`
 }
 
 // StorageConfig holds persistent storage configuration
@@ -24,6 +25,23 @@ type StorageConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Path          string `yaml:"path"`           // SQLite database path
 	RetentionDays int    `yaml:"retention_days"` // How long to keep history
+}
+
+// PolicyConfig holds policy engine configuration
+type PolicyConfig struct {
+	Enabled        bool         `yaml:"enabled"`
+	CaptureContent bool         `yaml:"capture_flagged"` // Capture content for flagged sessions
+	MaxCaptureSize int          `yaml:"max_capture_size"` // Max bytes to capture per request
+	Rules          []PolicyRule `yaml:"rules"`
+}
+
+// PolicyRule defines a single policy rule
+type PolicyRule struct {
+	Name        string `yaml:"name"`
+	Type        string `yaml:"type"`        // bytes_out, bytes_in, request_count, duration, requests_per_minute
+	Threshold   int64  `yaml:"threshold"`
+	Severity    string `yaml:"severity"`    // info, warning, critical
+	Description string `yaml:"description"`
 }
 
 // SessionConfig holds session-related configuration
@@ -127,6 +145,41 @@ func defaults() *Config {
 			Path:          "data/elida.db",
 			RetentionDays: 30,
 		},
+		Policy: PolicyConfig{
+			Enabled:        false,
+			CaptureContent: true,
+			MaxCaptureSize: 10000, // 10KB per request
+			Rules: []PolicyRule{
+				{
+					Name:        "large_response",
+					Type:        "bytes_out",
+					Threshold:   1048576, // 1MB
+					Severity:    "warning",
+					Description: "Session response exceeded 1MB",
+				},
+				{
+					Name:        "high_request_count",
+					Type:        "request_count",
+					Threshold:   100,
+					Severity:    "warning",
+					Description: "Session exceeded 100 requests",
+				},
+				{
+					Name:        "long_running",
+					Type:        "duration",
+					Threshold:   600, // 10 minutes in seconds
+					Severity:    "warning",
+					Description: "Session running longer than 10 minutes",
+				},
+				{
+					Name:        "rate_limit",
+					Type:        "requests_per_minute",
+					Threshold:   30,
+					Severity:    "critical",
+					Description: "Session exceeding 30 requests per minute",
+				},
+			},
+		},
 	}
 }
 
@@ -183,6 +236,14 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ELIDA_STORAGE_PATH"); v != "" {
 		c.Storage.Path = v
+	}
+
+	// Policy overrides
+	if os.Getenv("ELIDA_POLICY_ENABLED") == "true" {
+		c.Policy.Enabled = true
+	}
+	if os.Getenv("ELIDA_POLICY_CAPTURE") == "true" {
+		c.Policy.CaptureContent = true
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"elida/internal/config"
+	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/telemetry"
 )
@@ -23,15 +24,21 @@ type Proxy struct {
 	backend   *url.URL
 	transport *http.Transport
 	telemetry *telemetry.Provider
+	policy    *policy.Engine
 }
 
 // New creates a new proxy handler
 func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
-	return NewWithTelemetry(cfg, store, manager, nil)
+	return NewWithPolicy(cfg, store, manager, nil, nil)
 }
 
 // NewWithTelemetry creates a new proxy handler with telemetry support
 func NewWithTelemetry(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider) (*Proxy, error) {
+	return NewWithPolicy(cfg, store, manager, tp, nil)
+}
+
+// NewWithPolicy creates a new proxy handler with telemetry and policy support
+func NewWithPolicy(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider, pe *policy.Engine) (*Proxy, error) {
 	backendURL, err := url.Parse(cfg.Backend)
 	if err != nil {
 		return nil, err
@@ -56,6 +63,7 @@ func NewWithTelemetry(cfg *config.Config, store session.Store, manager *session.
 		backend:   backendURL,
 		transport: transport,
 		telemetry: tp,
+		policy:    pe,
 	}, nil
 }
 
@@ -135,11 +143,55 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// End telemetry span with metrics
 	p.telemetry.EndRequestSpan(span, statusCode, int64(len(requestBody)), bytesOut, nil)
 
+	// Evaluate policy rules
+	if p.policy != nil {
+		p.evaluatePolicy(sess, r.Method, r.URL.Path, requestBody, statusCode)
+	}
+
 	slog.Info("request completed",
 		"session_id", sess.ID,
 		"duration", time.Since(startTime),
 		"path", r.URL.Path,
 	)
+}
+
+// evaluatePolicy checks the session against policy rules
+func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, requestBody []byte, statusCode int) {
+	snap := sess.Snapshot()
+
+	metrics := policy.SessionMetrics{
+		SessionID:    snap.ID,
+		BytesIn:      snap.BytesIn,
+		BytesOut:     snap.BytesOut,
+		RequestCount: snap.RequestCount,
+		Duration:     sess.Duration(),
+		IdleTime:     sess.IdleTime(),
+		StartTime:    snap.StartTime,
+		RequestTimes: sess.GetRequestTimes(),
+	}
+
+	violations := p.policy.Evaluate(metrics)
+
+	if len(violations) > 0 {
+		for _, v := range violations {
+			slog.Warn("policy violation detected",
+				"session_id", sess.ID,
+				"rule", v.RuleName,
+				"severity", v.Severity,
+				"threshold", v.Threshold,
+				"actual", v.ActualValue,
+			)
+		}
+
+		// Capture the request for flagged sessions
+		p.policy.CaptureRequest(sess.ID, policy.CapturedRequest{
+			Timestamp:   time.Now(),
+			Method:      method,
+			Path:        path,
+			RequestBody: string(requestBody),
+			StatusCode:  statusCode,
+		})
+	}
 }
 
 // isStreamingRequest determines if the request expects a streaming response

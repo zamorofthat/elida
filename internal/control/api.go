@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"elida/internal/dashboard"
+	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
 )
@@ -17,6 +19,8 @@ type Handler struct {
 	store        session.Store
 	manager      *session.Manager
 	historyStore *storage.SQLiteStore
+	policyEngine *policy.Engine
+	dashboard    *dashboard.Handler
 	mux          *http.ServeMux
 }
 
@@ -27,13 +31,24 @@ func New(store session.Store, manager *session.Manager) *Handler {
 
 // NewWithHistory creates a new control API handler with history support
 func NewWithHistory(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore) *Handler {
+	return NewWithPolicy(store, manager, historyStore, nil)
+}
+
+// NewWithPolicy creates a new control API handler with history and policy support
+func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine) *Handler {
 	h := &Handler{
 		store:        store,
 		manager:      manager,
 		historyStore: historyStore,
+		policyEngine: policyEngine,
+		dashboard:    dashboard.New(),
 		mux:          http.NewServeMux(),
 	}
 
+	// Dashboard UI (catch-all pattern for Go 1.22+)
+	h.mux.Handle("/{path...}", h.dashboard)
+
+	// Control API endpoints
 	h.mux.HandleFunc("/control/health", h.handleHealth)
 	h.mux.HandleFunc("/control/stats", h.handleStats)
 	h.mux.HandleFunc("/control/sessions", h.handleSessions)
@@ -44,6 +59,11 @@ func NewWithHistory(store session.Store, manager *session.Manager, historyStore 
 	h.mux.HandleFunc("/control/history/stats", h.handleHistoryStats)
 	h.mux.HandleFunc("/control/history/timeseries", h.handleTimeSeries)
 	h.mux.HandleFunc("/control/history/", h.handleHistorySession)
+
+	// Policy/flagged sessions endpoints
+	h.mux.HandleFunc("/control/flagged", h.handleFlagged)
+	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
+	h.mux.HandleFunc("/control/flagged/", h.handleFlaggedSession)
 
 	return h
 }
@@ -419,4 +439,78 @@ func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, record)
+}
+
+// handleFlagged handles GET /control/flagged
+func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	minSeverity := query.Get("severity")
+
+	var flagged []*policy.FlaggedSession
+	if minSeverity != "" {
+		flagged = h.policyEngine.GetFlaggedSessionsBySeverity(policy.Severity(minSeverity))
+	} else {
+		flagged = h.policyEngine.GetFlaggedSessions()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"flagged": flagged,
+		"count":   len(flagged),
+	})
+}
+
+// handleFlaggedStats handles GET /control/flagged/stats
+func (h *Handler) handleFlaggedStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	stats := h.policyEngine.Stats()
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleFlaggedSession handles GET /control/flagged/{id}
+func (h *Handler) handleFlaggedSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract session ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/control/flagged/")
+	if path == "" || path == "stats" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := strings.Split(path, "/")[0]
+
+	flagged := h.policyEngine.GetFlaggedSession(sessionID)
+	if flagged == nil {
+		http.Error(w, "Session not flagged or not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, flagged)
 }
