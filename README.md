@@ -21,17 +21,20 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 - [x] Streaming support (NDJSON for Ollama, SSE for OpenAI/Anthropic/Mistral)
 - [x] Session tracking and management
 - [x] Session timeout enforcement
-- [x] Kill switch for active sessions
+- [x] Kill switch with configurable block modes
 - [x] Control API for monitoring
 - [x] Structured JSON logging
+- [x] Redis-backed session store for horizontal scaling
+- [x] OpenTelemetry integration for tracing
+- [x] SQLite storage for session history
+- [x] Policy engine for session-level rules
+- [x] Dashboard UI for monitoring
+- [x] Client IP-based session tracking (for Claude Code)
 
 ### Roadmap
 - [ ] WebSocket support for real-time/voice agents
-- [ ] Policy engine for session-level rules
 - [ ] Content inspection and PII detection
-- [ ] OpenTelemetry integration
-- [ ] Dashboard UI
-- [ ] Redis-backed session store
+- [ ] Multi-backend routing
 - [ ] SDK for native agent integration
 
 ## Quick Start
@@ -67,9 +70,28 @@ session:
   header: "X-Session-ID"
   generate_if_missing: true
 
+  # Kill block configuration - how long killed sessions stay blocked
+  kill_block:
+    # Mode options:
+    #   "duration"          - Block for a specific duration after kill
+    #   "until_hour_change" - Block until the hour changes (session ID regenerates)
+    #   "permanent"         - Block permanently until server restart
+    mode: "duration"
+    duration: 30m
+
 control:
   listen: ":9090"
   enabled: true
+
+# Policy engine for flagging suspicious sessions
+policy:
+  enabled: true
+  capture_flagged: true
+  rules:
+    - name: "high_request_count"
+      type: "request_count"
+      threshold: 100
+      severity: "warning"
 ```
 
 Or use environment variables:
@@ -77,6 +99,24 @@ Or use environment variables:
 export ELIDA_BACKEND="https://api.mistral.ai"
 export ELIDA_LISTEN=":8080"
 ```
+
+### Using with Claude Code
+
+ELIDA can proxy Claude Code traffic to monitor and control agent sessions:
+
+```bash
+# Configure ELIDA to proxy to Anthropic
+# In configs/elida.yaml:
+backend: "https://api.anthropic.com"
+
+# Start ELIDA
+make run
+
+# Start Claude Code with ELIDA as the base URL
+ANTHROPIC_BASE_URL=http://localhost:8080 claude
+```
+
+ELIDA automatically groups requests from the same IP into a single session, so all Claude Code requests appear as one session in the dashboard.
 
 ## Usage
 
@@ -116,6 +156,33 @@ curl http://localhost:9090/control/sessions/{session-id}
 
 # Kill a session
 curl -X POST http://localhost:9090/control/sessions/{session-id}/kill
+
+# View flagged sessions (policy violations)
+curl http://localhost:9090/control/flagged
+
+# View session history
+curl http://localhost:9090/control/history
+
+# Access the dashboard UI
+open http://localhost:9090/
+```
+
+### Kill Block Modes
+
+When you kill a session, ELIDA blocks subsequent requests from that client. The block duration depends on the configured mode:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `duration` | Blocks for a specific time (e.g., 30m) | Standard rate limiting / cooldown |
+| `until_hour_change` | Blocks until the clock hour changes | Aligns with automatic session ID regeneration |
+| `permanent` | Blocks until server restart | Maximum security for compromised sessions |
+
+```bash
+# Kill a runaway Claude Code session
+curl -X POST http://localhost:9090/control/sessions/client-abc123/kill
+
+# Response: {"session_id":"client-abc123","status":"killed"}
+# All subsequent requests from that IP will receive 403 until block expires
 ```
 
 ### Session Management

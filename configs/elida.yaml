@@ -18,6 +18,16 @@ session:
   # Generate a session ID if not provided
   generate_if_missing: true
 
+  # Kill block configuration - how long killed sessions stay blocked
+  kill_block:
+    # Mode options:
+    #   "duration"          - Block for a specific duration after kill
+    #   "until_hour_change" - Block until the hour changes (session ID regenerates)
+    #   "permanent"         - Block permanently until server restart
+    mode: "duration"
+    # Duration to block (only used if mode is "duration")
+    duration: 30m
+
 # Control API configuration
 control:
   # Address for the control API

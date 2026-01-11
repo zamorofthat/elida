@@ -74,11 +74,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Get or create session
 	sessionID := r.Header.Get(p.config.Session.Header)
-	if sessionID == "" && p.config.Session.GenerateIfMissing {
-		sessionID = "" // Let manager generate one
+
+	var sess *session.Session
+	if sessionID != "" {
+		// Explicit session ID provided - use it
+		sess = p.manager.GetOrCreate(sessionID, p.backend.String(), r.RemoteAddr)
+	} else if p.config.Session.GenerateIfMissing {
+		// No session ID - use client IP-based session tracking
+		// This groups all requests from the same client (e.g., Claude Code) into one session
+		sess = p.manager.GetOrCreateByClient(r.RemoteAddr, p.backend.String())
 	}
 
-	sess := p.manager.GetOrCreate(sessionID, p.backend.String(), r.RemoteAddr)
 	if sess == nil {
 		// Session was killed - reject request
 		w.Header().Set("Content-Type", "application/json")

@@ -51,6 +51,15 @@ type SessionConfig struct {
 	GenerateIfMissing bool          `yaml:"generate_if_missing"`
 	Store             string        `yaml:"store"` // "memory" or "redis"
 	Redis             RedisConfig   `yaml:"redis"`
+	KillBlock         KillBlockConfig `yaml:"kill_block"`
+}
+
+// KillBlockConfig configures how long killed sessions stay blocked
+type KillBlockConfig struct {
+	// Mode: "duration", "until_hour_change", or "permanent"
+	Mode     string        `yaml:"mode"`
+	// Duration to block (only used if mode is "duration")
+	Duration time.Duration `yaml:"duration"`
 }
 
 // RedisConfig holds Redis connection configuration
@@ -123,6 +132,10 @@ func defaults() *Config {
 				Password:  "",
 				DB:        0,
 				KeyPrefix: "elida:session:",
+			},
+			KillBlock: KillBlockConfig{
+				Mode:     "until_hour_change", // default: blocked until hour changes
+				Duration: 30 * time.Minute,    // if mode is "duration"
 			},
 		},
 		Control: ControlConfig{
