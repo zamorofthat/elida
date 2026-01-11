@@ -18,13 +18,26 @@ run: build
 dev:
 	air
 
-# Run tests
+# Run unit tests (no external dependencies)
 test:
-	go test -v ./...
+	go test -v ./test/unit/...
+
+# Run integration tests (requires Redis)
+test-integration: redis-up
+	go test -v ./test/integration/...
+
+# Run all tests
+test-all: redis-up
+	go test -v ./test/...
 
 # Run tests with coverage
 test-coverage:
-	go test -coverprofile=coverage.out ./...
+	go test -coverprofile=coverage.out ./test/unit/...
+	go tool cover -html=coverage.out -o coverage.html
+
+# Run all tests with coverage
+test-coverage-all: redis-up
+	go test -coverprofile=coverage.out ./test/...
 	go tool cover -html=coverage.out -o coverage.html
 
 # Clean build artifacts
@@ -76,3 +89,47 @@ stats:
 # Health check
 health:
 	curl -s http://localhost:9090/control/health | jq .
+
+# Start Redis container
+redis-up:
+	docker compose up -d redis
+
+# Stop Redis container
+redis-down:
+	docker compose down
+
+# Run with Redis backend
+run-redis: build redis-up
+	ELIDA_SESSION_STORE=redis ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Start full stack (Redis + ELIDA)
+up:
+	docker compose up -d
+
+# Stop full stack
+down:
+	docker compose down
+
+# View Redis keys
+redis-keys:
+	docker compose exec redis redis-cli KEYS "elida:*"
+
+# Flush Redis
+redis-flush:
+	docker compose exec redis redis-cli FLUSHDB
+
+# Start Jaeger for tracing
+jaeger-up:
+	docker compose up -d jaeger
+
+# Run with telemetry (stdout exporter for debugging)
+run-telemetry: build
+	ELIDA_TELEMETRY_ENABLED=true ELIDA_TELEMETRY_EXPORTER=stdout ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Run with Jaeger tracing
+run-jaeger: build jaeger-up
+	ELIDA_TELEMETRY_ENABLED=true ELIDA_TELEMETRY_EXPORTER=otlp ELIDA_TELEMETRY_ENDPOINT=localhost:4317 ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Open Jaeger UI
+jaeger-ui:
+	open http://localhost:16686

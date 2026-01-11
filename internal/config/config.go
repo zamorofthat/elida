@@ -10,11 +10,12 @@ import (
 
 // Config holds all configuration for ELIDA
 type Config struct {
-	Listen  string        `yaml:"listen"`
-	Backend string        `yaml:"backend"`
-	Session SessionConfig `yaml:"session"`
-	Control ControlConfig `yaml:"control"`
-	Logging LoggingConfig `yaml:"logging"`
+	Listen    string          `yaml:"listen"`
+	Backend   string          `yaml:"backend"`
+	Session   SessionConfig   `yaml:"session"`
+	Control   ControlConfig   `yaml:"control"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Telemetry TelemetryConfig `yaml:"telemetry"`
 }
 
 // SessionConfig holds session-related configuration
@@ -22,6 +23,16 @@ type SessionConfig struct {
 	Timeout           time.Duration `yaml:"timeout"`
 	Header            string        `yaml:"header"`
 	GenerateIfMissing bool          `yaml:"generate_if_missing"`
+	Store             string        `yaml:"store"` // "memory" or "redis"
+	Redis             RedisConfig   `yaml:"redis"`
+}
+
+// RedisConfig holds Redis connection configuration
+type RedisConfig struct {
+	Addr      string `yaml:"addr"`
+	Password  string `yaml:"password"`
+	DB        int    `yaml:"db"`
+	KeyPrefix string `yaml:"key_prefix"`
 }
 
 // ControlConfig holds control API configuration
@@ -34,6 +45,15 @@ type ControlConfig struct {
 type LoggingConfig struct {
 	Format string `yaml:"format"`
 	Level  string `yaml:"level"`
+}
+
+// TelemetryConfig holds OpenTelemetry configuration
+type TelemetryConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Exporter    string `yaml:"exporter"`     // "otlp", "stdout", or "none"
+	Endpoint    string `yaml:"endpoint"`     // OTLP endpoint (e.g., "localhost:4317")
+	ServiceName string `yaml:"service_name"`
+	Insecure    bool   `yaml:"insecure"` // Use insecure connection for OTLP
 }
 
 // Load reads and parses the configuration file
@@ -71,6 +91,13 @@ func defaults() *Config {
 			Timeout:           5 * time.Minute,
 			Header:            "X-Session-ID",
 			GenerateIfMissing: true,
+			Store:             "memory",
+			Redis: RedisConfig{
+				Addr:      "localhost:6379",
+				Password:  "",
+				DB:        0,
+				KeyPrefix: "elida:session:",
+			},
 		},
 		Control: ControlConfig{
 			Listen:  ":9090",
@@ -79,6 +106,13 @@ func defaults() *Config {
 		Logging: LoggingConfig{
 			Format: "json",
 			Level:  "info",
+		},
+		Telemetry: TelemetryConfig{
+			Enabled:     false,
+			Exporter:    "none",
+			ServiceName: "elida",
+			Endpoint:    "localhost:4317",
+			Insecure:    true,
 		},
 	}
 }
@@ -96,6 +130,38 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ELIDA_LOG_LEVEL"); v != "" {
 		c.Logging.Level = v
+	}
+	if v := os.Getenv("ELIDA_SESSION_STORE"); v != "" {
+		c.Session.Store = v
+	}
+	if v := os.Getenv("ELIDA_REDIS_ADDR"); v != "" {
+		c.Session.Redis.Addr = v
+	}
+	if v := os.Getenv("ELIDA_REDIS_PASSWORD"); v != "" {
+		c.Session.Redis.Password = v
+	}
+
+	// Telemetry overrides
+	if os.Getenv("ELIDA_TELEMETRY_ENABLED") == "true" {
+		c.Telemetry.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_TELEMETRY_EXPORTER"); v != "" {
+		c.Telemetry.Exporter = v
+	}
+	if v := os.Getenv("ELIDA_TELEMETRY_ENDPOINT"); v != "" {
+		c.Telemetry.Endpoint = v
+	}
+	if v := os.Getenv("ELIDA_TELEMETRY_SERVICE_NAME"); v != "" {
+		c.Telemetry.ServiceName = v
+	}
+	// Also support standard OTEL env vars
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
+		c.Telemetry.Enabled = true
+		c.Telemetry.Exporter = "otlp"
+		c.Telemetry.Endpoint = v
+	}
+	if os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true" {
+		c.Telemetry.Insecure = true
 	}
 }
 

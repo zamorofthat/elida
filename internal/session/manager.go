@@ -101,6 +101,14 @@ func (m *Manager) Kill(id string) bool {
 
 	sess.Kill()
 
+	// Persist the killed state (important for Redis store)
+	m.store.Put(sess)
+
+	// Publish kill signal for distributed kill switch
+	if rs, ok := m.store.(*RedisStore); ok {
+		rs.PublishKill(id)
+	}
+
 	slog.Info("session killed",
 		"session_id", id,
 		"duration", sess.Duration(),

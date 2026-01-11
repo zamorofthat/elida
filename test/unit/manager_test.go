@@ -1,13 +1,15 @@
-package session
+package unit
 
 import (
 	"testing"
 	"time"
+
+	"elida/internal/session"
 )
 
 func TestManager_GetOrCreate(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	// Create new session
 	sess := manager.GetOrCreate("test-id", "http://backend", "127.0.0.1")
@@ -26,8 +28,8 @@ func TestManager_GetOrCreate(t *testing.T) {
 }
 
 func TestManager_GetOrCreate_GeneratesID(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	sess := manager.GetOrCreate("", "http://backend", "127.0.0.1")
 	if sess == nil {
@@ -43,8 +45,8 @@ func TestManager_GetOrCreate_GeneratesID(t *testing.T) {
 }
 
 func TestManager_GetOrCreate_RejectsKilledSession(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	// Create and kill session
 	sess := manager.GetOrCreate("killed-session", "http://backend", "127.0.0.1")
@@ -57,32 +59,32 @@ func TestManager_GetOrCreate_RejectsKilledSession(t *testing.T) {
 	}
 
 	// Verify original session is still killed
-	if sess.GetState() != Killed {
+	if sess.GetState() != session.Killed {
 		t.Error("expected session to remain killed")
 	}
 }
 
 func TestManager_GetOrCreate_AllowsTimedOutSessionID(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	// Create and timeout session
 	sess := manager.GetOrCreate("timeout-session", "http://backend", "127.0.0.1")
-	sess.SetState(TimedOut)
+	sess.SetState(session.TimedOut)
 
 	// Reusing timed out session ID should create new session
 	sess2 := manager.GetOrCreate("timeout-session", "http://backend", "127.0.0.1")
 	if sess2 == nil {
 		t.Fatal("expected new session to be created")
 	}
-	if sess2.GetState() != Active {
+	if sess2.GetState() != session.Active {
 		t.Error("expected new session to be active")
 	}
 }
 
 func TestManager_Kill(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	manager.GetOrCreate("test-id", "http://backend", "127.0.0.1")
 
@@ -93,7 +95,7 @@ func TestManager_Kill(t *testing.T) {
 
 	// Verify session is killed
 	sess, _ := manager.Get("test-id")
-	if sess.GetState() != Killed {
+	if sess.GetState() != session.Killed {
 		t.Error("expected session to be killed")
 	}
 
@@ -109,8 +111,8 @@ func TestManager_Kill(t *testing.T) {
 }
 
 func TestManager_ListActive(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	manager.GetOrCreate("active-1", "http://backend", "127.0.0.1")
 	manager.GetOrCreate("active-2", "http://backend", "127.0.0.1")
@@ -124,8 +126,8 @@ func TestManager_ListActive(t *testing.T) {
 }
 
 func TestManager_Stats(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	sess1 := manager.GetOrCreate("active", "http://backend", "127.0.0.1")
 	sess1.AddBytes(100, 200)
@@ -134,7 +136,7 @@ func TestManager_Stats(t *testing.T) {
 	manager.Kill("killed")
 
 	sess3 := manager.GetOrCreate("timeout", "http://backend", "127.0.0.1")
-	sess3.SetState(TimedOut)
+	sess3.SetState(session.TimedOut)
 
 	stats := manager.Stats()
 
@@ -159,14 +161,36 @@ func TestManager_Stats(t *testing.T) {
 }
 
 func TestManager_Complete(t *testing.T) {
-	store := NewMemoryStore()
-	manager := NewManager(store, 5*time.Minute)
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
 
 	manager.GetOrCreate("test-id", "http://backend", "127.0.0.1")
 	manager.Complete("test-id")
 
 	sess, _ := manager.Get("test-id")
-	if sess.GetState() != Completed {
+	if sess.GetState() != session.Completed {
 		t.Errorf("expected state Completed, got %s", sess.GetState())
+	}
+}
+
+func TestManager_Kill_PersistsState(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Create session
+	manager.GetOrCreate("persist-kill", "http://backend", "127.0.0.1")
+
+	// Kill it
+	manager.Kill("persist-kill")
+
+	// Retrieve fresh from store (simulating what happens after restart)
+	sess, ok := store.Get("persist-kill")
+	if !ok {
+		t.Fatal("expected session to still exist in store")
+	}
+
+	// Verify state was persisted
+	if sess.GetState() != session.Killed {
+		t.Errorf("expected persisted state Killed, got %s", sess.GetState())
 	}
 }

@@ -12,6 +12,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/session"
+	"elida/internal/telemetry"
 )
 
 // Proxy handles proxying requests to the backend
@@ -21,10 +22,16 @@ type Proxy struct {
 	manager   *session.Manager
 	backend   *url.URL
 	transport *http.Transport
+	telemetry *telemetry.Provider
 }
 
 // New creates a new proxy handler
 func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
+	return NewWithTelemetry(cfg, store, manager, nil)
+}
+
+// NewWithTelemetry creates a new proxy handler with telemetry support
+func NewWithTelemetry(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider) (*Proxy, error) {
 	backendURL, err := url.Parse(cfg.Backend)
 	if err != nil {
 		return nil, err
@@ -37,18 +44,25 @@ func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Pr
 		DisableCompression:  true, // Keep original encoding for streaming
 	}
 
+	// Use noop provider if none provided
+	if tp == nil {
+		tp = telemetry.NoopProvider()
+	}
+
 	return &Proxy{
 		config:    cfg,
 		store:     store,
 		manager:   manager,
 		backend:   backendURL,
 		transport: transport,
+		telemetry: tp,
 	}, nil
 }
 
 // ServeHTTP handles incoming requests
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+	ctx := r.Context()
 
 	// Get or create session
 	sessionID := r.Header.Get(p.config.Session.Header)
@@ -94,8 +108,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Determine if this is a streaming request
 	isStreaming := p.isStreamingRequest(r, requestBody)
 
-	// Create the backend request
-	backendReq := p.createBackendRequest(r, requestBody)
+	// Start telemetry span
+	ctx, span := p.telemetry.StartRequestSpan(ctx, sess.ID, r.Method, r.URL.Path, isStreaming)
+	defer span.End()
+
+	// Create the backend request with context
+	backendReq := p.createBackendRequest(r, requestBody).WithContext(ctx)
 
 	// Log the request
 	slog.Info("proxying request",
@@ -105,11 +123,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"streaming", isStreaming,
 	)
 
+	var statusCode int
+	var bytesOut int64
+
 	if isStreaming {
-		p.handleStreaming(w, backendReq, sess)
+		statusCode, bytesOut = p.handleStreaming(w, backendReq, sess)
 	} else {
-		p.handleStandard(w, backendReq, sess)
+		statusCode, bytesOut = p.handleStandard(w, backendReq, sess)
 	}
+
+	// End telemetry span with metrics
+	p.telemetry.EndRequestSpan(span, statusCode, int64(len(requestBody)), bytesOut, nil)
 
 	slog.Info("request completed",
 		"session_id", sess.ID,
@@ -160,7 +184,7 @@ func (p *Proxy) createBackendRequest(r *http.Request, body []byte) *http.Request
 }
 
 // handleStandard handles non-streaming requests
-func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *session.Session) {
+func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *session.Session) (int, int64) {
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
 		slog.Error("backend request failed",
@@ -168,7 +192,7 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 			"error", err,
 		)
 		http.Error(w, "Backend unavailable", http.StatusBadGateway)
-		return
+		return http.StatusBadGateway, 0
 	}
 	defer resp.Body.Close()
 
@@ -187,7 +211,7 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 			"error", err,
 		)
 		http.Error(w, "Failed to read backend response", http.StatusBadGateway)
-		return
+		return http.StatusBadGateway, 0
 	}
 
 	sess.AddBytes(0, int64(len(responseBody)))
@@ -198,10 +222,12 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 	// Write response
 	w.WriteHeader(resp.StatusCode)
 	w.Write(responseBody)
+
+	return resp.StatusCode, int64(len(responseBody))
 }
 
 // handleStreaming handles streaming responses (SSE and NDJSON)
-func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *session.Session) {
+func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *session.Session) (int, int64) {
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
 		slog.Error("backend request failed",
@@ -209,7 +235,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 			"error", err,
 		)
 		http.Error(w, "Backend unavailable", http.StatusBadGateway)
-		return
+		return http.StatusBadGateway, 0
 	}
 	defer resp.Body.Close()
 
@@ -225,7 +251,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		slog.Error("response writer does not support flushing", "session_id", sess.ID)
-		return
+		return resp.StatusCode, 0
 	}
 
 	// Determine streaming format from content type
@@ -252,7 +278,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 		select {
 		case <-sess.KillChan():
 			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
-			return
+			return resp.StatusCode, totalBytes
 		default:
 		}
 
@@ -273,7 +299,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 					"session_id", sess.ID,
 					"error", writeErr,
 				)
-				return
+				return resp.StatusCode, totalBytes
 			}
 			flusher.Flush()
 		}
@@ -293,6 +319,8 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
+
+	return resp.StatusCode, totalBytes
 }
 
 // logResponse logs a standard response

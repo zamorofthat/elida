@@ -32,18 +32,23 @@ elida/
 │   ├── config/config.go        # Configuration loading
 │   ├── session/
 │   │   ├── session.go          # Session model
-│   │   ├── session_test.go     # Session unit tests
 │   │   ├── store.go            # Store interface + in-memory impl
-│   │   ├── store_test.go       # Store unit tests
-│   │   ├── manager.go          # Lifecycle, timeouts, cleanup
-│   │   └── manager_test.go     # Manager unit tests
-│   ├── proxy/
-│   │   ├── proxy.go            # Core proxy logic
-│   │   └── proxy_test.go       # Proxy integration tests
-│   └── control/
-│       ├── api.go              # Control API endpoints
-│       └── api_test.go         # Control API tests
+│   │   ├── redis_store.go      # Redis Store implementation
+│   │   └── manager.go          # Lifecycle, timeouts, cleanup
+│   ├── proxy/proxy.go          # Core proxy logic
+│   ├── control/api.go          # Control API endpoints
+│   └── telemetry/otel.go       # OpenTelemetry tracing
+├── test/
+│   ├── unit/                   # Unit tests (no external dependencies)
+│   │   ├── session_test.go
+│   │   ├── store_test.go
+│   │   ├── manager_test.go
+│   │   ├── proxy_test.go
+│   │   └── control_test.go
+│   └── integration/            # Integration tests (requires Redis)
+│       └── redis_test.go
 ├── configs/elida.yaml          # Default configuration
+├── docker-compose.yaml         # Redis + Jaeger for development
 ├── Dockerfile
 ├── Makefile
 └── README.md
@@ -83,9 +88,9 @@ elida/
 - [x] Single backend configuration
 
 ### Not Yet Implemented
-- [ ] **Redis session store** ← PRIORITY 1
-- [ ] **OpenTelemetry integration** ← PRIORITY 2
-- [ ] **Multi-backend routing** ← PRIORITY 3
+- [x] **Redis session store** ✓
+- [x] **OpenTelemetry integration** ✓
+- [ ] **Multi-backend routing** ← NEXT
 - [ ] SQLite for dashboard history
 - [ ] Dashboard UI
 - [ ] WebSocket support (for voice/real-time agents)
@@ -365,18 +370,33 @@ routing:
 # Build and run
 make build              # Build binary to bin/elida
 make run                # Build and run with default config
+make run-redis          # Run with Redis session store
 
 # Testing
-make test               # Run all tests
-make test-coverage      # Run tests with coverage report
-go test -v ./internal/session -run TestSessionKill  # Run a single test
+make test               # Run unit tests (fast, no dependencies)
+make test-integration   # Run integration tests (requires Redis)
+make test-all           # Run all tests
+make test-coverage      # Unit test coverage report
+go test -v ./test/unit -run TestSessionKill  # Run a single test
+
+# Redis management
+make redis-up           # Start Redis container
+make redis-down         # Stop Redis container
+make redis-keys         # View Redis keys
+make redis-flush        # Clear Redis
+
+# Telemetry / Tracing
+make run-telemetry      # Run with stdout trace exporter (debugging)
+make run-jaeger         # Run with Jaeger tracing
+make jaeger-up          # Start Jaeger container
+make jaeger-ui          # Open Jaeger UI in browser
 
 # Code quality
 make fmt                # Format code
 make lint               # Run golangci-lint (requires golangci-lint)
 
-# Quick verification against Ollama
-make test-ollama        # Test basic proxy
+# Quick verification
+make test-ollama        # Test basic proxy against Ollama
 make test-stream        # Test streaming
 make sessions           # View active sessions
 make stats              # View stats
@@ -389,22 +409,29 @@ curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 
 ## Test Coverage
 
-Tests are organized by package:
+Tests are in `test/` directory (black-box testing using only exported APIs):
 
-| Package | File | Coverage |
-|---------|------|----------|
-| `internal/session` | `session_test.go` | Session lifecycle: New, Touch, AddBytes, Kill, SetState, Duration, IdleTime, Snapshot |
-| `internal/session` | `store_test.go` | MemoryStore: Put, Get, Delete, List, Count, ActiveFilter |
-| `internal/session` | `manager_test.go` | Manager: GetOrCreate, GeneratesID, RejectsKilledSession, AllowsTimedOutSessionID, Kill, ListActive, Stats |
-| `internal/proxy` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, StreamingDetection, BytesTracking, HeadersForwarded |
-| `internal/control` | `api_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
+```bash
+make test              # Unit tests only (43 tests, fast)
+make test-integration  # Integration tests (10 tests, requires Redis)
+make test-all          # All tests (53 tests)
+```
+
+| Directory | File | Tests |
+|-----------|------|-------|
+| `test/unit/` | `session_test.go` | Session lifecycle: New, Touch, AddBytes, Kill, SetState, Duration, IdleTime, Snapshot |
+| `test/unit/` | `store_test.go` | MemoryStore: Put, Get, Delete, List, Count, ActiveFilter |
+| `test/unit/` | `manager_test.go` | Manager: GetOrCreate, GeneratesID, RejectsKilledSession, AllowsTimedOutSessionID, Kill, ListActive, Stats |
+| `test/unit/` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, BytesTracking, HeadersForwarded |
+| `test/unit/` | `control_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
+| `test/integration/` | `redis_test.go` | RedisStore: CRUD, KillChannel, Metadata, KillPersistsAcrossRestart, KilledStateLoadsCorrectly |
 
 **Key test scenarios:**
 - Killed sessions reject new requests (returns 403 with JSON error)
+- Killed session state persists across restarts (Redis)
 - Custom session IDs are honored
 - Session bytes/requests are tracked
 - Headers are forwarded to backend
-- Streaming vs non-streaming detection works
 
 ## Environment Variables
 
@@ -412,6 +439,13 @@ Tests are organized by package:
 - `ELIDA_BACKEND` — Backend URL (default: `http://localhost:11434`)
 - `ELIDA_CONTROL_LISTEN` — Control API address (default: `:9090`)
 - `ELIDA_LOG_LEVEL` — Log level: debug, info, warn, error
+- `ELIDA_SESSION_STORE` — Session store: `memory` (default) or `redis`
+- `ELIDA_REDIS_ADDR` — Redis address (default: `localhost:6379`)
+- `ELIDA_REDIS_PASSWORD` — Redis password (default: empty)
+- `ELIDA_TELEMETRY_ENABLED` — Enable OpenTelemetry (default: `false`)
+- `ELIDA_TELEMETRY_EXPORTER` — Exporter type: `otlp`, `stdout`, or `none`
+- `ELIDA_TELEMETRY_ENDPOINT` — OTLP endpoint (default: `localhost:4317`)
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — Standard OTel env var (also enables telemetry)
 
 ## Architecture Decisions
 

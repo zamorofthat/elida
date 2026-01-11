@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  # Redis for session storage
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  # ELIDA proxy (optional - can also run locally)
+  elida:
+    build: .
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      - ELIDA_SESSION_STORE=redis
+      - ELIDA_REDIS_ADDR=redis:6379
+      - ELIDA_BACKEND=http://host.docker.internal:11434  # Ollama on host
+      - ELIDA_TELEMETRY_ENABLED=true
+      - ELIDA_TELEMETRY_EXPORTER=otlp
+      - ELIDA_TELEMETRY_ENDPOINT=jaeger:4317
+    depends_on:
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+volumes:
+  redis_data:
