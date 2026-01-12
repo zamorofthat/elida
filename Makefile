@@ -153,3 +153,19 @@ history-stats:
 # Query time series data
 history-timeseries:
 	curl -s http://localhost:9090/control/history/timeseries | jq .
+
+# Install ELIDA as system service (auto-start on boot)
+install: build
+	./scripts/install.sh install
+
+# Uninstall ELIDA service
+uninstall:
+	./scripts/install.sh uninstall
+
+# Check service status
+service-status:
+	./scripts/install.sh status
+
+# Setup environment variables for AI tools
+setup-env:
+	./scripts/install.sh env

@@ -130,15 +130,16 @@ func (m *Manager) GetOrCreate(id, backend, clientAddr string) *Session {
 	return sess
 }
 
-// GetOrCreateByClient retrieves or creates a session based on client IP.
+// GetOrCreateByClient retrieves or creates a session based on client IP and backend.
 // This is used when no X-Session-ID header is provided, to group requests
-// from the same client (e.g., Claude Code) into a single session.
-func (m *Manager) GetOrCreateByClient(clientAddr, backend string) *Session {
+// from the same client to the same backend into a single session.
+// Each (client, backend) pair gets its own session for granular control.
+func (m *Manager) GetOrCreateByClient(clientAddr, backendName, backendURL string) *Session {
 	// Extract IP from client address (remove port)
 	clientIP := extractIP(clientAddr)
 
-	// Generate the session ID (deterministic based on IP + time window)
-	sessionID := m.generateClientSessionID(clientIP)
+	// Generate the session ID (deterministic based on IP + backend + time window)
+	sessionID := m.generateClientSessionID(clientIP, backendName)
 
 	// Check if session already exists in store (regardless of client mapping)
 	if sess, ok := m.store.Get(sessionID); ok {
@@ -152,6 +153,7 @@ func (m *Manager) GetOrCreateByClient(clientAddr, backend string) *Session {
 				slog.Warn("rejected request for killed client session",
 					"session_id", sessionID,
 					"client_ip", clientIP,
+					"backend", backendName,
 					"kill_block_mode", m.killBlockConfig.Mode,
 				)
 				return nil // BLOCK - don't create new session
@@ -160,6 +162,7 @@ func (m *Manager) GetOrCreateByClient(clientAddr, backend string) *Session {
 			slog.Info("kill block expired, allowing new session",
 				"session_id", sessionID,
 				"client_ip", clientIP,
+				"backend", backendName,
 			)
 			m.store.Delete(sessionID)
 		} else {
@@ -169,18 +172,18 @@ func (m *Manager) GetOrCreateByClient(clientAddr, backend string) *Session {
 	}
 
 	// Create new session
-	sess := NewSession(sessionID, backend, clientAddr)
+	sess := NewSession(sessionID, backendURL, clientAddr)
 	m.store.Put(sess)
 
-	// Update client mapping
+	// Update client mapping (now includes backend)
 	m.clientSessionsMu.Lock()
-	m.clientSessions[clientIP] = sessionID
+	m.clientSessions[clientIP+"-"+backendName] = sessionID
 	m.clientSessionsMu.Unlock()
 
 	slog.Info("client session created",
 		"session_id", sessionID,
 		"client_ip", clientIP,
-		"backend", backend,
+		"backend", backendName,
 	)
 
 	return sess
@@ -214,15 +217,16 @@ func (m *Manager) isKillBlockActive(sess *Session) bool {
 	}
 }
 
-// generateClientSessionID creates a session ID based on client IP and timestamp
-func (m *Manager) generateClientSessionID(clientIP string) string {
-	// Create a short hash of the IP + current hour (sessions reset hourly)
+// generateClientSessionID creates a session ID based on client IP, backend, and timestamp
+func (m *Manager) generateClientSessionID(clientIP, backendName string) string {
+	// Create a short hash of the IP + backend + current hour (sessions reset hourly)
 	hourKey := time.Now().Format("2006-01-02-15")
-	data := clientIP + "-" + hourKey
+	data := clientIP + "-" + backendName + "-" + hourKey
 	hash := sha256.Sum256([]byte(data))
 	shortHash := hex.EncodeToString(hash[:4]) // 8 char hex
 
-	return "client-" + shortHash
+	// Include backend name in session ID for clarity
+	return "client-" + shortHash + "-" + backendName
 }
 
 // extractIP extracts the IP address from a client address (host:port)

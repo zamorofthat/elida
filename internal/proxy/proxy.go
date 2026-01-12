@@ -105,9 +105,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Explicit session ID provided - use it
 		sess = p.manager.GetOrCreate(sessionID, backend.URL.String(), r.RemoteAddr)
 	} else if p.config.Session.GenerateIfMissing {
-		// No session ID - use client IP-based session tracking
-		// This groups all requests from the same client (e.g., Claude Code) into one session
-		sess = p.manager.GetOrCreateByClient(r.RemoteAddr, backend.URL.String())
+		// No session ID - use client IP + backend based session tracking
+		// Each (client, backend) pair gets its own session for granular control
+		sess = p.manager.GetOrCreateByClient(r.RemoteAddr, backend.Name, backend.URL.String())
 	}
 
 	if sess == nil {
