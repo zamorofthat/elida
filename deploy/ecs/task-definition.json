@@ -1,0 +1,75 @@
+{
+  "family": "elida",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+  "taskRoleArn": "${TASK_ROLE_ARN}",
+  "containerDefinitions": [
+    {
+      "name": "elida",
+      "image": "${ECR_REPO}:${IMAGE_TAG}",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp",
+          "name": "proxy"
+        },
+        {
+          "containerPort": 9090,
+          "protocol": "tcp",
+          "name": "control"
+        }
+      ],
+      "environment": [
+        {
+          "name": "ELIDA_LISTEN",
+          "value": ":8080"
+        },
+        {
+          "name": "ELIDA_CONTROL_LISTEN",
+          "value": ":9090"
+        },
+        {
+          "name": "ELIDA_SESSION_STORE",
+          "value": "redis"
+        },
+        {
+          "name": "ELIDA_TELEMETRY_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "ELIDA_POLICY_ENABLED",
+          "value": "true"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "ELIDA_REDIS_ADDR",
+          "valueFrom": "${REDIS_ADDR_SECRET_ARN}"
+        },
+        {
+          "name": "ELIDA_REDIS_PASSWORD",
+          "valueFrom": "${REDIS_PASSWORD_SECRET_ARN}"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/elida",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "elida"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9090/control/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 10
+      }
+    }
+  ]
+}
