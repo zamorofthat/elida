@@ -14,12 +14,22 @@ type Config struct {
 	Backend   string                      `yaml:"backend"`   // Single backend (backward compat)
 	Backends  map[string]BackendConfig    `yaml:"backends"`  // Multi-backend configuration
 	Routing   RoutingConfig               `yaml:"routing"`   // Routing method priority
+	TLS       TLSConfig                   `yaml:"tls"`       // TLS/HTTPS configuration
 	Session   SessionConfig               `yaml:"session"`
 	Control   ControlConfig               `yaml:"control"`
 	Logging   LoggingConfig               `yaml:"logging"`
 	Telemetry TelemetryConfig             `yaml:"telemetry"`
 	Storage   StorageConfig               `yaml:"storage"`
 	Policy    PolicyConfig                `yaml:"policy"`
+}
+
+// TLSConfig holds TLS/HTTPS configuration
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"` // Path to TLS certificate
+	KeyFile  string `yaml:"key_file"`  // Path to TLS private key
+	// Auto-generate self-signed cert for development
+	AutoCert bool `yaml:"auto_cert"`
 }
 
 // StorageConfig holds persistent storage configuration
@@ -173,6 +183,12 @@ func defaults() *Config {
 			Path:          "data/elida.db",
 			RetentionDays: 30,
 		},
+		TLS: TLSConfig{
+			Enabled:  false,
+			CertFile: "",
+			KeyFile:  "",
+			AutoCert: false,
+		},
 		Policy: PolicyConfig{
 			Enabled:        false,
 			CaptureContent: true,
@@ -272,6 +288,20 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("ELIDA_POLICY_CAPTURE") == "true" {
 		c.Policy.CaptureContent = true
+	}
+
+	// TLS overrides
+	if os.Getenv("ELIDA_TLS_ENABLED") == "true" {
+		c.TLS.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_TLS_CERT_FILE"); v != "" {
+		c.TLS.CertFile = v
+	}
+	if v := os.Getenv("ELIDA_TLS_KEY_FILE"); v != "" {
+		c.TLS.KeyFile = v
+	}
+	if os.Getenv("ELIDA_TLS_AUTO_CERT") == "true" {
+		c.TLS.AutoCert = true
 	}
 }
 

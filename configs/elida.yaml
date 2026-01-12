@@ -28,6 +28,17 @@ routing:
     - path          # Path prefix (/anthropic/*, /mistral/*, etc.)
     - default       # Fallback to default backend
 
+# TLS/HTTPS configuration
+tls:
+  # Enable HTTPS for the proxy server
+  enabled: false
+  # Path to TLS certificate file (PEM format)
+  cert_file: ""
+  # Path to TLS private key file (PEM format)
+  key_file: ""
+  # Auto-generate self-signed certificate (development only)
+  auto_cert: false
+
 # Session configuration
 session:
   # How long before an idle session times out
