@@ -46,6 +46,9 @@ type Session struct {
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 
+	// Track all backends used and request count per backend
+	BackendsUsed map[string]int `json:"backends_used,omitempty"`
+
 	// For rate limiting - track recent request times
 	RequestTimes []time.Time `json:"-"`
 
@@ -64,6 +67,7 @@ func NewSession(id, backend, clientAddr string) *Session {
 		Backend:      backend,
 		ClientAddr:   clientAddr,
 		Metadata:     make(map[string]string),
+		BackendsUsed: make(map[string]int),
 		killChan:     make(chan struct{}),
 	}
 }
@@ -99,6 +103,29 @@ func (s *Session) AddBytes(in, out int64) {
 	defer s.mu.Unlock()
 	s.BytesIn += in
 	s.BytesOut += out
+}
+
+// RecordBackend tracks which backend was used for a request
+func (s *Session) RecordBackend(backend string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.BackendsUsed == nil {
+		s.BackendsUsed = make(map[string]int)
+	}
+	s.BackendsUsed[backend]++
+	// Also update the Backend field to show the last used backend
+	s.Backend = backend
+}
+
+// GetBackendsUsed returns a copy of the backends used map
+func (s *Session) GetBackendsUsed() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]int, len(s.BackendsUsed))
+	for k, v := range s.BackendsUsed {
+		result[k] = v
+	}
+	return result
 }
 
 // SetState updates the session state
@@ -169,7 +196,7 @@ func (s *Session) SetMetadata(key, value string) {
 func (s *Session) Snapshot() Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	snap := Session{
 		ID:           s.ID,
 		State:        s.State,
@@ -182,9 +209,13 @@ func (s *Session) Snapshot() Session {
 		Backend:      s.Backend,
 		ClientAddr:   s.ClientAddr,
 		Metadata:     make(map[string]string, len(s.Metadata)),
+		BackendsUsed: make(map[string]int, len(s.BackendsUsed)),
 	}
 	for k, v := range s.Metadata {
 		snap.Metadata[k] = v
+	}
+	for k, v := range s.BackendsUsed {
+		snap.BackendsUsed[k] = v
 	}
 	return snap
 }

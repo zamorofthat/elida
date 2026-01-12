@@ -36,6 +36,7 @@ elida/
 │   │   ├── redis_store.go      # Redis Store implementation
 │   │   └── manager.go          # Lifecycle, timeouts, cleanup, kill block
 │   ├── proxy/proxy.go          # Core proxy logic
+│   ├── router/router.go        # Multi-backend routing
 │   ├── control/api.go          # Control API endpoints
 │   ├── policy/policy.go        # Policy engine, rules, flagging
 │   ├── dashboard/dashboard.go  # Embedded dashboard UI serving
@@ -88,6 +89,15 @@ When a session is killed, subsequent requests are blocked. Three modes available
 - Captures request/response bodies for logging
 - Forwards `X-Session-ID` in responses
 
+### Multi-Backend Router
+Routes requests to different backends based on priority order:
+1. **Header**: `X-Backend` header specifies backend name
+2. **Model**: Parse request body, match model name against glob patterns (e.g., `gpt-*`)
+3. **Path**: URL path prefix matching (e.g., `/openai/*`)
+4. **Default**: Fallback to default backend
+
+Each backend has its own HTTP transport for independent connection pooling.
+
 ### Control API (port 9090)
 - `GET /control/health` — Health check
 - `GET /control/stats` — Session statistics (live sessions)
@@ -128,9 +138,9 @@ When a session is killed, subsequent requests are blocked. Three modes available
 - [x] SQLite for dashboard history
 - [x] Dashboard UI (Preact, embedded)
 - [x] Policy engine with rule-based flagging
+- [x] Multi-backend routing (header, model, path-based)
 
 ### Not Yet Implemented
-- [ ] Multi-backend routing
 - [ ] WebSocket support (for voice/real-time agents)
 - [ ] Content inspection / PII detection
 - [ ] SDK for native agent integration
@@ -456,9 +466,9 @@ curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 Tests are in `test/` directory (black-box testing using only exported APIs):
 
 ```bash
-make test              # Unit tests only (53 tests, fast)
+make test              # Unit tests only (74 tests, fast)
 make test-integration  # Integration tests (10 tests, requires Redis)
-make test-all          # All tests (63 tests)
+make test-all          # All tests (84 tests)
 ```
 
 | Directory | File | Tests |
@@ -468,6 +478,7 @@ make test-all          # All tests (63 tests)
 | `test/unit/` | `storage_test.go` | SQLiteStore: SaveAndGet, ListSessions, GetStats, GetNotFound, Cleanup |
 | `test/unit/` | `manager_test.go` | Manager: GetOrCreate, GeneratesID, RejectsKilledSession, AllowsTimedOutSessionID, Kill, ListActive, Stats, KillBlock modes (duration/permanent/until_hour_change), GetOrCreateByClient |
 | `test/unit/` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, BytesTracking, HeadersForwarded |
+| `test/unit/` | `router_test.go` | Router: NewRouter, HeaderPriority, ModelMatching, PathRouting, DefaultFallback, SingleBackendRouter |
 | `test/unit/` | `control_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
 | `test/integration/` | `redis_test.go` | RedisStore: CRUD, KillChannel, Metadata, KillPersistsAcrossRestart, KilledStateLoadsCorrectly |
 
@@ -479,6 +490,10 @@ make test-all          # All tests (63 tests)
 - Custom session IDs are honored
 - Session bytes/requests are tracked
 - Headers are forwarded to backend
+- Multi-backend routing: X-Backend header takes priority over model matching
+- Model pattern matching: `gpt-4` matches `gpt-*`, `claude-3-opus` matches `claude-*`
+- Path-based routing: `/openai/*` routes to openai backend
+- Default fallback: unknown models fall back to default backend
 
 ## Environment Variables
 

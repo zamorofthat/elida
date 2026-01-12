@@ -32,9 +32,9 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 - [x] Client IP-based session tracking (for Claude Code)
 
 ### Roadmap
+- [x] Multi-backend routing (route by header, model name, or path)
 - [ ] WebSocket support for real-time/voice agents
 - [ ] Content inspection and PII detection
-- [ ] Multi-backend routing
 - [ ] SDK for native agent integration
 
 ## Quick Start
@@ -117,6 +117,42 @@ ANTHROPIC_BASE_URL=http://localhost:8080 claude
 ```
 
 ELIDA automatically groups requests from the same IP into a single session, so all Claude Code requests appear as one session in the dashboard.
+
+### Multi-Backend Routing
+
+ELIDA can route requests to different LLM backends based on model name, headers, or path:
+
+```yaml
+# In configs/elida.yaml
+backends:
+  ollama:
+    url: "http://localhost:11434"
+    type: ollama
+    default: true     # Fallback backend
+
+  openai:
+    url: "https://api.openai.com"
+    type: openai
+    models: ["gpt-*", "o1-*"]  # Route GPT models here
+
+  anthropic:
+    url: "https://api.anthropic.com"
+    type: anthropic
+    models: ["claude-*"]  # Route Claude models here
+
+  routing:
+    methods:
+      - header   # X-Backend header (highest priority)
+      - model    # Model name pattern matching
+      - path     # Path prefix (/openai/*, etc.)
+      - default  # Fallback
+```
+
+Routing priority:
+1. **Header**: `curl -H "X-Backend: openai" ...` routes to OpenAI
+2. **Model**: Request with `{"model": "gpt-4"}` routes to OpenAI (matches `gpt-*`)
+3. **Path**: `/openai/v1/chat/completions` routes to OpenAI backend
+4. **Default**: Falls back to the backend marked `default: true`
 
 ## Usage
 

@@ -12,6 +12,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/policy"
+	"elida/internal/router"
 	"elida/internal/session"
 	"elida/internal/telemetry"
 )
@@ -21,8 +22,7 @@ type Proxy struct {
 	config    *config.Config
 	store     session.Store
 	manager   *session.Manager
-	backend   *url.URL
-	transport *http.Transport
+	router    *router.Router
 	telemetry *telemetry.Provider
 	policy    *policy.Engine
 }
@@ -39,18 +39,29 @@ func NewWithTelemetry(cfg *config.Config, store session.Store, manager *session.
 
 // NewWithPolicy creates a new proxy handler with telemetry and policy support
 func NewWithPolicy(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider, pe *policy.Engine) (*Proxy, error) {
-	backendURL, err := url.Parse(cfg.Backend)
-	if err != nil {
-		return nil, err
+	// Create router based on config
+	var r *router.Router
+	var err error
+
+	if cfg.HasMultiBackend() {
+		// Multi-backend configuration
+		r, err = router.NewRouter(cfg.Backends, cfg.Routing)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Single backend (backward compatibility)
+		r, err = router.NewSingleBackendRouter(cfg.Backend)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true, // Keep original encoding for streaming
-	}
+	return NewWithRouter(cfg, store, manager, tp, pe, r)
+}
 
+// NewWithRouter creates a new proxy handler with a custom router
+func NewWithRouter(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider, pe *policy.Engine, r *router.Router) (*Proxy, error) {
 	// Use noop provider if none provided
 	if tp == nil {
 		tp = telemetry.NoopProvider()
@@ -60,8 +71,7 @@ func NewWithPolicy(cfg *config.Config, store session.Store, manager *session.Man
 		config:    cfg,
 		store:     store,
 		manager:   manager,
-		backend:   backendURL,
-		transport: transport,
+		router:    r,
 		telemetry: tp,
 		policy:    pe,
 	}, nil
@@ -72,17 +82,32 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 	ctx := r.Context()
 
+	// Capture request body first (needed for routing and forwarding)
+	var requestBody []byte
+	if r.Body != nil {
+		requestBody, _ = io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(requestBody))
+	}
+
+	// Select backend using router
+	backend, err := p.router.Select(r, requestBody)
+	if err != nil {
+		slog.Error("failed to select backend", "error", err)
+		http.Error(w, "Failed to select backend", http.StatusInternalServerError)
+		return
+	}
+
 	// Get or create session
 	sessionID := r.Header.Get(p.config.Session.Header)
 
 	var sess *session.Session
 	if sessionID != "" {
 		// Explicit session ID provided - use it
-		sess = p.manager.GetOrCreate(sessionID, p.backend.String(), r.RemoteAddr)
+		sess = p.manager.GetOrCreate(sessionID, backend.URL.String(), r.RemoteAddr)
 	} else if p.config.Session.GenerateIfMissing {
 		// No session ID - use client IP-based session tracking
 		// This groups all requests from the same client (e.g., Claude Code) into one session
-		sess = p.manager.GetOrCreateByClient(r.RemoteAddr, p.backend.String())
+		sess = p.manager.GetOrCreateByClient(r.RemoteAddr, backend.URL.String())
 	}
 
 	if sess == nil {
@@ -93,6 +118,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.Touch()
+	sess.AddBytes(int64(len(requestBody)), 0)
+	sess.RecordBackend(backend.Name)
 
 	// Check if session was killed
 	select {
@@ -111,14 +138,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add session ID to response headers
 	w.Header().Set(p.config.Session.Header, sess.ID)
 
-	// Capture request body
-	var requestBody []byte
-	if r.Body != nil {
-		requestBody, _ = io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(requestBody))
-		sess.AddBytes(int64(len(requestBody)), 0)
-	}
-
 	// Determine if this is a streaming request
 	isStreaming := p.isStreamingRequest(r, requestBody)
 
@@ -127,13 +146,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Create the backend request with context
-	backendReq := p.createBackendRequest(r, requestBody).WithContext(ctx)
+	backendReq := p.createBackendRequest(r, requestBody, backend.URL).WithContext(ctx)
 
 	// Log the request
 	slog.Info("proxying request",
 		"session_id", sess.ID,
 		"method", r.Method,
 		"path", r.URL.Path,
+		"backend", backend.Name,
 		"streaming", isStreaming,
 	)
 
@@ -141,9 +161,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var bytesOut int64
 
 	if isStreaming {
-		statusCode, bytesOut = p.handleStreaming(w, backendReq, sess)
+		statusCode, bytesOut = p.handleStreaming(w, backendReq, sess, backend)
 	} else {
-		statusCode, bytesOut = p.handleStandard(w, backendReq, sess)
+		statusCode, bytesOut = p.handleStandard(w, backendReq, sess, backend)
 	}
 
 	// End telemetry span with metrics
@@ -158,6 +178,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"session_id", sess.ID,
 		"duration", time.Since(startTime),
 		"path", r.URL.Path,
+		"backend", backend.Name,
 	)
 }
 
@@ -221,12 +242,12 @@ func (p *Proxy) isStreamingRequest(r *http.Request, body []byte) bool {
 }
 
 // createBackendRequest creates a new request to the backend
-func (p *Proxy) createBackendRequest(r *http.Request, body []byte) *http.Request {
-	backendURL := *p.backend
-	backendURL.Path = r.URL.Path
-	backendURL.RawQuery = r.URL.RawQuery
+func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backendURL *url.URL) *http.Request {
+	targetURL := *backendURL
+	targetURL.Path = r.URL.Path
+	targetURL.RawQuery = r.URL.RawQuery
 
-	req, _ := http.NewRequest(r.Method, backendURL.String(), bytes.NewReader(body))
+	req, _ := http.NewRequest(r.Method, targetURL.String(), bytes.NewReader(body))
 
 	// Copy headers
 	for key, values := range r.Header {
@@ -236,14 +257,14 @@ func (p *Proxy) createBackendRequest(r *http.Request, body []byte) *http.Request
 	}
 
 	// Set host header
-	req.Host = p.backend.Host
+	req.Host = backendURL.Host
 
 	return req
 }
 
 // handleStandard handles non-streaming requests
-func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *session.Session) (int, int64) {
-	resp, err := p.transport.RoundTrip(req)
+func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *session.Session, backend *router.Backend) (int, int64) {
+	resp, err := backend.Transport.RoundTrip(req)
 	if err != nil {
 		slog.Error("backend request failed",
 			"session_id", sess.ID,
@@ -285,8 +306,8 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 }
 
 // handleStreaming handles streaming responses (SSE and NDJSON)
-func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *session.Session) (int, int64) {
-	resp, err := p.transport.RoundTrip(req)
+func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *session.Session, backend *router.Backend) (int, int64) {
+	resp, err := backend.Transport.RoundTrip(req)
 	if err != nil {
 		slog.Error("backend request failed",
 			"session_id", sess.ID,
@@ -456,14 +477,15 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// ReverseProxy creates a standard reverse proxy (kept for reference/fallback)
+// ReverseProxy creates a standard reverse proxy using the default backend
 func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
+	defaultBackend := p.router.GetDefaultBackend()
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			req.URL.Scheme = p.backend.Scheme
-			req.URL.Host = p.backend.Host
-			req.Host = p.backend.Host
+			req.URL.Scheme = defaultBackend.URL.Scheme
+			req.URL.Host = defaultBackend.URL.Host
+			req.Host = defaultBackend.URL.Host
 		},
-		Transport: p.transport,
+		Transport: defaultBackend.Transport,
 	}
 }

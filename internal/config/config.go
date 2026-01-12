@@ -10,14 +10,16 @@ import (
 
 // Config holds all configuration for ELIDA
 type Config struct {
-	Listen    string          `yaml:"listen"`
-	Backend   string          `yaml:"backend"`
-	Session   SessionConfig   `yaml:"session"`
-	Control   ControlConfig   `yaml:"control"`
-	Logging   LoggingConfig   `yaml:"logging"`
-	Telemetry TelemetryConfig `yaml:"telemetry"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Policy    PolicyConfig    `yaml:"policy"`
+	Listen    string                      `yaml:"listen"`
+	Backend   string                      `yaml:"backend"`   // Single backend (backward compat)
+	Backends  map[string]BackendConfig    `yaml:"backends"`  // Multi-backend configuration
+	Routing   RoutingConfig               `yaml:"routing"`   // Routing method priority
+	Session   SessionConfig               `yaml:"session"`
+	Control   ControlConfig               `yaml:"control"`
+	Logging   LoggingConfig               `yaml:"logging"`
+	Telemetry TelemetryConfig             `yaml:"telemetry"`
+	Storage   StorageConfig               `yaml:"storage"`
+	Policy    PolicyConfig                `yaml:"policy"`
 }
 
 // StorageConfig holds persistent storage configuration
@@ -42,6 +44,19 @@ type PolicyRule struct {
 	Threshold   int64  `yaml:"threshold"`
 	Severity    string `yaml:"severity"`    // info, warning, critical
 	Description string `yaml:"description"`
+}
+
+// BackendConfig defines a single backend configuration
+type BackendConfig struct {
+	URL     string   `yaml:"url"`
+	Type    string   `yaml:"type"`    // ollama, openai, anthropic, mistral
+	Models  []string `yaml:"models"`  // glob patterns: ["gpt-*", "claude-*"]
+	Default bool     `yaml:"default"` // is this the default backend?
+}
+
+// RoutingConfig defines routing method priority
+type RoutingConfig struct {
+	Methods []string `yaml:"methods"` // [header, model, path, default]
 }
 
 // SessionConfig holds session-related configuration
@@ -265,11 +280,37 @@ func (c *Config) validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("listen address is required")
 	}
-	if c.Backend == "" {
-		return fmt.Errorf("backend URL is required")
+	// Either Backend (old style) or Backends (new style) must be configured
+	if c.Backend == "" && len(c.Backends) == 0 {
+		return fmt.Errorf("backend URL or backends configuration is required")
 	}
 	if c.Session.Timeout <= 0 {
 		return fmt.Errorf("session timeout must be positive")
 	}
+	// Validate backends config if present
+	if len(c.Backends) > 0 {
+		hasDefault := false
+		for name, b := range c.Backends {
+			if b.URL == "" {
+				return fmt.Errorf("backend %q: URL is required", name)
+			}
+			if b.Default {
+				hasDefault = true
+			}
+		}
+		if !hasDefault {
+			return fmt.Errorf("at least one backend must be marked as default")
+		}
+	}
 	return nil
+}
+
+// HasMultiBackend returns true if multi-backend configuration is present
+func (c *Config) HasMultiBackend() bool {
+	return len(c.Backends) > 0
+}
+
+// GetDefaultRoutingMethods returns the default routing method order
+func GetDefaultRoutingMethods() []string {
+	return []string{"header", "model", "path", "default"}
 }

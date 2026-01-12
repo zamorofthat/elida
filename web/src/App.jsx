@@ -31,6 +31,24 @@ function SeverityBadge({ severity }) {
   return <span class={'severity-badge severity-' + severity}>{severity}</span>
 }
 
+function formatBackends(session) {
+  // Check if backends_used is available and has entries
+  if (session.backends_used && Object.keys(session.backends_used).length > 0) {
+    const entries = Object.entries(session.backends_used)
+    if (entries.length === 1) {
+      return entries[0][0] // Just the name
+    }
+    // Multiple backends: show name (count) for each
+    return entries.map(([name, count]) => `${name}(${count})`).join(', ')
+  }
+  // Fallback to legacy backend field
+  try {
+    return new URL(session.backend).host
+  } catch {
+    return session.backend || '-'
+  }
+}
+
 function SessionTable({ sessions, showActions, onKill }) {
   if (!sessions || sessions.length === 0) {
     return <div class="empty-state">No sessions</div>
@@ -42,7 +60,7 @@ function SessionTable({ sessions, showActions, onKill }) {
         <tr>
           <th>Session ID</th>
           <th>State</th>
-          <th>Backend</th>
+          <th>Backends</th>
           <th>Client</th>
           <th>Requests</th>
           <th>Bytes In/Out</th>
@@ -55,7 +73,7 @@ function SessionTable({ sessions, showActions, onKill }) {
           <tr key={s.id}>
             <td class="mono">{truncateId(s.id)}</td>
             <td><StateBadge state={s.state} /></td>
-            <td class="mono muted">{new URL(s.backend).host}</td>
+            <td class="mono muted">{formatBackends(s)}</td>
             <td class="mono muted">{s.client_addr}</td>
             <td>{s.request_count}</td>
             <td class="mono">{formatBytes(s.bytes_in)} / {formatBytes(s.bytes_out)}</td>

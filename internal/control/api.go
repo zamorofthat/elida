@@ -147,6 +147,7 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			BytesIn:      snap.BytesIn,
 			BytesOut:     snap.BytesOut,
 			Backend:      snap.Backend,
+			BackendsUsed: snap.BackendsUsed,
 			ClientAddr:   snap.ClientAddr,
 			Metadata:     snap.Metadata,
 		}
@@ -213,6 +214,7 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 		BytesIn:      snap.BytesIn,
 		BytesOut:     snap.BytesOut,
 		Backend:      snap.Backend,
+		BackendsUsed: snap.BackendsUsed,
 		ClientAddr:   snap.ClientAddr,
 		Metadata:     snap.Metadata,
 	}
@@ -272,6 +274,7 @@ type SessionInfo struct {
 	BytesIn      int64             `json:"bytes_in"`
 	BytesOut     int64             `json:"bytes_out"`
 	Backend      string            `json:"backend"`
+	BackendsUsed map[string]int    `json:"backends_used,omitempty"`
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }

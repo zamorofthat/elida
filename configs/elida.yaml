@@ -4,10 +4,29 @@
 # Address to listen on for proxied traffic
 listen: ":8080"
 
-# Backend URL to proxy requests to
-# For Ollama: "http://localhost:11434"
-# For Claude/Anthropic: "https://api.anthropic.com"
-backend: "https://api.anthropic.com"
+# Single Backend Mode (backward compatible) - commented out when using multi-backend
+# backend: "https://api.anthropic.com"
+
+# Multi-Backend Mode
+backends:
+  anthropic:
+    url: "https://api.anthropic.com"
+    type: anthropic
+    models: ["claude-*"]
+    default: true     # Fallback backend
+
+  mistral:
+    url: "https://api.mistral.ai"
+    type: mistral
+    models: ["mistral-*", "codestral-*"]
+
+# Routing method priority
+routing:
+  methods:
+    - header        # X-Backend header (highest priority)
+    - model         # Model name pattern matching from request body
+    - path          # Path prefix (/anthropic/*, /mistral/*, etc.)
+    - default       # Fallback to default backend
 
 # Session configuration
 session:
