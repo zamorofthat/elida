@@ -28,6 +28,16 @@ routing:
     - path          # Path prefix (/anthropic/*, /mistral/*, etc.)
     - default       # Fallback to default backend
 
+  # LLM05 - Supply Chain Security: Model access control
+  # Reject requests if model doesn't match any backend pattern (no default fallback)
+  strict_model_matching: false
+
+  # Block specific models entirely (glob patterns)
+  # blocked_models:
+  #   - "gpt-4-turbo-*"      # Block all GPT-4 Turbo variants
+  #   - "claude-3-opus-*"    # Block Opus (cost control)
+  #   - "*-preview"          # Block all preview models
+
 # TLS/HTTPS configuration
 tls:
   # Enable HTTPS for the proxy server
@@ -95,42 +105,542 @@ storage:
   retention_days: 30
 
 # Policy configuration (for flagging suspicious sessions)
+# Based on OWASP LLM Top 10, NIST AI RMF, and OWASP API Security
 policy:
   # Enable policy engine
   enabled: false
+  # Mode: "enforce" (default) or "audit" (dry-run, log but don't block)
+  mode: enforce
   # Capture request/response content for flagged sessions
   capture_flagged: true
   # Max bytes to capture per request (default 10KB)
   max_capture_size: 10000
+  # Policy preset: minimal, standard, or strict (overrides rules below if set)
+  # preset: standard
 
-  # Policy rules
+  # Policy rules organized by security framework
   rules:
-    - name: "suspicious_activity"
-      type: "request_count"
-      threshold: 3
-      severity: "warning"
-      description: "Session exceeded 3 requests - potential automated activity"
+    # ============================================================
+    # RATE LIMITING / FIREWALL (OWASP API4 - Unrestricted Resource Consumption)
+    # ============================================================
+    - name: "rate_limit_high"
+      type: "requests_per_minute"
+      threshold: 60
+      severity: "critical"
+      action: "block"
+      description: "FIREWALL: Request rate exceeds 60/min - potential DoS or runaway agent"
 
-    - name: "large_response"
-      type: "bytes_out"
-      threshold: 1048576  # 1MB
+    - name: "rate_limit_warning"
+      type: "requests_per_minute"
+      threshold: 30
       severity: "warning"
-      description: "Session response exceeded 1MB"
+      action: "flag"
+      description: "FIREWALL: Elevated request rate (30/min)"
 
     - name: "high_request_count"
       type: "request_count"
       threshold: 100
-      severity: "critical"
-      description: "Session exceeded 100 requests"
-
-    - name: "long_running"
-      type: "duration"
-      threshold: 600  # 10 minutes in seconds
       severity: "warning"
-      description: "Session running longer than 10 minutes"
+      action: "flag"
+      description: "FIREWALL: Session exceeded 100 requests"
 
-    - name: "rate_limit"
-      type: "requests_per_minute"
-      threshold: 30
+    - name: "very_high_request_count"
+      type: "request_count"
+      threshold: 500
       severity: "critical"
-      description: "Session exceeding 30 requests per minute"
+      action: "block"
+      description: "FIREWALL: Session exceeded 500 requests - potential abuse"
+
+    - name: "long_running_session"
+      type: "duration"
+      threshold: 1800  # 30 minutes in seconds
+      severity: "warning"
+      action: "flag"
+      description: "FIREWALL: Session running longer than 30 minutes"
+
+    - name: "excessive_session_duration"
+      type: "duration"
+      threshold: 3600  # 1 hour in seconds
+      severity: "critical"
+      action: "block"
+      description: "FIREWALL: Session exceeded 1 hour - likely runaway agent"
+
+    - name: "large_response"
+      type: "bytes_out"
+      threshold: 10485760  # 10MB
+      severity: "warning"
+      action: "flag"
+      description: "FIREWALL: Large data transfer (>10MB response)"
+
+    - name: "excessive_data_transfer"
+      type: "bytes_total"
+      threshold: 52428800  # 50MB
+      severity: "critical"
+      action: "block"
+      description: "FIREWALL: Excessive data transfer (>50MB total)"
+
+    # ============================================================
+    # OWASP LLM01 - PROMPT INJECTION
+    # Detects attempts to override system prompts or manipulate model behavior
+    # ============================================================
+    - name: "prompt_injection_ignore"
+      type: "content_match"
+      patterns:
+        - "ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions|prompts|rules)"
+        - "disregard\\s+(all\\s+)?(previous|prior|system)\\s+(instructions|prompts)"
+        - "forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)"
+        - "override\\s+(system|previous|all)\\s+(prompt|instructions)"
+      severity: "critical"
+      action: "block"
+      description: "LLM01: Prompt injection attempt - instruction override"
+
+    - name: "prompt_injection_roleplay"
+      type: "content_match"
+      patterns:
+        - "you\\s+are\\s+now\\s+(DAN|a\\s+new|an?\\s+unrestricted)"
+        - "pretend\\s+(you\\s+are|to\\s+be)\\s+(DAN|unrestricted|unfiltered)"
+        - "act\\s+as\\s+(DAN|an?\\s+unrestricted|an?\\s+unfiltered)"
+        - "enable\\s+(DAN|developer|jailbreak)\\s+mode"
+        - "DAN\\s+mode\\s+(enabled|activated|on)"
+        - "jailbreak(ed)?\\s+(mode|prompt|enabled)"
+      severity: "critical"
+      action: "terminate"
+      description: "LLM01: Prompt injection attempt - jailbreak/DAN pattern"
+
+    - name: "prompt_injection_system"
+      type: "content_match"
+      patterns:
+        - "\\[system\\].*\\[/system\\]"
+        - "<system>.*</system>"
+        - "system\\s*:\\s*you\\s+are"
+        - "new\\s+system\\s+prompt"
+        - "inject.*system.*prompt"
+      severity: "critical"
+      action: "block"
+      description: "LLM01: Prompt injection attempt - system prompt manipulation"
+
+    - name: "prompt_injection_delimiter"
+      type: "content_match"
+      patterns:
+        - "```\\s*(system|admin|root)"
+        - "---+\\s*(new\\s+instructions|ignore\\s+above)"
+        - "\\*\\*\\*\\s*(admin|system|override)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM01: Suspicious delimiter pattern in prompt"
+
+    # ============================================================
+    # OWASP LLM06 - SENSITIVE INFORMATION DISCLOSURE
+    # Detects requests that may expose PII or sensitive data
+    # ============================================================
+    - name: "pii_ssn_request"
+      type: "content_match"
+      patterns:
+        - "social\\s+security\\s+(number|#)"
+        - "\\bssn\\b"
+        - "\\d{3}-\\d{2}-\\d{4}"  # SSN format
+      severity: "warning"
+      action: "flag"
+      description: "LLM06: Request may involve Social Security Numbers"
+
+    - name: "pii_credit_card"
+      type: "content_match"
+      patterns:
+        - "credit\\s+card\\s+(number|#|info)"
+        - "card\\s+number"
+        - "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\\b"  # CC format
+        - "\\bcvv\\b"
+        - "\\bcvc\\b"
+      severity: "warning"
+      action: "flag"
+      description: "LLM06: Request may involve credit card information"
+
+    - name: "pii_personal_data"
+      type: "content_match"
+      patterns:
+        - "(list|show|give|extract)\\s+(all\\s+)?(user|customer|employee)\\s+(data|info|records)"
+        - "dump\\s+(the\\s+)?(database|user\\s+table|customer\\s+data)"
+        - "(export|extract)\\s+all\\s+(personal|user|customer)\\s+(data|information)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM06: Bulk personal data extraction request"
+
+    - name: "credentials_request"
+      type: "content_match"
+      patterns:
+        - "(show|give|list|extract)\\s+(me\\s+)?(the\\s+)?api[_\\s]?key"
+        - "(show|give|list|extract)\\s+(me\\s+)?(the\\s+)?password"
+        - "(show|give|list|extract)\\s+(me\\s+)?(the\\s+)?secret[_\\s]?key"
+        - "(show|give|list|extract)\\s+(me\\s+)?(the\\s+)?access[_\\s]?token"
+        - "(read|show|cat|display)\\s+(the\\s+)?\\.env\\s+file"
+        - "(list|show|dump)\\s+(all\\s+)?credentials"
+        - "(show|give)\\s+me\\s+(the\\s+)?private\\s+key"
+      severity: "warning"
+      action: "flag"
+      description: "LLM06: Request for credentials or secrets"
+
+    - name: "internal_system_info"
+      type: "content_match"
+      patterns:
+        - "(show|list|give)\\s+(me\\s+)?(all\\s+)?(internal|private)\\s+(ip|server|endpoint)"
+        - "(what|show)\\s+(is|are)\\s+(the\\s+)?(internal|private)\\s+(network|infrastructure)"
+        - "(list|show)\\s+(all\\s+)?(database|db)\\s+(connection|credentials|passwords)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM06: Request for internal system information"
+
+    # ============================================================
+    # OWASP LLM08 - EXCESSIVE AGENCY
+    # Detects requests for dangerous system access
+    # ============================================================
+    - name: "shell_execution"
+      type: "content_match"
+      patterns:
+        - "(run|execute)\\s+(a\\s+)?(bash|shell|terminal)\\s+(command|script)"
+        - "bash\\s+-c\\s+"
+        - "sh\\s+-c\\s+"
+        - "/bin/(ba)?sh\\s+"
+        - "(run|execute|invoke)\\s+system\\s+command"
+        - "\\$\\(.*\\)"  # Command substitution
+        - "`.*`"  # Backtick execution
+      severity: "critical"
+      action: "block"
+      description: "LLM08: Shell/command execution request"
+
+    - name: "destructive_file_ops"
+      type: "content_match"
+      patterns:
+        - "rm\\s+(-rf?|--recursive)\\s+/"
+        - "rm\\s+-rf\\s+\\*"
+        - "rm\\s+-rf\\s+~"
+        - "(delete|remove|wipe)\\s+all\\s+(files|data|everything)"
+        - "(format|wipe)\\s+(the\\s+)?(disk|drive|hard\\s+drive)"
+        - "mkfs\\s+"
+        - "dd\\s+if=.*of=.*"
+      severity: "critical"
+      action: "terminate"
+      description: "LLM08: Destructive file system operation"
+
+    - name: "privilege_escalation"
+      type: "content_match"
+      patterns:
+        - "sudo\\s+"
+        - "(run|execute)\\s+(as|with)\\s+root"
+        - "privilege\\s+(escalation|elevation)"
+        - "chmod\\s+[0-7]*777"
+        - "chown\\s+root"
+        - "/etc/passwd"
+        - "/etc/shadow"
+      severity: "critical"
+      action: "block"
+      description: "LLM08: Privilege escalation attempt"
+
+    - name: "network_exfiltration"
+      type: "content_match"
+      patterns:
+        - "curl.*\\|\\s*(ba)?sh"
+        - "wget.*\\|\\s*(ba)?sh"
+        - "(send|upload|post|exfiltrate)\\s+(to|data\\s+to)\\s+(external|remote)"
+        - "nc\\s+-e"  # netcat reverse shell
+        - "reverse\\s+shell"
+        - "(data|info)\\s+exfiltration"
+      severity: "critical"
+      action: "terminate"
+      description: "LLM08: Potential data exfiltration or remote code execution"
+
+    - name: "network_scanning"
+      type: "content_match"
+      patterns:
+        - "nmap\\s+"
+        - "port\\s+scan"
+        - "(scan|enumerate)\\s+(the\\s+)?(network|ports|hosts)"
+        - "masscan\\s+"
+      severity: "warning"
+      action: "flag"
+      description: "LLM08: Network reconnaissance request"
+
+    - name: "database_manipulation"
+      type: "content_match"
+      patterns:
+        - "drop\\s+(table|database)\\s+"
+        - "truncate\\s+table"
+        - "delete\\s+from\\s+.*where\\s+1\\s*=\\s*1"
+        - ";\\s*(drop|delete|truncate|update)\\s+"  # SQL injection
+        - "union\\s+select"
+        - "'\\s*or\\s+'?1'?\\s*=\\s*'?1"  # SQL injection
+      severity: "critical"
+      action: "terminate"
+      description: "LLM08: SQL injection or database manipulation"
+
+    # ============================================================
+    # OWASP LLM04 - MODEL DENIAL OF SERVICE
+    # Detect resource exhaustion attempts
+    # ============================================================
+    - name: "resource_exhaustion"
+      type: "content_match"
+      patterns:
+        - "(generate|create|write)\\s+(a\\s+)?(very\\s+)?(long|huge|massive|infinite)"
+        - "repeat\\s+(this|the\\s+following)\\s+(forever|infinitely|1000000)"
+        - "loop\\s+(forever|infinitely)"
+        - "maximum\\s+(length|tokens|output)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM04: Potential resource exhaustion attempt"
+
+    # ============================================================
+    # NIST AI RMF - ANOMALY DETECTION
+    # General anomaly and abuse detection
+    # ============================================================
+    - name: "automated_abuse_pattern"
+      type: "content_match"
+      patterns:
+        - "\\{\\{.*\\}\\}"  # Template injection
+        - "\\$\\{.*\\}"  # Variable injection
+        - "<%.*%>"  # Template tags
+      severity: "warning"
+      action: "flag"
+      description: "NIST: Template/variable injection pattern detected"
+
+    - name: "encoding_evasion"
+      type: "content_match"
+      patterns:
+        - "base64\\s+(decode|encode)"
+        - "\\\\x[0-9a-fA-F]{2}"  # Hex encoding
+        - "\\\\u[0-9a-fA-F]{4}"  # Unicode encoding
+        - "from\\s+base64"
+        - "atob\\(|btoa\\("
+      severity: "warning"
+      action: "flag"
+      description: "NIST: Encoding/obfuscation pattern detected"
+
+    # ============================================================
+    # OWASP LLM02 - INSECURE OUTPUT HANDLING
+    # Detect dangerous content in LLM responses that could be executed
+    # These rules apply to RESPONSE content scanning
+    # ============================================================
+    - name: "output_script_injection"
+      type: "content_match"
+      patterns:
+        - "<script[^>]*>"
+        - "javascript:"
+        - "on(click|load|error|mouseover)\\s*="
+        - "eval\\s*\\("
+        - "document\\.(write|cookie|location)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM02: Response contains potential XSS/script injection"
+
+    - name: "output_sql_content"
+      type: "content_match"
+      patterns:
+        - "(?i)(insert|update|delete|drop|alter|create)\\s+(into|from|table|database)"
+        - "(?i)select\\s+.+\\s+from\\s+.+\\s+where"
+        - "(?i);\\s*(drop|delete|truncate)\\s+"
+      severity: "warning"
+      action: "flag"
+      description: "LLM02: Response contains SQL statements"
+
+    - name: "output_shell_commands"
+      type: "content_match"
+      patterns:
+        - "\\$\\s*\\(\\s*(curl|wget|bash|sh)\\s+"
+        - "&&\\s*(rm|chmod|chown|sudo)\\s+"
+        - "\\|\\s*(bash|sh|python|perl|ruby)\\s*$"
+        - ">(\\s*/dev/null|\\s*2>&1)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM02: Response contains shell command patterns"
+
+    - name: "output_serialization"
+      type: "content_match"
+      patterns:
+        - "pickle\\.loads"
+        - "yaml\\.unsafe_load"
+        - "eval\\s*\\(.*input"
+        - "exec\\s*\\(.*input"
+        - "__import__\\s*\\("
+      severity: "critical"
+      action: "flag"
+      description: "LLM02: Response contains unsafe deserialization patterns"
+
+    # ============================================================
+    # OWASP LLM07 - INSECURE PLUGIN DESIGN
+    # Monitor tool/function calling patterns for security issues
+    # ============================================================
+    - name: "tool_file_access"
+      type: "content_match"
+      patterns:
+        - "\"function\"\\s*:\\s*\"(read|write|delete|create)_file\""
+        - "\"name\"\\s*:\\s*\"file_(read|write|delete|access)\""
+        - "\"tool_calls\".*\"(read|write).*path\""
+        - "\"type\"\\s*:\\s*\"function\".*\"/etc/"
+        - "\"type\"\\s*:\\s*\"function\".*\"\\.\\./"
+      severity: "warning"
+      action: "flag"
+      description: "LLM07: Tool call requests file system access"
+
+    - name: "tool_code_execution"
+      type: "content_match"
+      patterns:
+        - "\"function\"\\s*:\\s*\"(run|execute|eval)_code\""
+        - "\"name\"\\s*:\\s*\"(code_interpreter|execute_python|run_script)\""
+        - "\"tool_calls\".*\"(exec|eval|system)\""
+        - "\"type\"\\s*:\\s*\"code_interpreter\""
+      severity: "critical"
+      action: "flag"
+      description: "LLM07: Tool call requests code execution"
+
+    - name: "tool_network_access"
+      type: "content_match"
+      patterns:
+        - "\"function\"\\s*:\\s*\"(http_request|fetch|curl|wget)\""
+        - "\"name\"\\s*:\\s*\"(web_request|api_call|http_get|http_post)\""
+        - "\"tool_calls\".*\"url\"\\s*:\\s*\"http"
+        - "\"arguments\".*\"(url|endpoint|host)\"\\s*:\\s*\"[^\"]*\\.(ru|cn|tk|ml)\""
+      severity: "warning"
+      action: "flag"
+      description: "LLM07: Tool call requests external network access"
+
+    - name: "tool_database_access"
+      type: "content_match"
+      patterns:
+        - "\"function\"\\s*:\\s*\"(query|sql|database)_\""
+        - "\"name\"\\s*:\\s*\"(run_sql|db_query|execute_query)\""
+        - "\"tool_calls\".*\"(query|sql)\"\\s*:"
+        - "\"arguments\".*\"(drop|delete|truncate|alter)\\s+"
+      severity: "warning"
+      action: "flag"
+      description: "LLM07: Tool call requests database access"
+
+    - name: "tool_credential_access"
+      type: "content_match"
+      patterns:
+        - "\"function\"\\s*:\\s*\"(get|read|fetch)_(secret|credential|password|key)\""
+        - "\"name\"\\s*:\\s*\"(vault_read|secret_manager|get_api_key)\""
+        - "\"arguments\".*\"(password|api_key|secret|token)\"\\s*:"
+      severity: "critical"
+      action: "block"
+      description: "LLM07: Tool call requests credential access"
+
+    # ============================================================
+    # OWASP LLM10 - MODEL THEFT
+    # Detect attempts to extract model weights, architecture, or training data
+    # ============================================================
+    - name: "model_architecture_probe"
+      type: "content_match"
+      patterns:
+        - "(what|describe|explain)\\s+(is|are)\\s+your\\s+(weights|parameters|architecture)"
+        - "(tell|show|give)\\s+me\\s+(your|the)\\s+(model|neural|network)\\s+(weights|architecture|structure)"
+        - "how\\s+many\\s+(layers|parameters|neurons|weights)\\s+(do\\s+you|does\\s+the\\s+model)"
+        - "(extract|dump|export)\\s+(the\\s+)?(model|weights|parameters)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM10: Probing for model architecture details"
+
+    - name: "training_data_extraction"
+      type: "content_match"
+      patterns:
+        - "(what|which)\\s+(data|dataset|examples)\\s+(were|was)\\s+(you|the\\s+model)\\s+trained\\s+on"
+        - "(show|give|list)\\s+me\\s+(examples|samples)\\s+(from|of)\\s+(your|the)\\s+training\\s+(data|set)"
+        - "repeat\\s+(exactly|verbatim|word\\s+for\\s+word)\\s+(what|the\\s+text)"
+        - "(recite|reproduce|output)\\s+(the|your)\\s+(training|memorized)\\s+(data|text|examples)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM10: Attempting to extract training data"
+
+    - name: "model_replication"
+      type: "content_match"
+      patterns:
+        - "(help\\s+me\\s+)?(create|build|train|replicate)\\s+(a\\s+)?(copy|clone|replica)\\s+of\\s+(you|this\\s+model)"
+        - "(what|how)\\s+(would|can)\\s+I\\s+(recreate|replicate|clone)\\s+(you|this\\s+model)"
+        - "(distill|compress|extract)\\s+(your|the\\s+model's?)\\s+(knowledge|capabilities)"
+        - "knowledge\\s+distillation\\s+(from|of)\\s+(you|this\\s+model)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM10: Attempting model replication/distillation"
+
+    - name: "systematic_probing"
+      type: "content_match"
+      patterns:
+        - "for\\s+(each|every|all)\\s+(possible|input|token|word)"
+        - "(test|probe|query)\\s+(all|every|each)\\s+(combination|permutation|variation)"
+        - "(enumerate|iterate|loop)\\s+(through|over)\\s+(all|every)"
+        - "(brute|exhaustive)\\s+(force|search|scan)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM10: Systematic probing pattern detected"
+
+    # ============================================================
+    # OWASP LLM09 - OVERRELIANCE MITIGATION
+    # Decision audit logging and confidence tracking
+    # ============================================================
+
+    # High-stakes domain detection - flag for enhanced audit
+    - name: "high_stakes_medical"
+      type: "content_match"
+      patterns:
+        - "(diagnose|diagnosis|treatment|prognosis)\\s+(for|of)"
+        - "(prescribe|prescription|medication|dosage)\\s+"
+        - "(symptoms?|disease|illness|condition)\\s+(indicate|suggest|mean)"
+        - "should\\s+I\\s+(take|stop|start)\\s+.*(medication|medicine|drug)"
+        - "(medical|health)\\s+(advice|recommendation|decision)"
+        - "is\\s+(this|it)\\s+(cancer|serious|dangerous|life-threatening)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM09: High-stakes medical domain - requires human verification"
+
+    - name: "high_stakes_legal"
+      type: "content_match"
+      patterns:
+        - "(legal|law)\\s+(advice|recommendation|opinion)"
+        - "(sue|lawsuit|litigation|liability)\\s+"
+        - "(contract|agreement|terms)\\s+(enforceable|binding|valid)"
+        - "is\\s+(this|it)\\s+(legal|illegal|lawful|unlawful)"
+        - "(guilty|innocent|liable)\\s+(of|for)"
+        - "(rights|obligations)\\s+(under|regarding)"
+        - "should\\s+I\\s+(sign|agree|accept)\\s+"
+      severity: "warning"
+      action: "flag"
+      description: "LLM09: High-stakes legal domain - requires human verification"
+
+    - name: "high_stakes_financial"
+      type: "content_match"
+      patterns:
+        - "(invest|investment|portfolio)\\s+(advice|recommendation|decision)"
+        - "should\\s+I\\s+(buy|sell|hold|invest)\\s+"
+        - "(stock|crypto|bitcoin|ethereum)\\s+(will|going\\s+to)\\s+(rise|fall|crash)"
+        - "(financial|money|investment)\\s+(advice|decision|recommendation)"
+        - "(retire|retirement)\\s+(plan|savings|fund)"
+        - "(loan|mortgage|debt)\\s+(should|recommend|advice)"
+        - "how\\s+much\\s+(should|can)\\s+I\\s+(borrow|invest|save)"
+      severity: "warning"
+      action: "flag"
+      description: "LLM09: High-stakes financial domain - requires human verification"
+
+    # Low-confidence language detection in responses
+    - name: "low_confidence_hedging"
+      type: "content_match"
+      patterns:
+        - "I('m|\\s+am)\\s+not\\s+(sure|certain|confident)"
+        - "I\\s+(think|believe|guess|suppose)\\s+(that\\s+)?(it|this)\\s+(might|may|could)"
+        - "(might|may|could)\\s+be\\s+(wrong|incorrect|inaccurate)"
+        - "I\\s+(don't|do\\s+not)\\s+(know|have)\\s+(enough|sufficient)"
+        - "(this|my)\\s+(answer|response)\\s+(might|may|could)\\s+(not\\s+)?be"
+        - "(please|you\\s+should)\\s+(verify|confirm|check|consult)"
+        - "I\\s+cannot\\s+(guarantee|verify|confirm)"
+      severity: "info"
+      action: "flag"
+      description: "LLM09: Low-confidence response detected - verify before acting"
+
+    - name: "uncertainty_indicators"
+      type: "content_match"
+      patterns:
+        - "(possibly|probably|perhaps|maybe)\\s+(correct|accurate|true)"
+        - "(not\\s+)?(100%|fully|completely|entirely)\\s+(sure|certain|confident)"
+        - "take\\s+(this|my\\s+advice)\\s+with\\s+(a\\s+grain\\s+of\\s+salt|caution)"
+        - "(consult|speak\\s+to|see)\\s+(a|an|your)\\s+(doctor|lawyer|professional|expert)"
+        - "this\\s+is\\s+(not|n't)\\s+(professional|medical|legal|financial)\\s+advice"
+        - "for\\s+(informational|educational)\\s+purposes\\s+only"
+      severity: "info"
+      action: "flag"
+      description: "LLM09: Uncertainty indicator - response acknowledges limitations"

@@ -49,6 +49,9 @@ type Session struct {
 	// Track all backends used and request count per backend
 	BackendsUsed map[string]int `json:"backends_used,omitempty"`
 
+	// Terminated sessions cannot be resumed (for malicious agents)
+	Terminated bool `json:"terminated,omitempty"`
+
 	// For rate limiting - track recent request times
 	RequestTimes []time.Time `json:"-"`
 
@@ -151,7 +154,7 @@ func (s *Session) IsActive() bool {
 	return s.GetState() == Active
 }
 
-// Kill signals the session to terminate
+// Kill signals the session to terminate (can be resumed later)
 func (s *Session) Kill() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -161,6 +164,52 @@ func (s *Session) Kill() {
 		s.EndTime = &now
 		close(s.killChan)
 	}
+}
+
+// Terminate permanently kills the session (cannot be resumed)
+// Use this for malicious or runaway agents
+func (s *Session) Terminate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State == Active || s.State == Killed {
+		s.State = Killed
+		s.Terminated = true
+		now := time.Now()
+		s.EndTime = &now
+		// Only close if not already closed
+		select {
+		case <-s.killChan:
+			// Already closed
+		default:
+			close(s.killChan)
+		}
+	}
+}
+
+// IsTerminated returns true if the session was permanently terminated
+func (s *Session) IsTerminated() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Terminated
+}
+
+// Resume reactivates a killed session, allowing new requests
+// Returns false if session is terminated (cannot be resumed)
+func (s *Session) Resume() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Terminated {
+		return false // Cannot resume terminated sessions
+	}
+	if s.State == Killed {
+		s.State = Active
+		s.EndTime = nil
+		s.LastActivity = time.Now()
+		// Create new kill channel for future kill operations
+		s.killChan = make(chan struct{})
+		return true
+	}
+	return false
 }
 
 // KillChan returns the channel that's closed when the session is killed

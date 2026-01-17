@@ -138,6 +138,39 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add session ID to response headers
 	w.Header().Set(p.config.Session.Header, sess.ID)
 
+	// Content inspection - check request body against policy rules BEFORE forwarding
+	if p.policy != nil && len(requestBody) > 0 {
+		if result := p.policy.EvaluateContent(sess.ID, string(requestBody)); result != nil {
+			if result.ShouldTerminate {
+				// Terminate the session for serious violations
+				p.manager.Terminate(sess.ID)
+				slog.Warn("request blocked and session terminated by policy",
+					"session_id", sess.ID,
+					"violations", len(result.Violations),
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy - session terminated"}`))
+				return
+			}
+			if result.ShouldBlock {
+				slog.Warn("request blocked by policy",
+					"session_id", sess.ID,
+					"violations", len(result.Violations),
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy"}`))
+				return
+			}
+			// Just flagged - continue but log
+			slog.Warn("request flagged by policy",
+				"session_id", sess.ID,
+				"violations", len(result.Violations),
+			)
+		}
+	}
+
 	// Determine if this is a streaming request
 	isStreaming := p.isStreamingRequest(r, requestBody)
 

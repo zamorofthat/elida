@@ -25,9 +25,11 @@ type Backend struct {
 
 // Router handles routing requests to multiple backends
 type Router struct {
-	backends       map[string]*Backend
-	defaultBackend *Backend
-	methods        []string // routing method priority: header, model, path, default
+	backends            map[string]*Backend
+	defaultBackend      *Backend
+	methods             []string // routing method priority: header, model, path, default
+	strictModelMatching bool     // reject if model doesn't match any backend pattern
+	blockedModels       []string // models to always reject (glob patterns)
 }
 
 // NewRouter creates a new multi-backend router from configuration
@@ -37,8 +39,10 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 	}
 
 	r := &Router{
-		backends: make(map[string]*Backend),
-		methods:  routing.Methods,
+		backends:            make(map[string]*Backend),
+		methods:             routing.Methods,
+		strictModelMatching: routing.StrictModelMatching,
+		blockedModels:       routing.BlockedModels,
 	}
 
 	// Use default methods if not specified
@@ -90,10 +94,18 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 		"backends", len(r.backends),
 		"methods", r.methods,
 		"default", r.defaultBackend.Name,
+		"strict_model_matching", r.strictModelMatching,
+		"blocked_models", len(r.blockedModels),
 	)
 
 	return r, nil
 }
+
+// ErrModelBlocked is returned when a model is on the blocklist
+var ErrModelBlocked = fmt.Errorf("model is blocked by policy")
+
+// ErrModelNotAllowed is returned when strict mode is enabled and model doesn't match any backend
+var ErrModelNotAllowed = fmt.Errorf("model not allowed (strict mode enabled)")
 
 // NewSingleBackendRouter creates a router with a single backend (backward compatibility)
 func NewSingleBackendRouter(backendURL string) (*Router, error) {
@@ -124,6 +136,19 @@ func NewSingleBackendRouter(backendURL string) (*Router, error) {
 
 // Select chooses the appropriate backend for a request
 func (r *Router) Select(req *http.Request, body []byte) (*Backend, error) {
+	// Extract model from request body for blocklist/strict checking
+	model := extractModel(body)
+
+	// Check blocklist first (LLM05 - Supply Chain)
+	if model != "" && r.isModelBlocked(model) {
+		slog.Warn("model blocked by policy",
+			"model", model,
+			"blocked_models", r.blockedModels,
+		)
+		return nil, ErrModelBlocked
+	}
+
+	var matchedByModel bool
 	for _, method := range r.methods {
 		var backend *Backend
 
@@ -132,9 +157,19 @@ func (r *Router) Select(req *http.Request, body []byte) (*Backend, error) {
 			backend = r.matchByHeader(req)
 		case "model":
 			backend = r.matchByModel(body)
+			if backend != nil {
+				matchedByModel = true
+			}
 		case "path":
 			backend = r.matchByPath(req)
 		case "default":
+			// In strict mode, only use default if model matched or no model specified
+			if r.strictModelMatching && model != "" && !matchedByModel {
+				slog.Warn("model not allowed in strict mode",
+					"model", model,
+				)
+				return nil, ErrModelNotAllowed
+			}
 			backend = r.defaultBackend
 		}
 
@@ -150,6 +185,21 @@ func (r *Router) Select(req *http.Request, body []byte) (*Backend, error) {
 
 	// Should never reach here if default is in methods
 	return r.defaultBackend, nil
+}
+
+// isModelBlocked checks if a model matches any blocked pattern
+func (r *Router) isModelBlocked(model string) bool {
+	for _, pattern := range r.blockedModels {
+		matched, err := filepath.Match(pattern, model)
+		if err != nil {
+			slog.Warn("invalid blocked model pattern", "pattern", pattern, "error", err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // matchByHeader checks for X-Backend header

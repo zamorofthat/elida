@@ -110,6 +110,120 @@ func TestManager_Kill(t *testing.T) {
 	}
 }
 
+func TestManager_Resume(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Create and kill a session
+	manager.GetOrCreate("resume-test", "http://backend", "127.0.0.1")
+	manager.Kill("resume-test")
+
+	// Resume the killed session
+	if !manager.Resume("resume-test") {
+		t.Error("expected Resume to return true")
+	}
+
+	// Verify session is active again
+	sess, ok := manager.Get("resume-test")
+	if !ok {
+		t.Fatal("expected session to exist")
+	}
+	if sess.GetState() != session.Active {
+		t.Errorf("expected session to be Active, got %v", sess.GetState())
+	}
+
+	// Resume already active session should fail
+	if manager.Resume("resume-test") {
+		t.Error("expected Resume to return false for already active session")
+	}
+
+	// Resume non-existent session should fail
+	if manager.Resume("nonexistent") {
+		t.Error("expected Resume to return false for non-existent session")
+	}
+}
+
+func TestManager_Resume_AllowsNewRequests(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Create, kill, then resume a session
+	sess := manager.GetOrCreate("resume-flow", "http://backend", "127.0.0.1")
+	originalID := sess.ID
+	manager.Kill("resume-flow")
+
+	// Verify killed session is blocked
+	blocked := manager.GetOrCreate("resume-flow", "http://backend", "127.0.0.1")
+	if blocked != nil {
+		t.Error("expected killed session to block new requests")
+	}
+
+	// Resume the session
+	manager.Resume("resume-flow")
+
+	// Now new requests should work
+	resumed := manager.GetOrCreate("resume-flow", "http://backend", "127.0.0.1")
+	if resumed == nil {
+		t.Fatal("expected resumed session to allow requests")
+	}
+	if resumed.ID != originalID {
+		t.Errorf("expected same session ID after resume, got %s", resumed.ID)
+	}
+}
+
+func TestManager_Terminate(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Create and terminate a session
+	manager.GetOrCreate("terminate-test", "http://backend", "127.0.0.1")
+	if !manager.Terminate("terminate-test") {
+		t.Error("expected Terminate to return true")
+	}
+
+	// Verify session is terminated
+	sess, ok := manager.Get("terminate-test")
+	if !ok {
+		t.Fatal("expected session to exist")
+	}
+	if !sess.IsTerminated() {
+		t.Error("expected session to be terminated")
+	}
+
+	// Terminated session cannot be resumed
+	if manager.Resume("terminate-test") {
+		t.Error("expected Resume to fail for terminated session")
+	}
+
+	// Terminate non-existent session should fail
+	if manager.Terminate("nonexistent") {
+		t.Error("expected Terminate to return false for non-existent session")
+	}
+}
+
+func TestManager_Terminate_CannotResume(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Create, kill, then try to resume after terminate
+	manager.GetOrCreate("no-resume", "http://backend", "127.0.0.1")
+	manager.Kill("no-resume")
+
+	// Can resume after kill
+	if !manager.Resume("no-resume") {
+		t.Error("expected Resume to succeed after kill")
+	}
+
+	// Kill again and then terminate
+	manager.Kill("no-resume")
+	manager.Terminate("no-resume")
+
+	// Cannot resume after terminate
+	if manager.Resume("no-resume") {
+		t.Error("expected Resume to fail after terminate")
+	}
+}
+
 func TestManager_ListActive(t *testing.T) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
@@ -206,7 +320,7 @@ func TestManager_KillBlock_DurationMode(t *testing.T) {
 	})
 
 	// Create session via client IP tracking
-	sess := manager.GetOrCreateByClient("192.168.1.1:12345", "http://backend")
+	sess := manager.GetOrCreateByClient("192.168.1.1:12345", "default", "http://backend")
 	if sess == nil {
 		t.Fatal("expected session to be created")
 	}
@@ -218,7 +332,7 @@ func TestManager_KillBlock_DurationMode(t *testing.T) {
 	}
 
 	// Immediately try to create new session - should be blocked
-	sess2 := manager.GetOrCreateByClient("192.168.1.1:12345", "http://backend")
+	sess2 := manager.GetOrCreateByClient("192.168.1.1:12345", "default", "http://backend")
 	if sess2 != nil {
 		t.Error("expected request to be blocked immediately after kill")
 	}
@@ -227,7 +341,7 @@ func TestManager_KillBlock_DurationMode(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Now should be allowed
-	sess3 := manager.GetOrCreateByClient("192.168.1.1:12345", "http://backend")
+	sess3 := manager.GetOrCreateByClient("192.168.1.1:12345", "default", "http://backend")
 	if sess3 == nil {
 		t.Error("expected request to be allowed after block duration expired")
 	}
@@ -241,7 +355,7 @@ func TestManager_KillBlock_PermanentMode(t *testing.T) {
 	})
 
 	// Create session via client IP tracking
-	sess := manager.GetOrCreateByClient("192.168.1.2:12345", "http://backend")
+	sess := manager.GetOrCreateByClient("192.168.1.2:12345", "default", "http://backend")
 	if sess == nil {
 		t.Fatal("expected session to be created")
 	}
@@ -254,7 +368,7 @@ func TestManager_KillBlock_PermanentMode(t *testing.T) {
 
 	// Try multiple times - should always be blocked
 	for i := 0; i < 3; i++ {
-		sess2 := manager.GetOrCreateByClient("192.168.1.2:12345", "http://backend")
+		sess2 := manager.GetOrCreateByClient("192.168.1.2:12345", "default", "http://backend")
 		if sess2 != nil {
 			t.Errorf("iteration %d: expected request to be blocked permanently", i)
 		}
@@ -269,7 +383,7 @@ func TestManager_KillBlock_UntilHourChangeMode(t *testing.T) {
 	})
 
 	// Create session via client IP tracking
-	sess := manager.GetOrCreateByClient("192.168.1.3:12345", "http://backend")
+	sess := manager.GetOrCreateByClient("192.168.1.3:12345", "default", "http://backend")
 	if sess == nil {
 		t.Fatal("expected session to be created")
 	}
@@ -281,7 +395,7 @@ func TestManager_KillBlock_UntilHourChangeMode(t *testing.T) {
 	}
 
 	// Should be blocked (same hour, same session ID generated)
-	sess2 := manager.GetOrCreateByClient("192.168.1.3:12345", "http://backend")
+	sess2 := manager.GetOrCreateByClient("192.168.1.3:12345", "default", "http://backend")
 	if sess2 != nil {
 		t.Error("expected request to be blocked until hour change")
 	}
@@ -294,14 +408,14 @@ func TestManager_KillBlock_DifferentClientsNotBlocked(t *testing.T) {
 	})
 
 	// Create and kill session for client 1
-	sess1 := manager.GetOrCreateByClient("192.168.1.100:12345", "http://backend")
+	sess1 := manager.GetOrCreateByClient("192.168.1.100:12345", "default", "http://backend")
 	if sess1 == nil {
 		t.Fatal("expected session to be created for client 1")
 	}
 	manager.Kill(sess1.ID)
 
 	// Client 2 should not be affected
-	sess2 := manager.GetOrCreateByClient("192.168.1.101:12345", "http://backend")
+	sess2 := manager.GetOrCreateByClient("192.168.1.101:12345", "default", "http://backend")
 	if sess2 == nil {
 		t.Error("expected client 2 to not be blocked by client 1's kill")
 	}
@@ -312,15 +426,15 @@ func TestManager_GetOrCreateByClient_GeneratesConsistentID(t *testing.T) {
 	manager := session.NewManager(store, 5*time.Minute)
 
 	// Same client IP should get same session
-	sess1 := manager.GetOrCreateByClient("10.0.0.1:5000", "http://backend")
-	sess2 := manager.GetOrCreateByClient("10.0.0.1:5001", "http://backend") // Different port, same IP
+	sess1 := manager.GetOrCreateByClient("10.0.0.1:5000", "default", "http://backend")
+	sess2 := manager.GetOrCreateByClient("10.0.0.1:5001", "default", "http://backend") // Different port, same IP
 
 	if sess1.ID != sess2.ID {
 		t.Errorf("expected same session ID for same IP, got %s and %s", sess1.ID, sess2.ID)
 	}
 
 	// Different IP should get different session
-	sess3 := manager.GetOrCreateByClient("10.0.0.2:5000", "http://backend")
+	sess3 := manager.GetOrCreateByClient("10.0.0.2:5000", "default", "http://backend")
 	if sess1.ID == sess3.ID {
 		t.Error("expected different session ID for different IP")
 	}
@@ -330,15 +444,17 @@ func TestManager_GetOrCreateByClient_SessionIDFormat(t *testing.T) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 
-	sess := manager.GetOrCreateByClient("172.16.0.1:8080", "http://backend")
+	sess := manager.GetOrCreateByClient("172.16.0.1:8080", "default", "http://backend")
 
 	// Session ID should start with "client-" prefix
 	if len(sess.ID) < 7 || sess.ID[:7] != "client-" {
 		t.Errorf("expected session ID to start with 'client-', got %s", sess.ID)
 	}
 
-	// Should be "client-" + 8 char hex hash
-	if len(sess.ID) != 15 {
-		t.Errorf("expected session ID length 15 (client- + 8 hex chars), got %d", len(sess.ID))
+	// Should be "client-" + 8 char hex hash + "-" + backend name
+	// Format: client-xxxxxxxx-default (23 chars for "default" backend)
+	expectedSuffix := "-default"
+	if len(sess.ID) < len(expectedSuffix) || sess.ID[len(sess.ID)-len(expectedSuffix):] != expectedSuffix {
+		t.Errorf("expected session ID to end with '%s', got %s", expectedSuffix, sess.ID)
 	}
 }

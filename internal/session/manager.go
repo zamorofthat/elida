@@ -43,6 +43,10 @@ type Manager struct {
 	// Kill block configuration
 	killBlockConfig KillBlockConfig
 
+	// How long a killed session can be resumed before auto-terminating
+	// Default: 30 minutes. Set to 0 to disable auto-termination.
+	killResumeTimeout time.Duration
+
 	// Callback for when sessions end (for persistence)
 	onSessionEnd SessionEndCallback
 
@@ -62,13 +66,20 @@ func NewManager(store Store, timeout time.Duration) *Manager {
 // NewManagerWithKillBlock creates a new session manager with custom kill block settings
 func NewManagerWithKillBlock(store Store, timeout time.Duration, killBlock KillBlockConfig) *Manager {
 	return &Manager{
-		store:           store,
-		timeout:         timeout,
-		cleanupInterval: 30 * time.Second,
-		retentionPeriod: 5 * time.Minute,
-		killBlockConfig: killBlock,
-		clientSessions:  make(map[string]string),
+		store:             store,
+		timeout:           timeout,
+		cleanupInterval:   30 * time.Second,
+		retentionPeriod:   5 * time.Minute,
+		killBlockConfig:   killBlock,
+		killResumeTimeout: 30 * time.Minute, // Default: 30 min to resume before auto-terminate
+		clientSessions:    make(map[string]string),
 	}
+}
+
+// SetKillResumeTimeout sets how long a killed session can be resumed
+// before it auto-terminates. Set to 0 to disable auto-termination.
+func (m *Manager) SetKillResumeTimeout(d time.Duration) {
+	m.killResumeTimeout = d
 }
 
 // SetSessionEndCallback sets a callback to be called when sessions end
@@ -265,7 +276,82 @@ func (m *Manager) Kill(id string) bool {
 		rs.PublishKill(id)
 	}
 
+	// Export CDR immediately when session is killed
+	if m.onSessionEnd != nil {
+		m.onSessionEnd(sess)
+	}
+
 	slog.Info("session killed",
+		"session_id", id,
+		"duration", sess.Duration(),
+		"requests", sess.RequestCount,
+	)
+
+	return true
+}
+
+// Resume reactivates a killed session, allowing it to continue
+// Returns false if session is terminated (cannot be resumed)
+func (m *Manager) Resume(id string) bool {
+	sess, ok := m.store.Get(id)
+	if !ok {
+		return false
+	}
+
+	if sess.GetState() != Killed {
+		return false
+	}
+
+	if !sess.Resume() {
+		slog.Warn("cannot resume terminated session",
+			"session_id", id,
+		)
+		return false
+	}
+
+	// Persist the resumed state
+	m.store.Put(sess)
+
+	slog.Info("session resumed",
+		"session_id", id,
+		"duration", sess.Duration(),
+		"requests", sess.RequestCount,
+	)
+
+	return true
+}
+
+// Terminate permanently kills a session (cannot be resumed)
+// Use this for malicious or runaway agents
+func (m *Manager) Terminate(id string) bool {
+	sess, ok := m.store.Get(id)
+	if !ok {
+		return false
+	}
+
+	if !sess.IsActive() && !sess.IsTerminated() {
+		// Already killed but not terminated - allow upgrade to terminated
+		if sess.GetState() != Killed {
+			return false
+		}
+	}
+
+	sess.Terminate()
+
+	// Persist the terminated state
+	m.store.Put(sess)
+
+	// Publish kill signal for distributed kill switch
+	if rs, ok := m.store.(*RedisStore); ok {
+		rs.PublishKill(id)
+	}
+
+	// Export session record immediately
+	if m.onSessionEnd != nil {
+		m.onSessionEnd(sess)
+	}
+
+	slog.Warn("session terminated (permanent)",
 		"session_id", id,
 		"duration", sess.Duration(),
 		"requests", sess.RequestCount,
@@ -329,16 +415,42 @@ func (m *Manager) Stats() Stats {
 
 // checkTimeouts checks for and handles timed out sessions
 func (m *Manager) checkTimeouts() {
+	// Check active sessions for idle timeout
 	sessions := m.store.List(ActiveFilter)
-	
 	for _, sess := range sessions {
 		if sess.IdleTime() > m.timeout {
 			sess.SetState(TimedOut)
-			
+
 			slog.Warn("session timed out",
 				"session_id", sess.ID,
 				"idle_time", sess.IdleTime(),
 				"timeout", m.timeout,
+			)
+		}
+	}
+
+	// Check killed sessions for auto-termination
+	if m.killResumeTimeout > 0 {
+		m.checkKilledSessionsForTermination()
+	}
+}
+
+// checkKilledSessionsForTermination auto-terminates killed sessions
+// that have exceeded the resume timeout window
+func (m *Manager) checkKilledSessionsForTermination() {
+	sessions := m.store.List(func(s *Session) bool {
+		return s.GetState() == Killed && !s.IsTerminated()
+	})
+
+	for _, sess := range sessions {
+		if sess.EndTime != nil && time.Since(*sess.EndTime) > m.killResumeTimeout {
+			sess.Terminate()
+			m.store.Put(sess)
+
+			slog.Warn("killed session auto-terminated after resume timeout",
+				"session_id", sess.ID,
+				"killed_duration", time.Since(*sess.EndTime),
+				"timeout", m.killResumeTimeout,
 			)
 		}
 	}

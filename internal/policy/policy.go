@@ -2,6 +2,8 @@ package policy
 
 import (
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,32 +21,41 @@ const (
 type RuleType string
 
 const (
-	RuleTypeBytesOut        RuleType = "bytes_out"
-	RuleTypeBytesIn         RuleType = "bytes_in"
-	RuleTypeBytesTotal      RuleType = "bytes_total"
-	RuleTypeRequestCount    RuleType = "request_count"
-	RuleTypeDuration        RuleType = "duration"
-	RuleTypeRequestsPerMin  RuleType = "requests_per_minute"
-	RuleTypeIdleTime        RuleType = "idle_time"
+	// Metric-based rules
+	RuleTypeBytesOut       RuleType = "bytes_out"
+	RuleTypeBytesIn        RuleType = "bytes_in"
+	RuleTypeBytesTotal     RuleType = "bytes_total"
+	RuleTypeRequestCount   RuleType = "request_count"
+	RuleTypeDuration       RuleType = "duration"
+	RuleTypeRequestsPerMin RuleType = "requests_per_minute"
+	RuleTypeIdleTime       RuleType = "idle_time"
+
+	// Content inspection rules
+	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request body
 )
 
 // Rule defines a policy rule
 type Rule struct {
 	Name        string   `yaml:"name" json:"name"`
 	Type        RuleType `yaml:"type" json:"type"`
-	Threshold   int64    `yaml:"threshold" json:"threshold"`
+	Threshold   int64    `yaml:"threshold" json:"threshold"`          // For metric rules
+	Patterns    []string `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
 	Severity    Severity `yaml:"severity" json:"severity"`
 	Description string   `yaml:"description" json:"description"`
+	Action      string   `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
 }
 
 // Violation represents a policy violation
 type Violation struct {
-	RuleName    string    `json:"rule_name"`
-	Description string    `json:"description"`
-	Severity    Severity  `json:"severity"`
-	Threshold   int64     `json:"threshold"`
-	ActualValue int64     `json:"actual_value"`
-	Timestamp   time.Time `json:"timestamp"`
+	RuleName      string    `json:"rule_name"`
+	Description   string    `json:"description"`
+	Severity      Severity  `json:"severity"`
+	Threshold     int64     `json:"threshold,omitempty"`
+	ActualValue   int64     `json:"actual_value,omitempty"`
+	MatchedText   string    `json:"matched_text,omitempty"`   // For content matches
+	MatchedPattern string   `json:"matched_pattern,omitempty"` // Pattern that matched
+	Action        string    `json:"action,omitempty"`          // Recommended action
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 // SessionMetrics contains the metrics needed for policy evaluation
@@ -79,18 +90,27 @@ type CapturedRequest struct {
 	StatusCode   int       `json:"status_code"`
 }
 
+// CompiledRule is a rule with pre-compiled regex patterns
+type CompiledRule struct {
+	Rule
+	CompiledPatterns []*regexp.Regexp
+}
+
 // Engine evaluates sessions against policy rules
 type Engine struct {
 	mu              sync.RWMutex
 	rules           []Rule
+	compiledRules   []CompiledRule // Rules with compiled regex
 	flaggedSessions map[string]*FlaggedSession
 	captureContent  bool
-	maxCaptureSize  int // Max bytes to capture per request
+	maxCaptureSize  int    // Max bytes to capture per request
+	auditMode       bool   // If true, log but don't enforce (dry-run)
 }
 
 // Config for the policy engine
 type Config struct {
 	Enabled        bool   `yaml:"enabled"`
+	Mode           string `yaml:"mode"` // "enforce" (default) or "audit"
 	CaptureContent bool   `yaml:"capture_flagged"`
 	MaxCaptureSize int    `yaml:"max_capture_size"`
 	Rules          []Rule `yaml:"rules"`
@@ -102,16 +122,47 @@ func NewEngine(cfg Config) *Engine {
 		cfg.MaxCaptureSize = 10000 // Default 10KB per request
 	}
 
+	// Default to enforce mode if not specified
+	auditMode := cfg.Mode == "audit"
+
 	e := &Engine{
 		rules:           cfg.Rules,
+		compiledRules:   make([]CompiledRule, 0),
 		flaggedSessions: make(map[string]*FlaggedSession),
 		captureContent:  cfg.CaptureContent,
 		maxCaptureSize:  cfg.MaxCaptureSize,
+		auditMode:       auditMode,
 	}
 
+	// Compile regex patterns for content rules
+	for _, rule := range cfg.Rules {
+		if rule.Type == RuleTypeContentMatch && len(rule.Patterns) > 0 {
+			compiled := CompiledRule{Rule: rule}
+			for _, pattern := range rule.Patterns {
+				re, err := regexp.Compile("(?i)" + pattern) // Case-insensitive
+				if err != nil {
+					slog.Error("invalid regex pattern in rule",
+						"rule", rule.Name,
+						"pattern", pattern,
+						"error", err,
+					)
+					continue
+				}
+				compiled.CompiledPatterns = append(compiled.CompiledPatterns, re)
+			}
+			e.compiledRules = append(e.compiledRules, compiled)
+		}
+	}
+
+	mode := "enforce"
+	if auditMode {
+		mode = "audit"
+	}
 	slog.Info("policy engine initialized",
 		"rules", len(cfg.Rules),
+		"content_rules", len(e.compiledRules),
 		"capture_content", cfg.CaptureContent,
+		"mode", mode,
 	)
 
 	return e
@@ -206,6 +257,89 @@ func (e *Engine) calculateRequestsPerMinute(metrics SessionMetrics) int64 {
 	}
 
 	return int64(count)
+}
+
+// ContentCheckResult contains the result of content inspection
+type ContentCheckResult struct {
+	Violations []Violation
+	ShouldBlock bool
+	ShouldTerminate bool
+}
+
+// EvaluateContent checks request content against content rules
+func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult {
+	if len(e.compiledRules) == 0 || content == "" {
+		return nil
+	}
+
+	result := &ContentCheckResult{}
+	contentLower := strings.ToLower(content)
+
+	for _, cr := range e.compiledRules {
+		for i, re := range cr.CompiledPatterns {
+			if match := re.FindString(contentLower); match != "" {
+				violation := Violation{
+					RuleName:       cr.Name,
+					Description:    cr.Description,
+					Severity:       cr.Severity,
+					MatchedText:    truncateMatch(match, 100),
+					MatchedPattern: cr.Patterns[i],
+					Action:         cr.Action,
+					Timestamp:      time.Now(),
+				}
+				result.Violations = append(result.Violations, violation)
+
+				// Only enforce actions if not in audit mode
+				if !e.auditMode {
+					switch cr.Action {
+					case "block":
+						result.ShouldBlock = true
+					case "terminate":
+						result.ShouldTerminate = true
+						result.ShouldBlock = true
+					}
+				}
+
+				// Log with audit mode indicator
+				logFunc := slog.Warn
+				actionMsg := cr.Action
+				if e.auditMode {
+					actionMsg = cr.Action + " (audit-only)"
+				}
+
+				logFunc("content policy violation detected",
+					"session_id", sessionID,
+					"rule", cr.Name,
+					"severity", cr.Severity,
+					"action", actionMsg,
+					"matched", truncateMatch(match, 50),
+					"audit_mode", e.auditMode,
+				)
+
+				// Record the violation
+				e.recordViolations(sessionID, []Violation{violation})
+				break // One match per rule is enough
+			}
+		}
+	}
+
+	if len(result.Violations) > 0 {
+		return result
+	}
+	return nil
+}
+
+// IsAuditMode returns true if the engine is in audit (dry-run) mode
+func (e *Engine) IsAuditMode() bool {
+	return e.auditMode
+}
+
+// truncateMatch truncates a matched string for logging
+func truncateMatch(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // recordViolations records violations for a session

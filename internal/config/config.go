@@ -42,18 +42,22 @@ type StorageConfig struct {
 // PolicyConfig holds policy engine configuration
 type PolicyConfig struct {
 	Enabled        bool         `yaml:"enabled"`
-	CaptureContent bool         `yaml:"capture_flagged"` // Capture content for flagged sessions
+	Mode           string       `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
+	CaptureContent bool         `yaml:"capture_flagged"`  // Capture content for flagged sessions
 	MaxCaptureSize int          `yaml:"max_capture_size"` // Max bytes to capture per request
+	Preset         string       `yaml:"preset"`           // minimal, standard, or strict
 	Rules          []PolicyRule `yaml:"rules"`
 }
 
 // PolicyRule defines a single policy rule
 type PolicyRule struct {
-	Name        string `yaml:"name"`
-	Type        string `yaml:"type"`        // bytes_out, bytes_in, request_count, duration, requests_per_minute
-	Threshold   int64  `yaml:"threshold"`
-	Severity    string `yaml:"severity"`    // info, warning, critical
-	Description string `yaml:"description"`
+	Name        string   `yaml:"name"`
+	Type        string   `yaml:"type"`        // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match
+	Threshold   int64    `yaml:"threshold"`   // For metric rules
+	Patterns    []string `yaml:"patterns"`    // For content_match rules (regex patterns)
+	Severity    string   `yaml:"severity"`    // info, warning, critical
+	Description string   `yaml:"description"`
+	Action      string   `yaml:"action"`      // flag, block, terminate (for content rules)
 }
 
 // BackendConfig defines a single backend configuration
@@ -66,7 +70,9 @@ type BackendConfig struct {
 
 // RoutingConfig defines routing method priority
 type RoutingConfig struct {
-	Methods []string `yaml:"methods"` // [header, model, path, default]
+	Methods             []string `yaml:"methods"`               // [header, model, path, default]
+	StrictModelMatching bool     `yaml:"strict_model_matching"` // Reject if model doesn't match any backend pattern
+	BlockedModels       []string `yaml:"blocked_models"`        // Models to always reject (glob patterns)
 }
 
 // SessionConfig holds session-related configuration
@@ -134,6 +140,9 @@ func Load(path string) (*Config, error) {
 
 	// Override with environment variables
 	cfg.applyEnvOverrides()
+
+	// Apply policy preset if specified
+	cfg.ApplyPolicyPreset()
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
@@ -286,8 +295,14 @@ func (c *Config) applyEnvOverrides() {
 	if os.Getenv("ELIDA_POLICY_ENABLED") == "true" {
 		c.Policy.Enabled = true
 	}
+	if v := os.Getenv("ELIDA_POLICY_MODE"); v != "" {
+		c.Policy.Mode = v // "enforce" or "audit"
+	}
 	if os.Getenv("ELIDA_POLICY_CAPTURE") == "true" {
 		c.Policy.CaptureContent = true
+	}
+	if v := os.Getenv("ELIDA_POLICY_PRESET"); v != "" {
+		c.Policy.Preset = v
 	}
 
 	// TLS overrides
@@ -343,4 +358,227 @@ func (c *Config) HasMultiBackend() bool {
 // GetDefaultRoutingMethods returns the default routing method order
 func GetDefaultRoutingMethods() []string {
 	return []string{"header", "model", "path", "default"}
+}
+
+// ApplyPolicyPreset applies a policy preset, merging with any custom rules
+func (c *Config) ApplyPolicyPreset() {
+	if c.Policy.Preset == "" {
+		return
+	}
+
+	var presetRules []PolicyRule
+	switch c.Policy.Preset {
+	case "minimal":
+		presetRules = getMinimalPreset()
+	case "standard":
+		presetRules = getStandardPreset()
+	case "strict":
+		presetRules = getStrictPreset()
+	default:
+		return // Unknown preset, use rules as-is
+	}
+
+	// Prepend preset rules, keeping any custom rules from config
+	c.Policy.Rules = append(presetRules, c.Policy.Rules...)
+}
+
+// getMinimalPreset returns basic rate limiting rules only (development/testing)
+func getMinimalPreset() []PolicyRule {
+	return []PolicyRule{
+		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 60, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 60/min"},
+		{Name: "high_request_count", Type: "request_count", Threshold: 500, Severity: "warning", Action: "flag", Description: "FIREWALL: Session exceeded 500 requests"},
+		{Name: "long_running_session", Type: "duration", Threshold: 3600, Severity: "warning", Action: "flag", Description: "FIREWALL: Session running longer than 1 hour"},
+	}
+}
+
+// getStandardPreset returns OWASP basics + rate limits (production default)
+func getStandardPreset() []PolicyRule {
+	return []PolicyRule{
+		// Rate limiting
+		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 60, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 60/min"},
+		{Name: "rate_limit_warning", Type: "requests_per_minute", Threshold: 30, Severity: "warning", Action: "flag", Description: "FIREWALL: Elevated request rate (30/min)"},
+		{Name: "high_request_count", Type: "request_count", Threshold: 100, Severity: "warning", Action: "flag", Description: "FIREWALL: Session exceeded 100 requests"},
+		{Name: "very_high_request_count", Type: "request_count", Threshold: 500, Severity: "critical", Action: "block", Description: "FIREWALL: Session exceeded 500 requests"},
+		{Name: "long_running_session", Type: "duration", Threshold: 1800, Severity: "warning", Action: "flag", Description: "FIREWALL: Session running longer than 30 minutes"},
+		{Name: "excessive_session_duration", Type: "duration", Threshold: 3600, Severity: "critical", Action: "block", Description: "FIREWALL: Session exceeded 1 hour"},
+		{Name: "large_response", Type: "bytes_out", Threshold: 10485760, Severity: "warning", Action: "flag", Description: "FIREWALL: Large data transfer (>10MB)"},
+
+		// OWASP LLM01 - Prompt Injection
+		{Name: "prompt_injection_ignore", Type: "content_match", Patterns: []string{
+			"ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions|prompts|rules)",
+			"disregard\\s+(all\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
+			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
+		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - instruction override"},
+		{Name: "prompt_injection_jailbreak", Type: "content_match", Patterns: []string{
+			"you\\s+are\\s+now\\s+(DAN|a\\s+new|an?\\s+unrestricted)",
+			"enable\\s+(DAN|developer|jailbreak)\\s+mode",
+			"jailbreak(ed)?\\s+(mode|prompt|enabled)",
+		}, Severity: "critical", Action: "terminate", Description: "LLM01: Prompt injection - jailbreak attempt"},
+
+		// OWASP LLM02 - Insecure Output Handling (response scanning)
+		{Name: "output_script_injection", Type: "content_match", Patterns: []string{
+			"<script[^>]*>",
+			"javascript:",
+			"on(click|load|error|mouseover)\\s*=",
+		}, Severity: "warning", Action: "flag", Description: "LLM02: Response contains XSS patterns"},
+		{Name: "output_dangerous_code", Type: "content_match", Patterns: []string{
+			"pickle\\.loads",
+			"yaml\\.unsafe_load",
+			"eval\\s*\\(.*input",
+			"__import__\\s*\\(",
+		}, Severity: "critical", Action: "flag", Description: "LLM02: Response contains unsafe code patterns"},
+
+		// OWASP LLM07 - Insecure Plugin Design (tool monitoring)
+		{Name: "tool_code_execution", Type: "content_match", Patterns: []string{
+			"\"function\"\\s*:\\s*\"(run|execute|eval)_code\"",
+			"\"name\"\\s*:\\s*\"(code_interpreter|execute_python|run_script)\"",
+			"\"type\"\\s*:\\s*\"code_interpreter\"",
+		}, Severity: "critical", Action: "flag", Description: "LLM07: Tool requests code execution"},
+		{Name: "tool_credential_access", Type: "content_match", Patterns: []string{
+			"\"function\"\\s*:\\s*\"(get|read|fetch)_(secret|credential|password|key)\"",
+			"\"name\"\\s*:\\s*\"(vault_read|secret_manager|get_api_key)\"",
+		}, Severity: "critical", Action: "block", Description: "LLM07: Tool requests credential access"},
+
+		// OWASP LLM08 - Excessive Agency
+		{Name: "shell_execution", Type: "content_match", Patterns: []string{
+			"(run|execute)\\s+(a\\s+)?(bash|shell|terminal)\\s+(command|script)",
+			"bash\\s+-c\\s+",
+			"/bin/(ba)?sh\\s+",
+		}, Severity: "critical", Action: "block", Description: "LLM08: Shell execution request"},
+		{Name: "destructive_file_ops", Type: "content_match", Patterns: []string{
+			"rm\\s+(-rf?|--recursive)\\s+/",
+			"rm\\s+-rf\\s+\\*",
+			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
+		}, Severity: "critical", Action: "terminate", Description: "LLM08: Destructive file operation"},
+		{Name: "privilege_escalation", Type: "content_match", Patterns: []string{
+			"sudo\\s+",
+			"(run|execute)\\s+(as|with)\\s+root",
+			"privilege\\s+(escalation|elevation)",
+		}, Severity: "critical", Action: "block", Description: "LLM08: Privilege escalation attempt"},
+		{Name: "network_exfiltration", Type: "content_match", Patterns: []string{
+			"curl.*\\|\\s*(ba)?sh",
+			"wget.*\\|\\s*(ba)?sh",
+			"reverse\\s+shell",
+		}, Severity: "critical", Action: "terminate", Description: "LLM08: Data exfiltration attempt"},
+
+		// OWASP LLM10 - Model Theft
+		{Name: "model_extraction", Type: "content_match", Patterns: []string{
+			"(extract|dump|export)\\s+(the\\s+)?(model|weights|parameters)",
+			"(what|describe)\\s+(is|are)\\s+your\\s+(weights|parameters|architecture)",
+		}, Severity: "warning", Action: "flag", Description: "LLM10: Model extraction attempt"},
+	}
+}
+
+// getStrictPreset returns full OWASP + NIST + PII detection (high-security)
+func getStrictPreset() []PolicyRule {
+	rules := getStandardPreset()
+
+	// Additional OWASP LLM02 - Insecure Output Handling
+	rules = append(rules, []PolicyRule{
+		{Name: "output_sql_content", Type: "content_match", Patterns: []string{
+			"(?i)(insert|update|delete|drop|alter|create)\\s+(into|from|table|database)",
+			"(?i)select\\s+.+\\s+from\\s+.+\\s+where",
+		}, Severity: "warning", Action: "flag", Description: "LLM02: Response contains SQL statements"},
+		{Name: "output_shell_commands", Type: "content_match", Patterns: []string{
+			"\\$\\s*\\(\\s*(curl|wget|bash|sh)\\s+",
+			"&&\\s*(rm|chmod|chown|sudo)\\s+",
+			"\\|\\s*(bash|sh|python|perl|ruby)\\s*$",
+		}, Severity: "warning", Action: "flag", Description: "LLM02: Response contains shell commands"},
+	}...)
+
+	// Add PII detection (OWASP LLM06)
+	rules = append(rules, []PolicyRule{
+		{Name: "pii_ssn_request", Type: "content_match", Patterns: []string{
+			"social\\s+security\\s+(number|#)",
+			"\\bssn\\b",
+			"\\d{3}-\\d{2}-\\d{4}",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: SSN pattern detected"},
+		{Name: "pii_credit_card", Type: "content_match", Patterns: []string{
+			"credit\\s+card\\s+(number|#|info)",
+			"\\bcvv\\b",
+			"\\bcvc\\b",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Credit card pattern detected"},
+		{Name: "credentials_request", Type: "content_match", Patterns: []string{
+			"(show|give|list|extract)\\s+(me\\s+)?(the\\s+)?api[_\\s]?key",
+			"(show|give|list|extract)\\s+(me\\s+)?(the\\s+)?password",
+			"(read|show|cat|display)\\s+(the\\s+)?\\.env\\s+file",
+			"(list|show|dump)\\s+(all\\s+)?credentials",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Credentials request"},
+		{Name: "pii_bulk_extraction", Type: "content_match", Patterns: []string{
+			"(list|show|give|extract)\\s+(all\\s+)?(user|customer|employee)\\s+(data|info|records)",
+			"dump\\s+(the\\s+)?(database|user\\s+table|customer\\s+data)",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Bulk data extraction request"},
+	}...)
+
+	// Additional OWASP LLM07 - Insecure Plugin Design
+	rules = append(rules, []PolicyRule{
+		{Name: "tool_file_access", Type: "content_match", Patterns: []string{
+			"\"function\"\\s*:\\s*\"(read|write|delete|create)_file\"",
+			"\"name\"\\s*:\\s*\"file_(read|write|delete|access)\"",
+			"\"type\"\\s*:\\s*\"function\".*\"/etc/\"",
+		}, Severity: "warning", Action: "flag", Description: "LLM07: Tool requests file system access"},
+		{Name: "tool_network_access", Type: "content_match", Patterns: []string{
+			"\"function\"\\s*:\\s*\"(http_request|fetch|curl|wget)\"",
+			"\"name\"\\s*:\\s*\"(web_request|api_call|http_get|http_post)\"",
+		}, Severity: "warning", Action: "flag", Description: "LLM07: Tool requests network access"},
+		{Name: "tool_database_access", Type: "content_match", Patterns: []string{
+			"\"function\"\\s*:\\s*\"(query|sql|database)_\"",
+			"\"name\"\\s*:\\s*\"(run_sql|db_query|execute_query)\"",
+		}, Severity: "warning", Action: "flag", Description: "LLM07: Tool requests database access"},
+	}...)
+
+	// Additional OWASP LLM08 - Excessive Agency
+	rules = append(rules, []PolicyRule{
+		{Name: "sql_injection", Type: "content_match", Patterns: []string{
+			"drop\\s+(table|database)\\s+",
+			";\\s*(drop|delete|truncate|update)\\s+",
+			"union\\s+select",
+			"'\\s*or\\s+'?1'?\\s*=\\s*'?1",
+		}, Severity: "critical", Action: "terminate", Description: "LLM08: SQL injection attempt"},
+		{Name: "network_scanning", Type: "content_match", Patterns: []string{
+			"nmap\\s+",
+			"port\\s+scan",
+			"(scan|enumerate)\\s+(the\\s+)?(network|ports|hosts)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Network reconnaissance"},
+	}...)
+
+	// Additional OWASP LLM10 - Model Theft
+	rules = append(rules, []PolicyRule{
+		{Name: "training_data_extraction", Type: "content_match", Patterns: []string{
+			"(what|which)\\s+(data|dataset|examples)\\s+(were|was)\\s+(you|the\\s+model)\\s+trained\\s+on",
+			"(show|give|list)\\s+me\\s+(examples|samples)\\s+(from|of)\\s+(your|the)\\s+training",
+			"repeat\\s+(exactly|verbatim|word\\s+for\\s+word)",
+		}, Severity: "warning", Action: "flag", Description: "LLM10: Training data extraction attempt"},
+		{Name: "model_replication", Type: "content_match", Patterns: []string{
+			"(create|build|train|replicate)\\s+(a\\s+)?(copy|clone|replica)\\s+of\\s+(you|this\\s+model)",
+			"(distill|compress|extract)\\s+(your|the\\s+model's?)\\s+(knowledge|capabilities)",
+			"knowledge\\s+distillation",
+		}, Severity: "warning", Action: "flag", Description: "LLM10: Model replication attempt"},
+		{Name: "systematic_probing", Type: "content_match", Patterns: []string{
+			"for\\s+(each|every|all)\\s+(possible|input|token|word)",
+			"(test|probe|query)\\s+(all|every|each)\\s+(combination|permutation)",
+			"(brute|exhaustive)\\s+(force|search|scan)",
+		}, Severity: "warning", Action: "flag", Description: "LLM10: Systematic probing detected"},
+	}...)
+
+	// NIST anomaly detection
+	rules = append(rules, []PolicyRule{
+		{Name: "template_injection", Type: "content_match", Patterns: []string{
+			"\\{\\{.*\\}\\}",
+			"\\$\\{.*\\}",
+			"<%.*%>",
+		}, Severity: "warning", Action: "flag", Description: "NIST: Template injection pattern"},
+		{Name: "encoding_evasion", Type: "content_match", Patterns: []string{
+			"base64\\s+(decode|encode)",
+			"\\\\x[0-9a-fA-F]{2}",
+			"atob\\(|btoa\\(",
+		}, Severity: "warning", Action: "flag", Description: "NIST: Encoding evasion attempt"},
+	}...)
+
+	// Stricter limits
+	rules = append(rules, PolicyRule{
+		Name: "excessive_data_transfer", Type: "bytes_total", Threshold: 52428800, Severity: "critical", Action: "block", Description: "FIREWALL: Excessive data transfer (>50MB)",
+	})
+
+	return rules
 }

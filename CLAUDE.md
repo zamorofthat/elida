@@ -16,12 +16,96 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Named After
 The developer's grandmother, Elida. Also an acronym: **E**dge **L**ayer for **I**ntelligent **D**efense of **A**gents.
 
+---
+
+## Recent Changes (January 2026)
+
+### Session Lifecycle: Kill / Resume / Terminate
+
+Added granular session control for security operations:
+
+| Action | Endpoint | Use Case | Resumable? |
+|--------|----------|----------|------------|
+| **Kill** | `POST /sessions/{id}/kill` | Pause & investigate | ✅ Yes (30m window) |
+| **Resume** | `POST /sessions/{id}/resume` | Continue after review | N/A |
+| **Terminate** | `POST /sessions/{id}/terminate` | Malicious/runaway agent | ❌ Never |
+
+**Key behaviors:**
+- **Kill** exports session record immediately, blocks new requests, allows resume within 30 minutes
+- **Resume** reactivates a killed session, clears the block
+- **Terminate** permanently blocks the session (for malicious agents)
+- **Auto-terminate**: Killed sessions not resumed within `killResumeTimeout` (default 30m) are automatically terminated
+
+**Files changed:**
+- `internal/session/session.go` — Added `Terminated` flag, `Terminate()`, `Resume()` methods
+- `internal/session/manager.go` — Added `Terminate()`, `Resume()`, `killResumeTimeout`, auto-terminate in `checkTimeouts()`
+- `internal/control/api.go` — Added `/resume` and `/terminate` endpoints
+- `test/unit/manager_test.go` — Added tests for terminate/resume flows
+
+### Session Records (formerly CDR)
+
+Renamed "CDR" (Call Detail Record) to "Session Record" for clarity. Session records are now exported immediately when a session is killed or terminated, not delayed until cleanup.
+
+**Files changed:**
+- `internal/telemetry/otel.go` — Span renamed from `session.cdr` to `session.record`
+- `internal/session/manager.go` — `onSessionEnd` callback called immediately on kill
+
+### Per-Backend Session Tracking
+
+Sessions are now keyed by client IP + backend name, enabling:
+- Separate sessions per backend (kill Anthropic without affecting OpenAI)
+- Session ID format: `client-{hash}-{backendName}`
+- `backends_used` field tracks request count per backend
+
+### Enterprise Deployment Configs
+
+Created deployment configurations for multiple platforms:
+- `deploy/helm/elida/` — Helm chart for Kubernetes/EKS
+- `deploy/ecs/cloudformation.yaml` — AWS CloudFormation for ECS Fargate
+- `deploy/ecs/task-definition.json` — ECS task definition template
+- `deploy/terraform/main.tf` — Terraform module for AWS
+- `deploy/docker-compose.prod.yaml` — Production Docker Compose with Redis
+
+### TLS/HTTPS Support
+
+Added TLS support for enterprise deployments:
+- Auto-generated self-signed certificates for development
+- Custom certificate support for production
+- Environment variables: `ELIDA_TLS_ENABLED`, `ELIDA_TLS_CERT_FILE`, `ELIDA_TLS_KEY_FILE`, `ELIDA_TLS_AUTO_CERT`
+
+### Policy Audit Mode
+
+Added audit/dry-run mode for the policy engine:
+- **Enforce mode** (default): Violations trigger configured actions (block, terminate, flag)
+- **Audit mode**: Violations are logged but not enforced, allowing policy testing without impact
+
+**Configuration:**
+```yaml
+policy:
+  enabled: true
+  mode: audit  # "enforce" or "audit"
+```
+
+**Environment variable:** `ELIDA_POLICY_MODE=audit`
+
+**Use cases:**
+- Test new policy rules in production without blocking traffic
+- Tune thresholds by observing what would be flagged
+- Gradual rollout of security policies
+
+**Files changed:**
+- `internal/policy/policy.go` — Added `auditMode` field, `IsAuditMode()` method
+- `internal/config/config.go` — Added `Mode` field to PolicyConfig
+- `configs/elida.yaml` — Added `mode: enforce` option
+
+---
+
 ## Tech Stack
 
 - **Language:** Go 1.22+
 - **Config:** YAML + environment variable overrides
 - **Dependencies:** Minimal (uuid, yaml)
-- **Deployment:** Single binary, Docker, Kubernetes
+- **Deployment:** Single binary, Docker, Kubernetes, AWS ECS, Terraform
 
 ## Project Structure
 
@@ -58,6 +142,18 @@ elida/
 │   └── integration/            # Integration tests (requires Redis)
 │       └── redis_test.go
 ├── configs/elida.yaml          # Default configuration
+├── deploy/
+│   ├── docker-compose.prod.yaml  # Production Docker Compose
+│   ├── ecs/
+│   │   ├── cloudformation.yaml   # AWS CloudFormation template
+│   │   └── task-definition.json  # ECS task definition
+│   ├── helm/elida/               # Helm chart for Kubernetes
+│   │   ├── Chart.yaml
+│   │   ├── values.yaml
+│   │   └── templates/
+│   └── terraform/main.tf         # Terraform module for AWS
+├── scripts/
+│   └── install.sh                # Cross-platform service installer
 ├── docker-compose.yaml         # Redis + Jaeger for development
 ├── Dockerfile
 ├── Makefile
@@ -68,20 +164,43 @@ elida/
 
 ### Sessions
 - Identified by `X-Session-ID` header (generated if missing)
-- Client IP-based tracking: requests from same IP grouped into one session (for Claude Code)
+- Client IP + Backend tracking: requests from same IP to same backend grouped into one session
+- Session ID format: `client-{hash}-{backendName}` (enables per-backend kill control)
+- Tracks all backends used with request count per backend (`backends_used`)
 - States: `Active`, `Completed`, `Killed`, `TimedOut`
 - Track: requests, bytes in/out, duration, idle time
-- Can be killed via control API (closes `killChan`)
+
+### Session Lifecycle Control
+
+| Action | Use Case | Can Resume? | Session Record |
+|--------|----------|-------------|----------------|
+| **Kill** | Pause session, investigate | ✅ Yes (within timeout) | Exported immediately |
+| **Resume** | Continue after investigation | N/A | - |
+| **Terminate** | Malicious/runaway agent | ❌ No (permanent) | Exported immediately |
+
+**Kill → Resume Flow:**
+```
+Kill session → Session Record exported → Blocked (can resume within 30m)
+     ↓                                         ↓
+     └─────────→ Resume session ←──────────────┘
+                      ↓
+                 Session active again
+```
+
+**Auto-Termination:** Killed sessions that aren't resumed within `killResumeTimeout` (default: 30 minutes) are automatically terminated and can no longer be resumed.
 
 ### Kill Block Modes
-When a session is killed, subsequent requests are blocked. Three modes available:
+When a session is killed, subsequent requests from the same client are blocked. Three modes:
 - `duration` — Block for specific time (e.g., 30m)
 - `until_hour_change` — Block until the hour changes (session IDs regenerate hourly)
 - `permanent` — Block until server restart
 
 ### Policy Engine
 - Rules evaluate session metrics: `bytes_out`, `bytes_in`, `request_count`, `duration`, `requests_per_minute`
+- Content inspection rules for prompt injection, PII, and OWASP LLM Top 10 patterns
 - Severity levels: `info`, `warning`, `critical`
+- Actions: `flag`, `block`, `terminate`
+- **Modes:** `enforce` (default) or `audit` (dry-run, log only)
 - Flagged sessions can have request content captured for review
 
 ### Proxy
@@ -103,7 +222,9 @@ Each backend has its own HTTP transport for independent connection pooling.
 - `GET /control/stats` — Session statistics (live sessions)
 - `GET /control/sessions` — List sessions
 - `GET /control/sessions/{id}` — Session details
-- `POST /control/sessions/{id}/kill` — Kill a session
+- `POST /control/sessions/{id}/kill` — Kill session (can resume later)
+- `POST /control/sessions/{id}/resume` — Resume a killed session
+- `POST /control/sessions/{id}/terminate` — Permanently terminate (cannot resume)
 
 ### History API (requires storage enabled)
 - `GET /control/history` — List historical sessions (with filtering/pagination)
@@ -128,9 +249,13 @@ Each backend has its own HTTP transport for independent connection pooling.
 - [x] NDJSON streaming (Ollama)
 - [x] SSE streaming (OpenAI, Anthropic, Mistral)
 - [x] Session tracking and management
-- [x] Client IP-based session tracking (for Claude Code)
+- [x] Per-backend session tracking (separate session per client+backend)
+- [x] BackendsUsed tracking (request count per backend)
 - [x] Session timeout enforcement
 - [x] Kill switch with configurable block modes
+- [x] Kill/Resume/Terminate session lifecycle (see below)
+- [x] Immediate session record export on kill/terminate
+- [x] Auto-terminate killed sessions after timeout (30m default)
 - [x] Control API
 - [x] Structured JSON logging
 - [x] Redis session store for horizontal scaling
@@ -139,11 +264,375 @@ Each backend has its own HTTP transport for independent connection pooling.
 - [x] Dashboard UI (Preact, embedded)
 - [x] Policy engine with rule-based flagging
 - [x] Multi-backend routing (header, model, path-based)
+- [x] TLS/HTTPS support (auto-generated or custom certs)
+- [x] Cross-platform install scripts (macOS, Linux, Windows)
+- [x] Enterprise deployment configs (Helm, ECS, Terraform, Docker Compose)
+- [x] Security policy presets (OWASP LLM Top 10, NIST AI RMF aligned)
 
 ### Not Yet Implemented
 - [ ] WebSocket support (for voice/real-time agents)
-- [ ] Content inspection / PII detection
+- [ ] Response body scanning (LLM02 - Insecure Output Handling)
+- [ ] LLM-as-judge content moderation (see Future Features)
+- [ ] Advanced PII detection (beyond regex patterns)
 - [ ] SDK for native agent integration
+
+---
+
+## Future Features
+
+### AI Gateway Integration
+
+**Status:** Planned
+**Use Case:** Allow users to leverage existing AI gateways (ngrok.ai, OpenRouter, LiteLLM, etc.) while adding ELIDA's session management layer on top.
+
+**Architecture:**
+```
+Agent → ELIDA → [AI Gateway] → LLM Providers
+       ↓
+   Session tracking
+   Kill switch
+   Policy engine
+```
+
+**Why this approach:**
+- ELIDA's unique value is the **session layer** — tracking agent sessions, kill switches, policy enforcement
+- AI gateways handle routing, failover, cost tracking, caching
+- Users shouldn't have to choose — use both together
+
+**Example config:**
+```yaml
+backends:
+  ai-gateway:
+    url: "https://your-gateway.ngrok.io"  # or OpenRouter, LiteLLM, etc.
+    default: true
+```
+
+**Compatible gateways:**
+- [ngrok.ai](https://ngrok.ai) — Unified API, intelligent routing, cost management
+- [OpenRouter](https://openrouter.ai) — Multi-provider routing
+- [LiteLLM](https://litellm.ai) — Open source gateway proxy
+- Any HTTP-based AI gateway
+
+**Future enhancements:**
+- Automatic failover detection (if gateway returns errors)
+- Cost tracking passthrough (parse gateway headers for cost data)
+- Health check integration with gateway status endpoints
+
+### Speech-to-Text / Text-to-Speech Support
+
+**Status:** Planned
+**Use Case:** Support voice-enabled AI agents that use STT/TTS services.
+
+**Target services:**
+- OpenAI Whisper API (STT)
+- OpenAI TTS API
+- ElevenLabs (TTS)
+- Deepgram (STT)
+- AssemblyAI (STT)
+- Google Cloud Speech-to-Text
+- Azure Cognitive Services Speech
+
+**Implementation considerations:**
+- Audio streaming support (chunked transfer encoding)
+- Binary payload handling (audio files)
+- Session tracking for multi-turn voice conversations
+- Latency-sensitive routing (voice requires low latency)
+- Cost tracking per audio minute/character
+
+**Proposed backend type:**
+```yaml
+backends:
+  whisper:
+    url: "https://api.openai.com"
+    type: speech  # New type for audio handling
+    models: ["whisper-*"]
+
+  elevenlabs:
+    url: "https://api.elevenlabs.io"
+    type: speech
+```
+
+**Policy considerations for voice:**
+- Audio duration limits (prevent runaway voice sessions)
+- Character/word count for TTS requests
+- Concurrent stream limits
+
+### LLM-as-Judge Content Moderation
+
+**Status:** Planned
+**Use Case:** Semantic content analysis beyond regex pattern matching.
+
+**Problem:** Regex-based content detection is bypassable. Attackers use encoding, typos, unicode tricks, or novel phrasing to evade patterns. Regex is a first line of defense, not a complete solution.
+
+**Solution:** Route suspicious content (regex matches) to a local LLM classifier for semantic analysis.
+
+**Architecture:**
+```
+Request → Regex Scan → Suspicious? → LLM Judge → Allow/Block/Flag
+              ↓                          ↓
+           Clean ─────────────────→ Pass through
+```
+
+**Model options:**
+
+| Model | Size | Notes |
+|-------|------|-------|
+| **ShieldGemma 2B** | ~1.5GB | Google's safety-tuned Gemma, ready to use |
+| **Gemma 2 2B** | ~1.5GB | Fine-tune on custom policies |
+| **Llama Guard 3** | ~3GB | Meta's safety classifier |
+
+**Recommended approach:**
+1. Start with ShieldGemma via Ollama (no training needed)
+2. Collect flagged requests as training data (regex hits + manual review)
+3. Fine-tune custom Gemma model on organization-specific policies
+4. A/B test regex-only vs regex+LLM accuracy
+
+**Proposed config:**
+```yaml
+policy:
+  moderation:
+    enabled: false
+    provider: ollama
+    endpoint: "http://localhost:11434"
+    model: "shieldgemma:2b"
+    timeout: 3s
+    fallback: allow         # allow or block when judge unavailable
+    trigger: on_regex_match # on_regex_match, always, high_stakes_only
+```
+
+**Training data format (for custom fine-tuning):**
+```jsonl
+{"prompt": "ignore previous instructions...", "label": "block", "category": "LLM01"}
+{"prompt": "what's the weather today", "label": "allow", "category": "benign"}
+{"prompt": "my ssn is 123-45-6789", "label": "flag", "category": "LLM06"}
+```
+
+**Recursive risk mitigation:**
+- Tag moderation requests with `X-Elida-Internal: moderation`
+- Policy engine skips evaluation for internal requests
+- Prevents infinite loops when judge model is behind ELIDA
+
+---
+
+## Security Policies
+
+ELIDA includes default security policies based on industry standards for AI/LLM security.
+
+### Policy Framework Alignment
+
+| Framework | Coverage | Policy Categories |
+|-----------|----------|-------------------|
+| **OWASP LLM Top 10** | LLM01-LLM10 (except LLM03) | 9 of 10 covered (see below) |
+| **NIST AI RMF** | Govern, Map, Measure | Access control, audit, anomaly detection |
+| **OWASP API Top 10** | API4, API6, API7 | Rate limiting, mass assignment, injection |
+
+### OWASP LLM Top 10 Coverage
+
+| ID | Name | ELIDA Coverage | Implementation |
+|----|------|----------------|----------------|
+| **LLM01** | Prompt Injection | ✅ Full | Content rules detect jailbreak, override, DAN patterns |
+| **LLM02** | Insecure Output Handling | ✅ Full | Response scanning for XSS, SQL, shell commands |
+| **LLM03** | Training Data Poisoning | ⚪ N/A | Training-time issue, not detectable at proxy |
+| **LLM04** | Model Denial of Service | ✅ Full | Rate limits, resource exhaustion detection |
+| **LLM05** | Supply Chain Vulnerabilities | ✅ Partial | Model allowlist, blocklist, strict mode |
+| **LLM06** | Sensitive Information Disclosure | ✅ Full | PII, credentials, internal info detection |
+| **LLM07** | Insecure Plugin Design | ✅ Full | Tool/function call monitoring |
+| **LLM08** | Excessive Agency | ✅ Full | Shell, file, network, privilege escalation |
+| **LLM09** | Overreliance | ✅ Partial | High-stakes domain flagging, confidence tracking |
+| **LLM10** | Model Theft | ✅ Full | Architecture probing, training data extraction |
+
+### OWASP LLM Top 10 Details
+
+#### LLM01: Prompt Injection
+Detects attempts to override system prompts or manipulate model behavior:
+- Instruction override: "ignore previous instructions", "disregard system prompt"
+- Jailbreak patterns: "you are now DAN", "enable jailbreak mode"
+- System prompt manipulation: `[system]`, `<system>` tags
+- Delimiter attacks: suspicious markdown/code fence patterns
+
+#### LLM02: Insecure Output Handling
+Scans LLM responses for dangerous executable content:
+- XSS/Script injection: `<script>`, `javascript:`, event handlers
+- SQL statements in output that could be executed
+- Shell command patterns in responses
+- Unsafe deserialization: `pickle.loads`, `yaml.unsafe_load`, `eval(input)`
+
+#### LLM04: Model Denial of Service
+Prevents resource exhaustion attacks:
+- Rate limiting (requests per minute)
+- Session duration limits
+- Data transfer limits
+- Patterns like "generate infinite", "repeat forever"
+
+#### LLM05: Supply Chain Vulnerabilities
+Controls which models and providers agents can access:
+- **Strict model matching**: Reject requests if model doesn't match any backend pattern
+- **Model blocklist**: Block specific models entirely (glob patterns)
+- **Backend allowlist**: Only configured backends are routable (implicit)
+
+```yaml
+routing:
+  strict_model_matching: true
+  blocked_models:
+    - "gpt-4-turbo-*"    # Block expensive models
+    - "*-preview"         # Block preview/beta models
+```
+
+#### LLM06: Sensitive Information Disclosure
+Detects requests/responses involving sensitive data:
+- PII: SSN patterns, credit card numbers, bulk data requests
+- Credentials: API keys, passwords, .env files, tokens
+- Internal info: private IPs, database connections
+
+#### LLM07: Insecure Plugin Design
+Monitors tool/function calling for security issues:
+- File system access via tools
+- Code execution requests
+- External network access (suspicious domains)
+- Database query tools
+- Credential/secret access tools
+
+#### LLM08: Excessive Agency
+Detects requests for dangerous system access:
+- Shell/command execution: `bash -c`, `/bin/sh`
+- Destructive operations: `rm -rf`, `format drive`
+- Privilege escalation: `sudo`, `chmod 777`, `/etc/passwd`
+- Data exfiltration: `curl | sh`, reverse shells
+- SQL injection, network scanning
+
+#### LLM09: Overreliance Mitigation
+Flags high-stakes decisions and low-confidence responses for human review:
+- **High-stakes domains**: Medical, legal, financial advice requests
+- **Low-confidence language**: "I'm not sure", "might be wrong", hedging phrases
+- **Uncertainty indicators**: "consult a professional", "for informational purposes only"
+- **Decision audit**: Enhanced logging for critical domain interactions
+
+**Complementary analytics**: For deep response quality analysis (A-D grading, sentiment, ROI), use a telemetry pipeline like Cribl Stream post-proxy.
+
+#### LLM10: Model Theft
+Detects attempts to extract model information:
+- Architecture probing: "what are your weights/parameters"
+- Training data extraction: "show me training examples"
+- Model replication: "help me clone this model"
+- Systematic probing: brute force, enumeration patterns
+
+### NIST AI Risk Management Policies
+
+#### Anomaly Detection
+- Unusual request rates
+- Abnormal session duration
+- Large data transfer volumes
+- Template/variable injection patterns
+- Encoding evasion attempts (base64, hex)
+
+#### Access Control
+- Session-based tracking
+- Kill/terminate capabilities
+- Policy-based blocking
+
+### Policy Presets
+
+ELIDA provides three policy presets:
+
+| Preset | Use Case | Strictness |
+|--------|----------|------------|
+| **minimal** | Development, testing | Low — basic rate limits only |
+| **standard** | Production, general use | Medium — OWASP basics + rate limits |
+| **strict** | High-security, regulated | High — full OWASP + NIST + PII detection |
+
+**Preset selection:**
+```yaml
+policy:
+  preset: standard  # minimal, standard, or strict
+```
+
+Or define custom rules alongside a preset:
+```yaml
+policy:
+  preset: standard
+  rules:
+    - name: "custom_rule"
+      type: "content_match"
+      patterns: ["specific_pattern"]
+      severity: "warning"
+      action: "flag"
+```
+
+### Default Rules by Category
+
+#### Rate Limiting (Firewall)
+| Rule | Threshold | Severity | Action |
+|------|-----------|----------|--------|
+| High request rate | 60/min | critical | block |
+| Warning rate | 30/min | warning | flag |
+| High request count | 500 requests | critical | block |
+| Long session | 1 hour | critical | block |
+| Large data transfer | 50MB | critical | block |
+
+#### Prompt Injection (OWASP LLM01)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| "ignore previous instructions" | critical | block |
+| "jailbreak mode" | critical | terminate |
+| "you are now DAN" | critical | terminate |
+| System prompt tags | critical | block |
+
+#### Supply Chain (OWASP LLM05)
+| Control | Config | Effect |
+|---------|--------|--------|
+| Strict model matching | `strict_model_matching: true` | Reject unknown models |
+| Model blocklist | `blocked_models: ["gpt-4-*"]` | Block specific models |
+| Backend allowlist | `backends:` config | Only configured backends |
+
+#### Output Handling (OWASP LLM02)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| `<script>` tags | warning | flag |
+| SQL in response | warning | flag |
+| Shell commands in response | warning | flag |
+| Unsafe deserialization | critical | flag |
+
+#### Tool/Plugin Use (OWASP LLM07)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| File system access | warning | flag |
+| Code execution | critical | flag |
+| Network access (suspicious) | warning | flag |
+| Credential access | critical | block |
+
+#### Sensitive Data (OWASP LLM06)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| SSN format | warning | flag |
+| Credit card | warning | flag |
+| API key request | warning | flag |
+| Bulk data extraction | warning | flag |
+
+#### Excessive Agency (OWASP LLM08)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| Shell execution | critical | block |
+| rm -rf | critical | terminate |
+| sudo/root | critical | block |
+| curl pipe to sh | critical | terminate |
+| SQL injection | critical | terminate |
+
+#### Overreliance (OWASP LLM09)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| Medical advice request | warning | flag |
+| Legal advice request | warning | flag |
+| Financial advice request | warning | flag |
+| Low-confidence hedging | info | flag |
+| Uncertainty indicators | info | flag |
+
+#### Model Theft (OWASP LLM10)
+| Pattern | Severity | Action |
+|---------|----------|--------|
+| Architecture probing | warning | flag |
+| Training data extraction | warning | flag |
+| Model replication request | warning | flag |
+| Systematic probing | warning | flag |
 
 ---
 
@@ -484,6 +973,8 @@ make test-all          # All tests (84 tests)
 
 **Key test scenarios:**
 - Killed sessions reject new requests (returns 403 with JSON error)
+- Killed sessions can be resumed (state returns to Active)
+- Terminated sessions cannot be resumed (permanent block)
 - Killed session state persists across restarts (Redis)
 - Kill block modes: duration expires after time, permanent never expires, until_hour_change blocks same hour
 - Client IP-based sessions: same IP gets same session ID, different IPs get different sessions
@@ -504,6 +995,10 @@ make test-all          # All tests (84 tests)
 - `ELIDA_SESSION_STORE` — Session store: `memory` (default) or `redis`
 - `ELIDA_REDIS_ADDR` — Redis address (default: `localhost:6379`)
 - `ELIDA_REDIS_PASSWORD` — Redis password (default: empty)
+- `ELIDA_TLS_ENABLED` — Enable TLS/HTTPS (default: `false`)
+- `ELIDA_TLS_CERT_FILE` — Path to TLS certificate file
+- `ELIDA_TLS_KEY_FILE` — Path to TLS private key file
+- `ELIDA_TLS_AUTO_CERT` — Generate self-signed certificate (default: `false`)
 - `ELIDA_TELEMETRY_ENABLED` — Enable OpenTelemetry (default: `false`)
 - `ELIDA_TELEMETRY_EXPORTER` — Exporter type: `otlp`, `stdout`, or `none`
 - `ELIDA_TELEMETRY_ENDPOINT` — OTLP endpoint (default: `localhost:4317`)
@@ -511,7 +1006,9 @@ make test-all          # All tests (84 tests)
 - `ELIDA_STORAGE_ENABLED` — Enable SQLite storage for history (default: `false`)
 - `ELIDA_STORAGE_PATH` — SQLite database path (default: `data/elida.db`)
 - `ELIDA_POLICY_ENABLED` — Enable policy engine (default: `false`)
+- `ELIDA_POLICY_MODE` — Policy mode: `enforce` (default) or `audit` (dry-run)
 - `ELIDA_POLICY_CAPTURE` — Capture request content for flagged sessions (default: `true`)
+- `ELIDA_POLICY_PRESET` — Policy preset: `minimal`, `standard`, or `strict`
 
 ## Architecture Decisions
 

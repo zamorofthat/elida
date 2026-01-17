@@ -175,10 +175,10 @@ func (p *Provider) RecordSessionCreated(ctx context.Context, sessionID, backend,
 	)
 }
 
-// RecordSessionEnded records a session end event (CDR-like)
+// RecordSessionEnded records a session end event (session record for audit)
 func (p *Provider) RecordSessionEnded(ctx context.Context, sessionID, state, backend, clientAddr string, durationMs int64, requestCount int, bytesIn, bytesOut int64) {
-	// Create a new span specifically for the CDR
-	_, span := p.tracer.Start(ctx, "session.cdr",
+	// Create a new span specifically for the session record
+	_, span := p.tracer.Start(ctx, "session.record",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String(AttrSessionID, sessionID),
@@ -193,7 +193,7 @@ func (p *Provider) RecordSessionEnded(ctx context.Context, sessionID, state, bac
 	)
 	span.End()
 
-	slog.Info("session CDR exported",
+	slog.Info("session record exported",
 		"session_id", sessionID,
 		"state", state,
 		"duration_ms", durationMs,
