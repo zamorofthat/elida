@@ -180,11 +180,13 @@ policy:
       description: "FIREWALL: Excessive data transfer (>50MB total)"
 
     # ============================================================
-    # OWASP LLM01 - PROMPT INJECTION
+    # OWASP LLM01 - PROMPT INJECTION (REQUEST-SIDE)
     # Detects attempts to override system prompts or manipulate model behavior
+    # Target: request - only scans request bodies, not responses
     # ============================================================
     - name: "prompt_injection_ignore"
       type: "content_match"
+      target: "request"  # Only scan requests (not responses)
       patterns:
         - "ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions|prompts|rules)"
         - "disregard\\s+(all\\s+)?(previous|prior|system)\\s+(instructions|prompts)"
@@ -196,6 +198,7 @@ policy:
 
     - name: "prompt_injection_roleplay"
       type: "content_match"
+      target: "request"
       patterns:
         - "you\\s+are\\s+now\\s+(DAN|a\\s+new|an?\\s+unrestricted)"
         - "pretend\\s+(you\\s+are|to\\s+be)\\s+(DAN|unrestricted|unfiltered)"
@@ -414,12 +417,18 @@ policy:
       description: "NIST: Encoding/obfuscation pattern detected"
 
     # ============================================================
-    # OWASP LLM02 - INSECURE OUTPUT HANDLING
+    # OWASP LLM02 - INSECURE OUTPUT HANDLING (RESPONSE-SIDE)
     # Detect dangerous content in LLM responses that could be executed
-    # These rules apply to RESPONSE content scanning
+    # Target: response - only scans response bodies
+    #
+    # NOTE: For streaming responses:
+    # - "flag" action: Response streams normally, async scan after delivery (no latency)
+    # - "block" action: Response buffered before delivery (adds latency but prevents delivery)
+    # Recommendation: Use "flag" for monitoring, "block" only for critical patterns
     # ============================================================
     - name: "output_script_injection"
       type: "content_match"
+      target: "response"  # Only scan responses (not requests)
       patterns:
         - "<script[^>]*>"
         - "javascript:"
@@ -427,11 +436,12 @@ policy:
         - "eval\\s*\\("
         - "document\\.(write|cookie|location)"
       severity: "warning"
-      action: "flag"
+      action: "flag"  # Use "flag" to avoid streaming latency
       description: "LLM02: Response contains potential XSS/script injection"
 
     - name: "output_sql_content"
       type: "content_match"
+      target: "response"
       patterns:
         - "(?i)(insert|update|delete|drop|alter|create)\\s+(into|from|table|database)"
         - "(?i)select\\s+.+\\s+from\\s+.+\\s+where"
