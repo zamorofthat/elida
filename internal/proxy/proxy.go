@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -326,6 +327,29 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 		return http.StatusBadGateway, 0
 	}
 
+	// Scan response body against policy rules BEFORE sending to client
+	if p.policy != nil && len(responseBody) > 0 {
+		if result := p.policy.EvaluateResponseContent(sess.ID, string(responseBody)); result != nil {
+			if result.ShouldTerminate {
+				p.manager.Terminate(sess.ID)
+				slog.Warn("response blocked and session terminated by policy",
+					"session_id", sess.ID,
+					"violations", len(result.Violations),
+				)
+				return p.writeBlockedResponse(w, "Response content violates security policy - session terminated", true)
+			}
+			if result.ShouldBlock {
+				slog.Warn("response blocked by policy",
+					"session_id", sess.ID,
+					"violations", len(result.Violations),
+				)
+				return p.writeBlockedResponse(w, "Response content violates security policy", false)
+			}
+			// Flagged but not blocked - capture response for review
+			p.policy.UpdateLastCaptureWithResponse(sess.ID, string(responseBody))
+		}
+	}
+
 	sess.AddBytes(0, int64(len(responseBody)))
 
 	// Log response (truncated for large responses)
@@ -351,6 +375,123 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 	}
 	defer resp.Body.Close()
 
+	// Determine streaming format from content type
+	contentType := resp.Header.Get("Content-Type")
+	isSSE := strings.Contains(contentType, "text/event-stream")
+
+	// Check if we have any response rules to evaluate
+	hasBlockingRules := p.policy != nil && p.policy.HasBlockingResponseRules()
+
+	if !hasBlockingRules {
+		// No blocking rules - stream directly with async scan for flag-only rules
+		return p.handleStreamingDirect(w, resp, sess, isSSE)
+	}
+
+	// Determine streaming scan mode from config
+	streamingMode := p.config.Policy.Streaming.Mode
+	if streamingMode == "" {
+		streamingMode = "chunked" // Default to low-latency chunked mode
+	}
+
+	switch streamingMode {
+	case "buffered":
+		// Full buffer mode - accumulate entire response before sending
+		// Higher latency but guaranteed pattern detection
+		return p.handleStreamingWithBuffer(w, resp, sess, isSSE)
+	case "chunked":
+		fallthrough
+	default:
+		// Chunked mode - scan as chunks arrive with overlap buffer
+		// Lower latency, real-time termination on detection
+		return p.handleStreamingChunked(w, resp, sess, isSSE)
+	}
+}
+
+// handleStreamingWithBuffer accumulates the full response before sending
+// Used when block/terminate response rules are configured (adds latency)
+func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Response, sess *session.Session, isSSE bool) (int, int64) {
+	// Accumulate entire response before sending
+	var buffer bytes.Buffer
+	buf := make([]byte, 4096)
+
+	for {
+		// Check if session was killed during buffering
+		select {
+		case <-sess.KillChan():
+			slog.Warn("streaming aborted during buffering: session killed", "session_id", sess.ID)
+			return resp.StatusCode, int64(buffer.Len())
+		default:
+		}
+
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			buffer.Write(buf[:n])
+		}
+		if err != nil {
+			if err != io.EOF {
+				slog.Error("error reading stream for buffering",
+					"session_id", sess.ID,
+					"error", err,
+				)
+			}
+			break
+		}
+	}
+
+	responseBody := buffer.String()
+
+	// Scan accumulated response against policy rules
+	if p.policy != nil && len(responseBody) > 0 {
+		if result := p.policy.EvaluateResponseContent(sess.ID, responseBody); result != nil {
+			if result.ShouldTerminate {
+				p.manager.Terminate(sess.ID)
+				slog.Warn("streaming response blocked and session terminated",
+					"session_id", sess.ID,
+					"violations", len(result.Violations),
+				)
+				return p.writeBlockedResponse(w, "Streaming response violates security policy - session terminated", true)
+			}
+			if result.ShouldBlock {
+				slog.Warn("streaming response blocked",
+					"session_id", sess.ID,
+					"violations", len(result.Violations),
+				)
+				return p.writeBlockedResponse(w, "Streaming response violates security policy", false)
+			}
+			// Flagged but not blocked - capture response
+			p.policy.UpdateLastCaptureWithResponse(sess.ID, responseBody)
+		}
+	}
+
+	// Response passed policy check - now send to client
+	sess.AddBytes(0, int64(len(responseBody)))
+
+	// Copy response headers and send buffered content
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(buffer.Bytes())
+
+	// Flush if supported
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	slog.Debug("buffered streaming response sent",
+		"session_id", sess.ID,
+		"size", len(responseBody),
+		"is_sse", isSSE,
+	)
+
+	return resp.StatusCode, int64(len(responseBody))
+}
+
+// handleStreamingChunked scans chunks as they arrive with overlap for cross-boundary patterns
+// Low latency: chunks are forwarded immediately, stream terminated on detection
+func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Response, sess *session.Session, isSSE bool) (int, int64) {
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -366,25 +507,17 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 		return resp.StatusCode, 0
 	}
 
-	// Determine streaming format from content type
-	contentType := resp.Header.Get("Content-Type")
-	isSSE := strings.Contains(contentType, "text/event-stream")
-	isNDJSON := strings.Contains(contentType, "application/x-ndjson") ||
-		strings.Contains(contentType, "application/json")
+	// Create streaming scanner with overlap buffer
+	overlapSize := p.config.Policy.Streaming.OverlapSize
+	if overlapSize <= 0 {
+		overlapSize = 1024
+	}
+	scanner := p.policy.NewStreamingScanner(sess.ID, overlapSize)
 
-	slog.Debug("streaming response",
-		"session_id", sess.ID,
-		"content_type", contentType,
-		"is_sse", isSSE,
-		"is_ndjson", isNDJSON,
-	)
-
-	// Buffer for collecting chunks for logging
-	var chunks []string
 	var totalBytes int64
-
-	// Read and forward chunks
+	var chunks []string // For logging and capture
 	buf := make([]byte, 4096)
+
 	for {
 		// Check if session was killed
 		select {
@@ -396,10 +529,143 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			chunk := buf[:n]
+			totalBytes += int64(n)
+
+			// Scan chunk with overlap buffer for cross-boundary patterns
+			if result := scanner.ScanChunk(chunk); result != nil {
+				if result.ShouldTerminate {
+					// Terminate immediately - send error and close
+					p.manager.Terminate(sess.ID)
+					slog.Warn("streaming terminated mid-stream by policy",
+						"session_id", sess.ID,
+						"violations", len(result.Violations),
+						"bytes_sent", totalBytes-int64(n), // Bytes already sent before this chunk
+					)
+					// Write termination message inline (client already received partial response)
+					w.Write([]byte("\n\n[ELIDA: Stream terminated - security policy violation detected]\n"))
+					flusher.Flush()
+					return resp.StatusCode, totalBytes
+				}
+				if result.ShouldBlock {
+					// Block immediately - send error and close
+					slog.Warn("streaming blocked mid-stream by policy",
+						"session_id", sess.ID,
+						"violations", len(result.Violations),
+						"bytes_sent", totalBytes-int64(n),
+					)
+					w.Write([]byte("\n\n[ELIDA: Stream blocked - security policy violation detected]\n"))
+					flusher.Flush()
+					return resp.StatusCode, totalBytes
+				}
+				// Just flagged - continue streaming, will capture at end
+			}
+
+			// Store chunk for logging (limit stored chunks)
+			if len(chunks) < 100 {
+				chunks = append(chunks, string(chunk))
+			}
+
+			// Forward chunk to client
+			_, writeErr := w.Write(chunk)
+			if writeErr != nil {
+				slog.Error("failed to write chunk",
+					"session_id", sess.ID,
+					"error", writeErr,
+				)
+				return resp.StatusCode, totalBytes
+			}
+			flusher.Flush()
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				slog.Error("error reading stream",
+					"session_id", sess.ID,
+					"error", err,
+				)
+			}
+			break
+		}
+	}
+
+	// Final scan of overlap buffer
+	if result := scanner.Finalize(); result != nil {
+		// Log any violations found in final scan
+		for _, v := range result.Violations {
+			slog.Info("final chunk scan: violation detected",
+				"session_id", sess.ID,
+				"rule", v.RuleName,
+				"severity", v.Severity,
+			)
+		}
+	}
+
+	sess.AddBytes(0, totalBytes)
+
+	// Log aggregated streaming response
+	p.logStreamingResponse(sess.ID, chunks, isSSE)
+
+	// Capture response for flagged sessions
+	if p.policy.IsFlagged(sess.ID) {
+		var response strings.Builder
+		for _, chunk := range chunks {
+			response.WriteString(chunk)
+		}
+		p.policy.UpdateLastCaptureWithResponse(sess.ID, response.String())
+	}
+
+	slog.Debug("chunked streaming response complete",
+		"session_id", sess.ID,
+		"total_bytes", totalBytes,
+		"chunks_scanned", len(chunks),
+		"is_sse", isSSE,
+	)
+
+	return resp.StatusCode, totalBytes
+}
+
+// handleStreamingDirect streams directly to client with async scanning
+// Used when only flag actions are configured (no latency impact)
+func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response, sess *session.Session, isSSE bool) (int, int64) {
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Get flusher for streaming
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		slog.Error("response writer does not support flushing", "session_id", sess.ID)
+		return resp.StatusCode, 0
+	}
+
+	// Buffer for collecting chunks for logging and async scanning
+	var chunks []string
+	var totalBytes int64
+
+	// Read and forward chunks
+	buf := make([]byte, 4096)
+	for {
+		// Check if session was killed
+		select {
+		case <-sess.KillChan():
+			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
+			// Still do async scan on what we have
+			go p.asyncScanResponse(sess.ID, chunks)
+			return resp.StatusCode, totalBytes
+		default:
+		}
+
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
 			totalBytes += int64(n)
 			chunk := buf[:n]
 
-			// Store chunk for logging (limit stored chunks)
+			// Store chunk for logging and async scanning (limit stored chunks)
 			if len(chunks) < 100 {
 				chunks = append(chunks, string(chunk))
 			}
@@ -432,7 +698,42 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
+	// Async scan for flag-only response rules (no latency impact)
+	go p.asyncScanResponse(sess.ID, chunks)
+
 	return resp.StatusCode, totalBytes
+}
+
+// asyncScanResponse scans response content asynchronously for flag-only rules
+func (p *Proxy) asyncScanResponse(sessionID string, chunks []string) {
+	if p.policy == nil {
+		return
+	}
+
+	// Reconstruct response from chunks
+	var response strings.Builder
+	for _, chunk := range chunks {
+		response.WriteString(chunk)
+	}
+
+	content := response.String()
+	if content == "" {
+		return
+	}
+
+	if result := p.policy.EvaluateResponseContent(sessionID, content); result != nil {
+		// Log violations (already logged in EvaluateResponseContent, but add async context)
+		for _, v := range result.Violations {
+			slog.Info("async response scan: violation detected",
+				"session_id", sessionID,
+				"rule", v.RuleName,
+				"severity", v.Severity,
+				"action", v.Action,
+			)
+		}
+		// Capture response for flagged sessions
+		p.policy.UpdateLastCaptureWithResponse(sessionID, content)
+	}
 }
 
 // logResponse logs a standard response
@@ -508,6 +809,26 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// writeBlockedResponse writes an error response when content is blocked by policy
+func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, message string, terminated bool) (int, int64) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Elida-Blocked", "true")
+
+	response := map[string]interface{}{
+		"error":   "response_blocked",
+		"message": message,
+	}
+	if terminated {
+		response["session_terminated"] = true
+	}
+
+	body, _ := json.Marshal(response)
+	w.WriteHeader(http.StatusForbidden)
+	w.Write(body)
+
+	return http.StatusForbidden, int64(len(body))
 }
 
 // ReverseProxy creates a standard reverse proxy using the default backend

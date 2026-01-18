@@ -31,18 +31,28 @@ const (
 	RuleTypeIdleTime       RuleType = "idle_time"
 
 	// Content inspection rules
-	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request body
+	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request/response body
+)
+
+// RuleTarget defines what content the rule applies to
+type RuleTarget string
+
+const (
+	RuleTargetRequest  RuleTarget = "request"  // Only scan request bodies
+	RuleTargetResponse RuleTarget = "response" // Only scan response bodies
+	RuleTargetBoth     RuleTarget = "both"     // Scan both (default)
 )
 
 // Rule defines a policy rule
 type Rule struct {
-	Name        string   `yaml:"name" json:"name"`
-	Type        RuleType `yaml:"type" json:"type"`
-	Threshold   int64    `yaml:"threshold" json:"threshold"`          // For metric rules
-	Patterns    []string `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
-	Severity    Severity `yaml:"severity" json:"severity"`
-	Description string   `yaml:"description" json:"description"`
-	Action      string   `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
+	Name        string     `yaml:"name" json:"name"`
+	Type        RuleType   `yaml:"type" json:"type"`
+	Target      RuleTarget `yaml:"target" json:"target"`                // request, response, both (default: both)
+	Threshold   int64      `yaml:"threshold" json:"threshold"`          // For metric rules
+	Patterns    []string   `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
+	Severity    Severity   `yaml:"severity" json:"severity"`
+	Description string     `yaml:"description" json:"description"`
+	Action      string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
 }
 
 // Violation represents a policy violation
@@ -261,13 +271,28 @@ func (e *Engine) calculateRequestsPerMinute(metrics SessionMetrics) int64 {
 
 // ContentCheckResult contains the result of content inspection
 type ContentCheckResult struct {
-	Violations []Violation
-	ShouldBlock bool
+	Violations      []Violation
+	ShouldBlock     bool
 	ShouldTerminate bool
 }
 
-// EvaluateContent checks request content against content rules
+// EvaluateContent checks request content against content rules (backward compatible)
 func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult {
+	return e.EvaluateRequestContent(sessionID, content)
+}
+
+// EvaluateRequestContent checks request content against request-applicable rules
+func (e *Engine) EvaluateRequestContent(sessionID, content string) *ContentCheckResult {
+	return e.evaluateContentWithTarget(sessionID, content, RuleTargetRequest)
+}
+
+// EvaluateResponseContent checks response content against response-applicable rules
+func (e *Engine) EvaluateResponseContent(sessionID, content string) *ContentCheckResult {
+	return e.evaluateContentWithTarget(sessionID, content, RuleTargetResponse)
+}
+
+// evaluateContentWithTarget is the internal implementation that filters by target
+func (e *Engine) evaluateContentWithTarget(sessionID, content string, target RuleTarget) *ContentCheckResult {
 	if len(e.compiledRules) == 0 || content == "" {
 		return nil
 	}
@@ -276,6 +301,11 @@ func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult 
 	contentLower := strings.ToLower(content)
 
 	for _, cr := range e.compiledRules {
+		// Skip rules that don't apply to this target
+		if !e.ruleAppliesToTarget(cr.Target, target) {
+			continue
+		}
+
 		for i, re := range cr.CompiledPatterns {
 			if match := re.FindString(contentLower); match != "" {
 				violation := Violation{
@@ -307,11 +337,17 @@ func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult 
 					actionMsg = cr.Action + " (audit-only)"
 				}
 
+				targetStr := "request"
+				if target == RuleTargetResponse {
+					targetStr = "response"
+				}
+
 				logFunc("content policy violation detected",
 					"session_id", sessionID,
 					"rule", cr.Name,
 					"severity", cr.Severity,
 					"action", actionMsg,
+					"target", targetStr,
 					"matched", truncateMatch(match, 50),
 					"audit_mode", e.auditMode,
 				)
@@ -327,6 +363,27 @@ func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult 
 		return result
 	}
 	return nil
+}
+
+// ruleAppliesToTarget checks if a rule should be evaluated for the given target
+func (e *Engine) ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) bool {
+	// Default (empty or "both") applies to everything
+	if ruleTarget == "" || ruleTarget == RuleTargetBoth {
+		return true
+	}
+	return ruleTarget == evaluationTarget
+}
+
+// HasBlockingResponseRules returns true if any response rules have block/terminate action
+func (e *Engine) HasBlockingResponseRules() bool {
+	for _, cr := range e.compiledRules {
+		if e.ruleAppliesToTarget(cr.Target, RuleTargetResponse) {
+			if cr.Action == "block" || cr.Action == "terminate" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IsAuditMode returns true if the engine is in audit (dry-run) mode
@@ -424,6 +481,28 @@ func (e *Engine) CaptureRequest(sessionID string, req CapturedRequest) {
 	flagged.CapturedContent = append(flagged.CapturedContent, req)
 }
 
+// UpdateLastCaptureWithResponse updates the most recent captured request with response body
+func (e *Engine) UpdateLastCaptureWithResponse(sessionID, responseBody string) {
+	if !e.captureContent {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	flagged, exists := e.flaggedSessions[sessionID]
+	if !exists || len(flagged.CapturedContent) == 0 {
+		return
+	}
+
+	// Update the last captured request with response body
+	lastIdx := len(flagged.CapturedContent) - 1
+	if len(responseBody) > e.maxCaptureSize {
+		responseBody = responseBody[:e.maxCaptureSize] + "...[truncated]"
+	}
+	flagged.CapturedContent[lastIdx].ResponseBody = responseBody
+}
+
 // IsFlagged checks if a session is flagged
 func (e *Engine) IsFlagged(sessionID string) bool {
 	e.mu.RLock()
@@ -514,4 +593,85 @@ func (e *Engine) Stats() map[string]interface{} {
 		"info":          info,
 		"rules_count":   len(e.rules),
 	}
+}
+
+// StreamingScanner handles chunk-based content scanning with overlap for cross-boundary patterns
+type StreamingScanner struct {
+	engine      *Engine
+	sessionID   string
+	overlapBuf  []byte
+	overlapSize int
+	totalScanned int64
+}
+
+// NewStreamingScanner creates a scanner for chunked response scanning
+func (e *Engine) NewStreamingScanner(sessionID string, overlapSize int) *StreamingScanner {
+	if overlapSize <= 0 {
+		overlapSize = 1024 // Default 1KB overlap
+	}
+	return &StreamingScanner{
+		engine:      e,
+		sessionID:   sessionID,
+		overlapBuf:  make([]byte, 0, overlapSize),
+		overlapSize: overlapSize,
+	}
+}
+
+// ScanChunk scans a chunk of streaming content, using overlap buffer for cross-boundary patterns
+// Returns violations if found. The caller should terminate the stream if ShouldBlock/ShouldTerminate.
+func (s *StreamingScanner) ScanChunk(chunk []byte) *ContentCheckResult {
+	if len(chunk) == 0 {
+		return nil
+	}
+
+	// Combine overlap buffer with current chunk for scanning
+	var scanContent []byte
+	if len(s.overlapBuf) > 0 {
+		scanContent = make([]byte, len(s.overlapBuf)+len(chunk))
+		copy(scanContent, s.overlapBuf)
+		copy(scanContent[len(s.overlapBuf):], chunk)
+	} else {
+		scanContent = chunk
+	}
+
+	// Scan the combined content
+	result := s.engine.EvaluateResponseContent(s.sessionID, string(scanContent))
+
+	// Update overlap buffer with end of current chunk
+	if len(chunk) >= s.overlapSize {
+		s.overlapBuf = make([]byte, s.overlapSize)
+		copy(s.overlapBuf, chunk[len(chunk)-s.overlapSize:])
+	} else {
+		// Chunk smaller than overlap - append to existing overlap
+		combined := append(s.overlapBuf, chunk...)
+		if len(combined) > s.overlapSize {
+			s.overlapBuf = combined[len(combined)-s.overlapSize:]
+		} else {
+			s.overlapBuf = combined
+		}
+	}
+
+	s.totalScanned += int64(len(chunk))
+	return result
+}
+
+// Finalize performs a final scan on any remaining overlap buffer
+// Call this when the stream ends to catch patterns at the very end
+func (s *StreamingScanner) Finalize() *ContentCheckResult {
+	if len(s.overlapBuf) == 0 {
+		return nil
+	}
+	// Final scan of overlap buffer (in case pattern is at the very end)
+	return s.engine.EvaluateResponseContent(s.sessionID, string(s.overlapBuf))
+}
+
+// TotalScanned returns total bytes scanned so far
+func (s *StreamingScanner) TotalScanned() int64 {
+	return s.totalScanned
+}
+
+// Reset clears the scanner state for reuse
+func (s *StreamingScanner) Reset() {
+	s.overlapBuf = s.overlapBuf[:0]
+	s.totalScanned = 0
 }

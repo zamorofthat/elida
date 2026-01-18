@@ -16,25 +16,38 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 
 ## Features
 
-### MVP (Current)
+### Current Features
 - [x] HTTP reverse proxy with request/response capture
 - [x] Streaming support (NDJSON for Ollama, SSE for OpenAI/Anthropic/Mistral)
 - [x] Session tracking and management
 - [x] Session timeout enforcement
-- [x] Kill switch with configurable block modes
+- [x] Kill/Resume/Terminate session lifecycle
 - [x] Control API for monitoring
 - [x] Structured JSON logging
 - [x] Redis-backed session store for horizontal scaling
 - [x] OpenTelemetry integration for tracing
 - [x] SQLite storage for session history
-- [x] Policy engine for session-level rules
 - [x] Dashboard UI for monitoring
 - [x] Client IP-based session tracking (for Claude Code)
+- [x] Multi-backend routing (route by header, model name, or path)
+- [x] TLS/HTTPS support
+
+### Security Features
+- [x] Policy engine with 40+ built-in rules (OWASP LLM Top 10)
+- [x] Content inspection for requests and responses
+- [x] Prompt injection detection and blocking (LLM01)
+- [x] Output security scanning - XSS, SQL, shell patterns (LLM02)
+- [x] PII and credential detection (LLM06)
+- [x] Tool/plugin security monitoring (LLM07)
+- [x] Excessive agency prevention (LLM08)
+- [x] Model theft detection (LLM10)
+- [x] Audit mode for dry-run evaluation
+- [x] Chunked streaming scan (low latency) and buffered mode (full validation)
 
 ### Roadmap
-- [x] Multi-backend routing (route by header, model name, or path)
 - [ ] WebSocket support for real-time/voice agents
-- [ ] Content inspection and PII detection
+- [ ] LLM-as-judge content moderation (local Gemma models)
+- [ ] Validation webhook for model output QA
 - [ ] SDK for native agent integration
 
 ## Quick Start
