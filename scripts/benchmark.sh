@@ -28,7 +28,7 @@ CONTROL_URL="${ELIDA_CONTROL_URL:-http://localhost:9090}"
 
 # Target: 10K sessions on single node
 TARGET_SESSIONS=10000
-TARGET_MEM_PER_SESSION_KB=10  # 10KB per session = 100MB for 10K
+TARGET_MEM_PER_SESSION_KB=50  # 50KB per session = 500MB for 10K (includes policy capture)
 
 print_header() {
     echo ""
