@@ -1,0 +1,15 @@
+apiVersion: v2
+name: elida
+description: ELIDA - Edge Layer for Intelligent Defense of Agents
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - proxy
+  - llm
+  - security
+  - observability
+home: https://github.com/zamorofthat/elida
+maintainers:
+  - name: Aaron Zamora

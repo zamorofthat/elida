@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "elida.fullname" . }}
+  labels:
+    {{- include "elida.labels" . | nindent 4 }}
+data:
+  elida.yaml: |
+    listen: ":{{ .Values.elida.listenPort }}"
+
+    backends:
+      {{- toYaml .Values.elida.backends | nindent 6 }}
+
+    routing:
+      methods:
+        {{- toYaml .Values.elida.routing.methods | nindent 8 }}
+
+    tls:
+      enabled: {{ .Values.elida.tls.enabled }}
+
+    session:
+      timeout: {{ .Values.elida.session.timeout }}
+      header: {{ .Values.elida.session.header | quote }}
+      generate_if_missing: {{ .Values.elida.session.generateIfMissing }}
+      store: {{ .Values.elida.session.store | quote }}
+      kill_block:
+        mode: {{ .Values.elida.session.killBlock.mode | quote }}
+        duration: {{ .Values.elida.session.killBlock.duration }}
+
+    control:
+      listen: ":{{ .Values.elida.controlPort }}"
+      enabled: true
+
+    logging:
+      format: json
+      level: info
+
+    telemetry:
+      enabled: {{ .Values.elida.telemetry.enabled }}
+      exporter: {{ .Values.elida.telemetry.exporter | quote }}
+      endpoint: {{ .Values.elida.telemetry.endpoint | quote }}
+      service_name: {{ .Values.elida.telemetry.serviceName | quote }}
+
+    storage:
+      enabled: {{ .Values.elida.storage.enabled }}
+      path: {{ .Values.elida.storage.path | quote }}
+
+    policy:
+      enabled: {{ .Values.elida.policy.enabled }}
+      capture_flagged: {{ .Values.elida.policy.captureContent }}
+      max_capture_size: {{ .Values.elida.policy.maxCaptureSize }}
+      rules:
+        {{- toYaml .Values.elida.policy.rules | nindent 8 }}
