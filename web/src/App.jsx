@@ -49,9 +49,13 @@ function formatBackends(session) {
   }
 }
 
-function SessionTable({ sessions, showActions, onKill }) {
+function SessionTable({ sessions, showActions, onKill, onViewDetails }) {
   if (!sessions || sessions.length === 0) {
     return <div class="empty-state">No sessions</div>
+  }
+
+  const handleRowClick = (s) => {
+    if (onViewDetails) onViewDetails(s)
   }
 
   return (
@@ -70,7 +74,7 @@ function SessionTable({ sessions, showActions, onKill }) {
       </thead>
       <tbody>
         {sessions.map((s) => (
-          <tr key={s.id}>
+          <tr key={s.id} class={onViewDetails ? 'clickable' : ''} onClick={() => handleRowClick(s)}>
             <td class="mono">{truncateId(s.id)}</td>
             <td><StateBadge state={s.state} /></td>
             <td class="mono muted">{formatBackends(s)}</td>
@@ -80,7 +84,7 @@ function SessionTable({ sessions, showActions, onKill }) {
             <td class="mono">{s.duration_ms ? (s.duration_ms / 1000).toFixed(1) + 's' : s.duration}</td>
             {showActions && (
               <td>
-                <button class="btn-danger" onClick={() => onKill(s.id)} disabled={s.state !== 'active'}>
+                <button class="btn-danger" onClick={(e) => { e.stopPropagation(); onKill(s.id); }} disabled={s.state !== 'active'}>
                   Kill
                 </button>
               </td>
@@ -89,6 +93,124 @@ function SessionTable({ sessions, showActions, onKill }) {
         ))}
       </tbody>
     </table>
+  )
+}
+
+function SessionDetails({ session, onClose }) {
+  const [flaggedInfo, setFlaggedInfo] = useState(null)
+
+  useEffect(() => {
+    if (session?.id) {
+      fetch(API_BASE + '/control/flagged/' + session.id)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => setFlaggedInfo(data))
+        .catch(() => setFlaggedInfo(null))
+    }
+  }, [session?.id])
+
+  if (!session) return null
+
+  return (
+    <div class="modal-overlay" onClick={onClose}>
+      <div class="modal" onClick={(e) => e.stopPropagation()}>
+        <div class="modal-header">
+          <h2>Session Record</h2>
+          <button class="btn-close" onClick={onClose}>x</button>
+        </div>
+        <div class="modal-body">
+          <div class="session-metrics">
+            <div class="metrics-grid">
+              <div class="metric">
+                <span class="metric-label">Session ID</span>
+                <span class="metric-value mono">{session.id}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">State</span>
+                <span class={'metric-value state-' + session.state}>{session.state}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Duration</span>
+                <span class="metric-value">{session.duration_ms ? (session.duration_ms / 1000).toFixed(2) + 's' : session.duration}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Requests</span>
+                <span class="metric-value">{session.request_count}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Bytes In</span>
+                <span class="metric-value">{formatBytes(session.bytes_in)}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Bytes Out</span>
+                <span class="metric-value">{formatBytes(session.bytes_out)}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Backend</span>
+                <span class="metric-value">{session.backend}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Client</span>
+                <span class="metric-value mono">{session.client_addr}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-label">Started</span>
+                <span class="metric-value">{new Date(session.start_time).toLocaleString()}</span>
+              </div>
+              {session.end_time && (
+                <div class="metric">
+                  <span class="metric-label">Ended</span>
+                  <span class="metric-value">{new Date(session.end_time).toLocaleString()}</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {flaggedInfo && flaggedInfo.violations && (
+            <div>
+              <h3>Policy Violations</h3>
+              <div class="violations-list">
+                {flaggedInfo.violations.map((v, i) => (
+                  <div key={i} class="violation-item">
+                    <div class="violation-header">
+                      <SeverityBadge severity={v.severity} />
+                      <strong>{v.rule_name}</strong>
+                    </div>
+                    <div class="violation-desc">{v.description}</div>
+                    {v.matched_text && (
+                      <div class="violation-match">
+                        Matched: <code>{v.matched_text}</code>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {flaggedInfo.captured_content && flaggedInfo.captured_content.length > 0 && (
+                <div>
+                  <h3>Captured Requests</h3>
+                  <div class="captured-list">
+                    {flaggedInfo.captured_content.map((c, i) => (
+                      <div key={i} class="captured-item">
+                        <div class="captured-header">
+                          <span class="mono">{c.method} {c.path}</span>
+                          <span class="muted">{new Date(c.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                        {c.request_body && (
+                          <div class="captured-body">
+                            <strong>Request:</strong>
+                            <pre>{c.request_body}</pre>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -134,6 +256,17 @@ function FlaggedTable({ flagged, onViewDetails }) {
 }
 
 function FlaggedDetails({ flagged, onClose }) {
+  const [sessionInfo, setSessionInfo] = useState(null)
+
+  useEffect(() => {
+    if (flagged?.session_id) {
+      fetch(API_BASE + '/control/sessions/' + flagged.session_id)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => setSessionInfo(data))
+        .catch(() => setSessionInfo(null))
+    }
+  }, [flagged?.session_id])
+
   if (!flagged) return null
 
   return (
@@ -150,7 +283,47 @@ function FlaggedDetails({ flagged, onClose }) {
           <div class="detail-row">
             <strong>Max Severity:</strong> <SeverityBadge severity={flagged.max_severity} />
           </div>
-          
+
+          {sessionInfo && (
+            <div class="session-metrics">
+              <h3>Session Record</h3>
+              <div class="metrics-grid">
+                <div class="metric">
+                  <span class="metric-label">State</span>
+                  <span class={'metric-value state-' + sessionInfo.state}>{sessionInfo.state}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Duration</span>
+                  <span class="metric-value">{sessionInfo.duration}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Requests</span>
+                  <span class="metric-value">{sessionInfo.request_count}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Bytes In</span>
+                  <span class="metric-value">{formatBytes(sessionInfo.bytes_in)}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Bytes Out</span>
+                  <span class="metric-value">{formatBytes(sessionInfo.bytes_out)}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Backend</span>
+                  <span class="metric-value">{sessionInfo.backend}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Client</span>
+                  <span class="metric-value mono">{sessionInfo.client_addr}</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-label">Started</span>
+                  <span class="metric-value">{new Date(sessionInfo.start_time).toLocaleString()}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           <h3>Violations</h3>
           <div class="violations-list">
             {flagged.violations.map((v, i) => (
@@ -160,9 +333,16 @@ function FlaggedDetails({ flagged, onClose }) {
                   <strong>{v.rule_name}</strong>
                 </div>
                 <div class="violation-desc">{v.description}</div>
-                <div class="violation-stats">
-                  Threshold: {v.threshold} | Actual: {v.actual_value}
-                </div>
+                {v.matched_text && (
+                  <div class="violation-match">
+                    Matched: <code>{v.matched_text}</code>
+                  </div>
+                )}
+                {v.threshold && (
+                  <div class="violation-stats">
+                    Threshold: {v.threshold} | Actual: {v.actual_value}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -202,6 +382,7 @@ export function App() {
   const [flagged, setFlagged] = useState([])
   const [flaggedStats, setFlaggedStats] = useState({})
   const [selectedFlagged, setSelectedFlagged] = useState(null)
+  const [selectedSession, setSelectedSession] = useState(null)
   const [status, setStatus] = useState('connecting')
 
   const fetchStats = async () => {
@@ -375,9 +556,9 @@ export function App() {
 
         {tab === 'history' && (
           <div class="panel">
-            <div class="refresh-info">Historical sessions from database</div>
+            <div class="refresh-info">Click a session to view full record</div>
             <div class="table-container">
-              <SessionTable sessions={history} showActions={false} />
+              <SessionTable sessions={history} showActions={false} onViewDetails={setSelectedSession} />
             </div>
           </div>
         )}
@@ -385,6 +566,10 @@ export function App() {
 
       {selectedFlagged && (
         <FlaggedDetails flagged={selectedFlagged} onClose={() => setSelectedFlagged(null)} />
+      )}
+
+      {selectedSession && (
+        <SessionDetails session={selectedSession} onClose={() => setSelectedSession(null)} />
       )}
     </div>
   )

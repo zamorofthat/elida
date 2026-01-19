@@ -142,6 +142,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Content inspection - check request body against policy rules BEFORE forwarding
 	if p.policy != nil && len(requestBody) > 0 {
 		if result := p.policy.EvaluateContent(sess.ID, string(requestBody)); result != nil {
+			// Capture the request content for forensics (before potential early return)
+			p.policy.CaptureRequest(sess.ID, policy.CapturedRequest{
+				Timestamp:   time.Now(),
+				Method:      r.Method,
+				Path:        r.URL.Path,
+				RequestBody: string(requestBody),
+				StatusCode:  http.StatusForbidden,
+			})
+
 			if result.ShouldTerminate {
 				// Terminate the session for serious violations
 				p.manager.Terminate(sess.ID)
