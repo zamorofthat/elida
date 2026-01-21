@@ -103,6 +103,8 @@ storage:
   path: "data/elida.db"
   # How many days to retain session history
   retention_days: 30
+  # Capture mode: "all" (CDR-style, capture all session content) or "flagged_only"
+  capture_mode: "all"
 
 # Policy configuration (for flagging suspicious sessions)
 # Based on OWASP LLM Top 10, NIST AI RMF, and OWASP API Security

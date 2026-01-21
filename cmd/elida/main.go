@@ -92,6 +92,9 @@ func main() {
 	manager := session.NewManagerWithKillBlock(store, cfg.Session.Timeout, killBlockConfig)
 	slog.Info("session manager configured", "kill_block_mode", killBlockConfig.Mode, "kill_block_duration", killBlockConfig.Duration)
 
+	// Forward-declare policyEngine so session callback closure can reference it
+	var policyEngine *policy.Engine
+
 	// Initialize SQLite storage for session history
 	var sqliteStore *storage.SQLiteStore
 	if cfg.Storage.Enabled {
@@ -132,6 +135,35 @@ func main() {
 				ClientAddr:   snap.ClientAddr,
 				Metadata:     snap.Metadata,
 			}
+
+			// Include captured content and violations from policy engine
+			if policyEngine != nil {
+				if flagged := policyEngine.GetFlaggedSession(snap.ID); flagged != nil {
+					slog.Debug("found flagged session for history", "session_id", snap.ID, "captures", len(flagged.CapturedContent), "violations", len(flagged.Violations))
+					// Convert captured requests
+					for _, cap := range flagged.CapturedContent {
+						record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
+							Timestamp:    cap.Timestamp,
+							Method:       cap.Method,
+							Path:         cap.Path,
+							RequestBody:  cap.RequestBody,
+							ResponseBody: cap.ResponseBody,
+							StatusCode:   cap.StatusCode,
+						})
+					}
+					// Convert violations
+					for _, v := range flagged.Violations {
+						record.Violations = append(record.Violations, storage.Violation{
+							RuleName:    v.RuleName,
+							Description: v.Description,
+							Severity:    string(v.Severity),
+							MatchedText: v.MatchedText,
+							Action:      v.Action,
+						})
+					}
+				}
+			}
+
 			if err := sqliteStore.SaveSession(record); err != nil {
 				slog.Error("failed to save session to history", "session_id", snap.ID, "error", err)
 			}
@@ -161,7 +193,6 @@ func main() {
 	}
 
 	// Initialize policy engine
-	var policyEngine *policy.Engine
 	if cfg.Policy.Enabled {
 		// Convert config rules to policy rules
 		policyRules := make([]policy.Rule, len(cfg.Policy.Rules))

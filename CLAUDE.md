@@ -1005,6 +1005,7 @@ make test-all          # All tests (84 tests)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — Standard OTel env var (also enables telemetry)
 - `ELIDA_STORAGE_ENABLED` — Enable SQLite storage for history (default: `false`)
 - `ELIDA_STORAGE_PATH` — SQLite database path (default: `data/elida.db`)
+- `ELIDA_STORAGE_CAPTURE_MODE` — Capture mode: `all` (default) or `flagged_only`
 - `ELIDA_POLICY_ENABLED` — Enable policy engine (default: `false`)
 - `ELIDA_POLICY_MODE` — Policy mode: `enforce` (default) or `audit` (dry-run)
 - `ELIDA_POLICY_CAPTURE` — Capture request content for flagged sessions (default: `true`)

@@ -37,6 +37,7 @@ type StorageConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Path          string `yaml:"path"`           // SQLite database path
 	RetentionDays int    `yaml:"retention_days"` // How long to keep history
+	CaptureMode   string `yaml:"capture_mode"`   // "all" (default) or "flagged_only"
 }
 
 // PolicyConfig holds policy engine configuration
@@ -205,6 +206,7 @@ func defaults() *Config {
 			Enabled:       false,
 			Path:          "data/elida.db",
 			RetentionDays: 30,
+			CaptureMode:   "all", // Capture all session content (CDR-style)
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -309,6 +311,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ELIDA_STORAGE_PATH"); v != "" {
 		c.Storage.Path = v
+	}
+	if v := os.Getenv("ELIDA_STORAGE_CAPTURE_MODE"); v != "" {
+		c.Storage.CaptureMode = v // "all" or "flagged_only"
 	}
 
 	// Policy overrides

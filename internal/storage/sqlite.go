@@ -11,18 +11,39 @@ import (
 )
 
 // SessionRecord represents a historical session record
+// CapturedRequest stores request/response content for session records
+type CapturedRequest struct {
+	Timestamp    time.Time `json:"timestamp"`
+	Method       string    `json:"method"`
+	Path         string    `json:"path"`
+	RequestBody  string    `json:"request_body,omitempty"`
+	ResponseBody string    `json:"response_body,omitempty"`
+	StatusCode   int       `json:"status_code"`
+}
+
+// Violation records a policy violation for session records
+type Violation struct {
+	RuleName    string `json:"rule_name"`
+	Description string `json:"description"`
+	Severity    string `json:"severity"`
+	MatchedText string `json:"matched_text,omitempty"`
+	Action      string `json:"action"`
+}
+
 type SessionRecord struct {
-	ID           string            `json:"id"`
-	State        string            `json:"state"`
-	StartTime    time.Time         `json:"start_time"`
-	EndTime      time.Time         `json:"end_time"`
-	DurationMs   int64             `json:"duration_ms"`
-	RequestCount int               `json:"request_count"`
-	BytesIn      int64             `json:"bytes_in"`
-	BytesOut     int64             `json:"bytes_out"`
-	Backend      string            `json:"backend"`
-	ClientAddr   string            `json:"client_addr"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	ID              string            `json:"id"`
+	State           string            `json:"state"`
+	StartTime       time.Time         `json:"start_time"`
+	EndTime         time.Time         `json:"end_time"`
+	DurationMs      int64             `json:"duration_ms"`
+	RequestCount    int               `json:"request_count"`
+	BytesIn         int64             `json:"bytes_in"`
+	BytesOut        int64             `json:"bytes_out"`
+	Backend         string            `json:"backend"`
+	ClientAddr      string            `json:"client_addr"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
+	Violations      []Violation       `json:"violations,omitempty"`
 }
 
 // SQLiteStore provides persistent storage for session history
@@ -69,6 +90,8 @@ func (s *SQLiteStore) migrate() error {
 		backend TEXT NOT NULL,
 		client_addr TEXT NOT NULL,
 		metadata TEXT,
+		captured_content TEXT,
+		violations TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -89,10 +112,20 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		metadata = []byte("{}")
 	}
 
+	capturedContent, err := json.Marshal(record.CapturedContent)
+	if err != nil {
+		capturedContent = []byte("[]")
+	}
+
+	violations, err := json.Marshal(record.Violations)
+	if err != nil {
+		violations = []byte("[]")
+	}
+
 	_, err = s.db.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -104,23 +137,30 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		record.Backend,
 		record.ClientAddr,
 		string(metadata),
+		string(capturedContent),
+		string(violations),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
-	slog.Debug("session saved to history", "session_id", record.ID, "state", record.State)
+	slog.Debug("session saved to history",
+		"session_id", record.ID,
+		"state", record.State,
+		"captures", len(record.CapturedContent),
+		"violations", len(record.Violations),
+	)
 	return nil
 }
 
 // GetSession retrieves a session by ID
 func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
-	var metadataStr string
+	var metadataStr, capturedStr, violationsStr sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -133,6 +173,8 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 		&record.Backend,
 		&record.ClientAddr,
 		&metadataStr,
+		&capturedStr,
+		&violationsStr,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -141,8 +183,14 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	if metadataStr != "" {
-		json.Unmarshal([]byte(metadataStr), &record.Metadata)
+	if metadataStr.Valid && metadataStr.String != "" {
+		json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+	}
+	if capturedStr.Valid && capturedStr.String != "" {
+		json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
+	}
+	if violationsStr.Valid && violationsStr.String != "" {
+		json.Unmarshal([]byte(violationsStr.String), &record.Violations)
 	}
 
 	return &record, nil
@@ -161,7 +209,7 @@ type ListSessionsOptions struct {
 // ListSessions retrieves sessions with filtering and pagination
 func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, error) {
 	query := `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations
 		FROM sessions WHERE 1=1`
 
 	args := []interface{}{}
@@ -203,7 +251,7 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 	var records []SessionRecord
 	for rows.Next() {
 		var record SessionRecord
-		var metadataStr string
+		var metadataStr, capturedStr, violationsStr sql.NullString
 		err := rows.Scan(
 			&record.ID,
 			&record.State,
@@ -216,13 +264,21 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 			&record.Backend,
 			&record.ClientAddr,
 			&metadataStr,
+			&capturedStr,
+			&violationsStr,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
 		}
 
-		if metadataStr != "" {
-			json.Unmarshal([]byte(metadataStr), &record.Metadata)
+		if metadataStr.Valid && metadataStr.String != "" {
+			json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+		}
+		if capturedStr.Valid && capturedStr.String != "" {
+			json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
+		}
+		if violationsStr.Valid && violationsStr.String != "" {
+			json.Unmarshal([]byte(violationsStr.String), &record.Violations)
 		}
 
 		records = append(records, record)
