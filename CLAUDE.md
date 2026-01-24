@@ -98,6 +98,137 @@ policy:
 - `internal/config/config.go` — Added `Mode` field to PolicyConfig
 - `configs/elida.yaml` — Added `mode: enforce` option
 
+### Response Body Capture (LLM02 Coverage)
+
+Added response body capture for flagged sessions, providing full forensic data:
+
+| Action | Request Body | Response Body | Why |
+|--------|--------------|---------------|-----|
+| **Block** | ✓ captured | ✗ none | Request stopped before reaching LLM |
+| **Flag** | ✓ captured | ✓ captured | Full forensics for review |
+| **Terminate** | ✓ captured | ✗ none | Session killed immediately |
+
+**Key behaviors:**
+- **Audit mode**: Flagged requests go through to backend, both request + response captured
+- **Enforce mode**: Blocked requests captured (request only), flagged requests get full capture
+- Status code captured for forensics (200 = success, 403 = blocked by ELIDA)
+
+**API endpoints:**
+- `GET /control/flagged` — List all flagged sessions
+- `GET /control/flagged/{id}` — Get flagged session with captured content
+- `GET /control/history?state=flagged` — Historical flagged sessions
+
+**Example captured content:**
+```json
+{
+  "session_id": "attack-session-1",
+  "captured_content": [{
+    "timestamp": "2026-01-23T22:14:58Z",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "request_body": "{\"messages\":[{\"content\":\"ignore previous instructions...\"}]}",
+    "response_body": "{\"choices\":[{\"message\":{\"content\":\"I cannot comply...\"}}]}",
+    "status_code": 200
+  }],
+  "violations": [{
+    "rule_name": "prompt_injection_ignore",
+    "severity": "critical",
+    "action": "block"
+  }]
+}
+```
+
+**Files changed:**
+- `internal/proxy/proxy.go` — Added response capture after backend call
+- `internal/policy/policy.go` — Added `UpdateLastCaptureWithResponseAndStatus()`
+- `web/src/App.jsx` — Display response_body in dashboard
+
+### Immediate Persistence of Flagged Sessions
+
+Flagged sessions are now written to SQLite immediately (not just on session end), ensuring forensic data survives crashes:
+
+**Before:**
+```
+Request flagged → Stored in memory → Written to SQLite when session ends
+                                    ↓
+                              CRASH = Data lost!
+```
+
+**After:**
+```
+Request flagged → Written to SQLite immediately → Updated on subsequent requests
+                                    ↓
+                              CRASH = Data survives ✓
+```
+
+**Query flagged history:**
+```bash
+# All flagged sessions (persisted immediately)
+curl "http://localhost:9090/control/history?state=flagged"
+
+# Specific flagged session
+curl "http://localhost:9090/control/flagged/session-id"
+```
+
+**Files changed:**
+- `internal/proxy/proxy.go` — Added `persistFlaggedSession()` method, `SetStorage()`
+- `cmd/elida/main.go` — Pass SQLite storage to proxy for immediate persistence
+
+### Benchmark Mode Comparison
+
+Added `--compare-modes` to benchmark script for comparing policy modes:
+
+```bash
+./scripts/benchmark.sh --compare-modes
+```
+
+**Output:**
+```
+                         No Policy    Audit    Enforce
+----------------------- ---------- -------- ----------
+Avg latency (ms)              109      116        113
+Blocked req latency (ms)      107      100         49  ← 2x faster!
+Memory per session (KB)         6        0         30
+```
+
+**Key insights:**
+- **Enforce mode**: Blocked requests are ~2x faster (no backend call)
+- **Audit mode**: All requests forwarded, blocked latency same as normal
+- **Memory**: Varies based on content capture (flagged sessions use more)
+
+**Benchmark options:**
+```bash
+./scripts/benchmark.sh              # Run all benchmarks
+./scripts/benchmark.sh --memory     # Memory profiling only
+./scripts/benchmark.sh --latency    # Latency test only
+./scripts/benchmark.sh --sessions   # Session creation throughput
+./scripts/benchmark.sh --policy     # Policy evaluation overhead
+./scripts/benchmark.sh --compare-modes  # Compare all policy modes
+./scripts/benchmark.sh --help       # Show all options
+```
+
+**Files changed:**
+- `scripts/benchmark.sh` — Added `--compare-modes`, macOS millisecond fix, improved memory measurement
+
+### Session Records: All Sessions vs Flagged
+
+ELIDA follows the telecom CDR (Call Detail Record) model:
+
+| Data | All Sessions | Flagged Only |
+|------|--------------|--------------|
+| Session ID | ✓ | ✓ |
+| Duration | ✓ | ✓ |
+| Request count | ✓ | ✓ |
+| Bytes in/out | ✓ | ✓ |
+| Backend used | ✓ | ✓ |
+| Client IP | ✓ | ✓ |
+| Start/end time | ✓ | ✓ |
+| **Request body** | ✗ | ✓ |
+| **Response body** | ✗ | ✓ |
+| **Violations** | ✗ | ✓ |
+
+**Rationale:** Capturing every request/response body would be expensive. Only flagged sessions (security events) get full content capture for forensics.
+
 ---
 
 ## Tech Stack
@@ -944,10 +1075,23 @@ make test-stream        # Test streaming
 make sessions           # View active sessions
 make stats              # View stats
 
+# Benchmarking
+./scripts/benchmark.sh              # Run all benchmarks
+./scripts/benchmark.sh --memory     # Memory profiling only
+./scripts/benchmark.sh --latency    # Latency test only
+./scripts/benchmark.sh --sessions   # Session creation throughput
+./scripts/benchmark.sh --policy     # Policy evaluation overhead
+./scripts/benchmark.sh --compare-modes  # Compare no-policy vs audit vs enforce
+
 # Manual testing
 curl http://localhost:8080/api/tags              # Test against Ollama
 curl http://localhost:9090/control/sessions      # Check sessions
 curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
+
+# Flagged sessions
+curl http://localhost:9090/control/flagged                    # List flagged sessions
+curl http://localhost:9090/control/flagged/{id}               # Get flagged session details
+curl "http://localhost:9090/control/history?state=flagged"    # Historical flagged sessions
 ```
 
 ## Test Coverage

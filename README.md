@@ -43,6 +43,8 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 - [x] Model theft detection (LLM10)
 - [x] Audit mode for dry-run evaluation
 - [x] Chunked streaming scan (low latency) and buffered mode (full validation)
+- [x] Response body capture for flagged sessions (forensics)
+- [x] Immediate persistence of flagged sessions (crash-safe)
 
 ### Roadmap
 - [ ] WebSocket support for real-time/voice agents
