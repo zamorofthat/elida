@@ -201,6 +201,12 @@ function SessionDetails({ session, onClose }) {
                             <pre>{c.request_body}</pre>
                           </div>
                         )}
+                        {c.response_body && (
+                          <div class="captured-body">
+                            <strong>Response:</strong>
+                            <pre>{c.response_body}</pre>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -361,6 +367,12 @@ function FlaggedDetails({ flagged, onClose }) {
                       <div class="captured-body">
                         <strong>Request:</strong>
                         <pre>{c.request_body}</pre>
+                      </div>
+                    )}
+                    {c.response_body && (
+                      <div class="captured-body">
+                        <strong>Response:</strong>
+                        <pre>{c.response_body}</pre>
                       </div>
                     )}
                   </div>

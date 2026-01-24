@@ -92,8 +92,9 @@ func main() {
 	manager := session.NewManagerWithKillBlock(store, cfg.Session.Timeout, killBlockConfig)
 	slog.Info("session manager configured", "kill_block_mode", killBlockConfig.Mode, "kill_block_duration", killBlockConfig.Duration)
 
-	// Forward-declare policyEngine so session callback closure can reference it
+	// Forward-declare so session callback closure can reference them
 	var policyEngine *policy.Engine
+	var tp *telemetry.Provider
 
 	// Initialize SQLite storage for session history
 	var sqliteStore *storage.SQLiteStore
@@ -167,11 +168,37 @@ func main() {
 			if err := sqliteStore.SaveSession(record); err != nil {
 				slog.Error("failed to save session to history", "session_id", snap.ID, "error", err)
 			}
+
+			// Export to telemetry (if enabled)
+			slog.Debug("checking telemetry export", "tp_nil", tp == nil, "tp_enabled", tp != nil && tp.Enabled())
+			if tp != nil && tp.Enabled() {
+				telemRecord := telemetry.SessionRecord{
+					SessionID:    snap.ID,
+					State:        snap.State.String(),
+					Backend:      snap.Backend,
+					ClientAddr:   snap.ClientAddr,
+					DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
+					RequestCount: snap.RequestCount,
+					BytesIn:      snap.BytesIn,
+					BytesOut:     snap.BytesOut,
+					CaptureCount: len(record.CapturedContent),
+				}
+				// Add violations
+				for _, v := range record.Violations {
+					telemRecord.Violations = append(telemRecord.Violations, telemetry.Violation{
+						RuleName:    v.RuleName,
+						Description: v.Description,
+						Severity:    v.Severity,
+						MatchedText: v.MatchedText,
+						Action:      v.Action,
+					})
+				}
+				tp.ExportSessionRecord(context.Background(), telemRecord)
+			}
 		})
 	}
 
 	// Initialize telemetry (graceful degradation if initialization fails)
-	var tp *telemetry.Provider
 	if cfg.Telemetry.Enabled {
 		var err error
 		tp, err = telemetry.NewProvider(telemetry.Config{
@@ -229,6 +256,11 @@ func main() {
 	if err != nil {
 		slog.Error("failed to create proxy", "error", err)
 		os.Exit(1)
+	}
+
+	// Set storage for immediate persistence of flagged sessions
+	if sqliteStore != nil {
+		proxyHandler.SetStorage(sqliteStore)
 	}
 
 	// Initialize control API

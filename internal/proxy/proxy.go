@@ -15,6 +15,7 @@ import (
 	"elida/internal/policy"
 	"elida/internal/router"
 	"elida/internal/session"
+	"elida/internal/storage"
 	"elida/internal/telemetry"
 )
 
@@ -26,6 +27,7 @@ type Proxy struct {
 	router    *router.Router
 	telemetry *telemetry.Provider
 	policy    *policy.Engine
+	storage   *storage.SQLiteStore // For persisting flagged sessions immediately
 }
 
 // New creates a new proxy handler
@@ -76,6 +78,11 @@ func NewWithRouter(cfg *config.Config, store session.Store, manager *session.Man
 		telemetry: tp,
 		policy:    pe,
 	}, nil
+}
+
+// SetStorage sets the SQLite storage for persisting flagged sessions immediately
+func (p *Proxy) SetStorage(s *storage.SQLiteStore) {
+	p.storage = s
 }
 
 // ServeHTTP handles incoming requests
@@ -354,8 +361,12 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 				)
 				return p.writeBlockedResponse(w, "Response content violates security policy", false)
 			}
-			// Flagged but not blocked - capture response for review
-			p.policy.UpdateLastCaptureWithResponse(sess.ID, string(responseBody))
+		}
+		// Capture response for any flagged session (even if response itself has no violations)
+		if p.policy.IsFlagged(sess.ID) {
+			p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, string(responseBody), resp.StatusCode)
+			// Persist flagged session immediately to survive crashes
+			p.persistFlaggedSession(sess, backend.Name)
 		}
 	}
 
@@ -393,7 +404,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 
 	if !hasBlockingRules {
 		// No blocking rules - stream directly with async scan for flag-only rules
-		return p.handleStreamingDirect(w, resp, sess, isSSE)
+		return p.handleStreamingDirect(w, resp, sess, backend, isSSE)
 	}
 
 	// Determine streaming scan mode from config
@@ -406,19 +417,19 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 	case "buffered":
 		// Full buffer mode - accumulate entire response before sending
 		// Higher latency but guaranteed pattern detection
-		return p.handleStreamingWithBuffer(w, resp, sess, isSSE)
+		return p.handleStreamingWithBuffer(w, resp, sess, backend, isSSE)
 	case "chunked":
 		fallthrough
 	default:
 		// Chunked mode - scan as chunks arrive with overlap buffer
 		// Lower latency, real-time termination on detection
-		return p.handleStreamingChunked(w, resp, sess, isSSE)
+		return p.handleStreamingChunked(w, resp, sess, backend, isSSE)
 	}
 }
 
 // handleStreamingWithBuffer accumulates the full response before sending
 // Used when block/terminate response rules are configured (adds latency)
-func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Response, sess *session.Session, isSSE bool) (int, int64) {
+func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Response, sess *session.Session, backend *router.Backend, isSSE bool) (int, int64) {
 	// Accumulate entire response before sending
 	var buffer bytes.Buffer
 	buf := make([]byte, 4096)
@@ -467,8 +478,12 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 				)
 				return p.writeBlockedResponse(w, "Streaming response violates security policy", false)
 			}
-			// Flagged but not blocked - capture response
-			p.policy.UpdateLastCaptureWithResponse(sess.ID, responseBody)
+		}
+		// Capture response for any flagged session (even if response itself has no violations)
+		if p.policy.IsFlagged(sess.ID) {
+			p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, responseBody, resp.StatusCode)
+			// Persist flagged session immediately to survive crashes
+			p.persistFlaggedSession(sess, backend.Name)
 		}
 	}
 
@@ -500,7 +515,7 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 
 // handleStreamingChunked scans chunks as they arrive with overlap for cross-boundary patterns
 // Low latency: chunks are forwarded immediately, stream terminated on detection
-func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Response, sess *session.Session, isSSE bool) (int, int64) {
+func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Response, sess *session.Session, backend *router.Backend, isSSE bool) (int, int64) {
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -621,7 +636,9 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 		for _, chunk := range chunks {
 			response.WriteString(chunk)
 		}
-		p.policy.UpdateLastCaptureWithResponse(sess.ID, response.String())
+		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, response.String(), resp.StatusCode)
+		// Persist flagged session immediately to survive crashes
+		p.persistFlaggedSession(sess, backend.Name)
 	}
 
 	slog.Debug("chunked streaming response complete",
@@ -636,7 +653,7 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 
 // handleStreamingDirect streams directly to client with async scanning
 // Used when only flag actions are configured (no latency impact)
-func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response, sess *session.Session, isSSE bool) (int, int64) {
+func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response, sess *session.Session, backend *router.Backend, isSSE bool) (int, int64) {
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -664,7 +681,7 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 		case <-sess.KillChan():
 			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
 			// Still do async scan on what we have
-			go p.asyncScanResponse(sess.ID, chunks)
+			go p.asyncScanResponse(sess, backend, chunks, resp.StatusCode)
 			return resp.StatusCode, totalBytes
 		default:
 		}
@@ -708,13 +725,13 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
 	// Async scan for flag-only response rules (no latency impact)
-	go p.asyncScanResponse(sess.ID, chunks)
+	go p.asyncScanResponse(sess, backend, chunks, resp.StatusCode)
 
 	return resp.StatusCode, totalBytes
 }
 
 // asyncScanResponse scans response content asynchronously for flag-only rules
-func (p *Proxy) asyncScanResponse(sessionID string, chunks []string) {
+func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend, chunks []string, statusCode int) {
 	if p.policy == nil {
 		return
 	}
@@ -730,18 +747,22 @@ func (p *Proxy) asyncScanResponse(sessionID string, chunks []string) {
 		return
 	}
 
-	if result := p.policy.EvaluateResponseContent(sessionID, content); result != nil {
+	if result := p.policy.EvaluateResponseContent(sess.ID, content); result != nil {
 		// Log violations (already logged in EvaluateResponseContent, but add async context)
 		for _, v := range result.Violations {
 			slog.Info("async response scan: violation detected",
-				"session_id", sessionID,
+				"session_id", sess.ID,
 				"rule", v.RuleName,
 				"severity", v.Severity,
 				"action", v.Action,
 			)
 		}
-		// Capture response for flagged sessions
-		p.policy.UpdateLastCaptureWithResponse(sessionID, content)
+	}
+	// Capture response for flagged sessions (even if response itself has no violations)
+	if p.policy.IsFlagged(sess.ID) {
+		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, content, statusCode)
+		// Persist flagged session immediately to survive crashes
+		p.persistFlaggedSession(sess, backend.Name)
 	}
 }
 
@@ -850,5 +871,67 @@ func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 			req.Host = defaultBackend.URL.Host
 		},
 		Transport: defaultBackend.Transport,
+	}
+}
+
+// persistFlaggedSession saves a flagged session to storage immediately
+// This ensures forensic data survives crashes
+func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string) {
+	if p.storage == nil || p.policy == nil {
+		return
+	}
+
+	// Only persist if session is flagged
+	if !p.policy.IsFlagged(sess.ID) {
+		return
+	}
+
+	flaggedData := p.policy.GetFlaggedSession(sess.ID)
+	if flaggedData == nil {
+		return
+	}
+
+	// Build session record
+	record := storage.SessionRecord{
+		ID:           sess.ID,
+		State:        "flagged",
+		StartTime:    sess.StartTime,
+		EndTime:      time.Now(),
+		DurationMs:   sess.Duration().Milliseconds(),
+		RequestCount: sess.RequestCount,
+		BytesIn:      sess.BytesIn,
+		BytesOut:     sess.BytesOut,
+		Backend:      backendName,
+		ClientAddr:   sess.ClientAddr,
+	}
+
+	// Add captured content
+	for _, c := range flaggedData.CapturedContent {
+		record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
+			Timestamp:    c.Timestamp,
+			Method:       c.Method,
+			Path:         c.Path,
+			RequestBody:  c.RequestBody,
+			ResponseBody: c.ResponseBody,
+			StatusCode:   c.StatusCode,
+		})
+	}
+
+	// Add violations
+	for _, v := range flaggedData.Violations {
+		record.Violations = append(record.Violations, storage.Violation{
+			RuleName:    v.RuleName,
+			Description: v.Description,
+			Severity:    string(v.Severity),
+			MatchedText: v.MatchedText,
+			Action:      string(v.Action),
+		})
+	}
+
+	// Save to storage (upserts if exists)
+	if err := p.storage.SaveSession(record); err != nil {
+		slog.Error("failed to persist flagged session", "session_id", sess.ID, "error", err)
+	} else {
+		slog.Debug("persisted flagged session", "session_id", sess.ID, "violations", len(record.Violations))
 	}
 }

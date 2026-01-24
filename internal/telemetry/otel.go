@@ -134,7 +134,37 @@ const (
 	AttrRequestPath   = "url.path"
 	AttrResponseCode  = "http.response.status_code"
 	AttrStreaming     = "elida.streaming"
+
+	// Violation attributes
+	AttrViolationCount    = "elida.violations.count"
+	AttrViolationRules    = "elida.violations.rules"
+	AttrViolationSeverity = "elida.violations.max_severity"
+	AttrViolationActions  = "elida.violations.actions"
+	AttrCaptureCount      = "elida.captures.count"
 )
+
+// Violation represents a policy violation for telemetry export
+type Violation struct {
+	RuleName    string
+	Description string
+	Severity    string
+	MatchedText string
+	Action      string
+}
+
+// SessionRecord contains all data for telemetry export
+type SessionRecord struct {
+	SessionID    string
+	State        string
+	Backend      string
+	ClientAddr   string
+	DurationMs   int64
+	RequestCount int
+	BytesIn      int64
+	BytesOut     int64
+	Violations   []Violation
+	CaptureCount int
+}
 
 // StartRequestSpan starts a span for an HTTP request
 func (p *Provider) StartRequestSpan(ctx context.Context, sessionID, method, path string, streaming bool) (context.Context, trace.Span) {
@@ -200,6 +230,69 @@ func (p *Provider) RecordSessionEnded(ctx context.Context, sessionID, state, bac
 		"requests", requestCount,
 		"bytes_in", bytesIn,
 		"bytes_out", bytesOut,
+	)
+}
+
+// ExportSessionRecord exports a complete session record with violations to telemetry
+func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord) {
+	if !p.Enabled() {
+		return
+	}
+
+	// Build violation rule names and actions for attributes
+	var ruleNames []string
+	var actions []string
+	maxSeverity := "info"
+	severityOrder := map[string]int{"info": 0, "warning": 1, "critical": 2}
+
+	for _, v := range record.Violations {
+		ruleNames = append(ruleNames, v.RuleName)
+		actions = append(actions, v.Action)
+		if severityOrder[v.Severity] > severityOrder[maxSeverity] {
+			maxSeverity = v.Severity
+		}
+	}
+
+	// Create session record span with all attributes
+	_, span := p.tracer.Start(ctx, "session.record",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String(AttrSessionID, record.SessionID),
+			attribute.String(AttrSessionState, record.State),
+			attribute.String(AttrBackend, record.Backend),
+			attribute.String(AttrClientAddr, record.ClientAddr),
+			attribute.Int64(AttrDurationMs, record.DurationMs),
+			attribute.Int(AttrRequestCount, record.RequestCount),
+			attribute.Int64(AttrBytesIn, record.BytesIn),
+			attribute.Int64(AttrBytesOut, record.BytesOut),
+			attribute.Int(AttrViolationCount, len(record.Violations)),
+			attribute.StringSlice(AttrViolationRules, ruleNames),
+			attribute.String(AttrViolationSeverity, maxSeverity),
+			attribute.StringSlice(AttrViolationActions, actions),
+			attribute.Int(AttrCaptureCount, record.CaptureCount),
+		),
+	)
+
+	// Add individual violation events for detailed tracking
+	for _, v := range record.Violations {
+		span.AddEvent("policy.violation",
+			trace.WithAttributes(
+				attribute.String("rule_name", v.RuleName),
+				attribute.String("description", v.Description),
+				attribute.String("severity", v.Severity),
+				attribute.String("matched_text", v.MatchedText),
+				attribute.String("action", v.Action),
+			),
+		)
+	}
+
+	span.End()
+
+	slog.Debug("session record exported to telemetry",
+		"session_id", record.SessionID,
+		"state", record.State,
+		"violations", len(record.Violations),
+		"captures", record.CaptureCount,
 	)
 }
 

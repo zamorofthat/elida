@@ -1,4 +1,4 @@
-.PHONY: build run test clean docker
+.PHONY: build run stop restart run-policy run-demo test clean docker
 
 # Build variables
 BINARY_NAME=elida
@@ -17,6 +17,23 @@ run: build
 # Run with hot reload (requires air: go install github.com/cosmtrek/air@latest)
 dev:
 	air
+
+# Stop running ELIDA server
+stop:
+	@pkill -f "bin/${BINARY_NAME}" 2>/dev/null || echo "ELIDA not running"
+
+# Restart ELIDA server
+restart: stop build
+	@sleep 0.5
+	./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Run with policy engine enabled
+run-policy: build
+	ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Run with policy + storage (demo mode)
+run-demo: build
+	ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ./bin/${BINARY_NAME} -config configs/elida.yaml
 
 # Run unit tests (no external dependencies)
 test:

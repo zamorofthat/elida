@@ -483,6 +483,11 @@ func (e *Engine) CaptureRequest(sessionID string, req CapturedRequest) {
 
 // UpdateLastCaptureWithResponse updates the most recent captured request with response body
 func (e *Engine) UpdateLastCaptureWithResponse(sessionID, responseBody string) {
+	e.UpdateLastCaptureWithResponseAndStatus(sessionID, responseBody, 0)
+}
+
+// UpdateLastCaptureWithResponseAndStatus updates the most recent captured request with response body and status code
+func (e *Engine) UpdateLastCaptureWithResponseAndStatus(sessionID, responseBody string, statusCode int) {
 	if !e.captureContent {
 		return
 	}
@@ -495,12 +500,15 @@ func (e *Engine) UpdateLastCaptureWithResponse(sessionID, responseBody string) {
 		return
 	}
 
-	// Update the last captured request with response body
+	// Update the last captured request with response body and status code
 	lastIdx := len(flagged.CapturedContent) - 1
 	if len(responseBody) > e.maxCaptureSize {
 		responseBody = responseBody[:e.maxCaptureSize] + "...[truncated]"
 	}
 	flagged.CapturedContent[lastIdx].ResponseBody = responseBody
+	if statusCode != 0 {
+		flagged.CapturedContent[lastIdx].StatusCode = statusCode
+	}
 }
 
 // IsFlagged checks if a session is flagged
