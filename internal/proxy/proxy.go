@@ -19,6 +19,11 @@ import (
 	"elida/internal/telemetry"
 )
 
+// WebSocketHandler is an interface for the WebSocket handler to avoid import cycle
+type WebSocketHandler interface {
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
 // Proxy handles proxying requests to the backend
 type Proxy struct {
 	config    *config.Config
@@ -28,6 +33,7 @@ type Proxy struct {
 	telemetry *telemetry.Provider
 	policy    *policy.Engine
 	storage   *storage.SQLiteStore // For persisting flagged sessions immediately
+	wsHandler WebSocketHandler     // WebSocket proxy handler
 }
 
 // New creates a new proxy handler
@@ -85,8 +91,36 @@ func (p *Proxy) SetStorage(s *storage.SQLiteStore) {
 	p.storage = s
 }
 
+// SetWebSocketHandler sets the WebSocket handler for proxying WebSocket connections
+func (p *Proxy) SetWebSocketHandler(h WebSocketHandler) {
+	p.wsHandler = h
+}
+
+// GetRouter returns the router for use by the WebSocket handler
+func (p *Proxy) GetRouter() *router.Router {
+	return p.router
+}
+
+// isWebSocketRequest checks if the request is a WebSocket upgrade request
+func isWebSocketRequest(r *http.Request) bool {
+	connection := r.Header.Get("Connection")
+	upgrade := r.Header.Get("Upgrade")
+
+	hasUpgrade := strings.Contains(strings.ToLower(connection), "upgrade")
+	isWebSocket := strings.EqualFold(upgrade, "websocket")
+
+	return hasUpgrade && isWebSocket
+}
+
 // ServeHTTP handles incoming requests
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check for WebSocket upgrade BEFORE reading body
+	// Body cannot be read during WebSocket handshake
+	if p.wsHandler != nil && isWebSocketRequest(r) {
+		p.wsHandler.ServeHTTP(w, r)
+		return
+	}
+
 	startTime := time.Now()
 	ctx := r.Context()
 

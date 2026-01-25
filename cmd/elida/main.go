@@ -28,6 +28,7 @@ import (
 	"elida/internal/session"
 	"elida/internal/storage"
 	"elida/internal/telemetry"
+	"elida/internal/websocket"
 )
 
 func main() {
@@ -263,8 +264,36 @@ func main() {
 		proxyHandler.SetStorage(sqliteStore)
 	}
 
+	// Initialize WebSocket handler if enabled
+	var wsHandler *websocket.Handler
+	if cfg.WebSocket.Enabled {
+		wsHandler = websocket.NewHandler(
+			&cfg.WebSocket,
+			cfg.Session.Header,
+			manager,
+			proxyHandler.GetRouter(),
+		)
+		proxyHandler.SetWebSocketHandler(wsHandler)
+
+		// Wire up policy engine for text frame scanning
+		if policyEngine != nil {
+			wsHandler.SetPolicyEngine(policyEngine)
+			slog.Info("WebSocket policy scanning enabled",
+				"scan_text_frames", cfg.WebSocket.ScanTextFrames,
+			)
+		}
+
+		slog.Info("WebSocket proxy enabled",
+			"ping_interval", cfg.WebSocket.PingInterval,
+			"max_message_size", cfg.WebSocket.MaxMessageSize,
+		)
+	}
+
 	// Initialize control API
 	controlHandler := control.NewWithPolicy(store, manager, sqliteStore, policyEngine)
+	if wsHandler != nil {
+		controlHandler.SetWebSocketHandler(wsHandler)
+	}
 
 	// Setup HTTP servers
 	proxyServer := &http.Server{

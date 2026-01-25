@@ -12,6 +12,7 @@ import (
 	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
+	"elida/internal/websocket"
 )
 
 // Handler handles control API requests
@@ -20,6 +21,7 @@ type Handler struct {
 	manager      *session.Manager
 	historyStore *storage.SQLiteStore
 	policyEngine *policy.Engine
+	wsHandler    *websocket.Handler
 	dashboard    *dashboard.Handler
 	mux          *http.ServeMux
 }
@@ -65,7 +67,16 @@ func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *
 	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
 	h.mux.HandleFunc("/control/flagged/", h.handleFlaggedSession)
 
+	// Voice sessions endpoints
+	h.mux.HandleFunc("/control/voice", h.handleVoiceSessions)
+	h.mux.HandleFunc("/control/voice/", h.handleVoiceSession)
+
 	return h
+}
+
+// SetWebSocketHandler sets the WebSocket handler for voice session access
+func (h *Handler) SetWebSocketHandler(wsHandler *websocket.Handler) {
+	h.wsHandler = wsHandler
 }
 
 // ServeHTTP implements http.Handler
@@ -555,4 +566,204 @@ func (h *Handler) handleFlaggedSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, flagged)
+}
+
+// handleVoiceSessions handles GET /control/voice - list all voice sessions
+func (h *Handler) handleVoiceSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.wsHandler == nil {
+		http.Error(w, "WebSocket handler not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Collect all voice sessions across all WebSocket connections
+	managers := h.wsHandler.ListVoiceManagers()
+	allSessions := make([]websocket.VoiceSessionInfo, 0)
+	stats := make(map[string]int)
+
+	for sessionID, mgr := range managers {
+		sessions := h.wsHandler.ListVoiceSessions(sessionID)
+		allSessions = append(allSessions, sessions...)
+
+		// Count by state
+		for _, vs := range sessions {
+			stats[vs.State]++
+		}
+		mgrStats := mgr.Stats()
+		stats["active"] = mgrStats.ActiveSessions
+		stats["completed"] = mgrStats.CompletedSessions
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"voice_sessions":    allSessions,
+		"total":             len(allSessions),
+		"websocket_sessions": len(managers),
+		"stats":             stats,
+	})
+}
+
+// handleVoiceSession handles requests to /control/voice/{sessionID}
+// Path patterns:
+//   GET /control/voice/{sessionID} - List voice sessions for a WebSocket session
+//   GET /control/voice/{sessionID}/{voiceID} - Get a specific voice session
+//   POST /control/voice/{sessionID}/{voiceID}/bye - End a voice session
+//   POST /control/voice/{sessionID}/{voiceID}/hold - Put on hold
+//   POST /control/voice/{sessionID}/{voiceID}/resume - Resume from hold
+func (h *Handler) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
+	if h.wsHandler == nil {
+		http.Error(w, "WebSocket handler not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse path: /control/voice/{sessionID}/{voiceID?}/{action?}
+	path := strings.TrimPrefix(r.URL.Path, "/control/voice/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := parts[0]
+	voiceID := ""
+	action := ""
+
+	if len(parts) > 1 {
+		voiceID = parts[1]
+	}
+	if len(parts) > 2 {
+		action = parts[2]
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if voiceID == "" {
+			// List voice sessions for this WebSocket session
+			h.listVoiceSessions(w, sessionID)
+		} else {
+			// Get specific voice session
+			h.getVoiceSession(w, sessionID, voiceID)
+		}
+	case http.MethodPost:
+		if voiceID == "" {
+			http.Error(w, "Voice session ID required", http.StatusBadRequest)
+			return
+		}
+		switch action {
+		case "bye":
+			h.endVoiceSession(w, r, sessionID, voiceID)
+		case "hold":
+			h.holdVoiceSession(w, sessionID, voiceID)
+		case "resume":
+			h.resumeVoiceSession(w, sessionID, voiceID)
+		default:
+			http.Error(w, "Unknown action. Use: bye, hold, or resume", http.StatusBadRequest)
+		}
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// listVoiceSessions handles GET /control/voice/{sessionID}
+func (h *Handler) listVoiceSessions(w http.ResponseWriter, sessionID string) {
+	sessions := h.wsHandler.ListVoiceSessions(sessionID)
+	if sessions == nil {
+		http.Error(w, "WebSocket session not found or has no voice sessions", http.StatusNotFound)
+		return
+	}
+
+	mgr := h.wsHandler.GetVoiceManager(sessionID)
+	var stats interface{}
+	if mgr != nil {
+		stats = mgr.Stats()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id":     sessionID,
+		"voice_sessions": sessions,
+		"total":          len(sessions),
+		"stats":          stats,
+	})
+}
+
+// getVoiceSession handles GET /control/voice/{sessionID}/{voiceID}
+func (h *Handler) getVoiceSession(w http.ResponseWriter, sessionID, voiceID string) {
+	vs := h.wsHandler.GetVoiceSession(sessionID, voiceID)
+	if vs == nil {
+		http.Error(w, "Voice session not found", http.StatusNotFound)
+		return
+	}
+
+	info := websocket.VoiceSessionInfo{
+		ID:              vs.ID,
+		ParentSessionID: vs.ParentSessionID,
+		State:           vs.GetState().String(),
+		AudioFramesIn:   vs.AudioFramesIn,
+		AudioFramesOut:  vs.AudioFramesOut,
+		AudioBytesIn:    vs.AudioBytesIn,
+		AudioBytesOut:   vs.AudioBytesOut,
+		AudioDurationMs: vs.AudioDurationMs,
+		TurnCount:       vs.TurnCount,
+		Model:           vs.Model,
+		Voice:           vs.Voice,
+		Language:        vs.Language,
+		Metadata:        vs.Metadata,
+	}
+
+	writeJSON(w, http.StatusOK, info)
+}
+
+// endVoiceSession handles POST /control/voice/{sessionID}/{voiceID}/bye
+func (h *Handler) endVoiceSession(w http.ResponseWriter, r *http.Request, sessionID, voiceID string) {
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		reason = "api_request"
+	}
+
+	slog.Info("voice session end request", "session_id", sessionID, "voice_id", voiceID, "reason", reason)
+
+	if h.wsHandler.EndVoiceSession(sessionID, voiceID, reason) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "ended",
+			"session_id": sessionID,
+			"voice_id":   voiceID,
+			"reason":     reason,
+		})
+	} else {
+		http.Error(w, "Voice session not found or already ended", http.StatusNotFound)
+	}
+}
+
+// holdVoiceSession handles POST /control/voice/{sessionID}/{voiceID}/hold
+func (h *Handler) holdVoiceSession(w http.ResponseWriter, sessionID, voiceID string) {
+	slog.Info("voice session hold request", "session_id", sessionID, "voice_id", voiceID)
+
+	if h.wsHandler.HoldVoiceSession(sessionID, voiceID) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "held",
+			"session_id": sessionID,
+			"voice_id":   voiceID,
+		})
+	} else {
+		http.Error(w, "Voice session not found or not in active state", http.StatusNotFound)
+	}
+}
+
+// resumeVoiceSession handles POST /control/voice/{sessionID}/{voiceID}/resume
+func (h *Handler) resumeVoiceSession(w http.ResponseWriter, sessionID, voiceID string) {
+	slog.Info("voice session resume request", "session_id", sessionID, "voice_id", voiceID)
+
+	if h.wsHandler.ResumeVoiceSession(sessionID, voiceID) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "resumed",
+			"session_id": sessionID,
+			"voice_id":   voiceID,
+		})
+	} else {
+		http.Error(w, "Voice session not found or not in held state", http.StatusNotFound)
+	}
 }

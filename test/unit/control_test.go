@@ -267,3 +267,52 @@ func TestHandler_CORS(t *testing.T) {
 		t.Errorf("expected status 200 for OPTIONS, got %d", w.Code)
 	}
 }
+
+func TestHandler_VoiceSessions_NoWebSocketHandler(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	// When WebSocket handler is not set, should return 503
+	req := httptest.NewRequest("GET", "/control/voice", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503 when WebSocket handler not set, got %d", w.Code)
+	}
+}
+
+func TestHandler_VoiceSession_NoWebSocketHandler(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	// When WebSocket handler is not set, should return 503
+	req := httptest.NewRequest("GET", "/control/voice/session-123", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503 when WebSocket handler not set, got %d", w.Code)
+	}
+}
+
+func TestHandler_VoiceSession_Actions_NoWebSocketHandler(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	// POST actions should also return 503 when WebSocket handler is not set
+	tests := []struct {
+		path string
+	}{
+		{"/control/voice/session-123/voice-1/bye"},
+		{"/control/voice/session-123/voice-1/hold"},
+		{"/control/voice/session-123/voice-1/resume"},
+	}
+
+	for _, tt := range tests {
+		req := httptest.NewRequest("POST", tt.path, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: expected status 503 when WebSocket handler not set, got %d", tt.path, w.Code)
+		}
+	}
+}

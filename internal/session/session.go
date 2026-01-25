@@ -52,6 +52,12 @@ type Session struct {
 	// Terminated sessions cannot be resumed (for malicious agents)
 	Terminated bool `json:"terminated,omitempty"`
 
+	// WebSocket session fields
+	IsWebSocket  bool  `json:"is_websocket,omitempty"`
+	FrameCount   int64 `json:"frame_count,omitempty"`
+	TextFrames   int64 `json:"text_frames,omitempty"`
+	BinaryFrames int64 `json:"binary_frames,omitempty"`
+
 	// For rate limiting - track recent request times
 	RequestTimes []time.Time `json:"-"`
 
@@ -106,6 +112,52 @@ func (s *Session) AddBytes(in, out int64) {
 	defer s.mu.Unlock()
 	s.BytesIn += in
 	s.BytesOut += out
+}
+
+// FrameType represents the type of WebSocket frame
+type FrameType int
+
+const (
+	FrameText FrameType = iota
+	FrameBinary
+)
+
+// FrameDirection represents the direction of a WebSocket frame
+type FrameDirection int
+
+const (
+	FrameInbound FrameDirection = iota
+	FrameOutbound
+)
+
+// AddFrame records a WebSocket frame and updates byte counters
+func (s *Session) AddFrame(frameType FrameType, size int64, direction FrameDirection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.FrameCount++
+	s.LastActivity = time.Now()
+
+	switch frameType {
+	case FrameText:
+		s.TextFrames++
+	case FrameBinary:
+		s.BinaryFrames++
+	}
+
+	switch direction {
+	case FrameInbound:
+		s.BytesIn += size
+	case FrameOutbound:
+		s.BytesOut += size
+	}
+}
+
+// SetWebSocket marks this session as a WebSocket session
+func (s *Session) SetWebSocket() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.IsWebSocket = true
 }
 
 // RecordBackend tracks which backend was used for a request
@@ -259,6 +311,10 @@ func (s *Session) Snapshot() Session {
 		ClientAddr:   s.ClientAddr,
 		Metadata:     make(map[string]string, len(s.Metadata)),
 		BackendsUsed: make(map[string]int, len(s.BackendsUsed)),
+		IsWebSocket:  s.IsWebSocket,
+		FrameCount:   s.FrameCount,
+		TextFrames:   s.TextFrames,
+		BinaryFrames: s.BinaryFrames,
 	}
 	for k, v := range s.Metadata {
 		snap.Metadata[k] = v

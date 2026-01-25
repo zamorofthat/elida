@@ -20,6 +20,532 @@ The developer's grandmother, Elida. Also an acronym: **E**dge **L**ayer for **I*
 
 ## Recent Changes (January 2026)
 
+### WebSocket Support & Voice Session Tracking
+
+Added WebSocket proxy support for real-time AI agents (OpenAI Realtime API, Deepgram, ElevenLabs, LiveKit). Features SIP-inspired voice session control for per-conversation tracking and transcripts.
+
+**Key Concepts:**
+
+| Term | Description |
+|------|-------------|
+| **WebSocket Session** | The underlying WebSocket connection (1 per client) |
+| **Voice Session** | A single conversation within a WebSocket (like a phone call) |
+| **INVITE** | Start a new voice session (detected from protocol messages) |
+| **BYE** | End a voice session |
+| **Transcript** | Captured text from STT/TTS during the conversation |
+
+**Voice Session States (SIP-inspired):**
+```
+Idle → Inviting → Active → Held → Terminated
+                    ↑         ↓
+                    └─────────┘ (Resume)
+```
+
+**Supported Protocols:**
+
+| Protocol | INVITE Signal | BYE Signal | Transcript Source |
+|----------|---------------|------------|-------------------|
+| **OpenAI Realtime** | `session.create` | `error` or close | `response.audio_transcript.*`, `conversation.item.input_audio_transcription.*` |
+| **Deepgram** | `Metadata` | close | `Results` with `channel.alternatives[].transcript` |
+| **ElevenLabs** | `voice_settings` | `flush` | `text` field (TTS input) |
+| **LiveKit** | `participant_joined` | `participant_left` | - |
+| **Custom** | Regex pattern | Regex pattern | - |
+
+**Voice Session API Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/control/voice` | GET | List all voice sessions |
+| `/control/voice/{wsSessionID}` | GET | List voice sessions for a WebSocket |
+| `/control/voice/{wsSessionID}/{voiceID}` | GET | Get voice session with transcript |
+| `/control/voice/{wsSessionID}/{voiceID}/bye` | POST | End voice session |
+| `/control/voice/{wsSessionID}/{voiceID}/hold` | POST | Put on hold |
+| `/control/voice/{wsSessionID}/{voiceID}/resume` | POST | Resume from hold |
+
+**Example API Response with Transcript:**
+```json
+{
+  "id": "a1b2c3d4",
+  "parent_session_id": "ws-session-123",
+  "state": "active",
+  "turn_count": 3,
+  "audio_duration_ms": 45000,
+  "model": "gpt-4o-realtime",
+  "voice": "alloy",
+  "transcript": [
+    {
+      "timestamp": "2026-01-24T21:15:00Z",
+      "speaker": "user",
+      "text": "Hello, how are you?",
+      "is_final": true,
+      "source": "stt"
+    },
+    {
+      "timestamp": "2026-01-24T21:15:02Z",
+      "speaker": "assistant",
+      "text": "I'm doing well! How can I help you today?",
+      "is_final": true,
+      "source": "stt"
+    }
+  ]
+}
+```
+
+**Configuration:**
+```yaml
+websocket:
+  enabled: true
+  voice_sessions:
+    enabled: true
+    max_concurrent: 5
+    cdr_per_session: true
+    protocols:
+      - openai_realtime
+      - deepgram
+      - elevenlabs
+```
+
+**Files added:**
+- `internal/websocket/handler.go` — WebSocket proxy handler
+- `internal/websocket/dial.go` — Backend connection handling
+- `internal/websocket/frame.go` — Frame processing
+- `internal/websocket/voice_session.go` — Voice session model and manager
+- `internal/websocket/session_control.go` — Protocol parsers for INVITE/BYE detection
+- `test/unit/websocket_test.go` — WebSocket tests
+- `test/unit/voice_session_test.go` — Voice session tests
+
+**Files modified:**
+- `internal/config/config.go` — Added WebSocketConfig, VoiceSessionConfig
+- `internal/session/session.go` — Added WebSocket tracking fields
+- `internal/router/router.go` — Added WSURL derivation
+- `internal/proxy/proxy.go` — Added WebSocket detection
+- `internal/control/api.go` — Added voice session API endpoints
+- `cmd/elida/main.go` — WebSocket handler initialization
+
+### Voice/Speech Services Reference
+
+ELIDA supports proxying to various voice AI services. Here's a reference for supported services, pricing, and how to test.
+
+#### Service Comparison
+
+| Service | Type | Free Tier | Paid Pricing | WebSocket API |
+|---------|------|-----------|--------------|---------------|
+| **Deepgram** | STT | 200 mins/month | ~$0.0043/min | ✅ Yes |
+| **AssemblyAI** | STT | 100 hrs one-time | ~$0.01/min | ✅ Yes |
+| **ElevenLabs** | TTS | 10K chars/month | ~$0.30/1K chars | ✅ Yes |
+| **OpenAI Realtime** | STT+LLM+TTS | ❌ None | ~$0.06/min + tokens | ✅ Yes |
+| **OpenAI Whisper** | STT (batch) | ❌ None | $0.006/min | ❌ REST only |
+| **Google Cloud STT** | STT | 60 mins/month | $0.016/min | ✅ Yes |
+| **Azure Speech** | STT/TTS | 5 hrs/month | $0.016/min | ✅ Yes |
+
+**Legend:**
+- **STT** = Speech-to-Text (transcribes audio to text)
+- **TTS** = Text-to-Speech (generates audio from text)
+- **STT+LLM+TTS** = Full conversational AI (speech in, speech out)
+
+#### Deepgram (Recommended for Testing)
+
+Best free tier for STT testing. 200 free minutes/month, no credit card required.
+
+**Sign up:** https://deepgram.com
+
+**Backend config:**
+```yaml
+backends:
+  deepgram:
+    url: "wss://api.deepgram.com/v1/listen"
+    type: deepgram
+
+websocket:
+  enabled: true
+  voice_sessions:
+    enabled: true
+    protocols: [deepgram]
+```
+
+**Test with wscat:**
+```bash
+# Through ELIDA
+wscat -c "ws://localhost:8080/v1/listen?model=nova-2" \
+  -H "Authorization: Token YOUR_DEEPGRAM_KEY"
+
+# Send audio data (binary) and receive transcripts
+```
+
+**What ELIDA captures:**
+- User speech transcripts (from `Results` messages)
+- Interim and final transcripts
+- Audio bytes in/out metrics
+
+#### ElevenLabs
+
+TTS service - converts text to natural-sounding speech. 10,000 free characters/month.
+
+**Sign up:** https://elevenlabs.io
+
+**Backend config:**
+```yaml
+backends:
+  elevenlabs:
+    url: "wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
+    type: elevenlabs
+```
+
+**What ELIDA captures:**
+- Text being synthesized (what assistant says)
+- Audio bytes out metrics
+
+#### OpenAI Realtime API
+
+Full conversational AI with speech input/output. No free tier, requires API access.
+
+**Backend config:**
+```yaml
+backends:
+  openai-realtime:
+    url: "wss://api.openai.com/v1/realtime"
+    type: openai
+
+websocket:
+  enabled: true
+  voice_sessions:
+    enabled: true
+    protocols: [openai_realtime]
+```
+
+**What ELIDA captures:**
+- User speech transcripts (`conversation.item.input_audio_transcription.completed`)
+- Assistant speech transcripts (`response.audio_transcript.done`)
+- Text responses (`response.text.done`)
+- Turn counts, audio duration, model/voice metadata
+
+#### Testing Without Paid Services
+
+**Option 1: Mock WebSocket Server (Completely Free)**
+
+Create a mock server that simulates OpenAI Realtime API:
+
+```bash
+# Create mock server
+cat > scripts/mock_voice_server.js << 'EOF'
+const WebSocket = require('ws');
+const wss = new WebSocket.Server({ port: 11434 });
+
+console.log('Mock voice server running on ws://localhost:11434');
+
+wss.on('connection', (ws) => {
+  console.log('Client connected');
+
+  // Send session.created on connect (simulates INVITE OK)
+  ws.send(JSON.stringify({
+    type: "session.created",
+    session: { id: "sess_mock_123", model: "gpt-4o-realtime", voice: "alloy" }
+  }));
+
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+      console.log('Received:', msg.type);
+
+      switch (msg.type) {
+        case "session.create":
+          // Already sent session.created on connect
+          break;
+
+        case "input_audio_buffer.commit":
+          // Simulate user speech transcription
+          ws.send(JSON.stringify({
+            type: "conversation.item.input_audio_transcription.completed",
+            transcript: "Hello, this is a test message from the user."
+          }));
+
+          // Simulate assistant response
+          setTimeout(() => {
+            ws.send(JSON.stringify({
+              type: "response.audio_transcript.done",
+              transcript: "Hi there! I received your message. How can I help you today?"
+            }));
+            ws.send(JSON.stringify({
+              type: "response.done",
+              response: { id: "resp_123", status: "completed" }
+            }));
+          }, 500);
+          break;
+
+        case "conversation.item.create":
+          // Handle text input
+          if (msg.item?.content?.[0]?.text) {
+            ws.send(JSON.stringify({
+              type: "response.text.done",
+              text: "I understand you said: " + msg.item.content[0].text
+            }));
+          }
+          break;
+      }
+    } catch (e) {
+      console.log('Received binary data:', data.length, 'bytes');
+    }
+  });
+
+  ws.on('close', () => console.log('Client disconnected'));
+});
+EOF
+
+# Install ws package and run
+npm install ws
+node scripts/mock_voice_server.js
+```
+
+**Test the mock server with ELIDA:**
+```bash
+# Terminal 1: Run mock server
+node scripts/mock_voice_server.js
+
+# Terminal 2: Run ELIDA pointing to mock server
+cat > /tmp/elida-test.yaml << 'EOF'
+listen: ":8080"
+backends:
+  mock:
+    url: "ws://localhost:11434"
+    default: true
+websocket:
+  enabled: true
+  voice_sessions:
+    enabled: true
+    protocols: [openai_realtime]
+control:
+  enabled: true
+  listen: ":9090"
+EOF
+
+./bin/elida -config /tmp/elida-test.yaml
+
+# Terminal 3: Connect through ELIDA
+wscat -c ws://localhost:8080
+
+# Send messages:
+{"type":"session.create","session":{"model":"gpt-4o-realtime"}}
+{"type":"input_audio_buffer.commit"}
+
+# Terminal 4: Check voice sessions with transcripts
+curl -s http://localhost:9090/control/voice | jq .
+```
+
+**Option 2: Local Whisper (Free, Self-Hosted STT)**
+
+Run speech-to-text locally using Whisper:
+
+```bash
+# Using whisper.cpp (C++, fast)
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+make
+./models/download-ggml-model.sh base
+./main -m models/ggml-base.bin -f samples/jfk.wav
+
+# Using faster-whisper (Python)
+pip install faster-whisper
+python -c "
+from faster_whisper import WhisperModel
+model = WhisperModel('base')
+segments, info = model.transcribe('audio.wav')
+for segment in segments:
+    print(segment.text)
+"
+```
+
+Note: Local Whisper is batch-mode only (not real-time WebSocket), but useful for testing transcription accuracy.
+
+**Option 3: Browser MediaRecorder + WebSocket**
+
+For testing real audio input through ELIDA:
+
+```html
+<!-- Save as test_voice.html, open in browser -->
+<!DOCTYPE html>
+<html>
+<head><title>ELIDA Voice Test</title></head>
+<body>
+  <button id="start">Start Recording</button>
+  <button id="stop" disabled>Stop</button>
+  <pre id="transcript"></pre>
+  <script>
+    const ws = new WebSocket('ws://localhost:8080/v1/listen?model=nova-2');
+    let mediaRecorder;
+
+    ws.onopen = () => console.log('Connected to ELIDA');
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.channel?.alternatives?.[0]?.transcript) {
+        document.getElementById('transcript').textContent +=
+          msg.channel.alternatives[0].transcript + '\n';
+      }
+    };
+
+    document.getElementById('start').onclick = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorder.ondataavailable = (e) => ws.send(e.data);
+      mediaRecorder.start(250); // Send chunks every 250ms
+      document.getElementById('start').disabled = true;
+      document.getElementById('stop').disabled = false;
+    };
+
+    document.getElementById('stop').onclick = () => {
+      mediaRecorder.stop();
+      document.getElementById('start').disabled = false;
+      document.getElementById('stop').disabled = true;
+    };
+  </script>
+</body>
+</html>
+```
+
+### WebSocket Policy Integration
+
+ELIDA applies policy scanning to WebSocket connections using a **telecom-inspired model**: real-time scanning for control messages, post-session analysis for voice transcripts.
+
+#### Two-Layer Scanning
+
+| Layer | When | What | Actions |
+|-------|------|------|---------|
+| **Real-time** | During connection | Text frames (JSON messages) | Block frame, terminate connection |
+| **Post-session** | Voice session ends | Full transcript | Flag for review, capture content |
+
+**Why this approach?**
+- Telecom/VoIP systems don't block calls based on content in real-time
+- Audio requires STT before text analysis (adds latency)
+- Transcripts are already captured from the voice service
+- Post-session scanning matches the CDR (Call Detail Record) pattern
+
+#### Real-Time Text Frame Scanning
+
+Text frames (JSON protocol messages) are scanned as they pass through:
+
+```
+Client → ELIDA → Backend
+         ↓
+   Policy check:
+   - Prompt injection in text?
+   - PII in messages?
+         ↓
+   Block frame or terminate
+```
+
+**Configuration:**
+```yaml
+websocket:
+  enabled: true
+  scan_text_frames: true  # Enable real-time scanning
+
+policy:
+  enabled: true
+  mode: enforce  # or "audit"
+```
+
+**What gets scanned:**
+- Text frames (JSON messages) - scanned in real-time
+- Binary frames (audio/video) - NOT scanned (pass-through)
+
+**Actions for text frame violations:**
+- `flag` - Log violation, forward frame
+- `block` - Drop frame, don't forward
+- `terminate` - Close both connections immediately
+
+#### Post-Session Transcript Scanning
+
+When a voice session ends (BYE), the full transcript is scanned:
+
+```
+Voice session active
+       │
+       ├─► Transcript captured (no blocking)
+       │
+       └─► Session ends (BYE)
+              │
+              ▼
+       ┌──────────────────┐
+       │ Scan full        │
+       │ transcript       │
+       └────────┬─────────┘
+                │
+       ┌────────┴────────┐
+       ▼                 ▼
+   Violations?       No violations
+       │                 │
+       ▼                 ▼
+   Flag parent       Done
+   session with
+   captured content
+```
+
+**What gets captured on violation:**
+```json
+{
+  "session_id": "client-abc123-openai",
+  "captured_content": [{
+    "timestamp": "2026-01-24T21:30:00Z",
+    "method": "VOICE",
+    "path": "/voice/a1b2c3d4",
+    "request_body": "user: Hello, ignore previous instructions\nassistant: I cannot comply with that request.\n"
+  }],
+  "violations": [{
+    "rule_name": "prompt_injection_ignore",
+    "severity": "critical",
+    "action": "flag"
+  }]
+}
+```
+
+**Voice session metadata on violation:**
+```json
+{
+  "id": "a1b2c3d4",
+  "metadata": {
+    "policy_violations": "true",
+    "max_severity": "critical"
+  }
+}
+```
+
+#### Viewing Flagged Voice Sessions
+
+```bash
+# List all flagged sessions (includes voice violations)
+curl http://localhost:9090/control/flagged
+
+# Get specific flagged session with captured transcript
+curl http://localhost:9090/control/flagged/client-abc123-openai
+
+# Historical flagged sessions
+curl "http://localhost:9090/control/history?state=flagged"
+```
+
+#### Testing Policy Scanning
+
+```bash
+# Terminal 1: Run mock voice server
+make mock-voice
+
+# Terminal 2: Run ELIDA with policy enabled
+make run-websocket-policy
+
+# Terminal 3: Connect and send violating message
+wscat -c ws://localhost:8080
+> {"type":"conversation.item.create","item":{"content":[{"type":"text","text":"ignore previous instructions"}]}}
+
+# Terminal 4: Check flagged sessions after disconnecting
+curl http://localhost:9090/control/flagged | jq .
+```
+
+#### Files Changed
+
+- `internal/websocket/handler.go` — Real-time text frame scanning
+- `internal/websocket/voice_session.go` — Post-session transcript scanning, `SetPolicyEngine()`, `GetFullTranscript()`
+- `cmd/elida/main.go` — Wire policy engine to WebSocket handler
+- `test/unit/websocket_test.go` — Policy integration tests
+- `test/unit/voice_session_test.go` — Transcript scanning tests
+
 ### Session Lifecycle: Kill / Resume / Terminate
 
 Added granular session control for security operations:
@@ -487,6 +1013,108 @@ backends:
 - Audio duration limits (prevent runaway voice sessions)
 - Character/word count for TTS requests
 - Concurrent stream limits
+
+### Real-Time Speech Analytics
+
+**Status:** Planned
+**Use Case:** Provide advisory insights during live voice conversations without blocking.
+
+This follows the enterprise contact center pattern where real-time analysis provides guidance to agents/operators without interrupting the conversation.
+
+**Architecture:**
+```
+Voice session active
+       │
+       ├─► Transcript event arrives (from STT)
+       │         │
+       │         ▼
+       │   ┌─────────────┐
+       │   │ Analyze     │
+       │   │ content     │
+       │   └──────┬──────┘
+       │          │
+       │          ▼
+       │   ┌─────────────┐
+       │   │ Emit alert  │──► Dashboard / Webhook / SSE
+       │   │ (advisory)  │
+       │   └─────────────┘
+       │
+       └─► Conversation continues (NOT blocked)
+```
+
+**Key principle:** Advisory only. Unlike post-session scanning which flags for review, real-time analytics provides live insights without interrupting the conversation.
+
+**Potential insights:**
+
+| Category | Examples |
+|----------|----------|
+| **Sentiment** | "Customer frustrated", "Positive tone" |
+| **Topics** | "Discussing refund", "Billing inquiry" |
+| **Compliance** | "Disclosure not read", "Missing verification" |
+| **Risk** | "PII mentioned", "Prompt injection attempt" |
+| **Coaching** | "Mention retention offer", "Escalate to supervisor" |
+
+**Implementation options:**
+
+| Approach | Latency | Use Case |
+|----------|---------|----------|
+| **Pattern matching** | ~0ms | Simple keyword detection |
+| **Local classifier** | 50-200ms | Sentiment, topic classification |
+| **LLM analysis** | 200-500ms | Complex reasoning, coaching suggestions |
+
+**Alert delivery mechanisms:**
+
+1. **WebSocket to dashboard** — Real-time UI updates
+2. **Webhook** — Integration with external systems (Slack, PagerDuty)
+3. **SSE endpoint** — Lightweight monitoring stream
+4. **Redis pub/sub** — Multi-instance alert distribution
+
+**Proposed config:**
+```yaml
+websocket:
+  voice_sessions:
+    enabled: true
+    realtime_analytics:
+      enabled: true
+      mode: advisory           # advisory (log only) or alert (emit events)
+      analyzers:
+        - type: sentiment
+          threshold: negative  # alert on negative sentiment
+        - type: pattern
+          patterns: ["refund", "cancel", "lawsuit"]
+          alert_name: "escalation_keywords"
+      alerts:
+        webhook: "https://hooks.slack.com/..."
+        sse_endpoint: true     # Enable /control/voice/alerts SSE stream
+```
+
+**Proposed API:**
+
+```bash
+# SSE stream of real-time alerts
+curl -N http://localhost:9090/control/voice/alerts
+
+# Example event:
+data: {"session_id":"abc123","voice_id":"v1","type":"sentiment","value":"negative","transcript":"I want to cancel everything","timestamp":"2026-01-24T21:30:00Z"}
+
+# Get alerts for specific session
+curl http://localhost:9090/control/voice/{wsSessionID}/{voiceID}/alerts
+```
+
+**Differs from current implementation:**
+
+| Current (Implemented) | Future (Real-Time Analytics) |
+|-----------------------|------------------------------|
+| Post-session scanning | During-session analysis |
+| Policy violations only | Sentiment, topics, coaching |
+| Flag for review | Live advisory alerts |
+| Captured in session record | Streamed to dashboard/webhook |
+
+**Implementation phases:**
+
+1. **Phase 1:** Pattern-based alerts (keyword detection)
+2. **Phase 2:** Sentiment analysis (local classifier)
+3. **Phase 3:** LLM-powered coaching (optional external call)
 
 ### LLM-as-Judge Content Moderation
 
@@ -1065,6 +1693,10 @@ make history            # View session history
 make history-stats      # View historical statistics
 make history-timeseries # View time series data
 
+# WebSocket / Voice Sessions
+make run-websocket      # Run with WebSocket proxy enabled
+make run-websocket-policy  # Run with WebSocket + policy scanning
+
 # Code quality
 make fmt                # Format code
 make lint               # Run golangci-lint (requires golangci-lint)
@@ -1090,6 +1722,13 @@ curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 
 # Flagged sessions
 curl http://localhost:9090/control/flagged                    # List flagged sessions
+
+# Voice sessions (WebSocket)
+curl http://localhost:9090/control/voice                      # List all voice sessions
+curl http://localhost:9090/control/voice/{wsSessionID}        # List voice sessions for WebSocket
+curl http://localhost:9090/control/voice/{wsSessionID}/{voiceID}  # Get voice session with transcript
+curl -X POST http://localhost:9090/control/voice/{wsSessionID}/{voiceID}/bye  # End voice session
+curl -X POST http://localhost:9090/control/voice/{wsSessionID}/{voiceID}/hold # Put on hold
 curl http://localhost:9090/control/flagged/{id}               # Get flagged session details
 curl "http://localhost:9090/control/history?state=flagged"    # Historical flagged sessions
 ```
