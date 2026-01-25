@@ -271,6 +271,37 @@ curl -H "X-Session-ID: my-agent-task-123" http://localhost:8080/api/generate ...
     └─────────────┘               └─────────────┘
 ```
 
+## Benchmarking
+
+ELIDA includes a benchmark suite for performance testing:
+
+```bash
+# Run all benchmarks
+./scripts/benchmark.sh
+
+# Compare policy modes (no-policy vs audit vs enforce)
+./scripts/benchmark.sh --compare-modes
+```
+
+### Sample Results
+
+| Metric | No Policy | Audit | Enforce |
+|--------|-----------|-------|---------|
+| Avg latency (ms) | 109 | 116 | 113 |
+| Blocked req latency (ms) | 107 | 100 | **49** |
+| Memory per session (KB) | 6 | 0 | 30 |
+
+**Key insights:**
+- **Enforce mode**: Blocked requests are ~2x faster (no backend call)
+- **Memory**: ~25-30KB per session with content capture enabled
+- **10K sessions**: ~267MB projected memory usage
+
+### Target Performance
+
+- 10K concurrent sessions per node
+- <50KB memory per session
+- Horizontal scaling via Redis
+
 ## Development
 
 ```bash
