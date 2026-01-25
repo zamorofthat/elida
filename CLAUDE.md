@@ -1171,6 +1171,74 @@ policy:
 - Policy engine skips evaluation for internal requests
 - Prevents infinite loops when judge model is behind ELIDA
 
+### On-Prem Enterprise Roadmap
+
+**Deployment Model:** Self-hosted, single-organization (not SaaS)
+
+This simplifies the roadmap — no multi-tenancy, billing, or customer isolation needed.
+
+#### Priority 1: Control API Authentication ✅
+
+**Status:** Implemented
+**Why:** Enterprises won't deploy without auth on the control plane.
+
+Simple API key authentication for all `/control/*` endpoints.
+
+```yaml
+control:
+  enabled: true
+  listen: ":9090"
+  auth:
+    enabled: true
+    api_key: "${ELIDA_CONTROL_API_KEY}"  # Required when auth enabled
+```
+
+```bash
+# Without auth: 401 Unauthorized
+curl http://localhost:9090/control/sessions
+
+# With auth: 200 OK
+curl -H "Authorization: Bearer ${ELIDA_CONTROL_API_KEY}" \
+  http://localhost:9090/control/sessions
+```
+
+#### Priority 2: Per-Model Rate Limits
+
+**Status:** Planned
+**Why:** Control costs across different LLM backends.
+
+```yaml
+rate_limits:
+  global:
+    requests_per_minute: 1000
+  per_model:
+    "gpt-4*":
+      requests_per_minute: 100
+      tokens_per_day: 1000000
+    "claude-3-opus*":
+      requests_per_minute: 50
+```
+
+#### Priority 3: Dashboard Enhancements
+
+**Status:** Planned
+**Why:** Nice-to-have for SOC visibility.
+
+- Real-time session graphs
+- Policy violation trends
+- Cost tracking by model/backend
+- Export to CSV/JSON
+
+#### Not Planned: Multi-Tenancy
+
+For SaaS deployments, you'd need:
+- Tenant isolation (separate sessions, policies, Redis keys)
+- Per-tenant API keys
+- Usage metering/billing
+- Tenant onboarding API
+
+**Decision:** Focus on on-prem single-org. Multi-tenancy adds complexity without value for self-hosted deployments.
+
 ---
 
 ## Security Policies
@@ -1793,6 +1861,8 @@ make test-all          # All tests (84 tests)
 - `ELIDA_POLICY_MODE` — Policy mode: `enforce` (default) or `audit` (dry-run)
 - `ELIDA_POLICY_CAPTURE` — Capture request content for flagged sessions (default: `true`)
 - `ELIDA_POLICY_PRESET` — Policy preset: `minimal`, `standard`, or `strict`
+- `ELIDA_CONTROL_AUTH_ENABLED` — Enable control API authentication (default: `false`)
+- `ELIDA_CONTROL_API_KEY` — API key for control API (auto-enables auth when set)
 
 ## Architecture Decisions
 

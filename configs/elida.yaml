@@ -74,6 +74,12 @@ control:
   listen: ":9090"
   # Enable the control API
   enabled: true
+  # Authentication for control API (recommended for production)
+  auth:
+    # Enable API key authentication
+    enabled: false
+    # API key for Bearer token auth (set via ELIDA_CONTROL_API_KEY env var)
+    # api_key: "your-secret-api-key-here"
 
 # Logging configuration
 logging:

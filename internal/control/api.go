@@ -24,6 +24,10 @@ type Handler struct {
 	wsHandler    *websocket.Handler
 	dashboard    *dashboard.Handler
 	mux          *http.ServeMux
+
+	// Authentication
+	authEnabled bool
+	apiKey      string
 }
 
 // New creates a new control API handler
@@ -38,6 +42,11 @@ func NewWithHistory(store session.Store, manager *session.Manager, historyStore 
 
 // NewWithPolicy creates a new control API handler with history and policy support
 func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine) *Handler {
+	return NewWithAuth(store, manager, historyStore, policyEngine, false, "")
+}
+
+// NewWithAuth creates a new control API handler with all options including authentication
+func NewWithAuth(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine, authEnabled bool, apiKey string) *Handler {
 	h := &Handler{
 		store:        store,
 		manager:      manager,
@@ -45,6 +54,8 @@ func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *
 		policyEngine: policyEngine,
 		dashboard:    dashboard.New(),
 		mux:          http.NewServeMux(),
+		authEnabled:  authEnabled,
+		apiKey:       apiKey,
 	}
 
 	// Dashboard UI (catch-all pattern for Go 1.22+)
@@ -84,14 +95,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add CORS headers for dashboard access
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	// Check authentication for /control/* endpoints
+	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") {
+		if !h.checkAuth(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="ELIDA Control API"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error":   "unauthorized",
+				"message": "Valid API key required. Use 'Authorization: Bearer <api_key>' header.",
+			})
+			return
+		}
+	}
+
 	h.mux.ServeHTTP(w, r)
+}
+
+// checkAuth verifies the request has a valid API key
+func (h *Handler) checkAuth(r *http.Request) bool {
+	// Check Authorization header (Bearer token)
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		// Support "Bearer <key>" format
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if token == h.apiKey {
+				return true
+			}
+		}
+		// Also support just the key directly
+		if authHeader == h.apiKey {
+			return true
+		}
+	}
+
+	// Check X-API-Key header as alternative
+	if apiKey := r.Header.Get("X-API-Key"); apiKey == h.apiKey {
+		return true
+	}
+
+	return false
 }
 
 // handleHealth handles GET /control/health

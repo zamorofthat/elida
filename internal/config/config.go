@@ -150,8 +150,15 @@ type RedisConfig struct {
 
 // ControlConfig holds control API configuration
 type ControlConfig struct {
-	Listen  string `yaml:"listen"`
+	Listen  string            `yaml:"listen"`
+	Enabled bool              `yaml:"enabled"`
+	Auth    ControlAuthConfig `yaml:"auth"`
+}
+
+// ControlAuthConfig holds control API authentication settings
+type ControlAuthConfig struct {
 	Enabled bool   `yaml:"enabled"`
+	APIKey  string `yaml:"api_key"` // API key for Bearer token auth
 }
 
 // LoggingConfig holds logging configuration
@@ -403,6 +410,15 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("ELIDA_WEBSOCKET_SCAN_TEXT_FRAMES") == "false" {
 		c.WebSocket.ScanTextFrames = false
+	}
+
+	// Control API auth overrides
+	if os.Getenv("ELIDA_CONTROL_AUTH_ENABLED") == "true" {
+		c.Control.Auth.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_CONTROL_API_KEY"); v != "" {
+		c.Control.Auth.APIKey = v
+		c.Control.Auth.Enabled = true // Auto-enable if key is set
 	}
 }
 

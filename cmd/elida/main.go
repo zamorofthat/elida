@@ -290,9 +290,20 @@ func main() {
 	}
 
 	// Initialize control API
-	controlHandler := control.NewWithPolicy(store, manager, sqliteStore, policyEngine)
+	controlHandler := control.NewWithAuth(
+		store,
+		manager,
+		sqliteStore,
+		policyEngine,
+		cfg.Control.Auth.Enabled,
+		cfg.Control.Auth.APIKey,
+	)
 	if wsHandler != nil {
 		controlHandler.SetWebSocketHandler(wsHandler)
+	}
+
+	if cfg.Control.Auth.Enabled {
+		slog.Info("control API authentication enabled")
 	}
 
 	// Setup HTTP servers
