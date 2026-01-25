@@ -1,0 +1,93 @@
+version: '3.8'
+
+# Production Docker Compose for ELIDA
+# Usage:
+#   docker-compose -f deploy/docker-compose.prod.yaml up -d
+#
+# Environment variables:
+#   ELIDA_IMAGE_TAG - Docker image tag (default: latest)
+#   ELIDA_TLS_CERT - Path to TLS certificate
+#   ELIDA_TLS_KEY - Path to TLS private key
+
+services:
+  elida:
+    image: ${ELIDA_IMAGE:-elida}:${ELIDA_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "443:8080"   # Proxy (HTTPS)
+      - "9090:9090"  # Dashboard/Control API
+    environment:
+      # Core config
+      - ELIDA_LISTEN=:8080
+      - ELIDA_CONTROL_LISTEN=:9090
+
+      # TLS
+      - ELIDA_TLS_ENABLED=${ELIDA_TLS_ENABLED:-false}
+      - ELIDA_TLS_CERT_FILE=/etc/elida/tls/cert.pem
+      - ELIDA_TLS_KEY_FILE=/etc/elida/tls/key.pem
+
+      # Redis for horizontal scaling
+      - ELIDA_SESSION_STORE=redis
+      - ELIDA_REDIS_ADDR=redis:6379
+
+      # Telemetry (optional)
+      - ELIDA_TELEMETRY_ENABLED=${ELIDA_TELEMETRY_ENABLED:-false}
+      - ELIDA_TELEMETRY_EXPORTER=otlp
+      - ELIDA_TELEMETRY_ENDPOINT=${OTEL_ENDPOINT:-}
+
+      # Storage for dashboard history
+      - ELIDA_STORAGE_ENABLED=true
+      - ELIDA_STORAGE_PATH=/data/elida.db
+
+      # Policy engine
+      - ELIDA_POLICY_ENABLED=true
+    volumes:
+      # Config file
+      - ./configs/elida.yaml:/etc/elida/elida.yaml:ro
+      # TLS certificates
+      - ${ELIDA_TLS_CERT:-/dev/null}:/etc/elida/tls/cert.pem:ro
+      - ${ELIDA_TLS_KEY:-/dev/null}:/etc/elida/tls/key.pem:ro
+      # Persistent data
+      - elida_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/control/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+
+volumes:
+  elida_data:
+  redis_data:
+
+networks:
+  default:
+    name: elida-network

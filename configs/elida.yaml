@@ -4,10 +4,50 @@
 # Address to listen on for proxied traffic
 listen: ":8080"
 
-# Backend URL to proxy requests to
-# For Ollama: "http://localhost:11434"
-# For Claude/Anthropic: "https://api.anthropic.com"
-backend: "https://api.anthropic.com"
+# Single Backend Mode (backward compatible) - commented out when using multi-backend
+# backend: "https://api.anthropic.com"
+
+# Multi-Backend Mode
+backends:
+  anthropic:
+    url: "https://api.anthropic.com"
+    type: anthropic
+    models: ["claude-*"]
+    default: true     # Fallback backend
+
+  mistral:
+    url: "https://api.mistral.ai"
+    type: mistral
+    models: ["mistral-*", "codestral-*"]
+
+# Routing method priority
+routing:
+  methods:
+    - header        # X-Backend header (highest priority)
+    - model         # Model name pattern matching from request body
+    - path          # Path prefix (/anthropic/*, /mistral/*, etc.)
+    - default       # Fallback to default backend
+
+  # LLM05 - Supply Chain Security: Model access control
+  # Reject requests if model doesn't match any backend pattern (no default fallback)
+  strict_model_matching: false
+
+  # Block specific models entirely (glob patterns)
+  # blocked_models:
+  #   - "gpt-4-turbo-*"      # Block all GPT-4 Turbo variants
+  #   - "claude-3-opus-*"    # Block Opus (cost control)
+  #   - "*-preview"          # Block all preview models
+
+# TLS/HTTPS configuration
+tls:
+  # Enable HTTPS for the proxy server
+  enabled: false
+  # Path to TLS certificate file (PEM format)
+  cert_file: ""
+  # Path to TLS private key file (PEM format)
+  key_file: ""
+  # Auto-generate self-signed certificate (development only)
+  auto_cert: false
 
 # Session configuration
 session:
@@ -63,44 +103,110 @@ storage:
   path: "data/elida.db"
   # How many days to retain session history
   retention_days: 30
+  # Capture mode: "all" (CDR-style, capture all session content) or "flagged_only"
+  capture_mode: "all"
 
 # Policy configuration (for flagging suspicious sessions)
+# Based on OWASP LLM Top 10, NIST AI RMF, and OWASP API Security
+#
+# ELIDA uses a WAF-style policy model:
+# - Presets provide comprehensive default rules (minimal, standard, strict)
+# - Custom rules are appended to the preset rules
+# - For full rule documentation, see: docs/POLICY_RULES_REFERENCE.md
 policy:
   # Enable policy engine
   enabled: false
+
+  # Mode: "enforce" (default) or "audit" (dry-run, log but don't block)
+  mode: enforce
+
   # Capture request/response content for flagged sessions
   capture_flagged: true
+
   # Max bytes to capture per request (default 10KB)
   max_capture_size: 10000
 
-  # Policy rules
-  rules:
-    - name: "suspicious_activity"
-      type: "request_count"
-      threshold: 3
-      severity: "warning"
-      description: "Session exceeded 3 requests - potential automated activity"
+  # Streaming response scanning configuration
+  # Controls how response rules are evaluated for streaming (SSE/NDJSON) responses
+  streaming:
+    # Mode options:
+    #   "chunked"  - Low latency: scan chunks as they arrive, terminate on detection
+    #                Uses overlap buffer to catch patterns spanning chunk boundaries
+    #                Client receives partial response before violation is detected
+    #   "buffered" - Full buffer: accumulate entire response before sending
+    #                Higher latency but guaranteed to catch all patterns
+    #                Client sees nothing until full response is scanned
+    mode: "chunked"
 
-    - name: "large_response"
-      type: "bytes_out"
-      threshold: 1048576  # 1MB
-      severity: "warning"
-      description: "Session response exceeded 1MB"
+    # Overlap buffer size for chunked mode (bytes)
+    # Retains this many bytes between chunks to catch cross-boundary patterns
+    # Larger = better pattern detection, more memory
+    # Default: 1024 (1KB - catches most injection patterns)
+    overlap_size: 1024
 
-    - name: "high_request_count"
-      type: "request_count"
-      threshold: 100
-      severity: "critical"
-      description: "Session exceeded 100 requests"
+    # Max buffer size for buffered mode (bytes)
+    # If response exceeds this, sends unbuffered with warning
+    # Default: 10485760 (10MB)
+    max_buffer_size: 10485760
 
-    - name: "long_running"
-      type: "duration"
-      threshold: 600  # 10 minutes in seconds
-      severity: "warning"
-      description: "Session running longer than 10 minutes"
+    # Buffer timeout for buffered mode (seconds)
+    # Max time to wait for full response before giving up
+    # Default: 60
+    buffer_timeout: 60
 
-    - name: "rate_limit"
-      type: "requests_per_minute"
-      threshold: 30
-      severity: "critical"
-      description: "Session exceeding 30 requests per minute"
+  # Policy preset - provides default rules based on security frameworks
+  # Options:
+  #   minimal  - Rate limiting and critical blocks only (8 rules)
+  #   standard - Balanced security with common patterns (38 rules) [recommended]
+  #   strict   - Maximum security, lower thresholds (46 rules)
+  #
+  # See docs/POLICY_RULES_REFERENCE.md for complete rule documentation
+  preset: standard
+
+  # Custom rules - appended to preset rules
+  # Use these to add organization-specific rules or override defaults
+  #
+  # Rule fields:
+  #   name        - Unique identifier
+  #   type        - "content_match", "request_count", "requests_per_minute",
+  #                 "duration", "bytes_in", "bytes_out", "bytes_total"
+  #   target      - "request", "response", "both" (default: both)
+  #   patterns    - Regex patterns (for content_match type)
+  #   threshold   - Numeric limit (for metric types)
+  #   severity    - "info", "warning", "critical"
+  #   action      - "flag", "block", "terminate"
+  #   description - Human-readable description
+  #
+  # Streaming note for response rules:
+  #   - "flag" action: Response streams normally, async scan after delivery (no latency)
+  #   - "block/terminate" action: Response buffered before delivery (adds latency)
+  #
+  # Example custom rules:
+  rules: []
+    # Block internal project codenames in responses
+    # - name: "internal_codenames"
+    #   type: "content_match"
+    #   target: "response"
+    #   patterns:
+    #     - "\\b(PROJECT_ALPHA|SKUNKWORKS|INTERNAL_ONLY)\\b"
+    #   severity: "warning"
+    #   action: "flag"
+    #   description: "Response contains internal codenames"
+    #
+    # Block requests mentioning competitor products
+    # - name: "competitor_mention"
+    #   type: "content_match"
+    #   target: "request"
+    #   patterns:
+    #     - "(compare|better than|vs|versus)\\s+(CompetitorA|CompetitorB)"
+    #   severity: "info"
+    #   action: "flag"
+    #   description: "Request mentions competitor products"
+    #
+    # Lower rate limit for specific use case
+    # - name: "custom_rate_limit"
+    #   type: "requests_per_minute"
+    #   threshold: 20
+    #   severity: "warning"
+    #   action: "block"
+    #   description: "Custom rate limit for controlled environment"

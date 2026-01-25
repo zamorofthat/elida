@@ -46,6 +46,12 @@ type Session struct {
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 
+	// Track all backends used and request count per backend
+	BackendsUsed map[string]int `json:"backends_used,omitempty"`
+
+	// Terminated sessions cannot be resumed (for malicious agents)
+	Terminated bool `json:"terminated,omitempty"`
+
 	// For rate limiting - track recent request times
 	RequestTimes []time.Time `json:"-"`
 
@@ -64,6 +70,7 @@ func NewSession(id, backend, clientAddr string) *Session {
 		Backend:      backend,
 		ClientAddr:   clientAddr,
 		Metadata:     make(map[string]string),
+		BackendsUsed: make(map[string]int),
 		killChan:     make(chan struct{}),
 	}
 }
@@ -101,6 +108,29 @@ func (s *Session) AddBytes(in, out int64) {
 	s.BytesOut += out
 }
 
+// RecordBackend tracks which backend was used for a request
+func (s *Session) RecordBackend(backend string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.BackendsUsed == nil {
+		s.BackendsUsed = make(map[string]int)
+	}
+	s.BackendsUsed[backend]++
+	// Also update the Backend field to show the last used backend
+	s.Backend = backend
+}
+
+// GetBackendsUsed returns a copy of the backends used map
+func (s *Session) GetBackendsUsed() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]int, len(s.BackendsUsed))
+	for k, v := range s.BackendsUsed {
+		result[k] = v
+	}
+	return result
+}
+
 // SetState updates the session state
 func (s *Session) SetState(state State) {
 	s.mu.Lock()
@@ -124,7 +154,7 @@ func (s *Session) IsActive() bool {
 	return s.GetState() == Active
 }
 
-// Kill signals the session to terminate
+// Kill signals the session to terminate (can be resumed later)
 func (s *Session) Kill() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -134,6 +164,52 @@ func (s *Session) Kill() {
 		s.EndTime = &now
 		close(s.killChan)
 	}
+}
+
+// Terminate permanently kills the session (cannot be resumed)
+// Use this for malicious or runaway agents
+func (s *Session) Terminate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State == Active || s.State == Killed {
+		s.State = Killed
+		s.Terminated = true
+		now := time.Now()
+		s.EndTime = &now
+		// Only close if not already closed
+		select {
+		case <-s.killChan:
+			// Already closed
+		default:
+			close(s.killChan)
+		}
+	}
+}
+
+// IsTerminated returns true if the session was permanently terminated
+func (s *Session) IsTerminated() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Terminated
+}
+
+// Resume reactivates a killed session, allowing new requests
+// Returns false if session is terminated (cannot be resumed)
+func (s *Session) Resume() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Terminated {
+		return false // Cannot resume terminated sessions
+	}
+	if s.State == Killed {
+		s.State = Active
+		s.EndTime = nil
+		s.LastActivity = time.Now()
+		// Create new kill channel for future kill operations
+		s.killChan = make(chan struct{})
+		return true
+	}
+	return false
 }
 
 // KillChan returns the channel that's closed when the session is killed
@@ -169,7 +245,7 @@ func (s *Session) SetMetadata(key, value string) {
 func (s *Session) Snapshot() Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	snap := Session{
 		ID:           s.ID,
 		State:        s.State,
@@ -182,9 +258,13 @@ func (s *Session) Snapshot() Session {
 		Backend:      s.Backend,
 		ClientAddr:   s.ClientAddr,
 		Metadata:     make(map[string]string, len(s.Metadata)),
+		BackendsUsed: make(map[string]int, len(s.BackendsUsed)),
 	}
 	for k, v := range s.Metadata {
 		snap.Metadata[k] = v
+	}
+	for k, v := range s.BackendsUsed {
+		snap.BackendsUsed[k] = v
 	}
 	return snap
 }

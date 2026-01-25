@@ -5,8 +5,8 @@ bin/
 *.dll
 *.so
 *.dylib
-elida
-
+/elida
+*.env
 # Test binary, built with `go test -c`
 *.test
 
@@ -45,3 +45,21 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+# TLS certificates and keys
+*.pem
+*.key
+*.crt
+*.csr
+certs/
+ssl/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+
+# ELIDA runtime
+.elida/

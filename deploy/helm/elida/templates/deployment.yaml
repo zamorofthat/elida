@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "elida.fullname" . }}
+  labels:
+    {{- include "elida.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "elida.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "elida.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "elida.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - -config
+            - /etc/elida/elida.yaml
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.elida.listenPort }}
+              protocol: TCP
+            - name: control
+              containerPort: {{ .Values.elida.controlPort }}
+              protocol: TCP
+          env:
+            - name: ELIDA_SESSION_STORE
+              value: "redis"
+            - name: ELIDA_REDIS_ADDR
+              value: "{{ include "elida.redisHost" . }}:{{ include "elida.redisPort" . }}"
+            {{- if and (not .Values.redis.enabled) .Values.externalRedis.password }}
+            - name: ELIDA_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "elida.fullname" . }}-redis
+                  key: password
+            {{- end }}
+            {{- if .Values.elida.tls.enabled }}
+            - name: ELIDA_TLS_ENABLED
+              value: "true"
+            - name: ELIDA_TLS_CERT_FILE
+              value: "/etc/elida/tls/tls.crt"
+            - name: ELIDA_TLS_KEY_FILE
+              value: "/etc/elida/tls/tls.key"
+            {{- end }}
+            {{- if .Values.elida.telemetry.enabled }}
+            - name: ELIDA_TELEMETRY_ENABLED
+              value: "true"
+            - name: ELIDA_TELEMETRY_EXPORTER
+              value: {{ .Values.elida.telemetry.exporter | quote }}
+            - name: ELIDA_TELEMETRY_ENDPOINT
+              value: {{ .Values.elida.telemetry.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.elida.policy.enabled }}
+            - name: ELIDA_POLICY_ENABLED
+              value: "true"
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /control/health
+              port: control
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /control/health
+              port: control
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/elida
+              readOnly: true
+            {{- if .Values.elida.tls.enabled }}
+            - name: tls
+              mountPath: /etc/elida/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.elida.storage.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "elida.fullname" . }}
+        {{- if .Values.elida.tls.enabled }}
+        - name: tls
+          secret:
+            {{- if .Values.elida.tls.existingSecret }}
+            secretName: {{ .Values.elida.tls.existingSecret }}
+            {{- else }}
+            secretName: {{ include "elida.fullname" . }}-tls
+            {{- end }}
+        {{- end }}
+        {{- if .Values.elida.storage.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "elida.fullname" . }}-data
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

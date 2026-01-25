@@ -16,25 +16,40 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 
 ## Features
 
-### MVP (Current)
+### Current Features
 - [x] HTTP reverse proxy with request/response capture
 - [x] Streaming support (NDJSON for Ollama, SSE for OpenAI/Anthropic/Mistral)
 - [x] Session tracking and management
 - [x] Session timeout enforcement
-- [x] Kill switch with configurable block modes
+- [x] Kill/Resume/Terminate session lifecycle
 - [x] Control API for monitoring
 - [x] Structured JSON logging
 - [x] Redis-backed session store for horizontal scaling
 - [x] OpenTelemetry integration for tracing
 - [x] SQLite storage for session history
-- [x] Policy engine for session-level rules
 - [x] Dashboard UI for monitoring
 - [x] Client IP-based session tracking (for Claude Code)
+- [x] Multi-backend routing (route by header, model name, or path)
+- [x] TLS/HTTPS support
+
+### Security Features
+- [x] Policy engine with 40+ built-in rules (OWASP LLM Top 10)
+- [x] Content inspection for requests and responses
+- [x] Prompt injection detection and blocking (LLM01)
+- [x] Output security scanning - XSS, SQL, shell patterns (LLM02)
+- [x] PII and credential detection (LLM06)
+- [x] Tool/plugin security monitoring (LLM07)
+- [x] Excessive agency prevention (LLM08)
+- [x] Model theft detection (LLM10)
+- [x] Audit mode for dry-run evaluation
+- [x] Chunked streaming scan (low latency) and buffered mode (full validation)
+- [x] Response body capture for flagged sessions (forensics)
+- [x] Immediate persistence of flagged sessions (crash-safe)
 
 ### Roadmap
 - [ ] WebSocket support for real-time/voice agents
-- [ ] Content inspection and PII detection
-- [ ] Multi-backend routing
+- [ ] LLM-as-judge content moderation (local Gemma models)
+- [ ] Validation webhook for model output QA
 - [ ] SDK for native agent integration
 
 ## Quick Start
@@ -117,6 +132,42 @@ ANTHROPIC_BASE_URL=http://localhost:8080 claude
 ```
 
 ELIDA automatically groups requests from the same IP into a single session, so all Claude Code requests appear as one session in the dashboard.
+
+### Multi-Backend Routing
+
+ELIDA can route requests to different LLM backends based on model name, headers, or path:
+
+```yaml
+# In configs/elida.yaml
+backends:
+  ollama:
+    url: "http://localhost:11434"
+    type: ollama
+    default: true     # Fallback backend
+
+  openai:
+    url: "https://api.openai.com"
+    type: openai
+    models: ["gpt-*", "o1-*"]  # Route GPT models here
+
+  anthropic:
+    url: "https://api.anthropic.com"
+    type: anthropic
+    models: ["claude-*"]  # Route Claude models here
+
+  routing:
+    methods:
+      - header   # X-Backend header (highest priority)
+      - model    # Model name pattern matching
+      - path     # Path prefix (/openai/*, etc.)
+      - default  # Fallback
+```
+
+Routing priority:
+1. **Header**: `curl -H "X-Backend: openai" ...` routes to OpenAI
+2. **Model**: Request with `{"model": "gpt-4"}` routes to OpenAI (matches `gpt-*`)
+3. **Path**: `/openai/v1/chat/completions` routes to OpenAI backend
+4. **Default**: Falls back to the backend marked `default: true`
 
 ## Usage
 
@@ -219,6 +270,37 @@ curl -H "X-Session-ID: my-agent-task-123" http://localhost:8080/api/generate ...
     │  (Clients)  │               │   (LLMs)    │
     └─────────────┘               └─────────────┘
 ```
+
+## Benchmarking
+
+ELIDA includes a benchmark suite for performance testing:
+
+```bash
+# Run all benchmarks
+./scripts/benchmark.sh
+
+# Compare policy modes (no-policy vs audit vs enforce)
+./scripts/benchmark.sh --compare-modes
+```
+
+### Sample Results
+
+| Metric | No Policy | Audit | Enforce |
+|--------|-----------|-------|---------|
+| Avg latency (ms) | 109 | 116 | 113 |
+| Blocked req latency (ms) | 107 | 100 | **49** |
+| Memory per session (KB) | 6 | 0 | 30 |
+
+**Key insights:**
+- **Enforce mode**: Blocked requests are ~2x faster (no backend call)
+- **Memory**: ~25-30KB per session with content capture enabled
+- **10K sessions**: ~267MB projected memory usage
+
+### Target Performance
+
+- 10K concurrent sessions per node
+- <50KB memory per session
+- Horizontal scaling via Redis
 
 ## Development
 

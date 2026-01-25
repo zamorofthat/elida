@@ -147,6 +147,7 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			BytesIn:      snap.BytesIn,
 			BytesOut:     snap.BytesOut,
 			Backend:      snap.Backend,
+			BackendsUsed: snap.BackendsUsed,
 			ClientAddr:   snap.ClientAddr,
 			Metadata:     snap.Metadata,
 		}
@@ -181,9 +182,14 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.getSession(w, sessionID)
 	case http.MethodPost:
-		if action == "kill" {
+		switch action {
+		case "kill":
 			h.killSession(w, sessionID)
-		} else {
+		case "terminate":
+			h.terminateSession(w, sessionID)
+		case "resume":
+			h.resumeSession(w, sessionID)
+		default:
 			http.Error(w, "Unknown action", http.StatusBadRequest)
 		}
 	case http.MethodDelete:
@@ -213,6 +219,7 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 		BytesIn:      snap.BytesIn,
 		BytesOut:     snap.BytesOut,
 		Backend:      snap.Backend,
+		BackendsUsed: snap.BackendsUsed,
 		ClientAddr:   snap.ClientAddr,
 		Metadata:     snap.Metadata,
 	}
@@ -231,6 +238,40 @@ func (h *Handler) killSession(w http.ResponseWriter, id string) {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":     "killed",
 			"session_id": id,
+		})
+	} else {
+		http.Error(w, "Session not found or already terminated", http.StatusNotFound)
+	}
+}
+
+// resumeSession handles POST /control/sessions/{id}/resume
+func (h *Handler) resumeSession(w http.ResponseWriter, id string) {
+	slog.Info("resume request received", "session_id", id)
+
+	if h.manager.Resume(id) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "resumed",
+			"session_id": id,
+		})
+	} else {
+		// Check if it's terminated
+		if sess, ok := h.manager.Get(id); ok && sess.IsTerminated() {
+			http.Error(w, "Session is terminated and cannot be resumed", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "Session not found or not in killed state", http.StatusNotFound)
+	}
+}
+
+// terminateSession handles POST /control/sessions/{id}/terminate
+func (h *Handler) terminateSession(w http.ResponseWriter, id string) {
+	slog.Warn("terminate request received", "session_id", id)
+
+	if h.manager.Terminate(id) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "terminated",
+			"session_id": id,
+			"message":    "Session permanently terminated, cannot be resumed",
 		})
 	} else {
 		http.Error(w, "Session not found or already terminated", http.StatusNotFound)
@@ -272,6 +313,7 @@ type SessionInfo struct {
 	BytesIn      int64             `json:"bytes_in"`
 	BytesOut     int64             `json:"bytes_out"`
 	Backend      string            `json:"backend"`
+	BackendsUsed map[string]int    `json:"backends_used,omitempty"`
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }

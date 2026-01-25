@@ -2,6 +2,8 @@ package policy
 
 import (
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,32 +21,51 @@ const (
 type RuleType string
 
 const (
-	RuleTypeBytesOut        RuleType = "bytes_out"
-	RuleTypeBytesIn         RuleType = "bytes_in"
-	RuleTypeBytesTotal      RuleType = "bytes_total"
-	RuleTypeRequestCount    RuleType = "request_count"
-	RuleTypeDuration        RuleType = "duration"
-	RuleTypeRequestsPerMin  RuleType = "requests_per_minute"
-	RuleTypeIdleTime        RuleType = "idle_time"
+	// Metric-based rules
+	RuleTypeBytesOut       RuleType = "bytes_out"
+	RuleTypeBytesIn        RuleType = "bytes_in"
+	RuleTypeBytesTotal     RuleType = "bytes_total"
+	RuleTypeRequestCount   RuleType = "request_count"
+	RuleTypeDuration       RuleType = "duration"
+	RuleTypeRequestsPerMin RuleType = "requests_per_minute"
+	RuleTypeIdleTime       RuleType = "idle_time"
+
+	// Content inspection rules
+	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request/response body
+)
+
+// RuleTarget defines what content the rule applies to
+type RuleTarget string
+
+const (
+	RuleTargetRequest  RuleTarget = "request"  // Only scan request bodies
+	RuleTargetResponse RuleTarget = "response" // Only scan response bodies
+	RuleTargetBoth     RuleTarget = "both"     // Scan both (default)
 )
 
 // Rule defines a policy rule
 type Rule struct {
-	Name        string   `yaml:"name" json:"name"`
-	Type        RuleType `yaml:"type" json:"type"`
-	Threshold   int64    `yaml:"threshold" json:"threshold"`
-	Severity    Severity `yaml:"severity" json:"severity"`
-	Description string   `yaml:"description" json:"description"`
+	Name        string     `yaml:"name" json:"name"`
+	Type        RuleType   `yaml:"type" json:"type"`
+	Target      RuleTarget `yaml:"target" json:"target"`                // request, response, both (default: both)
+	Threshold   int64      `yaml:"threshold" json:"threshold"`          // For metric rules
+	Patterns    []string   `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
+	Severity    Severity   `yaml:"severity" json:"severity"`
+	Description string     `yaml:"description" json:"description"`
+	Action      string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
 }
 
 // Violation represents a policy violation
 type Violation struct {
-	RuleName    string    `json:"rule_name"`
-	Description string    `json:"description"`
-	Severity    Severity  `json:"severity"`
-	Threshold   int64     `json:"threshold"`
-	ActualValue int64     `json:"actual_value"`
-	Timestamp   time.Time `json:"timestamp"`
+	RuleName      string    `json:"rule_name"`
+	Description   string    `json:"description"`
+	Severity      Severity  `json:"severity"`
+	Threshold     int64     `json:"threshold,omitempty"`
+	ActualValue   int64     `json:"actual_value,omitempty"`
+	MatchedText   string    `json:"matched_text,omitempty"`   // For content matches
+	MatchedPattern string   `json:"matched_pattern,omitempty"` // Pattern that matched
+	Action        string    `json:"action,omitempty"`          // Recommended action
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 // SessionMetrics contains the metrics needed for policy evaluation
@@ -79,18 +100,27 @@ type CapturedRequest struct {
 	StatusCode   int       `json:"status_code"`
 }
 
+// CompiledRule is a rule with pre-compiled regex patterns
+type CompiledRule struct {
+	Rule
+	CompiledPatterns []*regexp.Regexp
+}
+
 // Engine evaluates sessions against policy rules
 type Engine struct {
 	mu              sync.RWMutex
 	rules           []Rule
+	compiledRules   []CompiledRule // Rules with compiled regex
 	flaggedSessions map[string]*FlaggedSession
 	captureContent  bool
-	maxCaptureSize  int // Max bytes to capture per request
+	maxCaptureSize  int    // Max bytes to capture per request
+	auditMode       bool   // If true, log but don't enforce (dry-run)
 }
 
 // Config for the policy engine
 type Config struct {
 	Enabled        bool   `yaml:"enabled"`
+	Mode           string `yaml:"mode"` // "enforce" (default) or "audit"
 	CaptureContent bool   `yaml:"capture_flagged"`
 	MaxCaptureSize int    `yaml:"max_capture_size"`
 	Rules          []Rule `yaml:"rules"`
@@ -102,16 +132,47 @@ func NewEngine(cfg Config) *Engine {
 		cfg.MaxCaptureSize = 10000 // Default 10KB per request
 	}
 
+	// Default to enforce mode if not specified
+	auditMode := cfg.Mode == "audit"
+
 	e := &Engine{
 		rules:           cfg.Rules,
+		compiledRules:   make([]CompiledRule, 0),
 		flaggedSessions: make(map[string]*FlaggedSession),
 		captureContent:  cfg.CaptureContent,
 		maxCaptureSize:  cfg.MaxCaptureSize,
+		auditMode:       auditMode,
 	}
 
+	// Compile regex patterns for content rules
+	for _, rule := range cfg.Rules {
+		if rule.Type == RuleTypeContentMatch && len(rule.Patterns) > 0 {
+			compiled := CompiledRule{Rule: rule}
+			for _, pattern := range rule.Patterns {
+				re, err := regexp.Compile("(?i)" + pattern) // Case-insensitive
+				if err != nil {
+					slog.Error("invalid regex pattern in rule",
+						"rule", rule.Name,
+						"pattern", pattern,
+						"error", err,
+					)
+					continue
+				}
+				compiled.CompiledPatterns = append(compiled.CompiledPatterns, re)
+			}
+			e.compiledRules = append(e.compiledRules, compiled)
+		}
+	}
+
+	mode := "enforce"
+	if auditMode {
+		mode = "audit"
+	}
 	slog.Info("policy engine initialized",
 		"rules", len(cfg.Rules),
+		"content_rules", len(e.compiledRules),
 		"capture_content", cfg.CaptureContent,
+		"mode", mode,
 	)
 
 	return e
@@ -208,6 +269,136 @@ func (e *Engine) calculateRequestsPerMinute(metrics SessionMetrics) int64 {
 	return int64(count)
 }
 
+// ContentCheckResult contains the result of content inspection
+type ContentCheckResult struct {
+	Violations      []Violation
+	ShouldBlock     bool
+	ShouldTerminate bool
+}
+
+// EvaluateContent checks request content against content rules (backward compatible)
+func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult {
+	return e.EvaluateRequestContent(sessionID, content)
+}
+
+// EvaluateRequestContent checks request content against request-applicable rules
+func (e *Engine) EvaluateRequestContent(sessionID, content string) *ContentCheckResult {
+	return e.evaluateContentWithTarget(sessionID, content, RuleTargetRequest)
+}
+
+// EvaluateResponseContent checks response content against response-applicable rules
+func (e *Engine) EvaluateResponseContent(sessionID, content string) *ContentCheckResult {
+	return e.evaluateContentWithTarget(sessionID, content, RuleTargetResponse)
+}
+
+// evaluateContentWithTarget is the internal implementation that filters by target
+func (e *Engine) evaluateContentWithTarget(sessionID, content string, target RuleTarget) *ContentCheckResult {
+	if len(e.compiledRules) == 0 || content == "" {
+		return nil
+	}
+
+	result := &ContentCheckResult{}
+	contentLower := strings.ToLower(content)
+
+	for _, cr := range e.compiledRules {
+		// Skip rules that don't apply to this target
+		if !e.ruleAppliesToTarget(cr.Target, target) {
+			continue
+		}
+
+		for i, re := range cr.CompiledPatterns {
+			if match := re.FindString(contentLower); match != "" {
+				violation := Violation{
+					RuleName:       cr.Name,
+					Description:    cr.Description,
+					Severity:       cr.Severity,
+					MatchedText:    truncateMatch(match, 100),
+					MatchedPattern: cr.Patterns[i],
+					Action:         cr.Action,
+					Timestamp:      time.Now(),
+				}
+				result.Violations = append(result.Violations, violation)
+
+				// Only enforce actions if not in audit mode
+				if !e.auditMode {
+					switch cr.Action {
+					case "block":
+						result.ShouldBlock = true
+					case "terminate":
+						result.ShouldTerminate = true
+						result.ShouldBlock = true
+					}
+				}
+
+				// Log with audit mode indicator
+				logFunc := slog.Warn
+				actionMsg := cr.Action
+				if e.auditMode {
+					actionMsg = cr.Action + " (audit-only)"
+				}
+
+				targetStr := "request"
+				if target == RuleTargetResponse {
+					targetStr = "response"
+				}
+
+				logFunc("content policy violation detected",
+					"session_id", sessionID,
+					"rule", cr.Name,
+					"severity", cr.Severity,
+					"action", actionMsg,
+					"target", targetStr,
+					"matched", truncateMatch(match, 50),
+					"audit_mode", e.auditMode,
+				)
+
+				// Record the violation
+				e.recordViolations(sessionID, []Violation{violation})
+				break // One match per rule is enough
+			}
+		}
+	}
+
+	if len(result.Violations) > 0 {
+		return result
+	}
+	return nil
+}
+
+// ruleAppliesToTarget checks if a rule should be evaluated for the given target
+func (e *Engine) ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) bool {
+	// Default (empty or "both") applies to everything
+	if ruleTarget == "" || ruleTarget == RuleTargetBoth {
+		return true
+	}
+	return ruleTarget == evaluationTarget
+}
+
+// HasBlockingResponseRules returns true if any response rules have block/terminate action
+func (e *Engine) HasBlockingResponseRules() bool {
+	for _, cr := range e.compiledRules {
+		if e.ruleAppliesToTarget(cr.Target, RuleTargetResponse) {
+			if cr.Action == "block" || cr.Action == "terminate" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsAuditMode returns true if the engine is in audit (dry-run) mode
+func (e *Engine) IsAuditMode() bool {
+	return e.auditMode
+}
+
+// truncateMatch truncates a matched string for logging
+func truncateMatch(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // recordViolations records violations for a session
 func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	e.mu.Lock()
@@ -288,6 +479,36 @@ func (e *Engine) CaptureRequest(sessionID string, req CapturedRequest) {
 	}
 
 	flagged.CapturedContent = append(flagged.CapturedContent, req)
+}
+
+// UpdateLastCaptureWithResponse updates the most recent captured request with response body
+func (e *Engine) UpdateLastCaptureWithResponse(sessionID, responseBody string) {
+	e.UpdateLastCaptureWithResponseAndStatus(sessionID, responseBody, 0)
+}
+
+// UpdateLastCaptureWithResponseAndStatus updates the most recent captured request with response body and status code
+func (e *Engine) UpdateLastCaptureWithResponseAndStatus(sessionID, responseBody string, statusCode int) {
+	if !e.captureContent {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	flagged, exists := e.flaggedSessions[sessionID]
+	if !exists || len(flagged.CapturedContent) == 0 {
+		return
+	}
+
+	// Update the last captured request with response body and status code
+	lastIdx := len(flagged.CapturedContent) - 1
+	if len(responseBody) > e.maxCaptureSize {
+		responseBody = responseBody[:e.maxCaptureSize] + "...[truncated]"
+	}
+	flagged.CapturedContent[lastIdx].ResponseBody = responseBody
+	if statusCode != 0 {
+		flagged.CapturedContent[lastIdx].StatusCode = statusCode
+	}
 }
 
 // IsFlagged checks if a session is flagged
@@ -380,4 +601,85 @@ func (e *Engine) Stats() map[string]interface{} {
 		"info":          info,
 		"rules_count":   len(e.rules),
 	}
+}
+
+// StreamingScanner handles chunk-based content scanning with overlap for cross-boundary patterns
+type StreamingScanner struct {
+	engine      *Engine
+	sessionID   string
+	overlapBuf  []byte
+	overlapSize int
+	totalScanned int64
+}
+
+// NewStreamingScanner creates a scanner for chunked response scanning
+func (e *Engine) NewStreamingScanner(sessionID string, overlapSize int) *StreamingScanner {
+	if overlapSize <= 0 {
+		overlapSize = 1024 // Default 1KB overlap
+	}
+	return &StreamingScanner{
+		engine:      e,
+		sessionID:   sessionID,
+		overlapBuf:  make([]byte, 0, overlapSize),
+		overlapSize: overlapSize,
+	}
+}
+
+// ScanChunk scans a chunk of streaming content, using overlap buffer for cross-boundary patterns
+// Returns violations if found. The caller should terminate the stream if ShouldBlock/ShouldTerminate.
+func (s *StreamingScanner) ScanChunk(chunk []byte) *ContentCheckResult {
+	if len(chunk) == 0 {
+		return nil
+	}
+
+	// Combine overlap buffer with current chunk for scanning
+	var scanContent []byte
+	if len(s.overlapBuf) > 0 {
+		scanContent = make([]byte, len(s.overlapBuf)+len(chunk))
+		copy(scanContent, s.overlapBuf)
+		copy(scanContent[len(s.overlapBuf):], chunk)
+	} else {
+		scanContent = chunk
+	}
+
+	// Scan the combined content
+	result := s.engine.EvaluateResponseContent(s.sessionID, string(scanContent))
+
+	// Update overlap buffer with end of current chunk
+	if len(chunk) >= s.overlapSize {
+		s.overlapBuf = make([]byte, s.overlapSize)
+		copy(s.overlapBuf, chunk[len(chunk)-s.overlapSize:])
+	} else {
+		// Chunk smaller than overlap - append to existing overlap
+		combined := append(s.overlapBuf, chunk...)
+		if len(combined) > s.overlapSize {
+			s.overlapBuf = combined[len(combined)-s.overlapSize:]
+		} else {
+			s.overlapBuf = combined
+		}
+	}
+
+	s.totalScanned += int64(len(chunk))
+	return result
+}
+
+// Finalize performs a final scan on any remaining overlap buffer
+// Call this when the stream ends to catch patterns at the very end
+func (s *StreamingScanner) Finalize() *ContentCheckResult {
+	if len(s.overlapBuf) == 0 {
+		return nil
+	}
+	// Final scan of overlap buffer (in case pattern is at the very end)
+	return s.engine.EvaluateResponseContent(s.sessionID, string(s.overlapBuf))
+}
+
+// TotalScanned returns total bytes scanned so far
+func (s *StreamingScanner) TotalScanned() int64 {
+	return s.totalScanned
+}
+
+// Reset clears the scanner state for reuse
+func (s *StreamingScanner) Reset() {
+	s.overlapBuf = s.overlapBuf[:0]
+	s.totalScanned = 0
 }

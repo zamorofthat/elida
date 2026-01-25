@@ -1,0 +1,190 @@
+# ELIDA Helm Chart Values
+
+replicaCount: 2
+
+image:
+  repository: elida
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# ELIDA configuration
+elida:
+  # Proxy listen port
+  listenPort: 8080
+  # Control API port
+  controlPort: 9090
+
+  # TLS configuration
+  tls:
+    enabled: false
+    # Use existing secret with tls.crt and tls.key
+    existingSecret: ""
+    # Or specify cert/key directly (base64 encoded)
+    cert: ""
+    key: ""
+
+  # Backend configuration
+  backends:
+    anthropic:
+      url: "https://api.anthropic.com"
+      type: anthropic
+      models: ["claude-*"]
+      default: true
+    openai:
+      url: "https://api.openai.com"
+      type: openai
+      models: ["gpt-*", "o1-*"]
+    mistral:
+      url: "https://api.mistral.ai"
+      type: mistral
+      models: ["mistral-*", "codestral-*"]
+
+  # Routing methods priority
+  routing:
+    methods:
+      - header
+      - model
+      - path
+      - default
+
+  # Session configuration
+  session:
+    timeout: 5m
+    header: "X-Session-ID"
+    generateIfMissing: true
+    # Use Redis for horizontal scaling
+    store: redis
+    killBlock:
+      mode: "until_hour_change"
+      duration: 30m
+
+  # Telemetry (OpenTelemetry)
+  telemetry:
+    enabled: false
+    exporter: otlp
+    endpoint: ""
+    serviceName: elida
+
+  # Policy engine
+  policy:
+    enabled: true
+    captureContent: true
+    maxCaptureSize: 10000
+    rules:
+      - name: high_request_count
+        type: request_count
+        threshold: 100
+        severity: warning
+      - name: rate_limit
+        type: requests_per_minute
+        threshold: 60
+        severity: critical
+
+  # Storage (SQLite - use PVC for persistence)
+  storage:
+    enabled: false
+    path: /data/elida.db
+
+# Redis configuration (sub-chart or external)
+redis:
+  enabled: true
+  # Use Bitnami Redis sub-chart
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+# External Redis (if redis.enabled is false)
+externalRedis:
+  host: ""
+  port: 6379
+  password: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Proxy service (for AI traffic)
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# Control service (for dashboard/API)
+controlService:
+  type: ClusterIP
+  port: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: elida.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+    # - secretName: elida-tls
+    #   hosts:
+    #     - elida.example.com
+
+# Separate ingress for control/dashboard
+controlIngress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: elida-dashboard.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

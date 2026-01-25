@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "elida.fullname" . }}
+  labels:
+    {{- include "elida.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: proxy
+      protocol: TCP
+      name: proxy
+  selector:
+    {{- include "elida.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "elida.fullname" . }}-control
+  labels:
+    {{- include "elida.labels" . | nindent 4 }}
+  {{- with .Values.controlService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.controlService.type }}
+  ports:
+    - port: {{ .Values.controlService.port }}
+      targetPort: control
+      protocol: TCP
+      name: control
+  selector:
+    {{- include "elida.selectorLabels" . | nindent 4 }}

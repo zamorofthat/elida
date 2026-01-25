@@ -385,3 +385,64 @@ tr:hover {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* Session metrics grid */
+.session-metrics {
+  margin-bottom: 1rem;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  background: #0f172a;
+  border-radius: 0.375rem;
+  padding: 1rem;
+  border: 1px solid #334155;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.metric-label {
+  font-size: 0.7rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.metric-value {
+  font-size: 0.875rem;
+  color: #e2e8f0;
+  font-weight: 500;
+}
+
+.metric-value.state-active { color: #4ade80; }
+.metric-value.state-killed { color: #f87171; }
+.metric-value.state-completed { color: #94a3b8; }
+
+.violation-match {
+  font-size: 0.75rem;
+  color: #94a3b8;
+  margin-top: 0.25rem;
+}
+
+.violation-match code {
+  background: #020617;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  color: #fbbf24;
+}
+
+/* Clickable table rows */
+tr.clickable {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+tr.clickable:hover {
+  background: #1e293b;
+}
