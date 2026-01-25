@@ -5,7 +5,8 @@ bin/
 *.dll
 *.so
 *.dylib
-/elida
+
+/bin/.*
 *.env
 # Test binary, built with `go test -c`
 *.test
