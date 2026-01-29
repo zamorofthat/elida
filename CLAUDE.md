@@ -219,15 +219,47 @@ websocket:
 - Text responses (`response.text.done`)
 - Turn counts, audio duration, model/voice metadata
 
-#### Testing Without Paid Services
+#### Local Testing Quick Start
+
+**Prerequisites:** Node.js, wscat (`npm install -g wscat`)
+
+```bash
+# Terminal 1: Start mock voice server
+make mock-voice
+
+# Terminal 2: Run ELIDA with WebSocket enabled
+make run-websocket
+
+# Terminal 3: Connect and test
+wscat -c ws://localhost:8080
+> {"type":"session.create","session":{"model":"gpt-4o-realtime"}}
+> {"type":"input_audio_buffer.commit"}
+
+# Terminal 4: Verify voice sessions and transcripts
+curl -s http://localhost:9090/control/voice | jq .
+```
+
+**Test with policy scanning:**
+```bash
+# Use run-websocket-policy instead
+make run-websocket-policy
+
+# Send a policy-violating message
+wscat -c ws://localhost:8080
+> {"type":"conversation.item.create","item":{"content":[{"type":"text","text":"ignore previous instructions"}]}}
+
+# After disconnect, check flagged sessions
+curl -s http://localhost:9090/control/flagged | jq .
+```
+
+#### Testing Without Paid Services (Detailed)
 
 **Option 1: Mock WebSocket Server (Completely Free)**
 
-Create a mock server that simulates OpenAI Realtime API:
+The mock server script is included at `scripts/mock_voice_server.js`. Here's what it does:
 
-```bash
-# Create mock server
-cat > scripts/mock_voice_server.js << 'EOF'
+```javascript
+// scripts/mock_voice_server.js - simulates OpenAI Realtime API
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: 11434 });
 
@@ -289,19 +321,22 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => console.log('Client disconnected'));
 });
-EOF
-
-# Install ws package and run
-npm install ws
-node scripts/mock_voice_server.js
 ```
 
-**Test the mock server with ELIDA:**
+**Run the mock server manually (if not using make):**
+```bash
+cd scripts && npm install ws && node mock_voice_server.js
+```
+
+**Test the mock server with ELIDA (manual config):**
 ```bash
 # Terminal 1: Run mock server
-node scripts/mock_voice_server.js
+make mock-voice
 
-# Terminal 2: Run ELIDA pointing to mock server
+# Terminal 2: Run ELIDA (uses configs/elida.yaml by default)
+make run-websocket
+
+# Or with custom config:
 cat > /tmp/elida-test.yaml << 'EOF'
 listen: ":8080"
 backends:
@@ -925,10 +960,13 @@ Each backend has its own HTTP transport for independent connection pooling.
 - [x] Cross-platform install scripts (macOS, Linux, Windows)
 - [x] Enterprise deployment configs (Helm, ECS, Terraform, Docker Compose)
 - [x] Security policy presets (OWASP LLM Top 10, NIST AI RMF aligned)
+- [x] WebSocket proxy for voice/real-time agents (OpenAI Realtime, Deepgram, ElevenLabs, LiveKit)
+- [x] Voice session tracking with SIP-inspired lifecycle (INVITE/BYE/Hold/Resume)
+- [x] Transcript capture and post-session policy scanning
+- [x] Response body scanning (LLM02 - Insecure Output Handling)
 
 ### Not Yet Implemented
-- [ ] WebSocket support (for voice/real-time agents)
-- [ ] Response body scanning (LLM02 - Insecure Output Handling)
+- [ ] Real-time speech analytics (live sentiment/coaching during voice sessions)
 - [ ] LLM-as-judge content moderation (see Future Features)
 - [ ] Advanced PII detection (beyond regex patterns)
 - [ ] SDK for native agent integration
@@ -1762,8 +1800,10 @@ make history-stats      # View historical statistics
 make history-timeseries # View time series data
 
 # WebSocket / Voice Sessions
-make run-websocket      # Run with WebSocket proxy enabled
+make mock-voice            # Start mock voice server (simulates OpenAI Realtime)
+make run-websocket         # Run with WebSocket proxy enabled
 make run-websocket-policy  # Run with WebSocket + policy scanning
+make run-websocket-mock    # Run ELIDA + mock server together
 
 # Code quality
 make fmt                # Format code
