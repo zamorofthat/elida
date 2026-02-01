@@ -159,6 +159,33 @@ run-storage: build
 run-full: build jaeger-up
 	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ELIDA_TELEMETRY_ENABLED=true ELIDA_TELEMETRY_EXPORTER=otlp ELIDA_TELEMETRY_ENDPOINT=localhost:4317 ./bin/${BINARY_NAME} -config configs/elida.yaml
 
+# Run with WebSocket support enabled
+run-websocket: build
+	ELIDA_WEBSOCKET_ENABLED=true ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Run with WebSocket + policy (for voice AI agents)
+run-websocket-policy: build
+	ELIDA_WEBSOCKET_ENABLED=true ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# Run mock voice server for testing (simulates OpenAI Realtime API)
+mock-voice:
+	@which node > /dev/null || (echo "Node.js required. Install from https://nodejs.org" && exit 1)
+	@test -f node_modules/ws/index.js || npm install ws
+	node scripts/mock_voice_server.js
+
+# Run ELIDA with mock voice server as backend
+run-websocket-mock: build
+	@echo "Starting mock voice server in background..."
+	@which node > /dev/null || (echo "Node.js required" && exit 1)
+	@test -f node_modules/ws/index.js || npm install ws
+	@node scripts/mock_voice_server.js &
+	@sleep 1
+	ELIDA_WEBSOCKET_ENABLED=true ELIDA_BACKEND=ws://localhost:11434 ./bin/${BINARY_NAME} -config configs/elida.yaml
+
+# List voice sessions
+voice-sessions:
+	curl -s http://localhost:9090/control/voice | jq .
+
 # Query session history
 history:
 	curl -s http://localhost:9090/control/history | jq .

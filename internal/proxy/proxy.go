@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"elida/internal/config"
 	"elida/internal/policy"
 	"elida/internal/router"
@@ -18,6 +20,11 @@ import (
 	"elida/internal/storage"
 	"elida/internal/telemetry"
 )
+
+// WebSocketHandler is an interface for the WebSocket handler to avoid import cycle
+type WebSocketHandler interface {
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
 
 // Proxy handles proxying requests to the backend
 type Proxy struct {
@@ -28,6 +35,7 @@ type Proxy struct {
 	telemetry *telemetry.Provider
 	policy    *policy.Engine
 	storage   *storage.SQLiteStore // For persisting flagged sessions immediately
+	wsHandler WebSocketHandler     // WebSocket proxy handler
 }
 
 // New creates a new proxy handler
@@ -85,8 +93,102 @@ func (p *Proxy) SetStorage(s *storage.SQLiteStore) {
 	p.storage = s
 }
 
+// SetWebSocketHandler sets the WebSocket handler for proxying WebSocket connections
+func (p *Proxy) SetWebSocketHandler(h WebSocketHandler) {
+	p.wsHandler = h
+}
+
+// GetRouter returns the router for use by the WebSocket handler
+func (p *Proxy) GetRouter() *router.Router {
+	return p.router
+}
+
+// isWebSocketRequest checks if the request is a WebSocket upgrade request
+func isWebSocketRequest(r *http.Request) bool {
+	connection := r.Header.Get("Connection")
+	upgrade := r.Header.Get("Upgrade")
+
+	hasUpgrade := strings.Contains(strings.ToLower(connection), "upgrade")
+	isWebSocket := strings.EqualFold(upgrade, "websocket")
+
+	return hasUpgrade && isWebSocket
+}
+
+// TTSRequestInfo contains parsed TTS request details
+type TTSRequestInfo struct {
+	Provider string
+	Model    string
+	Voice    string
+	Text     string
+}
+
+// isTTSRequest checks if the request is a TTS API call and returns provider info
+func isTTSRequest(r *http.Request, body []byte) *TTSRequestInfo {
+	path := r.URL.Path
+
+	// OpenAI TTS: POST /v1/audio/speech
+	if strings.HasSuffix(path, "/v1/audio/speech") || strings.HasSuffix(path, "/audio/speech") {
+		return parseTTSRequest("openai", body)
+	}
+
+	// Deepgram Aura: POST /v1/speak
+	if strings.HasSuffix(path, "/v1/speak") || strings.HasSuffix(path, "/speak") {
+		return parseTTSRequest("deepgram", body)
+	}
+
+	// ElevenLabs REST: POST /v1/text-to-speech/{voice_id}
+	if strings.Contains(path, "/text-to-speech/") && !strings.Contains(path, "/stream") {
+		info := parseTTSRequest("elevenlabs", body)
+		// Extract voice ID from path
+		parts := strings.Split(path, "/text-to-speech/")
+		if len(parts) > 1 {
+			voiceID := strings.Split(parts[1], "/")[0]
+			info.Voice = voiceID
+		}
+		return info
+	}
+
+	return nil
+}
+
+// parseTTSRequest extracts TTS details from the request body
+func parseTTSRequest(provider string, body []byte) *TTSRequestInfo {
+	info := &TTSRequestInfo{Provider: provider}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return info
+	}
+
+	// Extract model
+	if model, ok := data["model"].(string); ok {
+		info.Model = model
+	}
+
+	// Extract voice
+	if voice, ok := data["voice"].(string); ok {
+		info.Voice = voice
+	}
+
+	// Extract text/input
+	if text, ok := data["text"].(string); ok {
+		info.Text = text
+	} else if input, ok := data["input"].(string); ok {
+		info.Text = input
+	}
+
+	return info
+}
+
 // ServeHTTP handles incoming requests
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check for WebSocket upgrade BEFORE reading body
+	// Body cannot be read during WebSocket handshake
+	if p.wsHandler != nil && isWebSocketRequest(r) {
+		p.wsHandler.ServeHTTP(w, r)
+		return
+	}
+
 	startTime := time.Now()
 	ctx := r.Context()
 
@@ -222,6 +324,36 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Evaluate policy rules
 	if p.policy != nil {
 		p.evaluatePolicy(sess, r.Method, r.URL.Path, requestBody, statusCode)
+	}
+
+	// Track TTS requests
+	if p.storage != nil && r.Method == http.MethodPost {
+		if ttsInfo := isTTSRequest(r, requestBody); ttsInfo != nil {
+			ttsRecord := storage.TTSRequest{
+				ID:            uuid.New().String()[:8],
+				SessionID:     sess.ID,
+				Timestamp:     startTime,
+				Provider:      ttsInfo.Provider,
+				Model:         ttsInfo.Model,
+				Voice:         ttsInfo.Voice,
+				Text:          ttsInfo.Text,
+				TextLength:    len(ttsInfo.Text),
+				ResponseBytes: bytesOut,
+				DurationMs:    time.Since(startTime).Milliseconds(),
+				StatusCode:    statusCode,
+			}
+
+			if err := p.storage.SaveTTSRequest(ttsRecord); err != nil {
+				slog.Error("failed to save TTS request", "error", err)
+			} else {
+				slog.Info("TTS request tracked",
+					"session_id", sess.ID,
+					"provider", ttsInfo.Provider,
+					"voice", ttsInfo.Voice,
+					"text_length", len(ttsInfo.Text),
+				)
+			}
+		}
 	}
 
 	slog.Info("request completed",

@@ -28,6 +28,7 @@ import (
 	"elida/internal/session"
 	"elida/internal/storage"
 	"elida/internal/telemetry"
+	"elida/internal/websocket"
 )
 
 func main() {
@@ -263,8 +264,105 @@ func main() {
 		proxyHandler.SetStorage(sqliteStore)
 	}
 
+	// Initialize WebSocket handler if enabled
+	var wsHandler *websocket.Handler
+	if cfg.WebSocket.Enabled {
+		wsHandler = websocket.NewHandler(
+			&cfg.WebSocket,
+			cfg.Session.Header,
+			manager,
+			proxyHandler.GetRouter(),
+		)
+		proxyHandler.SetWebSocketHandler(wsHandler)
+
+		// Wire up policy engine for text frame scanning
+		if policyEngine != nil {
+			wsHandler.SetPolicyEngine(policyEngine)
+			slog.Info("WebSocket policy scanning enabled",
+				"scan_text_frames", cfg.WebSocket.ScanTextFrames,
+			)
+		}
+
+		// Wire up voice session persistence (CDR)
+		if sqliteStore != nil {
+			wsHandler.SetVoiceSessionCallbacks(
+				nil, // onStart - no action needed
+				func(wsSession *session.Session, vs *websocket.VoiceSession) {
+					// Persist voice session CDR to SQLite
+					snap := vs.Snapshot()
+					record := storage.VoiceSessionRecord{
+						ID:              snap.ID,
+						ParentSessionID: snap.ParentSessionID,
+						State:           snap.State.String(),
+						StartTime:       snap.StartTime,
+						AnswerTime:      snap.AnswerTime,
+						EndTime:         snap.EndTime,
+						DurationMs:      snap.Duration().Milliseconds(),
+						AudioDurationMs: snap.AudioDurationMs,
+						TurnCount:       snap.TurnCount,
+						Model:           snap.Model,
+						Voice:           snap.Voice,
+						Language:        snap.Language,
+						AudioBytesIn:    snap.AudioBytesIn,
+						AudioBytesOut:   snap.AudioBytesOut,
+						Metadata:        snap.Metadata,
+					}
+
+					// Get protocol from metadata
+					if proto, ok := snap.Metadata["protocol"]; ok {
+						record.Protocol = proto
+					}
+
+					// Convert transcript entries
+					for _, t := range snap.Transcript {
+						record.Transcript = append(record.Transcript, storage.TranscriptEntry{
+							Timestamp: t.Timestamp,
+							Speaker:   t.Speaker,
+							Text:      t.Text,
+							IsFinal:   t.IsFinal,
+							Source:    t.Source,
+						})
+					}
+
+					if err := sqliteStore.SaveVoiceSession(record); err != nil {
+						slog.Error("failed to save voice session",
+							"voice_session_id", snap.ID,
+							"error", err,
+						)
+					} else {
+						slog.Info("voice session CDR saved",
+							"voice_session_id", snap.ID,
+							"parent_session_id", snap.ParentSessionID,
+							"transcript_entries", len(record.Transcript),
+						)
+					}
+				},
+			)
+			slog.Info("voice session CDR persistence enabled")
+		}
+
+		slog.Info("WebSocket proxy enabled",
+			"ping_interval", cfg.WebSocket.PingInterval,
+			"max_message_size", cfg.WebSocket.MaxMessageSize,
+		)
+	}
+
 	// Initialize control API
-	controlHandler := control.NewWithPolicy(store, manager, sqliteStore, policyEngine)
+	controlHandler := control.NewWithAuth(
+		store,
+		manager,
+		sqliteStore,
+		policyEngine,
+		cfg.Control.Auth.Enabled,
+		cfg.Control.Auth.APIKey,
+	)
+	if wsHandler != nil {
+		controlHandler.SetWebSocketHandler(wsHandler)
+	}
+
+	if cfg.Control.Auth.Enabled {
+		slog.Info("control API authentication enabled")
+	}
 
 	// Setup HTTP servers
 	proxyServer := &http.Server{

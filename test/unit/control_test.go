@@ -267,3 +267,158 @@ func TestHandler_CORS(t *testing.T) {
 		t.Errorf("expected status 200 for OPTIONS, got %d", w.Code)
 	}
 }
+
+func TestHandler_VoiceSessions_NoWebSocketHandler(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	// When WebSocket handler is not set, should return 503
+	req := httptest.NewRequest("GET", "/control/voice", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503 when WebSocket handler not set, got %d", w.Code)
+	}
+}
+
+func TestHandler_VoiceSession_NoWebSocketHandler(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	// When WebSocket handler is not set, should return 503
+	req := httptest.NewRequest("GET", "/control/voice/session-123", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status 503 when WebSocket handler not set, got %d", w.Code)
+	}
+}
+
+func TestHandler_VoiceSession_Actions_NoWebSocketHandler(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	// POST actions should also return 503 when WebSocket handler is not set
+	tests := []struct {
+		path string
+	}{
+		{"/control/voice/session-123/voice-1/bye"},
+		{"/control/voice/session-123/voice-1/hold"},
+		{"/control/voice/session-123/voice-1/resume"},
+	}
+
+	for _, tt := range tests {
+		req := httptest.NewRequest("POST", tt.path, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: expected status 503 when WebSocket handler not set, got %d", tt.path, w.Code)
+		}
+	}
+}
+
+// Auth tests
+func newTestHandlerWithAuth(apiKey string) *control.Handler {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	return control.NewWithAuth(store, manager, nil, nil, true, apiKey)
+}
+
+func TestHandler_Auth_Unauthorized(t *testing.T) {
+	handler := newTestHandlerWithAuth("secret-key-123")
+
+	// Request without auth header should return 401
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401, got %d", w.Code)
+	}
+
+	// Check WWW-Authenticate header
+	if w.Header().Get("WWW-Authenticate") == "" {
+		t.Error("expected WWW-Authenticate header")
+	}
+}
+
+func TestHandler_Auth_WrongKey(t *testing.T) {
+	handler := newTestHandlerWithAuth("secret-key-123")
+
+	// Request with wrong key should return 401
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	req.Header.Set("Authorization", "Bearer wrong-key")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401, got %d", w.Code)
+	}
+}
+
+func TestHandler_Auth_BearerToken(t *testing.T) {
+	handler := newTestHandlerWithAuth("secret-key-123")
+
+	// Request with correct Bearer token should succeed
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	req.Header.Set("Authorization", "Bearer secret-key-123")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+}
+
+func TestHandler_Auth_XAPIKey(t *testing.T) {
+	handler := newTestHandlerWithAuth("secret-key-123")
+
+	// Request with X-API-Key header should succeed
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	req.Header.Set("X-API-Key", "secret-key-123")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+}
+
+func TestHandler_Auth_DashboardNoAuth(t *testing.T) {
+	handler := newTestHandlerWithAuth("secret-key-123")
+
+	// Dashboard (root path) should NOT require auth
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Should get 200 (dashboard) or 404, but NOT 401
+	if w.Code == http.StatusUnauthorized {
+		t.Error("dashboard should not require auth")
+	}
+}
+
+func TestHandler_Auth_AllControlEndpoints(t *testing.T) {
+	handler := newTestHandlerWithAuth("secret-key-123")
+
+	// All /control/* endpoints should require auth
+	endpoints := []string{
+		"/control/health",
+		"/control/stats",
+		"/control/sessions",
+		"/control/sessions/test-123",
+		"/control/history",
+		"/control/flagged",
+		"/control/voice",
+	}
+
+	for _, ep := range endpoints {
+		req := httptest.NewRequest("GET", ep, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s: expected status 401 without auth, got %d", ep, w.Code)
+		}
+	}
+}

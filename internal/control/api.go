@@ -12,6 +12,7 @@ import (
 	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
+	"elida/internal/websocket"
 )
 
 // Handler handles control API requests
@@ -20,8 +21,13 @@ type Handler struct {
 	manager      *session.Manager
 	historyStore *storage.SQLiteStore
 	policyEngine *policy.Engine
+	wsHandler    *websocket.Handler
 	dashboard    *dashboard.Handler
 	mux          *http.ServeMux
+
+	// Authentication
+	authEnabled bool
+	apiKey      string
 }
 
 // New creates a new control API handler
@@ -36,6 +42,11 @@ func NewWithHistory(store session.Store, manager *session.Manager, historyStore 
 
 // NewWithPolicy creates a new control API handler with history and policy support
 func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine) *Handler {
+	return NewWithAuth(store, manager, historyStore, policyEngine, false, "")
+}
+
+// NewWithAuth creates a new control API handler with all options including authentication
+func NewWithAuth(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine, authEnabled bool, apiKey string) *Handler {
 	h := &Handler{
 		store:        store,
 		manager:      manager,
@@ -43,6 +54,8 @@ func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *
 		policyEngine: policyEngine,
 		dashboard:    dashboard.New(),
 		mux:          http.NewServeMux(),
+		authEnabled:  authEnabled,
+		apiKey:       apiKey,
 	}
 
 	// Dashboard UI (catch-all pattern for Go 1.22+)
@@ -65,7 +78,25 @@ func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *
 	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
 	h.mux.HandleFunc("/control/flagged/", h.handleFlaggedSession)
 
+	// Voice sessions endpoints (live)
+	h.mux.HandleFunc("/control/voice", h.handleVoiceSessions)
+	h.mux.HandleFunc("/control/voice/", h.handleVoiceSession)
+
+	// Voice session history endpoints (persisted CDRs)
+	h.mux.HandleFunc("/control/voice-history", h.handleVoiceHistory)
+	h.mux.HandleFunc("/control/voice-history/stats", h.handleVoiceHistoryStats)
+	h.mux.HandleFunc("/control/voice-history/", h.handleVoiceHistorySession)
+
+	// TTS (Text-to-Speech) tracking endpoints
+	h.mux.HandleFunc("/control/tts", h.handleTTSRequests)
+	h.mux.HandleFunc("/control/tts/stats", h.handleTTSStats)
+
 	return h
+}
+
+// SetWebSocketHandler sets the WebSocket handler for voice session access
+func (h *Handler) SetWebSocketHandler(wsHandler *websocket.Handler) {
+	h.wsHandler = wsHandler
 }
 
 // ServeHTTP implements http.Handler
@@ -73,14 +104,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add CORS headers for dashboard access
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
+	// Check authentication for /control/* endpoints
+	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") {
+		if !h.checkAuth(r) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="ELIDA Control API"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error":   "unauthorized",
+				"message": "Valid API key required. Use 'Authorization: Bearer <api_key>' header.",
+			})
+			return
+		}
+	}
+
 	h.mux.ServeHTTP(w, r)
+}
+
+// checkAuth verifies the request has a valid API key
+func (h *Handler) checkAuth(r *http.Request) bool {
+	// Check Authorization header (Bearer token)
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		// Support "Bearer <key>" format
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if token == h.apiKey {
+				return true
+			}
+		}
+		// Also support just the key directly
+		if authHeader == h.apiKey {
+			return true
+		}
+	}
+
+	// Check X-API-Key header as alternative
+	if apiKey := r.Header.Get("X-API-Key"); apiKey == h.apiKey {
+		return true
+	}
+
+	return false
 }
 
 // handleHealth handles GET /control/health
@@ -555,4 +624,416 @@ func (h *Handler) handleFlaggedSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, flagged)
+}
+
+// handleVoiceSessions handles GET /control/voice - list all voice sessions
+func (h *Handler) handleVoiceSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.wsHandler == nil {
+		http.Error(w, "WebSocket handler not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Collect all voice sessions across all WebSocket connections
+	managers := h.wsHandler.ListVoiceManagers()
+	allSessions := make([]websocket.VoiceSessionInfo, 0)
+	stats := make(map[string]int)
+
+	for sessionID, mgr := range managers {
+		sessions := h.wsHandler.ListVoiceSessions(sessionID)
+		allSessions = append(allSessions, sessions...)
+
+		// Count by state
+		for _, vs := range sessions {
+			stats[vs.State]++
+		}
+		mgrStats := mgr.Stats()
+		stats["active"] = mgrStats.ActiveSessions
+		stats["completed"] = mgrStats.CompletedSessions
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"voice_sessions":    allSessions,
+		"total":             len(allSessions),
+		"websocket_sessions": len(managers),
+		"stats":             stats,
+	})
+}
+
+// handleVoiceSession handles requests to /control/voice/{sessionID}
+// Path patterns:
+//   GET /control/voice/{sessionID} - List voice sessions for a WebSocket session
+//   GET /control/voice/{sessionID}/{voiceID} - Get a specific voice session
+//   POST /control/voice/{sessionID}/{voiceID}/bye - End a voice session
+//   POST /control/voice/{sessionID}/{voiceID}/hold - Put on hold
+//   POST /control/voice/{sessionID}/{voiceID}/resume - Resume from hold
+func (h *Handler) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
+	if h.wsHandler == nil {
+		http.Error(w, "WebSocket handler not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Parse path: /control/voice/{sessionID}/{voiceID?}/{action?}
+	path := strings.TrimPrefix(r.URL.Path, "/control/voice/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := parts[0]
+	voiceID := ""
+	action := ""
+
+	if len(parts) > 1 {
+		voiceID = parts[1]
+	}
+	if len(parts) > 2 {
+		action = parts[2]
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if voiceID == "" {
+			// List voice sessions for this WebSocket session
+			h.listVoiceSessions(w, sessionID)
+		} else {
+			// Get specific voice session
+			h.getVoiceSession(w, sessionID, voiceID)
+		}
+	case http.MethodPost:
+		if voiceID == "" {
+			http.Error(w, "Voice session ID required", http.StatusBadRequest)
+			return
+		}
+		switch action {
+		case "bye":
+			h.endVoiceSession(w, r, sessionID, voiceID)
+		case "hold":
+			h.holdVoiceSession(w, sessionID, voiceID)
+		case "resume":
+			h.resumeVoiceSession(w, sessionID, voiceID)
+		default:
+			http.Error(w, "Unknown action. Use: bye, hold, or resume", http.StatusBadRequest)
+		}
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// listVoiceSessions handles GET /control/voice/{sessionID}
+func (h *Handler) listVoiceSessions(w http.ResponseWriter, sessionID string) {
+	sessions := h.wsHandler.ListVoiceSessions(sessionID)
+	if sessions == nil {
+		http.Error(w, "WebSocket session not found or has no voice sessions", http.StatusNotFound)
+		return
+	}
+
+	mgr := h.wsHandler.GetVoiceManager(sessionID)
+	var stats interface{}
+	if mgr != nil {
+		stats = mgr.Stats()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id":     sessionID,
+		"voice_sessions": sessions,
+		"total":          len(sessions),
+		"stats":          stats,
+	})
+}
+
+// getVoiceSession handles GET /control/voice/{sessionID}/{voiceID}
+func (h *Handler) getVoiceSession(w http.ResponseWriter, sessionID, voiceID string) {
+	vs := h.wsHandler.GetVoiceSession(sessionID, voiceID)
+	if vs == nil {
+		http.Error(w, "Voice session not found", http.StatusNotFound)
+		return
+	}
+
+	info := websocket.VoiceSessionInfo{
+		ID:              vs.ID,
+		ParentSessionID: vs.ParentSessionID,
+		State:           vs.GetState().String(),
+		AudioFramesIn:   vs.AudioFramesIn,
+		AudioFramesOut:  vs.AudioFramesOut,
+		AudioBytesIn:    vs.AudioBytesIn,
+		AudioBytesOut:   vs.AudioBytesOut,
+		AudioDurationMs: vs.AudioDurationMs,
+		TurnCount:       vs.TurnCount,
+		Model:           vs.Model,
+		Voice:           vs.Voice,
+		Language:        vs.Language,
+		Metadata:        vs.Metadata,
+	}
+
+	writeJSON(w, http.StatusOK, info)
+}
+
+// endVoiceSession handles POST /control/voice/{sessionID}/{voiceID}/bye
+func (h *Handler) endVoiceSession(w http.ResponseWriter, r *http.Request, sessionID, voiceID string) {
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		reason = "api_request"
+	}
+
+	slog.Info("voice session end request", "session_id", sessionID, "voice_id", voiceID, "reason", reason)
+
+	if h.wsHandler.EndVoiceSession(sessionID, voiceID, reason) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "ended",
+			"session_id": sessionID,
+			"voice_id":   voiceID,
+			"reason":     reason,
+		})
+	} else {
+		http.Error(w, "Voice session not found or already ended", http.StatusNotFound)
+	}
+}
+
+// holdVoiceSession handles POST /control/voice/{sessionID}/{voiceID}/hold
+func (h *Handler) holdVoiceSession(w http.ResponseWriter, sessionID, voiceID string) {
+	slog.Info("voice session hold request", "session_id", sessionID, "voice_id", voiceID)
+
+	if h.wsHandler.HoldVoiceSession(sessionID, voiceID) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "held",
+			"session_id": sessionID,
+			"voice_id":   voiceID,
+		})
+	} else {
+		http.Error(w, "Voice session not found or not in active state", http.StatusNotFound)
+	}
+}
+
+// resumeVoiceSession handles POST /control/voice/{sessionID}/{voiceID}/resume
+func (h *Handler) resumeVoiceSession(w http.ResponseWriter, sessionID, voiceID string) {
+	slog.Info("voice session resume request", "session_id", sessionID, "voice_id", voiceID)
+
+	if h.wsHandler.ResumeVoiceSession(sessionID, voiceID) {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "resumed",
+			"session_id": sessionID,
+			"voice_id":   voiceID,
+		})
+	} else {
+		http.Error(w, "Voice session not found or not in held state", http.StatusNotFound)
+	}
+}
+
+// handleVoiceHistory handles GET /control/voice-history
+func (h *Handler) handleVoiceHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"count":          0,
+			"voice_sessions": nil,
+			"error":          "storage not enabled",
+		})
+		return
+	}
+
+	// Parse query parameters
+	opts := storage.ListVoiceSessionsOptions{
+		Limit:  100,
+		Offset: 0,
+	}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+			opts.Limit = l
+		}
+	}
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		if o, err := strconv.Atoi(offset); err == nil && o >= 0 {
+			opts.Offset = o
+		}
+	}
+	if state := r.URL.Query().Get("state"); state != "" {
+		opts.State = state
+	}
+	if parentID := r.URL.Query().Get("parent_session_id"); parentID != "" {
+		opts.ParentSessionID = parentID
+	}
+	if since := r.URL.Query().Get("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			opts.Since = &t
+		}
+	}
+
+	sessions, err := h.historyStore.ListVoiceSessions(opts)
+	if err != nil {
+		slog.Error("failed to list voice session history", "error", err)
+		http.Error(w, "Failed to retrieve voice session history", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"count":          len(sessions),
+		"voice_sessions": sessions,
+	})
+}
+
+// handleVoiceHistoryStats handles GET /control/voice-history/stats
+func (h *Handler) handleVoiceHistoryStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"error": "storage not enabled",
+		})
+		return
+	}
+
+	var since *time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = &t
+		}
+	}
+
+	stats, err := h.historyStore.GetVoiceStats(since)
+	if err != nil {
+		slog.Error("failed to get voice stats", "error", err)
+		http.Error(w, "Failed to retrieve voice stats", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleVoiceHistorySession handles GET /control/voice-history/{voiceID}
+func (h *Handler) handleVoiceHistorySession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "Storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract voice session ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/control/voice-history/")
+	voiceID := strings.TrimSuffix(path, "/")
+
+	if voiceID == "" {
+		http.Error(w, "Voice session ID required", http.StatusBadRequest)
+		return
+	}
+
+	session, err := h.historyStore.GetVoiceSession(voiceID)
+	if err != nil {
+		slog.Error("failed to get voice session", "voice_id", voiceID, "error", err)
+		http.Error(w, "Failed to retrieve voice session", http.StatusInternalServerError)
+		return
+	}
+
+	if session == nil {
+		http.Error(w, "Voice session not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, session)
+}
+
+// handleTTSRequests handles GET /control/tts
+func (h *Handler) handleTTSRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"count":        0,
+			"tts_requests": nil,
+			"error":        "storage not enabled",
+		})
+		return
+	}
+
+	// Parse query parameters
+	opts := storage.ListTTSRequestsOptions{
+		Limit:  100,
+		Offset: 0,
+	}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+			opts.Limit = l
+		}
+	}
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		if o, err := strconv.Atoi(offset); err == nil && o >= 0 {
+			opts.Offset = o
+		}
+	}
+	if sessionID := r.URL.Query().Get("session_id"); sessionID != "" {
+		opts.SessionID = sessionID
+	}
+	if provider := r.URL.Query().Get("provider"); provider != "" {
+		opts.Provider = provider
+	}
+	if since := r.URL.Query().Get("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			opts.Since = &t
+		}
+	}
+
+	requests, err := h.historyStore.ListTTSRequests(opts)
+	if err != nil {
+		slog.Error("failed to list TTS requests", "error", err)
+		http.Error(w, "Failed to retrieve TTS requests", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"count":        len(requests),
+		"tts_requests": requests,
+	})
+}
+
+// handleTTSStats handles GET /control/tts/stats
+func (h *Handler) handleTTSStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"error": "storage not enabled",
+		})
+		return
+	}
+
+	var since *time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = &t
+		}
+	}
+
+	stats, err := h.historyStore.GetTTSStats(since)
+	if err != nil {
+		slog.Error("failed to get TTS stats", "error", err)
+		http.Error(w, "Failed to retrieve TTS stats", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
 }

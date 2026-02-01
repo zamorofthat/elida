@@ -74,6 +74,12 @@ control:
   listen: ":9090"
   # Enable the control API
   enabled: true
+  # Authentication for control API (recommended for production)
+  auth:
+    # Enable API key authentication
+    enabled: false
+    # API key for Bearer token auth (set via ELIDA_CONTROL_API_KEY env var)
+    # api_key: "your-secret-api-key-here"
 
 # Logging configuration
 logging:
@@ -210,3 +216,71 @@ policy:
     #   severity: "warning"
     #   action: "block"
     #   description: "Custom rate limit for controlled environment"
+
+# WebSocket proxy configuration
+# Enables proxying of WebSocket connections for real-time AI agents
+# (e.g., OpenAI Realtime API, voice assistants, STT/TTS services)
+websocket:
+  # Enable WebSocket proxy support
+  enabled: false
+
+  # Buffer sizes for WebSocket connections (bytes)
+  read_buffer_size: 4096
+  write_buffer_size: 4096
+
+  # Timeout for WebSocket handshake
+  handshake_timeout: 10s
+
+  # Ping/pong keep-alive settings
+  # Ping frames are sent to keep connections alive
+  ping_interval: 30s
+  pong_timeout: 60s
+
+  # Maximum message size (bytes)
+  # Messages larger than this will be rejected
+  max_message_size: 1048576  # 1MB
+
+  # Scan text frames with policy engine (Phase 2)
+  # Binary frames are always passed through without scanning
+  scan_text_frames: true
+
+  # Voice session configuration
+  # Enables SIP-inspired session control for voice/real-time conversations
+  # Tracks INVITE/BYE signals to create per-conversation CDRs with transcripts
+  voice_sessions:
+    # Enable voice session tracking
+    enabled: true
+
+    # Maximum concurrent voice sessions per WebSocket connection
+    # Prevents resource exhaustion from excessive parallel calls
+    max_concurrent: 5
+
+    # Generate CDR (Call Detail Record) for each voice session
+    # When false, only tracks at WebSocket connection level
+    cdr_per_session: true
+
+    # Apply policy rules on INVITE (session start)
+    # Allows blocking sessions before they begin
+    policy_on_invite: true
+
+    # Auto-start a voice session when WebSocket connects
+    # Useful for simple 1:1 connection-to-session mapping
+    auto_start_session: false
+
+    # Protocols to auto-detect for session control signals
+    # Built-in: openai_realtime, deepgram, elevenlabs, livekit
+    protocols:
+      - openai_realtime
+      - deepgram
+      - elevenlabs
+      - livekit
+
+    # Custom session control patterns (regex-based)
+    # Use when working with non-standard or custom voice protocols
+    # custom_patterns:
+    #   - name: "my_invite"
+    #     type: "invite"        # invite, bye, ok, hold, resume, turn_start, turn_end
+    #     pattern: '"action":\s*"start_call"'
+    #   - name: "my_bye"
+    #     type: "bye"
+    #     pattern: '"action":\s*"end_call"'

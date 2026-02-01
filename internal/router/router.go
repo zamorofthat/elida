@@ -17,6 +17,7 @@ import (
 type Backend struct {
 	Name      string
 	URL       *url.URL
+	WSURL     *url.URL // Derived WebSocket URL: ws:// or wss://
 	Type      string   // ollama, openai, anthropic, mistral
 	Models    []string // glob patterns for model matching
 	Default   bool
@@ -57,9 +58,13 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 			return nil, fmt.Errorf("invalid URL for backend %q: %w", name, err)
 		}
 
+		// Derive WebSocket URL from HTTP URL
+		wsURL := deriveWebSocketURL(backendURL)
+
 		backend := &Backend{
 			Name:    name,
 			URL:     backendURL,
+			WSURL:   wsURL,
 			Type:    bcfg.Type,
 			Models:  bcfg.Models,
 			Default: bcfg.Default,
@@ -80,6 +85,7 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 		slog.Info("backend configured",
 			"name", name,
 			"url", bcfg.URL,
+			"ws_url", wsURL.String(),
 			"type", bcfg.Type,
 			"models", bcfg.Models,
 			"default", bcfg.Default,
@@ -117,6 +123,7 @@ func NewSingleBackendRouter(backendURL string) (*Router, error) {
 	backend := &Backend{
 		Name:    "default",
 		URL:     parsed,
+		WSURL:   deriveWebSocketURL(parsed),
 		Type:    "unknown",
 		Default: true,
 		Transport: &http.Transport{
@@ -132,6 +139,19 @@ func NewSingleBackendRouter(backendURL string) (*Router, error) {
 		defaultBackend: backend,
 		methods:        []string{"default"},
 	}, nil
+}
+
+// deriveWebSocketURL converts an HTTP URL to a WebSocket URL
+// http:// -> ws://, https:// -> wss://
+func deriveWebSocketURL(httpURL *url.URL) *url.URL {
+	wsURL := *httpURL // Copy the URL
+	switch wsURL.Scheme {
+	case "http":
+		wsURL.Scheme = "ws"
+	case "https":
+		wsURL.Scheme = "wss"
+	}
+	return &wsURL
 }
 
 // Select chooses the appropriate backend for a request

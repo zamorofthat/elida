@@ -141,6 +141,12 @@ const (
 	AttrViolationSeverity = "elida.violations.max_severity"
 	AttrViolationActions  = "elida.violations.actions"
 	AttrCaptureCount      = "elida.captures.count"
+
+	// WebSocket attributes
+	AttrIsWebSocket  = "elida.websocket"
+	AttrFrameCount   = "elida.websocket.frame_count"
+	AttrTextFrames   = "elida.websocket.text_frames"
+	AttrBinaryFrames = "elida.websocket.binary_frames"
 )
 
 // Violation represents a policy violation for telemetry export
@@ -164,6 +170,12 @@ type SessionRecord struct {
 	BytesOut     int64
 	Violations   []Violation
 	CaptureCount int
+
+	// WebSocket fields
+	IsWebSocket  bool
+	FrameCount   int64
+	TextFrames   int64
+	BinaryFrames int64
 }
 
 // StartRequestSpan starts a span for an HTTP request
@@ -253,24 +265,37 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 		}
 	}
 
+	// Build attributes list
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrSessionID, record.SessionID),
+		attribute.String(AttrSessionState, record.State),
+		attribute.String(AttrBackend, record.Backend),
+		attribute.String(AttrClientAddr, record.ClientAddr),
+		attribute.Int64(AttrDurationMs, record.DurationMs),
+		attribute.Int(AttrRequestCount, record.RequestCount),
+		attribute.Int64(AttrBytesIn, record.BytesIn),
+		attribute.Int64(AttrBytesOut, record.BytesOut),
+		attribute.Int(AttrViolationCount, len(record.Violations)),
+		attribute.StringSlice(AttrViolationRules, ruleNames),
+		attribute.String(AttrViolationSeverity, maxSeverity),
+		attribute.StringSlice(AttrViolationActions, actions),
+		attribute.Int(AttrCaptureCount, record.CaptureCount),
+	}
+
+	// Add WebSocket attributes if this is a WebSocket session
+	if record.IsWebSocket {
+		attrs = append(attrs,
+			attribute.Bool(AttrIsWebSocket, true),
+			attribute.Int64(AttrFrameCount, record.FrameCount),
+			attribute.Int64(AttrTextFrames, record.TextFrames),
+			attribute.Int64(AttrBinaryFrames, record.BinaryFrames),
+		)
+	}
+
 	// Create session record span with all attributes
 	_, span := p.tracer.Start(ctx, "session.record",
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(
-			attribute.String(AttrSessionID, record.SessionID),
-			attribute.String(AttrSessionState, record.State),
-			attribute.String(AttrBackend, record.Backend),
-			attribute.String(AttrClientAddr, record.ClientAddr),
-			attribute.Int64(AttrDurationMs, record.DurationMs),
-			attribute.Int(AttrRequestCount, record.RequestCount),
-			attribute.Int64(AttrBytesIn, record.BytesIn),
-			attribute.Int64(AttrBytesOut, record.BytesOut),
-			attribute.Int(AttrViolationCount, len(record.Violations)),
-			attribute.StringSlice(AttrViolationRules, ruleNames),
-			attribute.String(AttrViolationSeverity, maxSeverity),
-			attribute.StringSlice(AttrViolationActions, actions),
-			attribute.Int(AttrCaptureCount, record.CaptureCount),
-		),
+		trace.WithAttributes(attrs...),
 	)
 
 	// Add individual violation events for detailed tracking

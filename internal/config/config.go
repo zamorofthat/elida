@@ -21,6 +21,38 @@ type Config struct {
 	Telemetry TelemetryConfig             `yaml:"telemetry"`
 	Storage   StorageConfig               `yaml:"storage"`
 	Policy    PolicyConfig                `yaml:"policy"`
+	WebSocket WebSocketConfig             `yaml:"websocket"` // WebSocket proxy configuration
+}
+
+// WebSocketConfig holds WebSocket proxy configuration
+type WebSocketConfig struct {
+	Enabled          bool          `yaml:"enabled"`
+	ReadBufferSize   int           `yaml:"read_buffer_size"`   // Buffer size for reading (default 4096)
+	WriteBufferSize  int           `yaml:"write_buffer_size"`  // Buffer size for writing (default 4096)
+	HandshakeTimeout time.Duration `yaml:"handshake_timeout"`  // Timeout for WS handshake (default 10s)
+	PingInterval     time.Duration `yaml:"ping_interval"`      // Interval for ping frames (default 30s)
+	PongTimeout      time.Duration `yaml:"pong_timeout"`       // Timeout waiting for pong (default 60s)
+	MaxMessageSize   int64         `yaml:"max_message_size"`   // Max message size in bytes (default 1MB)
+	ScanTextFrames   bool          `yaml:"scan_text_frames"`   // Scan text frames with policy engine (default true)
+	VoiceSessions    VoiceSessionConfig `yaml:"voice_sessions"` // SIP-style voice session control
+}
+
+// VoiceSessionConfig holds voice session control configuration (SIP-inspired)
+type VoiceSessionConfig struct {
+	Enabled          bool     `yaml:"enabled"`            // Enable voice session tracking
+	MaxConcurrent    int      `yaml:"max_concurrent"`     // Max concurrent voice sessions per WebSocket (default 1)
+	CDRPerSession    bool     `yaml:"cdr_per_session"`    // Generate CDR per voice session (not just per WebSocket)
+	PolicyOnInvite   bool     `yaml:"policy_on_invite"`   // Run policy checks at INVITE time
+	AutoStartSession bool     `yaml:"auto_start_session"` // Auto-create session on first audio frame if no INVITE
+	Protocols        []string `yaml:"protocols"`          // Enabled protocols: openai_realtime, deepgram, elevenlabs, livekit, custom
+	CustomPatterns   []VoiceCustomPattern `yaml:"custom_patterns"` // Custom INVITE/BYE patterns
+}
+
+// VoiceCustomPattern defines a custom pattern for detecting voice session control
+type VoiceCustomPattern struct {
+	Name    string `yaml:"name"`    // Pattern name
+	Type    string `yaml:"type"`    // invite, bye, ok, hold, resume, turn_start, turn_end
+	Pattern string `yaml:"pattern"` // Regex pattern to match
 }
 
 // TLSConfig holds TLS/HTTPS configuration
@@ -118,8 +150,15 @@ type RedisConfig struct {
 
 // ControlConfig holds control API configuration
 type ControlConfig struct {
-	Listen  string `yaml:"listen"`
+	Listen  string            `yaml:"listen"`
+	Enabled bool              `yaml:"enabled"`
+	Auth    ControlAuthConfig `yaml:"auth"`
+}
+
+// ControlAuthConfig holds control API authentication settings
+type ControlAuthConfig struct {
 	Enabled bool   `yaml:"enabled"`
+	APIKey  string `yaml:"api_key"` // API key for Bearer token auth
 }
 
 // LoggingConfig holds logging configuration
@@ -255,6 +294,24 @@ func defaults() *Config {
 				},
 			},
 		},
+		WebSocket: WebSocketConfig{
+			Enabled:          false,
+			ReadBufferSize:   4096,
+			WriteBufferSize:  4096,
+			HandshakeTimeout: 10 * time.Second,
+			PingInterval:     30 * time.Second,
+			PongTimeout:      60 * time.Second,
+			MaxMessageSize:   1048576, // 1MB
+			ScanTextFrames:   true,
+			VoiceSessions: VoiceSessionConfig{
+				Enabled:          true, // Enable by default when WebSocket is enabled
+				MaxConcurrent:    1,
+				CDRPerSession:    true,
+				PolicyOnInvite:   true,
+				AutoStartSession: true, // Auto-start if no explicit INVITE detected
+				Protocols:        []string{"openai_realtime", "deepgram", "elevenlabs", "livekit"},
+			},
+		},
 	}
 }
 
@@ -345,6 +402,23 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("ELIDA_TLS_AUTO_CERT") == "true" {
 		c.TLS.AutoCert = true
+	}
+
+	// WebSocket overrides
+	if os.Getenv("ELIDA_WEBSOCKET_ENABLED") == "true" {
+		c.WebSocket.Enabled = true
+	}
+	if os.Getenv("ELIDA_WEBSOCKET_SCAN_TEXT_FRAMES") == "false" {
+		c.WebSocket.ScanTextFrames = false
+	}
+
+	// Control API auth overrides
+	if os.Getenv("ELIDA_CONTROL_AUTH_ENABLED") == "true" {
+		c.Control.Auth.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_CONTROL_API_KEY"); v != "" {
+		c.Control.Auth.APIKey = v
+		c.Control.Auth.Enabled = true // Auto-enable if key is set
 	}
 }
 

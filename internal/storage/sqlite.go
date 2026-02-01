@@ -30,6 +30,51 @@ type Violation struct {
 	Action      string `json:"action"`
 }
 
+// TranscriptEntry represents a single utterance in a voice session
+type TranscriptEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Speaker   string    `json:"speaker"` // "user" or "assistant"
+	Text      string    `json:"text"`
+	IsFinal   bool      `json:"is_final"`
+	Source    string    `json:"source"` // "stt", "tts", "text"
+}
+
+// VoiceSessionRecord represents a historical voice session record (CDR)
+type VoiceSessionRecord struct {
+	ID              string            `json:"id"`
+	ParentSessionID string            `json:"parent_session_id"`
+	State           string            `json:"state"`
+	StartTime       time.Time         `json:"start_time"`
+	AnswerTime      *time.Time        `json:"answer_time,omitempty"`
+	EndTime         *time.Time        `json:"end_time,omitempty"`
+	DurationMs      int64             `json:"duration_ms"`
+	AudioDurationMs int64             `json:"audio_duration_ms"`
+	TurnCount       int               `json:"turn_count"`
+	Model           string            `json:"model,omitempty"`
+	Voice           string            `json:"voice,omitempty"`
+	Language        string            `json:"language,omitempty"`
+	Protocol        string            `json:"protocol,omitempty"`
+	AudioBytesIn    int64             `json:"audio_bytes_in"`
+	AudioBytesOut   int64             `json:"audio_bytes_out"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	Transcript      []TranscriptEntry `json:"transcript,omitempty"`
+}
+
+// TTSRequest represents a text-to-speech API call
+type TTSRequest struct {
+	ID            string    `json:"id"`
+	SessionID     string    `json:"session_id"`
+	Timestamp     time.Time `json:"timestamp"`
+	Provider      string    `json:"provider"`       // "openai", "deepgram", "elevenlabs"
+	Model         string    `json:"model"`          // e.g., "tts-1", "aura-asteria-en"
+	Voice         string    `json:"voice"`          // e.g., "alloy", "nova"
+	Text          string    `json:"text"`           // Text being synthesized
+	TextLength    int       `json:"text_length"`    // Character count
+	ResponseBytes int64     `json:"response_bytes"` // Audio response size
+	DurationMs    int64     `json:"duration_ms"`    // Request duration
+	StatusCode    int       `json:"status_code"`
+}
+
 type SessionRecord struct {
 	ID              string            `json:"id"`
 	State           string            `json:"state"`
@@ -99,6 +144,52 @@ func (s *SQLiteStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_end_time ON sessions(end_time);
 	CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
 	CREATE INDEX IF NOT EXISTS idx_sessions_backend ON sessions(backend);
+
+	-- Voice session CDR table
+	CREATE TABLE IF NOT EXISTS voice_sessions (
+		id TEXT PRIMARY KEY,
+		parent_session_id TEXT NOT NULL,
+		state TEXT NOT NULL,
+		start_time DATETIME NOT NULL,
+		answer_time DATETIME,
+		end_time DATETIME,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		audio_duration_ms INTEGER NOT NULL DEFAULT 0,
+		turn_count INTEGER NOT NULL DEFAULT 0,
+		model TEXT,
+		voice TEXT,
+		language TEXT,
+		protocol TEXT,
+		audio_bytes_in INTEGER NOT NULL DEFAULT 0,
+		audio_bytes_out INTEGER NOT NULL DEFAULT 0,
+		metadata TEXT,
+		transcript TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_voice_sessions_parent ON voice_sessions(parent_session_id);
+	CREATE INDEX IF NOT EXISTS idx_voice_sessions_start_time ON voice_sessions(start_time);
+	CREATE INDEX IF NOT EXISTS idx_voice_sessions_state ON voice_sessions(state);
+
+	-- TTS (Text-to-Speech) request table
+	CREATE TABLE IF NOT EXISTS tts_requests (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		timestamp DATETIME NOT NULL,
+		provider TEXT NOT NULL,
+		model TEXT,
+		voice TEXT,
+		text TEXT,
+		text_length INTEGER NOT NULL DEFAULT 0,
+		response_bytes INTEGER NOT NULL DEFAULT 0,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		status_code INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_tts_session ON tts_requests(session_id);
+	CREATE INDEX IF NOT EXISTS idx_tts_timestamp ON tts_requests(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_tts_provider ON tts_requests(provider);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -453,4 +544,525 @@ func (s *SQLiteStore) Cleanup(retentionDays int) (int64, error) {
 // Close closes the database connection
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// SaveVoiceSession saves a voice session record (CDR with transcript)
+func (s *SQLiteStore) SaveVoiceSession(record VoiceSessionRecord) error {
+	metadata, err := json.Marshal(record.Metadata)
+	if err != nil {
+		metadata = []byte("{}")
+	}
+
+	transcript, err := json.Marshal(record.Transcript)
+	if err != nil {
+		transcript = []byte("[]")
+	}
+
+	_, err = s.db.Exec(`
+		INSERT OR REPLACE INTO voice_sessions
+		(id, parent_session_id, state, start_time, answer_time, end_time, duration_ms, audio_duration_ms, turn_count, model, voice, language, protocol, audio_bytes_in, audio_bytes_out, metadata, transcript)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.ID,
+		record.ParentSessionID,
+		record.State,
+		record.StartTime,
+		record.AnswerTime,
+		record.EndTime,
+		record.DurationMs,
+		record.AudioDurationMs,
+		record.TurnCount,
+		record.Model,
+		record.Voice,
+		record.Language,
+		record.Protocol,
+		record.AudioBytesIn,
+		record.AudioBytesOut,
+		string(metadata),
+		string(transcript),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to save voice session: %w", err)
+	}
+
+	slog.Debug("voice session saved to history",
+		"voice_session_id", record.ID,
+		"parent_session_id", record.ParentSessionID,
+		"state", record.State,
+		"transcript_entries", len(record.Transcript),
+	)
+	return nil
+}
+
+// GetVoiceSession retrieves a voice session by ID
+func (s *SQLiteStore) GetVoiceSession(id string) (*VoiceSessionRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT id, parent_session_id, state, start_time, answer_time, end_time, duration_ms, audio_duration_ms, turn_count, model, voice, language, protocol, audio_bytes_in, audio_bytes_out, metadata, transcript
+		FROM voice_sessions WHERE id = ?`, id)
+
+	var record VoiceSessionRecord
+	var answerTime, endTime sql.NullTime
+	var model, voice, language, protocol sql.NullString
+	var metadataStr, transcriptStr sql.NullString
+
+	err := row.Scan(
+		&record.ID,
+		&record.ParentSessionID,
+		&record.State,
+		&record.StartTime,
+		&answerTime,
+		&endTime,
+		&record.DurationMs,
+		&record.AudioDurationMs,
+		&record.TurnCount,
+		&model,
+		&voice,
+		&language,
+		&protocol,
+		&record.AudioBytesIn,
+		&record.AudioBytesOut,
+		&metadataStr,
+		&transcriptStr,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voice session: %w", err)
+	}
+
+	if answerTime.Valid {
+		record.AnswerTime = &answerTime.Time
+	}
+	if endTime.Valid {
+		record.EndTime = &endTime.Time
+	}
+	if model.Valid {
+		record.Model = model.String
+	}
+	if voice.Valid {
+		record.Voice = voice.String
+	}
+	if language.Valid {
+		record.Language = language.String
+	}
+	if protocol.Valid {
+		record.Protocol = protocol.String
+	}
+	if metadataStr.Valid && metadataStr.String != "" {
+		json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+	}
+	if transcriptStr.Valid && transcriptStr.String != "" {
+		json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
+	}
+
+	return &record, nil
+}
+
+// ListVoiceSessionsOptions contains options for listing voice sessions
+type ListVoiceSessionsOptions struct {
+	Limit           int
+	Offset          int
+	ParentSessionID string // Filter by parent HTTP session
+	State           string
+	Since           *time.Time
+	Until           *time.Time
+}
+
+// ListVoiceSessions retrieves voice sessions with filtering and pagination
+func (s *SQLiteStore) ListVoiceSessions(opts ListVoiceSessionsOptions) ([]VoiceSessionRecord, error) {
+	query := `
+		SELECT id, parent_session_id, state, start_time, answer_time, end_time, duration_ms, audio_duration_ms, turn_count, model, voice, language, protocol, audio_bytes_in, audio_bytes_out, metadata, transcript
+		FROM voice_sessions WHERE 1=1`
+
+	args := []interface{}{}
+
+	if opts.ParentSessionID != "" {
+		query += " AND parent_session_id = ?"
+		args = append(args, opts.ParentSessionID)
+	}
+	if opts.State != "" {
+		query += " AND state = ?"
+		args = append(args, opts.State)
+	}
+	if opts.Since != nil {
+		query += " AND start_time >= ?"
+		args = append(args, *opts.Since)
+	}
+	if opts.Until != nil {
+		query += " AND start_time <= ?"
+		args = append(args, *opts.Until)
+	}
+
+	query += " ORDER BY start_time DESC"
+
+	if opts.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, opts.Limit)
+	}
+	if opts.Offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, opts.Offset)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list voice sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var records []VoiceSessionRecord
+	for rows.Next() {
+		var record VoiceSessionRecord
+		var answerTime, endTime sql.NullTime
+		var model, voice, language, protocol sql.NullString
+		var metadataStr, transcriptStr sql.NullString
+
+		err := rows.Scan(
+			&record.ID,
+			&record.ParentSessionID,
+			&record.State,
+			&record.StartTime,
+			&answerTime,
+			&endTime,
+			&record.DurationMs,
+			&record.AudioDurationMs,
+			&record.TurnCount,
+			&model,
+			&voice,
+			&language,
+			&protocol,
+			&record.AudioBytesIn,
+			&record.AudioBytesOut,
+			&metadataStr,
+			&transcriptStr,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan voice session: %w", err)
+		}
+
+		if answerTime.Valid {
+			record.AnswerTime = &answerTime.Time
+		}
+		if endTime.Valid {
+			record.EndTime = &endTime.Time
+		}
+		if model.Valid {
+			record.Model = model.String
+		}
+		if voice.Valid {
+			record.Voice = voice.String
+		}
+		if language.Valid {
+			record.Language = language.String
+		}
+		if protocol.Valid {
+			record.Protocol = protocol.String
+		}
+		if metadataStr.Valid && metadataStr.String != "" {
+			json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+		}
+		if transcriptStr.Valid && transcriptStr.String != "" {
+			json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
+		}
+
+		records = append(records, record)
+	}
+
+	return records, nil
+}
+
+// GetVoiceSessionsByParent retrieves all voice sessions for a parent HTTP session
+func (s *SQLiteStore) GetVoiceSessionsByParent(parentSessionID string) ([]VoiceSessionRecord, error) {
+	return s.ListVoiceSessions(ListVoiceSessionsOptions{
+		ParentSessionID: parentSessionID,
+	})
+}
+
+// VoiceStats represents aggregate statistics for voice sessions
+type VoiceStats struct {
+	TotalSessions     int64   `json:"total_sessions"`
+	TotalAudioMs      int64   `json:"total_audio_ms"`
+	TotalTurns        int64   `json:"total_turns"`
+	AvgDurationMs     float64 `json:"avg_duration_ms"`
+	AvgTurnsPerSession float64 `json:"avg_turns_per_session"`
+	SessionsByState   map[string]int64 `json:"sessions_by_state"`
+	SessionsByModel   map[string]int64 `json:"sessions_by_model"`
+}
+
+// GetVoiceStats retrieves aggregate statistics for voice sessions
+func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
+	stats := &VoiceStats{
+		SessionsByState: make(map[string]int64),
+		SessionsByModel: make(map[string]int64),
+	}
+
+	whereClause := "WHERE 1=1"
+	args := []interface{}{}
+	if since != nil {
+		whereClause += " AND start_time >= ?"
+		args = append(args, *since)
+	}
+
+	row := s.db.QueryRow(fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(audio_duration_ms), 0),
+			COALESCE(SUM(turn_count), 0),
+			COALESCE(AVG(duration_ms), 0),
+			COALESCE(AVG(turn_count), 0)
+		FROM voice_sessions %s`, whereClause), args...)
+
+	err := row.Scan(
+		&stats.TotalSessions,
+		&stats.TotalAudioMs,
+		&stats.TotalTurns,
+		&stats.AvgDurationMs,
+		&stats.AvgTurnsPerSession,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voice stats: %w", err)
+	}
+
+	// Sessions by state
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT state, COUNT(*) FROM voice_sessions %s GROUP BY state`, whereClause), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voice state stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var state string
+		var count int64
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, err
+		}
+		stats.SessionsByState[state] = count
+	}
+
+	// Sessions by model
+	rows, err = s.db.Query(fmt.Sprintf(`
+		SELECT COALESCE(model, 'unknown'), COUNT(*) FROM voice_sessions %s GROUP BY model`, whereClause), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get voice model stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var model string
+		var count int64
+		if err := rows.Scan(&model, &count); err != nil {
+			return nil, err
+		}
+		stats.SessionsByModel[model] = count
+	}
+
+	return stats, nil
+}
+
+// SaveTTSRequest saves a TTS request record
+func (s *SQLiteStore) SaveTTSRequest(req TTSRequest) error {
+	_, err := s.db.Exec(`
+		INSERT INTO tts_requests
+		(id, session_id, timestamp, provider, model, voice, text, text_length, response_bytes, duration_ms, status_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		req.ID,
+		req.SessionID,
+		req.Timestamp,
+		req.Provider,
+		req.Model,
+		req.Voice,
+		req.Text,
+		req.TextLength,
+		req.ResponseBytes,
+		req.DurationMs,
+		req.StatusCode,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to save TTS request: %w", err)
+	}
+
+	slog.Debug("TTS request saved",
+		"id", req.ID,
+		"session_id", req.SessionID,
+		"provider", req.Provider,
+		"text_length", req.TextLength,
+	)
+	return nil
+}
+
+// ListTTSRequestsOptions contains options for listing TTS requests
+type ListTTSRequestsOptions struct {
+	Limit     int
+	Offset    int
+	SessionID string
+	Provider  string
+	Since     *time.Time
+	Until     *time.Time
+}
+
+// ListTTSRequests retrieves TTS requests with filtering
+func (s *SQLiteStore) ListTTSRequests(opts ListTTSRequestsOptions) ([]TTSRequest, error) {
+	query := `
+		SELECT id, session_id, timestamp, provider, model, voice, text, text_length, response_bytes, duration_ms, status_code
+		FROM tts_requests WHERE 1=1`
+
+	args := []interface{}{}
+
+	if opts.SessionID != "" {
+		query += " AND session_id = ?"
+		args = append(args, opts.SessionID)
+	}
+	if opts.Provider != "" {
+		query += " AND provider = ?"
+		args = append(args, opts.Provider)
+	}
+	if opts.Since != nil {
+		query += " AND timestamp >= ?"
+		args = append(args, *opts.Since)
+	}
+	if opts.Until != nil {
+		query += " AND timestamp <= ?"
+		args = append(args, *opts.Until)
+	}
+
+	query += " ORDER BY timestamp DESC"
+
+	if opts.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, opts.Limit)
+	}
+	if opts.Offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, opts.Offset)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list TTS requests: %w", err)
+	}
+	defer rows.Close()
+
+	var requests []TTSRequest
+	for rows.Next() {
+		var req TTSRequest
+		var model, voice, text sql.NullString
+
+		err := rows.Scan(
+			&req.ID,
+			&req.SessionID,
+			&req.Timestamp,
+			&req.Provider,
+			&model,
+			&voice,
+			&text,
+			&req.TextLength,
+			&req.ResponseBytes,
+			&req.DurationMs,
+			&req.StatusCode,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan TTS request: %w", err)
+		}
+
+		if model.Valid {
+			req.Model = model.String
+		}
+		if voice.Valid {
+			req.Voice = voice.String
+		}
+		if text.Valid {
+			req.Text = text.String
+		}
+
+		requests = append(requests, req)
+	}
+
+	return requests, nil
+}
+
+// GetTTSRequestsBySession retrieves all TTS requests for a session
+func (s *SQLiteStore) GetTTSRequestsBySession(sessionID string) ([]TTSRequest, error) {
+	return s.ListTTSRequests(ListTTSRequestsOptions{
+		SessionID: sessionID,
+	})
+}
+
+// TTSStats represents aggregate statistics for TTS requests
+type TTSStats struct {
+	TotalRequests      int64            `json:"total_requests"`
+	TotalCharacters    int64            `json:"total_characters"`
+	TotalResponseBytes int64            `json:"total_response_bytes"`
+	AvgTextLength      float64          `json:"avg_text_length"`
+	RequestsByProvider map[string]int64 `json:"requests_by_provider"`
+	RequestsByVoice    map[string]int64 `json:"requests_by_voice"`
+}
+
+// GetTTSStats retrieves aggregate TTS statistics
+func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
+	stats := &TTSStats{
+		RequestsByProvider: make(map[string]int64),
+		RequestsByVoice:    make(map[string]int64),
+	}
+
+	whereClause := "WHERE 1=1"
+	args := []interface{}{}
+	if since != nil {
+		whereClause += " AND timestamp >= ?"
+		args = append(args, *since)
+	}
+
+	row := s.db.QueryRow(fmt.Sprintf(`
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(text_length), 0),
+			COALESCE(SUM(response_bytes), 0),
+			COALESCE(AVG(text_length), 0)
+		FROM tts_requests %s`, whereClause), args...)
+
+	err := row.Scan(
+		&stats.TotalRequests,
+		&stats.TotalCharacters,
+		&stats.TotalResponseBytes,
+		&stats.AvgTextLength,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TTS stats: %w", err)
+	}
+
+	// Requests by provider
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT provider, COUNT(*) FROM tts_requests %s GROUP BY provider`, whereClause), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TTS provider stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var provider string
+		var count int64
+		if err := rows.Scan(&provider, &count); err != nil {
+			return nil, err
+		}
+		stats.RequestsByProvider[provider] = count
+	}
+
+	// Requests by voice
+	rows, err = s.db.Query(fmt.Sprintf(`
+		SELECT COALESCE(voice, 'unknown'), COUNT(*) FROM tts_requests %s GROUP BY voice`, whereClause), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TTS voice stats: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var voice string
+		var count int64
+		if err := rows.Scan(&voice, &count); err != nil {
+			return nil, err
+		}
+		stats.RequestsByVoice[voice] = count
+	}
+
+	return stats, nil
 }
