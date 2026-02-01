@@ -51,6 +51,11 @@ jobs:
       - name: Run Semgrep
         run: semgrep scan --config p/golang --config p/security-audit --config p/secrets --error
 
+      - name: Run TruffleHog (secrets in git history)
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
