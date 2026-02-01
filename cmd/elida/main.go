@@ -283,6 +283,64 @@ func main() {
 			)
 		}
 
+		// Wire up voice session persistence (CDR)
+		if sqliteStore != nil {
+			wsHandler.SetVoiceSessionCallbacks(
+				nil, // onStart - no action needed
+				func(wsSession *session.Session, vs *websocket.VoiceSession) {
+					// Persist voice session CDR to SQLite
+					snap := vs.Snapshot()
+					record := storage.VoiceSessionRecord{
+						ID:              snap.ID,
+						ParentSessionID: snap.ParentSessionID,
+						State:           snap.State.String(),
+						StartTime:       snap.StartTime,
+						AnswerTime:      snap.AnswerTime,
+						EndTime:         snap.EndTime,
+						DurationMs:      snap.Duration().Milliseconds(),
+						AudioDurationMs: snap.AudioDurationMs,
+						TurnCount:       snap.TurnCount,
+						Model:           snap.Model,
+						Voice:           snap.Voice,
+						Language:        snap.Language,
+						AudioBytesIn:    snap.AudioBytesIn,
+						AudioBytesOut:   snap.AudioBytesOut,
+						Metadata:        snap.Metadata,
+					}
+
+					// Get protocol from metadata
+					if proto, ok := snap.Metadata["protocol"]; ok {
+						record.Protocol = proto
+					}
+
+					// Convert transcript entries
+					for _, t := range snap.Transcript {
+						record.Transcript = append(record.Transcript, storage.TranscriptEntry{
+							Timestamp: t.Timestamp,
+							Speaker:   t.Speaker,
+							Text:      t.Text,
+							IsFinal:   t.IsFinal,
+							Source:    t.Source,
+						})
+					}
+
+					if err := sqliteStore.SaveVoiceSession(record); err != nil {
+						slog.Error("failed to save voice session",
+							"voice_session_id", snap.ID,
+							"error", err,
+						)
+					} else {
+						slog.Info("voice session CDR saved",
+							"voice_session_id", snap.ID,
+							"parent_session_id", snap.ParentSessionID,
+							"transcript_entries", len(record.Transcript),
+						)
+					}
+				},
+			)
+			slog.Info("voice session CDR persistence enabled")
+		}
+
 		slog.Info("WebSocket proxy enabled",
 			"ping_interval", cfg.WebSocket.PingInterval,
 			"max_message_size", cfg.WebSocket.MaxMessageSize,

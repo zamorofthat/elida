@@ -78,9 +78,18 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
 	h.mux.HandleFunc("/control/flagged/", h.handleFlaggedSession)
 
-	// Voice sessions endpoints
+	// Voice sessions endpoints (live)
 	h.mux.HandleFunc("/control/voice", h.handleVoiceSessions)
 	h.mux.HandleFunc("/control/voice/", h.handleVoiceSession)
+
+	// Voice session history endpoints (persisted CDRs)
+	h.mux.HandleFunc("/control/voice-history", h.handleVoiceHistory)
+	h.mux.HandleFunc("/control/voice-history/stats", h.handleVoiceHistoryStats)
+	h.mux.HandleFunc("/control/voice-history/", h.handleVoiceHistorySession)
+
+	// TTS (Text-to-Speech) tracking endpoints
+	h.mux.HandleFunc("/control/tts", h.handleTTSRequests)
+	h.mux.HandleFunc("/control/tts/stats", h.handleTTSStats)
 
 	return h
 }
@@ -815,4 +824,216 @@ func (h *Handler) resumeVoiceSession(w http.ResponseWriter, sessionID, voiceID s
 	} else {
 		http.Error(w, "Voice session not found or not in held state", http.StatusNotFound)
 	}
+}
+
+// handleVoiceHistory handles GET /control/voice-history
+func (h *Handler) handleVoiceHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"count":          0,
+			"voice_sessions": nil,
+			"error":          "storage not enabled",
+		})
+		return
+	}
+
+	// Parse query parameters
+	opts := storage.ListVoiceSessionsOptions{
+		Limit:  100,
+		Offset: 0,
+	}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+			opts.Limit = l
+		}
+	}
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		if o, err := strconv.Atoi(offset); err == nil && o >= 0 {
+			opts.Offset = o
+		}
+	}
+	if state := r.URL.Query().Get("state"); state != "" {
+		opts.State = state
+	}
+	if parentID := r.URL.Query().Get("parent_session_id"); parentID != "" {
+		opts.ParentSessionID = parentID
+	}
+	if since := r.URL.Query().Get("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			opts.Since = &t
+		}
+	}
+
+	sessions, err := h.historyStore.ListVoiceSessions(opts)
+	if err != nil {
+		slog.Error("failed to list voice session history", "error", err)
+		http.Error(w, "Failed to retrieve voice session history", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"count":          len(sessions),
+		"voice_sessions": sessions,
+	})
+}
+
+// handleVoiceHistoryStats handles GET /control/voice-history/stats
+func (h *Handler) handleVoiceHistoryStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"error": "storage not enabled",
+		})
+		return
+	}
+
+	var since *time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = &t
+		}
+	}
+
+	stats, err := h.historyStore.GetVoiceStats(since)
+	if err != nil {
+		slog.Error("failed to get voice stats", "error", err)
+		http.Error(w, "Failed to retrieve voice stats", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleVoiceHistorySession handles GET /control/voice-history/{voiceID}
+func (h *Handler) handleVoiceHistorySession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "Storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract voice session ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/control/voice-history/")
+	voiceID := strings.TrimSuffix(path, "/")
+
+	if voiceID == "" {
+		http.Error(w, "Voice session ID required", http.StatusBadRequest)
+		return
+	}
+
+	session, err := h.historyStore.GetVoiceSession(voiceID)
+	if err != nil {
+		slog.Error("failed to get voice session", "voice_id", voiceID, "error", err)
+		http.Error(w, "Failed to retrieve voice session", http.StatusInternalServerError)
+		return
+	}
+
+	if session == nil {
+		http.Error(w, "Voice session not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, session)
+}
+
+// handleTTSRequests handles GET /control/tts
+func (h *Handler) handleTTSRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"count":        0,
+			"tts_requests": nil,
+			"error":        "storage not enabled",
+		})
+		return
+	}
+
+	// Parse query parameters
+	opts := storage.ListTTSRequestsOptions{
+		Limit:  100,
+		Offset: 0,
+	}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+			opts.Limit = l
+		}
+	}
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		if o, err := strconv.Atoi(offset); err == nil && o >= 0 {
+			opts.Offset = o
+		}
+	}
+	if sessionID := r.URL.Query().Get("session_id"); sessionID != "" {
+		opts.SessionID = sessionID
+	}
+	if provider := r.URL.Query().Get("provider"); provider != "" {
+		opts.Provider = provider
+	}
+	if since := r.URL.Query().Get("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			opts.Since = &t
+		}
+	}
+
+	requests, err := h.historyStore.ListTTSRequests(opts)
+	if err != nil {
+		slog.Error("failed to list TTS requests", "error", err)
+		http.Error(w, "Failed to retrieve TTS requests", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"count":        len(requests),
+		"tts_requests": requests,
+	})
+}
+
+// handleTTSStats handles GET /control/tts/stats
+func (h *Handler) handleTTSStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"error": "storage not enabled",
+		})
+		return
+	}
+
+	var since *time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = &t
+		}
+	}
+
+	stats, err := h.historyStore.GetTTSStats(since)
+	if err != nil {
+		slog.Error("failed to get TTS stats", "error", err)
+		http.Error(w, "Failed to retrieve TTS stats", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
 }

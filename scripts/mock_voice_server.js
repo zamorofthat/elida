@@ -9,6 +9,9 @@
  *   npm install ws
  *   node scripts/mock_voice_server.js
  *
+ * Or via make:
+ *   make mock-voice
+ *
  * Then configure ELIDA:
  *   backends:
  *     mock:

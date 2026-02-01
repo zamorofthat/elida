@@ -122,6 +122,94 @@ websocket:
 - `internal/control/api.go` — Added voice session API endpoints
 - `cmd/elida/main.go` — WebSocket handler initialization
 
+### Voice CDR Persistence & TTS Tracking (January 2026)
+
+Added persistent storage for voice session CDRs (Call Detail Records) and REST TTS request tracking. Voice transcripts are now saved to SQLite when sessions end, completing the telecom-inspired CDR model.
+
+**What Gets Persisted:**
+
+| Data Type | Source | Storage |
+|-----------|--------|---------|
+| Voice session metadata | WebSocket (OpenAI Realtime, Deepgram, etc.) | `voice_sessions` table |
+| Full transcript | STT/TTS during conversation | JSON in `voice_sessions.transcript` |
+| TTS requests | REST API (OpenAI TTS, Deepgram Aura) | `tts_requests` table |
+
+**Voice CDR API Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/control/voice` | GET | List **active** voice sessions (live) |
+| `/control/voice-history` | GET | List **persisted** voice session CDRs |
+| `/control/voice-history/stats` | GET | Aggregate voice session statistics |
+| `/control/voice-history/{voiceID}` | GET | Get voice session with full transcript |
+| `/control/tts` | GET | List TTS requests |
+| `/control/tts/stats` | GET | Aggregate TTS statistics |
+
+**Example Voice CDR (persisted):**
+```json
+{
+  "id": "5b97e226",
+  "parent_session_id": "client-abc123-mock",
+  "state": "terminated",
+  "model": "gpt-4o-realtime",
+  "protocol": "openai_realtime",
+  "duration_ms": 2500,
+  "transcript": [
+    {"timestamp": "2026-01-28T22:30:00Z", "speaker": "user", "text": "What is AI?", "source": "stt"},
+    {"timestamp": "2026-01-28T22:30:02Z", "speaker": "assistant", "text": "AI is artificial intelligence...", "source": "stt"}
+  ]
+}
+```
+
+**Example TTS Request (tracked):**
+```json
+{
+  "id": "f23a9e09",
+  "session_id": "client-abc123-openai",
+  "provider": "openai",
+  "model": "tts-1",
+  "voice": "nova",
+  "text": "Hello, how can I help?",
+  "text_length": 22,
+  "response_bytes": 48000,
+  "duration_ms": 150,
+  "status_code": 200
+}
+```
+
+**TTS Endpoint Detection:**
+
+| Provider | Endpoint Pattern | Fields Extracted |
+|----------|------------------|------------------|
+| OpenAI | `/v1/audio/speech` | model, voice, input (text) |
+| Deepgram Aura | `/v1/speak` | model, voice, text |
+| ElevenLabs | `/text-to-speech/{voice_id}` | voice (from URL), text |
+
+**Files added/modified:**
+- `internal/storage/sqlite.go` — Added `voice_sessions` and `tts_requests` tables, `VoiceSessionRecord`, `TTSRequest` types
+- `internal/proxy/proxy.go` — Added `isTTSRequest()` detection and TTS tracking
+- `internal/control/api.go` — Added `/control/voice-history/*` and `/control/tts/*` endpoints
+- `cmd/elida/main.go` — Wired voice session end callback for CDR persistence
+
+**Testing:**
+```bash
+# Start with storage enabled
+make run-storage
+
+# Or with WebSocket + storage
+make run-websocket
+
+# Check voice CDRs after a voice session ends
+curl http://localhost:9090/control/voice-history | jq .
+
+# Check TTS requests
+curl http://localhost:9090/control/tts | jq .
+
+# Get stats
+curl http://localhost:9090/control/voice-history/stats | jq .
+curl http://localhost:9090/control/tts/stats | jq .
+```
+
 ### Voice/Speech Services Reference
 
 ELIDA supports proxying to various voice AI services. Here's a reference for supported services, pricing, and how to test.
@@ -1831,12 +1919,22 @@ curl -X POST http://localhost:9090/control/sessions/{id}/kill  # Kill a session
 # Flagged sessions
 curl http://localhost:9090/control/flagged                    # List flagged sessions
 
-# Voice sessions (WebSocket)
+# Voice sessions (WebSocket - live)
 curl http://localhost:9090/control/voice                      # List all voice sessions
 curl http://localhost:9090/control/voice/{wsSessionID}        # List voice sessions for WebSocket
 curl http://localhost:9090/control/voice/{wsSessionID}/{voiceID}  # Get voice session with transcript
 curl -X POST http://localhost:9090/control/voice/{wsSessionID}/{voiceID}/bye  # End voice session
 curl -X POST http://localhost:9090/control/voice/{wsSessionID}/{voiceID}/hold # Put on hold
+
+# Voice session history (persisted CDRs)
+curl http://localhost:9090/control/voice-history              # List voice session CDRs
+curl http://localhost:9090/control/voice-history/stats        # Voice session statistics
+curl http://localhost:9090/control/voice-history/{id}         # Get voice session with transcript
+
+# TTS requests (REST-based text-to-speech)
+curl http://localhost:9090/control/tts                        # List TTS requests
+curl http://localhost:9090/control/tts/stats                  # TTS statistics
+
 curl http://localhost:9090/control/flagged/{id}               # Get flagged session details
 curl "http://localhost:9090/control/history?state=flagged"    # Historical flagged sessions
 ```
