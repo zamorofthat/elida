@@ -296,7 +296,10 @@ func (v *VoiceSession) GetFullTranscript() string {
 	return sb.String()
 }
 
-// Snapshot returns a copy of the voice session for safe reading
+// Snapshot returns a copy of the voice session for safe reading.
+// Note: Returns a new VoiceSession with a fresh zero-value mutex, not copying v.mu.
+//
+//nolint:govet // mutex field is zero-initialized, not copied from source
 func (v *VoiceSession) Snapshot() VoiceSession {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

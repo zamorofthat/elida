@@ -293,7 +293,10 @@ func (s *Session) SetMetadata(key, value string) {
 	s.Metadata[key] = value
 }
 
-// Snapshot returns a copy of the session for safe reading
+// Snapshot returns a copy of the session for safe reading.
+// Note: Returns a new Session with a fresh zero-value mutex, not copying s.mu.
+//
+//nolint:govet // mutex field is zero-initialized, not copied from source
 func (s *Session) Snapshot() Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

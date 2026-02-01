@@ -490,7 +490,8 @@ func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSer
 		dateTrunc = "strftime('%Y-%m-%d %H:00:00', datetime(start_time))" // default to hourly
 	}
 
-	query := fmt.Sprintf(`
+	// #nosec G201 -- dateTrunc is safe, only set from hardcoded switch cases above, never user input
+	query := fmt.Sprintf(` // nosemgrep: string-formatted-query
 		SELECT
 			COALESCE(%s, 'unknown') as bucket,
 			COUNT(*) as session_count,

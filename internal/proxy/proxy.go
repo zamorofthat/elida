@@ -38,6 +38,18 @@ type Proxy struct {
 	wsHandler WebSocketHandler     // WebSocket proxy handler
 }
 
+// TODO: Security fix - use this helper to handle G104 (CWE-703) unhandled write errors
+// Replace w.Write() calls with writeJSONError() to properly log write failures
+// See: gosec G104 findings
+//
+// func writeJSONError(w http.ResponseWriter, statusCode int, body string) {
+// 	w.Header().Set("Content-Type", "application/json")
+// 	w.WriteHeader(statusCode)
+// 	if _, err := w.Write([]byte(body)); err != nil {
+// 		slog.Debug("failed to write error response", "error", err)
+// 	}
+// }
+
 // New creates a new proxy handler
 func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
 	return NewWithPolicy(cfg, store, manager, nil, nil)
@@ -997,10 +1009,9 @@ func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, message string, term
 func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 	defaultBackend := p.router.GetDefaultBackend()
 	return &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = defaultBackend.URL.Scheme
-			req.URL.Host = defaultBackend.URL.Host
-			req.Host = defaultBackend.URL.Host
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(defaultBackend.URL)
+			pr.Out.Host = defaultBackend.URL.Host
 		},
 		Transport: defaultBackend.Transport,
 	}

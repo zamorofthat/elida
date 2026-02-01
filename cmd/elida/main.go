@@ -102,7 +102,7 @@ func main() {
 	if cfg.Storage.Enabled {
 		// Ensure data directory exists
 		dataDir := filepath.Dir(cfg.Storage.Path)
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
+		if err := os.MkdirAll(dataDir, 0750); err != nil {
 			slog.Error("failed to create data directory", "error", err, "path", dataDir)
 			os.Exit(1)
 		}

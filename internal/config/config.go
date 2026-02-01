@@ -178,7 +178,7 @@ type TelemetryConfig struct {
 
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
 	if err != nil {
 		// Return defaults if config file doesn't exist
 		if os.IsNotExist(err) {
