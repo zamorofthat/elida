@@ -762,4 +762,3 @@ func (h *Handler) keepAlive(ctx context.Context, conn *websocket.Conn, sess *ses
 		}
 	}
 }
-

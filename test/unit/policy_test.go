@@ -207,8 +207,8 @@ func TestEvaluateResponseContent_XSSPatterns(t *testing.T) {
 	engine := newTestPolicyEngine(rules)
 
 	tests := []struct {
-		name    string
-		content string
+		name        string
+		content     string
 		shouldMatch bool
 	}{
 		{"script tag", "<script>alert('xss')</script>", true},
@@ -235,9 +235,9 @@ func TestEvaluateResponseContent_XSSPatterns(t *testing.T) {
 func TestEvaluateResponseContent_SQLPatterns(t *testing.T) {
 	rules := []policy.Rule{
 		{
-			Name:     "sql_in_response",
-			Type:     "content_match",
-			Target:   "response",
+			Name:   "sql_in_response",
+			Type:   "content_match",
+			Target: "response",
 			Patterns: []string{
 				"(?i)(insert|update|delete|drop)\\s+(into|from|table)",
 				"(?i);\\s*(drop|delete|truncate)\\s+",
@@ -275,9 +275,9 @@ func TestEvaluateResponseContent_SQLPatterns(t *testing.T) {
 func TestEvaluateRequestContent_PromptInjection(t *testing.T) {
 	rules := []policy.Rule{
 		{
-			Name:     "prompt_injection",
-			Type:     "content_match",
-			Target:   "request",
+			Name:   "prompt_injection",
+			Type:   "content_match",
+			Target: "request",
 			Patterns: []string{
 				"ignore\\s+(all\\s+)?(previous|prior)\\s+instructions",
 				"you\\s+are\\s+now\\s+DAN",

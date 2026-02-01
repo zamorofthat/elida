@@ -295,38 +295,38 @@ func TestSessionControlParser_OpenAIRealtime(t *testing.T) {
 		expected ws.SessionControlType
 	}{
 		{
-			name: "session.create",
-			data: `{"type":"session.create","session":{"model":"gpt-4o-realtime","voice":"alloy"}}`,
+			name:     "session.create",
+			data:     `{"type":"session.create","session":{"model":"gpt-4o-realtime","voice":"alloy"}}`,
 			expected: ws.ControlInvite,
 		},
 		{
-			name: "session.created",
-			data: `{"type":"session.created","session":{"id":"sess_123"}}`,
+			name:     "session.created",
+			data:     `{"type":"session.created","session":{"id":"sess_123"}}`,
 			expected: ws.ControlOK,
 		},
 		{
-			name: "session.update",
-			data: `{"type":"session.update","session":{"instructions":"new instructions"}}`,
+			name:     "session.update",
+			data:     `{"type":"session.update","session":{"instructions":"new instructions"}}`,
 			expected: ws.ControlInvite,
 		},
 		{
-			name: "response.create",
-			data: `{"type":"response.create"}`,
+			name:     "response.create",
+			data:     `{"type":"response.create"}`,
 			expected: ws.ControlTurnStart,
 		},
 		{
-			name: "response.done",
-			data: `{"type":"response.done","response":{"id":"resp_123","status":"completed"}}`,
+			name:     "response.done",
+			data:     `{"type":"response.done","response":{"id":"resp_123","status":"completed"}}`,
 			expected: ws.ControlTurnEnd,
 		},
 		{
-			name: "error",
-			data: `{"type":"error","error":{"type":"invalid_request","message":"bad request"}}`,
+			name:     "error",
+			data:     `{"type":"error","error":{"type":"invalid_request","message":"bad request"}}`,
 			expected: ws.ControlBye,
 		},
 		{
-			name: "unrecognized",
-			data: `{"type":"input_audio_buffer.append","audio":"..."}`,
+			name:     "unrecognized",
+			data:     `{"type":"input_audio_buffer.append","audio":"..."}`,
 			expected: ws.ControlNone,
 		},
 	}
@@ -362,18 +362,18 @@ func TestSessionControlParser_Deepgram(t *testing.T) {
 		expected ws.SessionControlType
 	}{
 		{
-			name: "Metadata",
-			data: `{"type":"Metadata","metadata":{"request_id":"abc","model_info":{"name":"nova-2"}}}`,
+			name:     "Metadata",
+			data:     `{"type":"Metadata","metadata":{"request_id":"abc","model_info":{"name":"nova-2"}}}`,
 			expected: ws.ControlOK,
 		},
 		{
-			name: "SpeechStarted",
-			data: `{"type":"SpeechStarted"}`,
+			name:     "SpeechStarted",
+			data:     `{"type":"SpeechStarted"}`,
 			expected: ws.ControlTurnStart,
 		},
 		{
-			name: "UtteranceEnd",
-			data: `{"type":"UtteranceEnd"}`,
+			name:     "UtteranceEnd",
+			data:     `{"type":"UtteranceEnd"}`,
 			expected: ws.ControlTurnEnd,
 		},
 	}
@@ -542,48 +542,48 @@ func TestSessionControlParser_OpenAITranscripts(t *testing.T) {
 	parser := ws.NewSessionControlParser(nil)
 
 	tests := []struct {
-		name              string
-		data              string
-		expectTranscript  string
-		expectSpeaker     string
-		expectFinal       bool
-		expectSource      string
+		name             string
+		data             string
+		expectTranscript string
+		expectSpeaker    string
+		expectFinal      bool
+		expectSource     string
 	}{
 		{
-			name: "user_input_transcription",
-			data: `{"type":"conversation.item.input_audio_transcription.completed","transcript":"Hello, how are you?"}`,
+			name:             "user_input_transcription",
+			data:             `{"type":"conversation.item.input_audio_transcription.completed","transcript":"Hello, how are you?"}`,
 			expectTranscript: "Hello, how are you?",
 			expectSpeaker:    "user",
 			expectFinal:      true,
 			expectSource:     "stt",
 		},
 		{
-			name: "assistant_audio_transcript_delta",
-			data: `{"type":"response.audio_transcript.delta","delta":"I'm doing"}`,
+			name:             "assistant_audio_transcript_delta",
+			data:             `{"type":"response.audio_transcript.delta","delta":"I'm doing"}`,
 			expectTranscript: "I'm doing",
 			expectSpeaker:    "assistant",
 			expectFinal:      false,
 			expectSource:     "stt",
 		},
 		{
-			name: "assistant_audio_transcript_done",
-			data: `{"type":"response.audio_transcript.done","transcript":"I'm doing well, thank you!"}`,
+			name:             "assistant_audio_transcript_done",
+			data:             `{"type":"response.audio_transcript.done","transcript":"I'm doing well, thank you!"}`,
 			expectTranscript: "I'm doing well, thank you!",
 			expectSpeaker:    "assistant",
 			expectFinal:      true,
 			expectSource:     "stt",
 		},
 		{
-			name: "text_response_delta",
-			data: `{"type":"response.text.delta","delta":"Hello there"}`,
+			name:             "text_response_delta",
+			data:             `{"type":"response.text.delta","delta":"Hello there"}`,
 			expectTranscript: "Hello there",
 			expectSpeaker:    "assistant",
 			expectFinal:      false,
 			expectSource:     "text",
 		},
 		{
-			name: "text_response_done",
-			data: `{"type":"response.text.done","text":"Hello there, how can I help?"}`,
+			name:             "text_response_done",
+			data:             `{"type":"response.text.done","text":"Hello there, how can I help?"}`,
 			expectTranscript: "Hello there, how can I help?",
 			expectSpeaker:    "assistant",
 			expectFinal:      true,

@@ -77,10 +77,10 @@ func NewFrameScanner(sessionID string, scanTextOnly bool, overlapSize int) *Fram
 
 // ScanResult contains the result of frame scanning
 type ScanResult struct {
-	SessionID      string
-	ShouldBlock    bool
+	SessionID       string
+	ShouldBlock     bool
 	ShouldTerminate bool
-	Violations     []string
+	Violations      []string
 }
 
 // ScanFrame scans a frame for policy violations

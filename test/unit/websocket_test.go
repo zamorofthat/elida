@@ -18,8 +18,8 @@ import (
 
 func TestWebSocket_IsWebSocketRequest(t *testing.T) {
 	tests := []struct {
-		name       string
-		headers    map[string]string
+		name        string
+		headers     map[string]string
 		isWebSocket bool
 	}{
 		{
@@ -61,8 +61,8 @@ func TestWebSocket_IsWebSocketRequest(t *testing.T) {
 			isWebSocket: false,
 		},
 		{
-			name:       "no headers",
-			headers:    map[string]string{},
+			name:        "no headers",
+			headers:     map[string]string{},
 			isWebSocket: false,
 		},
 		{

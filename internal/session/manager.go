@@ -391,7 +391,7 @@ func (m *Manager) ListAll() []*Session {
 // Stats returns session statistics
 func (m *Manager) Stats() Stats {
 	sessions := m.store.List(nil)
-	
+
 	stats := Stats{}
 	for _, s := range sessions {
 		switch s.GetState() {
@@ -409,7 +409,7 @@ func (m *Manager) Stats() Stats {
 		stats.TotalBytesOut += s.BytesOut
 	}
 	stats.Total = len(sessions)
-	
+
 	return stats
 }
 

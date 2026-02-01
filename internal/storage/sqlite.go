@@ -380,13 +380,13 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 
 // Stats represents aggregate statistics
 type Stats struct {
-	TotalSessions   int64   `json:"total_sessions"`
-	TotalRequests   int64   `json:"total_requests"`
-	TotalBytesIn    int64   `json:"total_bytes_in"`
-	TotalBytesOut   int64   `json:"total_bytes_out"`
-	AvgDurationMs   float64 `json:"avg_duration_ms"`
-	AvgRequestCount float64 `json:"avg_request_count"`
-	SessionsByState map[string]int64 `json:"sessions_by_state"`
+	TotalSessions     int64            `json:"total_sessions"`
+	TotalRequests     int64            `json:"total_requests"`
+	TotalBytesIn      int64            `json:"total_bytes_in"`
+	TotalBytesOut     int64            `json:"total_bytes_out"`
+	AvgDurationMs     float64          `json:"avg_duration_ms"`
+	AvgRequestCount   float64          `json:"avg_request_count"`
+	SessionsByState   map[string]int64 `json:"sessions_by_state"`
 	SessionsByBackend map[string]int64 `json:"sessions_by_backend"`
 }
 
@@ -781,13 +781,13 @@ func (s *SQLiteStore) GetVoiceSessionsByParent(parentSessionID string) ([]VoiceS
 
 // VoiceStats represents aggregate statistics for voice sessions
 type VoiceStats struct {
-	TotalSessions     int64   `json:"total_sessions"`
-	TotalAudioMs      int64   `json:"total_audio_ms"`
-	TotalTurns        int64   `json:"total_turns"`
-	AvgDurationMs     float64 `json:"avg_duration_ms"`
-	AvgTurnsPerSession float64 `json:"avg_turns_per_session"`
-	SessionsByState   map[string]int64 `json:"sessions_by_state"`
-	SessionsByModel   map[string]int64 `json:"sessions_by_model"`
+	TotalSessions      int64            `json:"total_sessions"`
+	TotalAudioMs       int64            `json:"total_audio_ms"`
+	TotalTurns         int64            `json:"total_turns"`
+	AvgDurationMs      float64          `json:"avg_duration_ms"`
+	AvgTurnsPerSession float64          `json:"avg_turns_per_session"`
+	SessionsByState    map[string]int64 `json:"sessions_by_state"`
+	SessionsByModel    map[string]int64 `json:"sessions_by_model"`
 }
 
 // GetVoiceStats retrieves aggregate statistics for voice sessions
