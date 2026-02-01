@@ -40,6 +40,11 @@ jobs:
       - name: Verify dependencies
         run: go mod download && go mod verify
 
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./... || echo "::warning::govulncheck found vulnerabilities (may be stdlib issues)"
+
       - name: Run gosec
         uses: securego/gosec@master
         with:
