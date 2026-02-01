@@ -275,13 +275,13 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 	}
 
 	if metadataStr.Valid && metadataStr.String != "" {
-		json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+		_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 	}
 	if capturedStr.Valid && capturedStr.String != "" {
-		json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
+		_ = json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
 	}
 	if violationsStr.Valid && violationsStr.String != "" {
-		json.Unmarshal([]byte(violationsStr.String), &record.Violations)
+		_ = json.Unmarshal([]byte(violationsStr.String), &record.Violations)
 	}
 
 	return &record, nil
