@@ -273,7 +273,7 @@ func (m *Manager) Kill(id string) bool {
 
 	// Publish kill signal for distributed kill switch
 	if rs, ok := m.store.(*RedisStore); ok {
-		rs.PublishKill(id)
+		_ = rs.PublishKill(id)
 	}
 
 	// Export CDR immediately when session is killed
@@ -343,7 +343,7 @@ func (m *Manager) Terminate(id string) bool {
 
 	// Publish kill signal for distributed kill switch
 	if rs, ok := m.store.(*RedisStore); ok {
-		rs.PublishKill(id)
+		_ = rs.PublishKill(id)
 	}
 
 	// Export session record immediately
@@ -391,7 +391,7 @@ func (m *Manager) ListAll() []*Session {
 // Stats returns session statistics
 func (m *Manager) Stats() Stats {
 	sessions := m.store.List(nil)
-	
+
 	stats := Stats{}
 	for _, s := range sessions {
 		switch s.GetState() {
@@ -409,7 +409,7 @@ func (m *Manager) Stats() Stats {
 		stats.TotalBytesOut += s.BytesOut
 	}
 	stats.Total = len(sessions)
-	
+
 	return stats
 }
 

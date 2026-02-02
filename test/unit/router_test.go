@@ -1,7 +1,6 @@
 package unit
 
 import (
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -378,12 +377,4 @@ func TestRouter_EmptyBackends(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty backends")
 	}
-}
-
-func createTestRequest(method, path string, headers map[string]string) *http.Request {
-	req := httptest.NewRequest(method, path, nil)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	return req
 }

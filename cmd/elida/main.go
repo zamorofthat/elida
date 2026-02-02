@@ -63,15 +63,15 @@ func main() {
 
 	switch cfg.Session.Store {
 	case "redis":
-		var err error
-		redisStore, err = session.NewRedisStore(session.RedisConfig{
+		var redisErr error
+		redisStore, redisErr = session.NewRedisStore(session.RedisConfig{
 			Addr:      cfg.Session.Redis.Addr,
 			Password:  cfg.Session.Redis.Password,
 			DB:        cfg.Session.Redis.DB,
 			KeyPrefix: cfg.Session.Redis.KeyPrefix,
 		}, cfg.Session.Timeout)
-		if err != nil {
-			slog.Error("failed to connect to Redis", "error", err)
+		if redisErr != nil {
+			slog.Error("failed to connect to Redis", "error", redisErr)
 			os.Exit(1)
 		}
 		store = redisStore
@@ -102,15 +102,15 @@ func main() {
 	if cfg.Storage.Enabled {
 		// Ensure data directory exists
 		dataDir := filepath.Dir(cfg.Storage.Path)
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
-			slog.Error("failed to create data directory", "error", err, "path", dataDir)
+		if mkdirErr := os.MkdirAll(dataDir, 0750); mkdirErr != nil {
+			slog.Error("failed to create data directory", "error", mkdirErr, "path", dataDir)
 			os.Exit(1)
 		}
 
-		var err error
-		sqliteStore, err = storage.NewSQLiteStore(cfg.Storage.Path)
-		if err != nil {
-			slog.Error("failed to initialize SQLite storage", "error", err)
+		var storageErr error
+		sqliteStore, storageErr = storage.NewSQLiteStore(cfg.Storage.Path)
+		if storageErr != nil {
+			slog.Error("failed to initialize SQLite storage", "error", storageErr)
 			os.Exit(1)
 		}
 		slog.Info("SQLite storage enabled", "path", cfg.Storage.Path, "retention_days", cfg.Storage.RetentionDays)
@@ -166,8 +166,8 @@ func main() {
 				}
 			}
 
-			if err := sqliteStore.SaveSession(record); err != nil {
-				slog.Error("failed to save session to history", "session_id", snap.ID, "error", err)
+			if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
+				slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
 			}
 
 			// Export to telemetry (if enabled)
@@ -201,16 +201,16 @@ func main() {
 
 	// Initialize telemetry (graceful degradation if initialization fails)
 	if cfg.Telemetry.Enabled {
-		var err error
-		tp, err = telemetry.NewProvider(telemetry.Config{
+		var telemetryErr error
+		tp, telemetryErr = telemetry.NewProvider(telemetry.Config{
 			Enabled:     cfg.Telemetry.Enabled,
 			Exporter:    cfg.Telemetry.Exporter,
 			Endpoint:    cfg.Telemetry.Endpoint,
 			ServiceName: cfg.Telemetry.ServiceName,
 			Insecure:    cfg.Telemetry.Insecure,
 		})
-		if err != nil {
-			slog.Warn("telemetry initialization failed, continuing without tracing", "error", err)
+		if telemetryErr != nil {
+			slog.Warn("telemetry initialization failed, continuing without tracing", "error", telemetryErr)
 			tp = nil // Continue without telemetry
 		} else {
 			slog.Info("telemetry enabled",

@@ -8,16 +8,16 @@ import (
 type Store interface {
 	// Get retrieves a session by ID
 	Get(id string) (*Session, bool)
-	
+
 	// Put stores a session
 	Put(session *Session)
-	
+
 	// Delete removes a session
 	Delete(id string)
-	
+
 	// List returns all sessions matching the filter
 	List(filter func(*Session) bool) []*Session
-	
+
 	// Count returns the number of sessions matching the filter
 	Count(filter func(*Session) bool) int
 }
@@ -61,7 +61,7 @@ func (s *MemoryStore) Delete(id string) {
 func (s *MemoryStore) List(filter func(*Session) bool) []*Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	var result []*Session
 	for _, sess := range s.sessions {
 		if filter == nil || filter(sess) {
@@ -75,7 +75,7 @@ func (s *MemoryStore) List(filter func(*Session) bool) []*Session {
 func (s *MemoryStore) Count(filter func(*Session) bool) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	
+
 	count := 0
 	for _, sess := range s.sessions {
 		if filter == nil || filter(sess) {

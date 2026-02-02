@@ -54,7 +54,7 @@ func newTestRedisStore(t *testing.T) *session.RedisStore {
 	return store
 }
 
-func cleanupTestKeys(t *testing.T, addr string) {
+func cleanupTestKeys(_ *testing.T, addr string) {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	defer client.Close()
 
@@ -275,7 +275,7 @@ func TestRedisStore_KillChannel(t *testing.T) {
 	}
 
 	// Publish kill via the store's method
-	store.PublishKill("kill-chan-test")
+	_ = store.PublishKill("kill-chan-test")
 
 	// Wait a bit for the pub/sub message to be processed
 	time.Sleep(100 * time.Millisecond)

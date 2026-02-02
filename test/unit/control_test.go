@@ -129,7 +129,7 @@ func TestHandler_Sessions_ActiveOnly(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	var sessResp control.SessionsResponse
-	json.NewDecoder(w.Result().Body).Decode(&sessResp)
+	_ = json.NewDecoder(w.Result().Body).Decode(&sessResp)
 
 	if sessResp.Total != 1 {
 		t.Errorf("expected total 1, got %d", sessResp.Total)
@@ -200,7 +200,7 @@ func TestHandler_Session_Kill(t *testing.T) {
 	}
 
 	var result map[string]string
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 	if result["status"] != "killed" {
 		t.Errorf("expected status 'killed', got %s", result["status"])
 	}
@@ -318,7 +318,7 @@ func TestHandler_VoiceSession_Actions_NoWebSocketHandler(t *testing.T) {
 }
 
 // Auth tests
-func newTestHandlerWithAuth(apiKey string) *control.Handler {
+func newTestHandlerWithAuth(apiKey string) *control.Handler { //nolint:unparam // test helper with constant value
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 	return control.NewWithAuth(store, manager, nil, nil, true, apiKey)

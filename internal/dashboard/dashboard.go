@@ -27,7 +27,7 @@ func New() *Handler {
 
 	// Log embedded files
 	var fileCount int
-	fs.WalkDir(staticFS, ".", func(path string, d fs.DirEntry, err error) error {
+	_ = fs.WalkDir(staticFS, ".", func(path string, d fs.DirEntry, err error) error {
 		if err == nil {
 			slog.Info("embedded file", "path", path, "is_dir", d.IsDir())
 			fileCount++
@@ -56,12 +56,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveIndex serves the index.html file directly
-func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) serveIndex(w http.ResponseWriter, _ *http.Request) {
 	content, err := staticFiles.ReadFile("static/index.html")
 	if err != nil {
 		http.Error(w, "Dashboard not found", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(content)
+	_, _ = w.Write(content)
 }

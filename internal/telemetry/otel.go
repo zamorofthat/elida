@@ -17,8 +17,8 @@ import (
 // Config holds telemetry configuration
 type Config struct {
 	Enabled     bool   `yaml:"enabled"`
-	Exporter    string `yaml:"exporter"`    // "otlp", "stdout", or "none"
-	Endpoint    string `yaml:"endpoint"`    // OTLP endpoint (e.g., "localhost:4317")
+	Exporter    string `yaml:"exporter"` // "otlp", "stdout", or "none"
+	Endpoint    string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
 	ServiceName string `yaml:"service_name"`
 	Insecure    bool   `yaml:"insecure"` // Use insecure connection for OTLP
 }

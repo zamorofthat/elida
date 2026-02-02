@@ -18,8 +18,8 @@ import (
 
 func TestWebSocket_IsWebSocketRequest(t *testing.T) {
 	tests := []struct {
-		name       string
-		headers    map[string]string
+		name        string
+		headers     map[string]string
 		isWebSocket bool
 	}{
 		{
@@ -61,8 +61,8 @@ func TestWebSocket_IsWebSocketRequest(t *testing.T) {
 			isWebSocket: false,
 		},
 		{
-			name:       "no headers",
-			headers:    map[string]string{},
+			name:        "no headers",
+			headers:     map[string]string{},
 			isWebSocket: false,
 		},
 		{
@@ -380,7 +380,10 @@ func TestWebSocket_ProxyIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(ctx, proxyURL.String()+"/test", nil)
+	conn, resp, err := websocket.Dial(ctx, proxyURL.String()+"/test", nil)
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
 	if err != nil {
 		t.Fatalf("failed to connect to proxy: %v", err)
 	}
@@ -486,6 +489,9 @@ func TestWebSocket_ScanTextFramesConfig(t *testing.T) {
 		ScanTextFrames: true,
 	}
 
+	if !cfg.Enabled {
+		t.Error("expected Enabled to be true")
+	}
 	if !cfg.ScanTextFrames {
 		t.Error("expected ScanTextFrames to be true")
 	}

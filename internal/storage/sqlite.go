@@ -275,13 +275,13 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 	}
 
 	if metadataStr.Valid && metadataStr.String != "" {
-		json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+		_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 	}
 	if capturedStr.Valid && capturedStr.String != "" {
-		json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
+		_ = json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
 	}
 	if violationsStr.Valid && violationsStr.String != "" {
-		json.Unmarshal([]byte(violationsStr.String), &record.Violations)
+		_ = json.Unmarshal([]byte(violationsStr.String), &record.Violations)
 	}
 
 	return &record, nil
@@ -363,13 +363,13 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 		}
 
 		if metadataStr.Valid && metadataStr.String != "" {
-			json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+			_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 		}
 		if capturedStr.Valid && capturedStr.String != "" {
-			json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
+			_ = json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
 		}
 		if violationsStr.Valid && violationsStr.String != "" {
-			json.Unmarshal([]byte(violationsStr.String), &record.Violations)
+			_ = json.Unmarshal([]byte(violationsStr.String), &record.Violations)
 		}
 
 		records = append(records, record)
@@ -380,13 +380,13 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 
 // Stats represents aggregate statistics
 type Stats struct {
-	TotalSessions   int64   `json:"total_sessions"`
-	TotalRequests   int64   `json:"total_requests"`
-	TotalBytesIn    int64   `json:"total_bytes_in"`
-	TotalBytesOut   int64   `json:"total_bytes_out"`
-	AvgDurationMs   float64 `json:"avg_duration_ms"`
-	AvgRequestCount float64 `json:"avg_request_count"`
-	SessionsByState map[string]int64 `json:"sessions_by_state"`
+	TotalSessions     int64            `json:"total_sessions"`
+	TotalRequests     int64            `json:"total_requests"`
+	TotalBytesIn      int64            `json:"total_bytes_in"`
+	TotalBytesOut     int64            `json:"total_bytes_out"`
+	AvgDurationMs     float64          `json:"avg_duration_ms"`
+	AvgRequestCount   float64          `json:"avg_request_count"`
+	SessionsByState   map[string]int64 `json:"sessions_by_state"`
 	SessionsByBackend map[string]int64 `json:"sessions_by_backend"`
 }
 
@@ -439,8 +439,8 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 	for rows.Next() {
 		var state string
 		var count int64
-		if err := rows.Scan(&state, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&state, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.SessionsByState[state] = count
 	}
@@ -490,7 +490,8 @@ func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSer
 		dateTrunc = "strftime('%Y-%m-%d %H:00:00', datetime(start_time))" // default to hourly
 	}
 
-	query := fmt.Sprintf(`
+	// #nosec G201 -- dateTrunc is safe, only set from hardcoded switch cases above, never user input
+	query := fmt.Sprintf(` // nosemgrep: string-formatted-query
 		SELECT
 			COALESCE(%s, 'unknown') as bucket,
 			COUNT(*) as session_count,
@@ -649,10 +650,10 @@ func (s *SQLiteStore) GetVoiceSession(id string) (*VoiceSessionRecord, error) {
 		record.Protocol = protocol.String
 	}
 	if metadataStr.Valid && metadataStr.String != "" {
-		json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+		_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 	}
 	if transcriptStr.Valid && transcriptStr.String != "" {
-		json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
+		_ = json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
 	}
 
 	return &record, nil
@@ -759,10 +760,10 @@ func (s *SQLiteStore) ListVoiceSessions(opts ListVoiceSessionsOptions) ([]VoiceS
 			record.Protocol = protocol.String
 		}
 		if metadataStr.Valid && metadataStr.String != "" {
-			json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+			_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 		}
 		if transcriptStr.Valid && transcriptStr.String != "" {
-			json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
+			_ = json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
 		}
 
 		records = append(records, record)
@@ -780,13 +781,13 @@ func (s *SQLiteStore) GetVoiceSessionsByParent(parentSessionID string) ([]VoiceS
 
 // VoiceStats represents aggregate statistics for voice sessions
 type VoiceStats struct {
-	TotalSessions     int64   `json:"total_sessions"`
-	TotalAudioMs      int64   `json:"total_audio_ms"`
-	TotalTurns        int64   `json:"total_turns"`
-	AvgDurationMs     float64 `json:"avg_duration_ms"`
-	AvgTurnsPerSession float64 `json:"avg_turns_per_session"`
-	SessionsByState   map[string]int64 `json:"sessions_by_state"`
-	SessionsByModel   map[string]int64 `json:"sessions_by_model"`
+	TotalSessions      int64            `json:"total_sessions"`
+	TotalAudioMs       int64            `json:"total_audio_ms"`
+	TotalTurns         int64            `json:"total_turns"`
+	AvgDurationMs      float64          `json:"avg_duration_ms"`
+	AvgTurnsPerSession float64          `json:"avg_turns_per_session"`
+	SessionsByState    map[string]int64 `json:"sessions_by_state"`
+	SessionsByModel    map[string]int64 `json:"sessions_by_model"`
 }
 
 // GetVoiceStats retrieves aggregate statistics for voice sessions
@@ -834,8 +835,8 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 	for rows.Next() {
 		var state string
 		var count int64
-		if err := rows.Scan(&state, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&state, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.SessionsByState[state] = count
 	}
@@ -1041,8 +1042,8 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 	for rows.Next() {
 		var provider string
 		var count int64
-		if err := rows.Scan(&provider, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&provider, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.RequestsByProvider[provider] = count
 	}

@@ -63,10 +63,10 @@ type SessionControlMessage struct {
 	RawEvent string            // Original event type string
 
 	// Transcript content (if this message contains speech/text)
-	Transcript       string // The transcript text
+	Transcript        string // The transcript text
 	TranscriptSpeaker string // "user" or "assistant"
-	TranscriptFinal  bool   // true if this is a final transcript
-	TranscriptSource string // "stt", "tts", "text"
+	TranscriptFinal   bool   // true if this is a final transcript
+	TranscriptSource  string // "stt", "tts", "text"
 }
 
 // SessionControlParser detects session control messages in WebSocket frames
@@ -405,9 +405,9 @@ func (p *ElevenLabsParser) Parse(data []byte) *SessionControlMessage {
 		AuthorizationBearerToken string `json:"authorization"`
 		Flush                    bool   `json:"flush"`
 		// Server responses
-		Audio           string `json:"audio"`
-		IsFinal         bool   `json:"isFinal"`
-		NormalizedAlignment any `json:"normalizedAlignment"`
+		Audio               string `json:"audio"`
+		IsFinal             bool   `json:"isFinal"`
+		NormalizedAlignment any    `json:"normalizedAlignment"`
 	}
 
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -516,7 +516,7 @@ type CustomPatternConfig struct {
 type CustomPattern struct {
 	Name     string             `yaml:"name"`
 	Type     SessionControlType `yaml:"-"`
-	TypeStr  string             `yaml:"type"` // "invite", "bye", "ok", etc.
+	TypeStr  string             `yaml:"type"`    // "invite", "bye", "ok", etc.
 	Pattern  string             `yaml:"pattern"` // Regex pattern
 	compiled *regexp.Regexp
 }

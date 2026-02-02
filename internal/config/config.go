@@ -10,42 +10,42 @@ import (
 
 // Config holds all configuration for ELIDA
 type Config struct {
-	Listen    string                      `yaml:"listen"`
-	Backend   string                      `yaml:"backend"`   // Single backend (backward compat)
-	Backends  map[string]BackendConfig    `yaml:"backends"`  // Multi-backend configuration
-	Routing   RoutingConfig               `yaml:"routing"`   // Routing method priority
-	TLS       TLSConfig                   `yaml:"tls"`       // TLS/HTTPS configuration
-	Session   SessionConfig               `yaml:"session"`
-	Control   ControlConfig               `yaml:"control"`
-	Logging   LoggingConfig               `yaml:"logging"`
-	Telemetry TelemetryConfig             `yaml:"telemetry"`
-	Storage   StorageConfig               `yaml:"storage"`
-	Policy    PolicyConfig                `yaml:"policy"`
-	WebSocket WebSocketConfig             `yaml:"websocket"` // WebSocket proxy configuration
+	Listen    string                   `yaml:"listen"`
+	Backend   string                   `yaml:"backend"`  // Single backend (backward compat)
+	Backends  map[string]BackendConfig `yaml:"backends"` // Multi-backend configuration
+	Routing   RoutingConfig            `yaml:"routing"`  // Routing method priority
+	TLS       TLSConfig                `yaml:"tls"`      // TLS/HTTPS configuration
+	Session   SessionConfig            `yaml:"session"`
+	Control   ControlConfig            `yaml:"control"`
+	Logging   LoggingConfig            `yaml:"logging"`
+	Telemetry TelemetryConfig          `yaml:"telemetry"`
+	Storage   StorageConfig            `yaml:"storage"`
+	Policy    PolicyConfig             `yaml:"policy"`
+	WebSocket WebSocketConfig          `yaml:"websocket"` // WebSocket proxy configuration
 }
 
 // WebSocketConfig holds WebSocket proxy configuration
 type WebSocketConfig struct {
-	Enabled          bool          `yaml:"enabled"`
-	ReadBufferSize   int           `yaml:"read_buffer_size"`   // Buffer size for reading (default 4096)
-	WriteBufferSize  int           `yaml:"write_buffer_size"`  // Buffer size for writing (default 4096)
-	HandshakeTimeout time.Duration `yaml:"handshake_timeout"`  // Timeout for WS handshake (default 10s)
-	PingInterval     time.Duration `yaml:"ping_interval"`      // Interval for ping frames (default 30s)
-	PongTimeout      time.Duration `yaml:"pong_timeout"`       // Timeout waiting for pong (default 60s)
-	MaxMessageSize   int64         `yaml:"max_message_size"`   // Max message size in bytes (default 1MB)
-	ScanTextFrames   bool          `yaml:"scan_text_frames"`   // Scan text frames with policy engine (default true)
-	VoiceSessions    VoiceSessionConfig `yaml:"voice_sessions"` // SIP-style voice session control
+	Enabled          bool               `yaml:"enabled"`
+	ReadBufferSize   int                `yaml:"read_buffer_size"`  // Buffer size for reading (default 4096)
+	WriteBufferSize  int                `yaml:"write_buffer_size"` // Buffer size for writing (default 4096)
+	HandshakeTimeout time.Duration      `yaml:"handshake_timeout"` // Timeout for WS handshake (default 10s)
+	PingInterval     time.Duration      `yaml:"ping_interval"`     // Interval for ping frames (default 30s)
+	PongTimeout      time.Duration      `yaml:"pong_timeout"`      // Timeout waiting for pong (default 60s)
+	MaxMessageSize   int64              `yaml:"max_message_size"`  // Max message size in bytes (default 1MB)
+	ScanTextFrames   bool               `yaml:"scan_text_frames"`  // Scan text frames with policy engine (default true)
+	VoiceSessions    VoiceSessionConfig `yaml:"voice_sessions"`    // SIP-style voice session control
 }
 
 // VoiceSessionConfig holds voice session control configuration (SIP-inspired)
 type VoiceSessionConfig struct {
-	Enabled          bool     `yaml:"enabled"`            // Enable voice session tracking
-	MaxConcurrent    int      `yaml:"max_concurrent"`     // Max concurrent voice sessions per WebSocket (default 1)
-	CDRPerSession    bool     `yaml:"cdr_per_session"`    // Generate CDR per voice session (not just per WebSocket)
-	PolicyOnInvite   bool     `yaml:"policy_on_invite"`   // Run policy checks at INVITE time
-	AutoStartSession bool     `yaml:"auto_start_session"` // Auto-create session on first audio frame if no INVITE
-	Protocols        []string `yaml:"protocols"`          // Enabled protocols: openai_realtime, deepgram, elevenlabs, livekit, custom
-	CustomPatterns   []VoiceCustomPattern `yaml:"custom_patterns"` // Custom INVITE/BYE patterns
+	Enabled          bool                 `yaml:"enabled"`            // Enable voice session tracking
+	MaxConcurrent    int                  `yaml:"max_concurrent"`     // Max concurrent voice sessions per WebSocket (default 1)
+	CDRPerSession    bool                 `yaml:"cdr_per_session"`    // Generate CDR per voice session (not just per WebSocket)
+	PolicyOnInvite   bool                 `yaml:"policy_on_invite"`   // Run policy checks at INVITE time
+	AutoStartSession bool                 `yaml:"auto_start_session"` // Auto-create session on first audio frame if no INVITE
+	Protocols        []string             `yaml:"protocols"`          // Enabled protocols: openai_realtime, deepgram, elevenlabs, livekit, custom
+	CustomPatterns   []VoiceCustomPattern `yaml:"custom_patterns"`    // Custom INVITE/BYE patterns
 }
 
 // VoiceCustomPattern defines a custom pattern for detecting voice session control
@@ -98,13 +98,13 @@ type StreamingConfig struct {
 // PolicyRule defines a single policy rule
 type PolicyRule struct {
 	Name        string   `yaml:"name"`
-	Type        string   `yaml:"type"`        // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match
-	Target      string   `yaml:"target"`      // request, response, both (default: both)
-	Threshold   int64    `yaml:"threshold"`   // For metric rules
-	Patterns    []string `yaml:"patterns"`    // For content_match rules (regex patterns)
-	Severity    string   `yaml:"severity"`    // info, warning, critical
+	Type        string   `yaml:"type"`      // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match
+	Target      string   `yaml:"target"`    // request, response, both (default: both)
+	Threshold   int64    `yaml:"threshold"` // For metric rules
+	Patterns    []string `yaml:"patterns"`  // For content_match rules (regex patterns)
+	Severity    string   `yaml:"severity"`  // info, warning, critical
 	Description string   `yaml:"description"`
-	Action      string   `yaml:"action"`      // flag, block, terminate (for content rules)
+	Action      string   `yaml:"action"` // flag, block, terminate (for content rules)
 }
 
 // BackendConfig defines a single backend configuration
@@ -124,18 +124,18 @@ type RoutingConfig struct {
 
 // SessionConfig holds session-related configuration
 type SessionConfig struct {
-	Timeout           time.Duration `yaml:"timeout"`
-	Header            string        `yaml:"header"`
-	GenerateIfMissing bool          `yaml:"generate_if_missing"`
-	Store             string        `yaml:"store"` // "memory" or "redis"
-	Redis             RedisConfig   `yaml:"redis"`
+	Timeout           time.Duration   `yaml:"timeout"`
+	Header            string          `yaml:"header"`
+	GenerateIfMissing bool            `yaml:"generate_if_missing"`
+	Store             string          `yaml:"store"` // "memory" or "redis"
+	Redis             RedisConfig     `yaml:"redis"`
 	KillBlock         KillBlockConfig `yaml:"kill_block"`
 }
 
 // KillBlockConfig configures how long killed sessions stay blocked
 type KillBlockConfig struct {
 	// Mode: "duration", "until_hour_change", or "permanent"
-	Mode     string        `yaml:"mode"`
+	Mode string `yaml:"mode"`
 	// Duration to block (only used if mode is "duration")
 	Duration time.Duration `yaml:"duration"`
 }
@@ -170,15 +170,15 @@ type LoggingConfig struct {
 // TelemetryConfig holds OpenTelemetry configuration
 type TelemetryConfig struct {
 	Enabled     bool   `yaml:"enabled"`
-	Exporter    string `yaml:"exporter"`     // "otlp", "stdout", or "none"
-	Endpoint    string `yaml:"endpoint"`     // OTLP endpoint (e.g., "localhost:4317")
+	Exporter    string `yaml:"exporter"` // "otlp", "stdout", or "none"
+	Endpoint    string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
 	ServiceName string `yaml:"service_name"`
 	Insecure    bool   `yaml:"insecure"` // Use insecure connection for OTLP
 }
 
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
 	if err != nil {
 		// Return defaults if config file doesn't exist
 		if os.IsNotExist(err) {
@@ -258,10 +258,10 @@ func defaults() *Config {
 			CaptureContent: true,
 			MaxCaptureSize: 10000, // 10KB per request
 			Streaming: StreamingConfig{
-				Mode:          "chunked",   // Low latency by default
-				OverlapSize:   1024,        // 1KB overlap for cross-chunk patterns
-				MaxBufferSize: 10485760,    // 10MB max buffer
-				BufferTimeout: 60,          // 60 seconds
+				Mode:          "chunked", // Low latency by default
+				OverlapSize:   1024,      // 1KB overlap for cross-chunk patterns
+				MaxBufferSize: 10485760,  // 10MB max buffer
+				BufferTimeout: 60,        // 60 seconds
 			},
 			Rules: []PolicyRule{
 				{
