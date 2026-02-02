@@ -585,8 +585,8 @@ func TestSQLiteStore_Cleanup(t *testing.T) {
 		EndTime:   now,
 	}
 
-	store.SaveSession(oldRecord)
-	store.SaveSession(newRecord)
+	_ = store.SaveSession(oldRecord)
+	_ = store.SaveSession(newRecord)
 
 	// Cleanup with 30 day retention
 	deleted, err := store.Cleanup(30)

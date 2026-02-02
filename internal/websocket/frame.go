@@ -60,10 +60,9 @@ func (f *Frame) IsBinary() bool {
 // FrameScanner provides frame-level content scanning for policy evaluation
 // This is a placeholder for Phase 2: Policy Integration
 type FrameScanner struct {
-	sessionID     string
-	scanTextOnly  bool
-	overlapBuffer []byte
-	overlapSize   int
+	sessionID    string
+	scanTextOnly bool
+	overlapSize  int
 }
 
 // NewFrameScanner creates a new FrameScanner for policy evaluation

@@ -439,8 +439,8 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 	for rows.Next() {
 		var state string
 		var count int64
-		if err := rows.Scan(&state, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&state, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.SessionsByState[state] = count
 	}
@@ -650,10 +650,10 @@ func (s *SQLiteStore) GetVoiceSession(id string) (*VoiceSessionRecord, error) {
 		record.Protocol = protocol.String
 	}
 	if metadataStr.Valid && metadataStr.String != "" {
-		json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+		_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 	}
 	if transcriptStr.Valid && transcriptStr.String != "" {
-		json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
+		_ = json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
 	}
 
 	return &record, nil
@@ -760,10 +760,10 @@ func (s *SQLiteStore) ListVoiceSessions(opts ListVoiceSessionsOptions) ([]VoiceS
 			record.Protocol = protocol.String
 		}
 		if metadataStr.Valid && metadataStr.String != "" {
-			json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
+			_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
 		}
 		if transcriptStr.Valid && transcriptStr.String != "" {
-			json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
+			_ = json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
 		}
 
 		records = append(records, record)
@@ -835,8 +835,8 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 	for rows.Next() {
 		var state string
 		var count int64
-		if err := rows.Scan(&state, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&state, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.SessionsByState[state] = count
 	}
@@ -1042,8 +1042,8 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 	for rows.Next() {
 		var provider string
 		var count int64
-		if err := rows.Scan(&provider, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&provider, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.RequestsByProvider[provider] = count
 	}
