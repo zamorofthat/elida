@@ -273,7 +273,7 @@ func (m *Manager) Kill(id string) bool {
 
 	// Publish kill signal for distributed kill switch
 	if rs, ok := m.store.(*RedisStore); ok {
-		rs.PublishKill(id)
+		_ = rs.PublishKill(id)
 	}
 
 	// Export CDR immediately when session is killed
@@ -343,7 +343,7 @@ func (m *Manager) Terminate(id string) bool {
 
 	// Publish kill signal for distributed kill switch
 	if rs, ok := m.store.(*RedisStore); ok {
-		rs.PublishKill(id)
+		_ = rs.PublishKill(id)
 	}
 
 	// Export session record immediately

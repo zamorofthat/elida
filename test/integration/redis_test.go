@@ -275,7 +275,7 @@ func TestRedisStore_KillChannel(t *testing.T) {
 	}
 
 	// Publish kill via the store's method
-	store.PublishKill("kill-chan-test")
+	_ = store.PublishKill("kill-chan-test")
 
 	// Wait a bit for the pub/sub message to be processed
 	time.Sleep(100 * time.Millisecond)

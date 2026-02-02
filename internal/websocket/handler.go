@@ -378,7 +378,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	defer clientConn.CloseNow()
+	defer clientConn.CloseNow() //nolint:errcheck
 
 	// Connect to backend WebSocket
 	backendConn, err := DialBackend(ctx, backend, r, h.config)
@@ -391,7 +391,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		clientConn.Close(websocket.StatusInternalError, "Backend connection failed")
 		return
 	}
-	defer backendConn.CloseNow()
+	defer backendConn.CloseNow() //nolint:errcheck
 
 	// Set message size limits
 	if h.config.MaxMessageSize > 0 {

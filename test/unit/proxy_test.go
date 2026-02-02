@@ -38,7 +38,7 @@ func TestProxy_BasicRequest(t *testing.T) {
 	// Mock backend
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"response":"ok"}`))
+		_, _ = w.Write([]byte(`{"response":"ok"}`))
 	}))
 	defer backend.Close()
 
@@ -70,7 +70,7 @@ func TestProxy_BasicRequest(t *testing.T) {
 
 func TestProxy_CustomSessionID(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer backend.Close()
 
@@ -100,7 +100,7 @@ func TestProxy_CustomSessionID(t *testing.T) {
 
 func TestProxy_KilledSessionRejected(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer backend.Close()
 
@@ -134,7 +134,7 @@ func TestProxy_KilledSessionRejected(t *testing.T) {
 func TestProxy_BackendError(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"backend error"}`))
+		_, _ = w.Write([]byte(`{"error":"backend error"}`))
 	}))
 	defer backend.Close()
 
@@ -152,7 +152,7 @@ func TestProxy_BackendError(t *testing.T) {
 
 func TestProxy_SessionBytesTracking(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"response":"test response data"}`))
+		_, _ = w.Write([]byte(`{"response":"test response data"}`))
 	}))
 	defer backend.Close()
 
@@ -176,7 +176,7 @@ func TestProxy_HeadersForwarded(t *testing.T) {
 	var receivedHeaders http.Header
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedHeaders = r.Header
-		w.Write([]byte(`ok`))
+		_, _ = w.Write([]byte(`ok`))
 	}))
 	defer backend.Close()
 

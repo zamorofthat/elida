@@ -27,7 +27,7 @@ func New() *Handler {
 
 	// Log embedded files
 	var fileCount int
-	fs.WalkDir(staticFS, ".", func(path string, d fs.DirEntry, err error) error {
+	_ = fs.WalkDir(staticFS, ".", func(path string, d fs.DirEntry, err error) error {
 		if err == nil {
 			slog.Info("embedded file", "path", path, "is_dir", d.IsDir())
 			fileCount++
