@@ -99,11 +99,11 @@ func TestStreamingScanner_OverlapBuffer(t *testing.T) {
 	scanner := engine.NewStreamingScanner("test-session", 20)
 
 	// First chunk ends with partial pattern
-	result := scanner.ScanChunk([]byte("Some text ending with DANGER"))
+	_ = scanner.ScanChunk([]byte("Some text ending with DANGER"))
 	// Might not detect yet since pattern isn't complete
 
 	// Second chunk completes pattern
-	result = scanner.ScanChunk([]byte("_PATTERN and more text"))
+	result := scanner.ScanChunk([]byte("_PATTERN and more text"))
 	if result == nil {
 		t.Fatal("expected violation for pattern spanning chunks with overlap")
 	}

@@ -56,12 +56,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveIndex serves the index.html file directly
-func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) serveIndex(w http.ResponseWriter, _ *http.Request) {
 	content, err := staticFiles.ReadFile("static/index.html")
 	if err != nil {
 		http.Error(w, "Dashboard not found", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(content)
+	_, _ = w.Write(content)
 }

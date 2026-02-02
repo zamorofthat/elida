@@ -46,7 +46,7 @@ func TestNewProvider_StdoutExporter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	if !provider.Enabled() {
 		t.Error("provider should be enabled with stdout exporter")
@@ -85,7 +85,7 @@ func TestNewProvider_DefaultServiceName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	// Provider should work with default service name
 	if !provider.Enabled() {
@@ -158,7 +158,7 @@ func TestExportSessionRecord_WithStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	record := telemetry.SessionRecord{
 		SessionID:    "test-session-123",
@@ -203,7 +203,7 @@ func TestExportSessionRecord_NoViolations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	record := telemetry.SessionRecord{
 		SessionID:    "clean-session",
@@ -254,6 +254,27 @@ func TestSessionRecord_Struct(t *testing.T) {
 	if record.State != "killed" {
 		t.Error("State mismatch")
 	}
+	if record.Backend != "anthropic" {
+		t.Error("Backend mismatch")
+	}
+	if record.ClientAddr != "127.0.0.1:9999" {
+		t.Error("ClientAddr mismatch")
+	}
+	if record.DurationMs != 1500 {
+		t.Error("DurationMs mismatch")
+	}
+	if record.RequestCount != 3 {
+		t.Error("RequestCount mismatch")
+	}
+	if record.BytesIn != 256 {
+		t.Error("BytesIn mismatch")
+	}
+	if record.BytesOut != 1024 {
+		t.Error("BytesOut mismatch")
+	}
+	if record.CaptureCount != 1 {
+		t.Error("CaptureCount mismatch")
+	}
 	if len(record.Violations) != 1 {
 		t.Error("Violations count mismatch")
 	}
@@ -274,8 +295,14 @@ func TestViolation_Struct(t *testing.T) {
 	if v.RuleName != "prompt_injection_ignore" {
 		t.Error("RuleName mismatch")
 	}
+	if v.Description != "LLM01: Prompt injection - instruction override" {
+		t.Error("Description mismatch")
+	}
 	if v.Severity != "critical" {
 		t.Error("Severity mismatch")
+	}
+	if v.MatchedText != "ignore all previous instructions" {
+		t.Error("MatchedText mismatch")
 	}
 	if v.Action != "block" {
 		t.Error("Action mismatch")
@@ -297,7 +324,7 @@ func TestStartRequestSpan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	ctx := context.Background()
 	ctx, span := provider.StartRequestSpan(ctx, "test-session", "POST", "/v1/chat/completions", true)
@@ -331,7 +358,7 @@ func TestEndRequestSpan_WithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	ctx := context.Background()
 	_, span := provider.StartRequestSpan(ctx, "test-session", "POST", "/api/generate", false)
@@ -357,7 +384,7 @@ func TestRecordSessionCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	ctx := context.Background()
 	ctx, span := provider.StartRequestSpan(ctx, "new-session", "POST", "/test", false)
@@ -383,7 +410,7 @@ func TestRecordSessionEnded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	ctx := context.Background()
 
@@ -406,7 +433,7 @@ func TestRecordSessionKilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	ctx := context.Background()
 	ctx, span := provider.StartRequestSpan(ctx, "kill-session", "POST", "/test", false)
@@ -517,7 +544,7 @@ func TestSpanFromContext_WithSpan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create provider: %v", err)
 	}
-	defer provider.Shutdown(context.Background())
+	defer func() { _ = provider.Shutdown(context.Background()) }()
 
 	ctx := context.Background()
 	ctx, expectedSpan := provider.StartRequestSpan(ctx, "test", "GET", "/", false)

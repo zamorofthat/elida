@@ -287,7 +287,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Session was killed - reject request
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed and cannot be reused"}`))
+		_, _ = w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed and cannot be reused"}`))
 		return
 	}
 
@@ -304,7 +304,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed"}`))
+		_, _ = w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed"}`))
 		return
 	default:
 	}
@@ -581,9 +581,9 @@ func (h *Handler) forwardFrames(ctx context.Context, src, dst *websocket.Conn, s
 			// Auto-start session on first binary frame if enabled
 			if activeVS == nil && msgType == websocket.MessageBinary &&
 				h.config.VoiceSessions.AutoStartSession && !autoStarted && inbound {
-				var err error
-				activeVS, err = voiceMgr.StartSession()
-				if err == nil {
+				var startErr error
+				activeVS, startErr = voiceMgr.StartSession()
+				if startErr == nil {
 					activeVS.SetMetadata("protocol", "auto_detected")
 					activeVS.SetMetadata("trigger", "first_audio_frame")
 					activeVS.Activate()

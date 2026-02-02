@@ -54,7 +54,7 @@ func newTestRedisStore(t *testing.T) *session.RedisStore {
 	return store
 }
 
-func cleanupTestKeys(t *testing.T, addr string) {
+func cleanupTestKeys(_ *testing.T, addr string) {
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	defer client.Close()
 

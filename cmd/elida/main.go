@@ -166,8 +166,8 @@ func main() {
 				}
 			}
 
-			if err := sqliteStore.SaveSession(record); err != nil {
-				slog.Error("failed to save session to history", "session_id", snap.ID, "error", err)
+			if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
+				slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
 			}
 
 			// Export to telemetry (if enabled)

@@ -47,8 +47,8 @@ const (
 type Rule struct {
 	Name        string     `yaml:"name" json:"name"`
 	Type        RuleType   `yaml:"type" json:"type"`
-	Target      RuleTarget `yaml:"target" json:"target"`                // request, response, both (default: both)
-	Threshold   int64      `yaml:"threshold" json:"threshold"`          // For metric rules
+	Target      RuleTarget `yaml:"target" json:"target"`               // request, response, both (default: both)
+	Threshold   int64      `yaml:"threshold" json:"threshold"`         // For metric rules
 	Patterns    []string   `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
 	Severity    Severity   `yaml:"severity" json:"severity"`
 	Description string     `yaml:"description" json:"description"`
@@ -57,36 +57,36 @@ type Rule struct {
 
 // Violation represents a policy violation
 type Violation struct {
-	RuleName      string    `json:"rule_name"`
-	Description   string    `json:"description"`
-	Severity      Severity  `json:"severity"`
-	Threshold     int64     `json:"threshold,omitempty"`
-	ActualValue   int64     `json:"actual_value,omitempty"`
-	MatchedText   string    `json:"matched_text,omitempty"`   // For content matches
-	MatchedPattern string   `json:"matched_pattern,omitempty"` // Pattern that matched
-	Action        string    `json:"action,omitempty"`          // Recommended action
-	Timestamp     time.Time `json:"timestamp"`
+	RuleName       string    `json:"rule_name"`
+	Description    string    `json:"description"`
+	Severity       Severity  `json:"severity"`
+	Threshold      int64     `json:"threshold,omitempty"`
+	ActualValue    int64     `json:"actual_value,omitempty"`
+	MatchedText    string    `json:"matched_text,omitempty"`    // For content matches
+	MatchedPattern string    `json:"matched_pattern,omitempty"` // Pattern that matched
+	Action         string    `json:"action,omitempty"`          // Recommended action
+	Timestamp      time.Time `json:"timestamp"`
 }
 
 // SessionMetrics contains the metrics needed for policy evaluation
 type SessionMetrics struct {
-	SessionID       string
-	BytesIn         int64
-	BytesOut        int64
-	RequestCount    int
-	Duration        time.Duration
-	IdleTime        time.Duration
-	StartTime       time.Time
-	RequestTimes    []time.Time // For rate calculation
+	SessionID    string
+	BytesIn      int64
+	BytesOut     int64
+	RequestCount int
+	Duration     time.Duration
+	IdleTime     time.Duration
+	StartTime    time.Time
+	RequestTimes []time.Time // For rate calculation
 }
 
 // FlaggedSession tracks a session that has policy violations
 type FlaggedSession struct {
-	SessionID      string       `json:"session_id"`
-	Violations     []Violation  `json:"violations"`
-	MaxSeverity    Severity     `json:"max_severity"`
-	FirstFlagged   time.Time    `json:"first_flagged"`
-	LastFlagged    time.Time    `json:"last_flagged"`
+	SessionID       string            `json:"session_id"`
+	Violations      []Violation       `json:"violations"`
+	MaxSeverity     Severity          `json:"max_severity"`
+	FirstFlagged    time.Time         `json:"first_flagged"`
+	LastFlagged     time.Time         `json:"last_flagged"`
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
 }
 
@@ -113,8 +113,8 @@ type Engine struct {
 	compiledRules   []CompiledRule // Rules with compiled regex
 	flaggedSessions map[string]*FlaggedSession
 	captureContent  bool
-	maxCaptureSize  int    // Max bytes to capture per request
-	auditMode       bool   // If true, log but don't enforce (dry-run)
+	maxCaptureSize  int  // Max bytes to capture per request
+	auditMode       bool // If true, log but don't enforce (dry-run)
 }
 
 // Config for the policy engine
@@ -605,10 +605,10 @@ func (e *Engine) Stats() map[string]interface{} {
 
 // StreamingScanner handles chunk-based content scanning with overlap for cross-boundary patterns
 type StreamingScanner struct {
-	engine      *Engine
-	sessionID   string
-	overlapBuf  []byte
-	overlapSize int
+	engine       *Engine
+	sessionID    string
+	overlapBuf   []byte
+	overlapSize  int
 	totalScanned int64
 }
 

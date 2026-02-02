@@ -657,20 +657,21 @@ func (h *Handler) handleVoiceSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"voice_sessions":    allSessions,
-		"total":             len(allSessions),
+		"voice_sessions":     allSessions,
+		"total":              len(allSessions),
 		"websocket_sessions": len(managers),
-		"stats":             stats,
+		"stats":              stats,
 	})
 }
 
 // handleVoiceSession handles requests to /control/voice/{sessionID}
 // Path patterns:
-//   GET /control/voice/{sessionID} - List voice sessions for a WebSocket session
-//   GET /control/voice/{sessionID}/{voiceID} - Get a specific voice session
-//   POST /control/voice/{sessionID}/{voiceID}/bye - End a voice session
-//   POST /control/voice/{sessionID}/{voiceID}/hold - Put on hold
-//   POST /control/voice/{sessionID}/{voiceID}/resume - Resume from hold
+//
+//	GET /control/voice/{sessionID} - List voice sessions for a WebSocket session
+//	GET /control/voice/{sessionID}/{voiceID} - Get a specific voice session
+//	POST /control/voice/{sessionID}/{voiceID}/bye - End a voice session
+//	POST /control/voice/{sessionID}/{voiceID}/hold - Put on hold
+//	POST /control/voice/{sessionID}/{voiceID}/resume - Resume from hold
 func (h *Handler) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	if h.wsHandler == nil {
 		http.Error(w, "WebSocket handler not enabled", http.StatusServiceUnavailable)

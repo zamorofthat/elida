@@ -47,7 +47,10 @@ func DialBackend(ctx context.Context, backend *router.Backend, origReq *http.Req
 	}
 
 	// Dial the backend
-	conn, _, err := websocket.Dial(ctx, backendURL.String(), dialOpts)
+	conn, resp, err := websocket.Dial(ctx, backendURL.String(), dialOpts)
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
 	return conn, err
 }
 

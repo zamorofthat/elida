@@ -97,8 +97,8 @@ func TestSQLiteStore_ListSessions(t *testing.T) {
 			Backend:      "http://localhost:11434",
 			ClientAddr:   "127.0.0.1:12345",
 		}
-		if err := store.SaveSession(record); err != nil {
-			t.Fatalf("failed to save session %d: %v", i, err)
+		if saveErr := store.SaveSession(record); saveErr != nil {
+			t.Fatalf("failed to save session %d: %v", i, saveErr)
 		}
 	}
 
@@ -153,8 +153,8 @@ func TestSQLiteStore_GetStats(t *testing.T) {
 			Backend:      "http://localhost:11434",
 			ClientAddr:   "127.0.0.1:12345",
 		}
-		if err := store.SaveSession(record); err != nil {
-			t.Fatalf("failed to save session: %v", err)
+		if saveErr := store.SaveSession(record); saveErr != nil {
+			t.Fatalf("failed to save session: %v", saveErr)
 		}
 	}
 
@@ -471,8 +471,8 @@ func TestSQLiteStore_ListSessionsWithViolations(t *testing.T) {
 	}
 
 	for _, r := range records {
-		if err := store.SaveSession(r); err != nil {
-			t.Fatalf("failed to save session: %v", err)
+		if saveErr := store.SaveSession(r); saveErr != nil {
+			t.Fatalf("failed to save session: %v", saveErr)
 		}
 	}
 
@@ -541,13 +541,7 @@ func TestSQLiteStore_EmptyCapturedContentAndViolations(t *testing.T) {
 		t.Fatalf("failed to get session: %v", err)
 	}
 
-	// Verify empty slices (not nil)
-	if retrieved.CapturedContent == nil {
-		// This is acceptable - could be nil or empty slice
-	}
-	if retrieved.Violations == nil {
-		// This is acceptable - could be nil or empty slice
-	}
+	// Verify empty slices (nil is acceptable, check length)
 	if len(retrieved.CapturedContent) != 0 {
 		t.Errorf("expected 0 captured requests, got %d", len(retrieved.CapturedContent))
 	}

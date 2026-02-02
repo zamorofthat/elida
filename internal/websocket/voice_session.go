@@ -51,10 +51,10 @@ func (s VoiceSessionState) String() string {
 // TranscriptEntry represents a single utterance in the conversation
 type TranscriptEntry struct {
 	Timestamp time.Time `json:"timestamp"`
-	Speaker   string    `json:"speaker"`   // "user" or "assistant"
+	Speaker   string    `json:"speaker"` // "user" or "assistant"
 	Text      string    `json:"text"`
-	IsFinal   bool      `json:"is_final"`  // false for interim results
-	Source    string    `json:"source"`    // "stt", "tts", "text"
+	IsFinal   bool      `json:"is_final"` // false for interim results
+	Source    string    `json:"source"`   // "stt", "tts", "text"
 }
 
 // VoiceSession represents a single voice conversation within a WebSocket connection
@@ -63,15 +63,15 @@ type VoiceSession struct {
 	mu sync.RWMutex
 
 	// Identity
-	ID              string    `json:"id"`
-	ParentSessionID string    `json:"parent_session_id"` // WebSocket session ID
+	ID              string            `json:"id"`
+	ParentSessionID string            `json:"parent_session_id"` // WebSocket session ID
 	State           VoiceSessionState `json:"state"`
 
 	// Timing
-	StartTime    time.Time  `json:"start_time"`
-	AnswerTime   *time.Time `json:"answer_time,omitempty"`   // When session became active
-	EndTime      *time.Time `json:"end_time,omitempty"`
-	HoldTime     *time.Time `json:"hold_time,omitempty"`     // When put on hold
+	StartTime  time.Time  `json:"start_time"`
+	AnswerTime *time.Time `json:"answer_time,omitempty"` // When session became active
+	EndTime    *time.Time `json:"end_time,omitempty"`
+	HoldTime   *time.Time `json:"hold_time,omitempty"` // When put on hold
 
 	// Metadata (from INVITE)
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -80,14 +80,14 @@ type VoiceSession struct {
 	Language string            `json:"language,omitempty"` // Language code
 
 	// Metrics
-	AudioFramesIn    int64 `json:"audio_frames_in"`
-	AudioFramesOut   int64 `json:"audio_frames_out"`
-	TextFramesIn     int64 `json:"text_frames_in"`
-	TextFramesOut    int64 `json:"text_frames_out"`
-	AudioBytesIn     int64 `json:"audio_bytes_in"`
-	AudioBytesOut    int64 `json:"audio_bytes_out"`
-	AudioDurationMs  int64 `json:"audio_duration_ms"`  // Estimated audio duration
-	TurnCount        int   `json:"turn_count"`         // Number of conversation turns
+	AudioFramesIn   int64 `json:"audio_frames_in"`
+	AudioFramesOut  int64 `json:"audio_frames_out"`
+	TextFramesIn    int64 `json:"text_frames_in"`
+	TextFramesOut   int64 `json:"text_frames_out"`
+	AudioBytesIn    int64 `json:"audio_bytes_in"`
+	AudioBytesOut   int64 `json:"audio_bytes_out"`
+	AudioDurationMs int64 `json:"audio_duration_ms"` // Estimated audio duration
+	TurnCount       int   `json:"turn_count"`        // Number of conversation turns
 
 	// Transcript - what was said during the session
 	Transcript []TranscriptEntry `json:"transcript,omitempty"`

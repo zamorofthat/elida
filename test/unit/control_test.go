@@ -318,7 +318,7 @@ func TestHandler_VoiceSession_Actions_NoWebSocketHandler(t *testing.T) {
 }
 
 // Auth tests
-func newTestHandlerWithAuth(apiKey string) *control.Handler {
+func newTestHandlerWithAuth(apiKey string) *control.Handler { //nolint:unparam // test helper with constant value
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 	return control.NewWithAuth(store, manager, nil, nil, true, apiKey)
