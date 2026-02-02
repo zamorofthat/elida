@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -263,25 +264,24 @@ func TestVoiceSessionManager_Stats(t *testing.T) {
 func TestVoiceSessionManager_Callbacks(t *testing.T) {
 	mgr := ws.NewVoiceSessionManager("ws-session-1", 1)
 
-	startCalled := false
-	endCalled := false
+	var startCalled, endCalled atomic.Bool
 
 	mgr.SetCallbacks(
-		func(vs *ws.VoiceSession) { startCalled = true },
-		func(vs *ws.VoiceSession) { endCalled = true },
+		func(vs *ws.VoiceSession) { startCalled.Store(true) },
+		func(vs *ws.VoiceSession) { endCalled.Store(true) },
 	)
 
 	vs, _ := mgr.StartSession()
 
 	// Start callback is async, give it a moment
 	time.Sleep(10 * time.Millisecond)
-	if !startCalled {
+	if !startCalled.Load() {
 		t.Error("expected start callback to be called")
 	}
 
 	mgr.EndSession(vs.ID, "test")
 
-	if !endCalled {
+	if !endCalled.Load() {
 		t.Error("expected end callback to be called")
 	}
 }
