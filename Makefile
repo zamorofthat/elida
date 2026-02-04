@@ -213,3 +213,15 @@ service-status:
 # Setup environment variables for AI tools
 setup-env:
 	./scripts/install.sh env
+
+# Web Dashboard (using bun for faster builds)
+web-install:
+	@which bun > /dev/null || (echo "Bun required. Install from https://bun.sh" && exit 1)
+	cd web && bun install
+
+web-build: web-install
+	cd web && bun run build
+
+web-dev:
+	@which bun > /dev/null || (echo "Bun required. Install from https://bun.sh" && exit 1)
+	cd web && bun run dev

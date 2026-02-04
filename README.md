@@ -323,4 +323,3 @@ MIT
 
 **E**dge **L**ayer for **I**ntelligent **D**efense of **A**gents
 
-Also named after the developer's grandmother.
