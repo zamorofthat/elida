@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
+import { formatBytes, formatDuration, formatDurationStr, truncateId } from './utils'
 
 const API_BASE = ''
 
@@ -79,48 +80,6 @@ const IconEmpty = () => (
     <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
   </svg>
 )
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
-}
-
-function formatDuration(ms) {
-  if (!ms) return '-'
-  if (ms < 1000) return ms + 'ms'
-  const seconds = ms / 1000
-  if (seconds < 60) return seconds.toFixed(1) + 's'
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = Math.floor(seconds % 60)
-  return `${minutes}m ${remainingSeconds}s`
-}
-
-function formatDurationStr(str) {
-  if (!str) return '-'
-  // Handle Go duration strings like "1m5.912904792s", "45.123s", "500ms"
-  const match = str.match(/(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+)ms)?/)
-  if (!match) return str
-  const h = parseInt(match[1]) || 0
-  const m = parseInt(match[2]) || 0
-  const s = Math.floor(parseFloat(match[3]) || 0)
-  const ms = parseInt(match[4]) || 0
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${s}s`
-  if (s > 0) return `${s}s`
-  if (ms > 0) return `${ms}ms`
-  return str
-}
-
-function truncateId(id, length = 8) {
-  return id ? id.substring(0, length) + '...' : '-'
-}
 
 // ============================================================================
 // Sparkline Component
