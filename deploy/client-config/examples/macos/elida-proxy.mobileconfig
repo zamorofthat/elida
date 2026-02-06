@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ELIDA AI Proxy Configuration Profile for macOS
+
+  This profile sets environment variables to route AI tool traffic through ELIDA.
+  Deploy via Jamf, Kandji, Mosyle, or Apple Business Manager.
+
+  BEFORE DEPLOYING:
+  1. Replace "elida.corp.local:8080" with your ELIDA proxy address
+  2. Generate new UUIDs for PayloadUUID fields (use `uuidgen` command)
+  3. Sign the profile for production deployment
+-->
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.ManagedClient.preferences</string>
+            <key>PayloadIdentifier</key>
+            <string>com.elida.proxy.env</string>
+            <key>PayloadUUID</key>
+            <string>A1B2C3D4-E5F6-7890-ABCD-EF1234567890</string>
+            <key>PayloadEnabled</key>
+            <true/>
+            <key>PayloadDisplayName</key>
+            <string>ELIDA AI Proxy Environment Variables</string>
+            <key>PayloadDescription</key>
+            <string>Configures AI coding tools to route through the ELIDA security proxy</string>
+            <key>PayloadContent</key>
+            <dict>
+                <!-- Environment variables for launchd (affects GUI apps) -->
+                <key>com.apple.loginwindow</key>
+                <dict>
+                    <key>Forced</key>
+                    <array>
+                        <dict>
+                            <key>mcx_preference_settings</key>
+                            <dict>
+                                <key>EnvironmentVariables</key>
+                                <dict>
+                                    <!-- Anthropic (Claude Code, Claude API) -->
+                                    <key>ANTHROPIC_BASE_URL</key>
+                                    <string>http://elida.corp.local:8080</string>
+
+                                    <!-- OpenAI (GPT, Cursor, many tools) -->
+                                    <key>OPENAI_BASE_URL</key>
+                                    <string>http://elida.corp.local:8080/v1</string>
+                                    <key>OPENAI_API_BASE</key>
+                                    <string>http://elida.corp.local:8080/v1</string>
+
+                                    <!-- Mistral -->
+                                    <key>MISTRAL_API_BASE</key>
+                                    <string>http://elida.corp.local:8080</string>
+
+                                    <!-- Generic proxy (for tools that support it) -->
+                                    <key>LLM_PROXY_URL</key>
+                                    <string>http://elida.corp.local:8080</string>
+                                </dict>
+                            </dict>
+                        </dict>
+                    </array>
+                </dict>
+            </dict>
+        </dict>
+    </array>
+    <key>PayloadDisplayName</key>
+    <string>ELIDA AI Proxy Configuration</string>
+    <key>PayloadDescription</key>
+    <string>Routes AI coding tool traffic through ELIDA for session tracking, policy enforcement, and security monitoring.</string>
+    <key>PayloadIdentifier</key>
+    <string>com.elida.proxy</string>
+    <key>PayloadOrganization</key>
+    <string>Your Organization</string>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>B2C3D4E5-F6A7-8901-BCDE-F23456789012</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadScope</key>
+    <string>User</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+</dict>
+</plist>

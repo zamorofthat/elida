@@ -1,0 +1,57 @@
+ELIDA has been deployed successfully!
+
+1. Get the proxy URL:
+{{- if .Values.ingress.enabled }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ (index .Values.ingress.hosts 0).host }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "elida.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  Watch status: kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "elida.fullname" . }}
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "elida.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$SERVICE_IP:{{ .Values.service.port }}
+{{- else if contains "ClusterIP" .Values.service.type }}
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "elida.fullname" . }} 8080:{{ .Values.service.port }}
+  echo "Proxy URL: http://localhost:8080"
+{{- end }}
+
+2. Get the control/dashboard URL:
+{{- if .Values.controlIngress.enabled }}
+  http{{ if $.Values.controlIngress.tls }}s{{ end }}://{{ (index .Values.controlIngress.hosts 0).host }}
+{{- else }}
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "elida.fullname" . }}-control 9090:{{ .Values.controlService.port }}
+  echo "Dashboard URL: http://localhost:9090"
+{{- end }}
+
+3. Configure your AI tools to use ELIDA:
+
+   # Claude Code
+   export ANTHROPIC_BASE_URL="<proxy-url>"
+
+   # OpenAI SDK
+   export OPENAI_BASE_URL="<proxy-url>/v1"
+
+   # Mistral
+   export MISTRAL_API_BASE="<proxy-url>"
+
+4. View active sessions:
+   curl http://localhost:9090/control/sessions
+
+5. View session statistics:
+   curl http://localhost:9090/control/stats
+
+{{- if .Values.elida.policy.enabled }}
+
+Policy engine is ENABLED. Flagged sessions can be viewed at:
+   curl http://localhost:9090/control/flagged
+{{- end }}
+
+{{- if .Values.elida.telemetry.enabled }}
+
+Telemetry is ENABLED. Traces are being sent to:
+   {{ .Values.elida.telemetry.endpoint }}
+{{- end }}
+
+For more information, visit: https://github.com/zamorofthat/elida

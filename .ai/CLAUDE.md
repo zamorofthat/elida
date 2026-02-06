@@ -804,7 +804,7 @@ Created deployment configurations for multiple platforms:
 - `deploy/ecs/task-definition.json` — ECS task definition template
 - `deploy/terraform/main.tf` — Terraform module for AWS
 - `deploy/docker-compose.prod.yaml` — Production Docker Compose with Redis
-- `deploy/client-config/` — AI tool client configurations and MDM deployment scripts
+- `deploy/client-config/` — AI tool client configurations and MDM deployment examples
 
 ### TLS/HTTPS Support
 
