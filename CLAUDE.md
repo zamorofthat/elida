@@ -18,6 +18,124 @@ The developer's grandmother, Elida. Also an acronym: **E**dge **L**ayer for **I*
 
 ---
 
+## Recent Changes (February 2026)
+
+### AI Tool Client Configuration & MDM Deployment
+
+Added comprehensive documentation and scripts for deploying ELIDA proxy configuration to developer workstations.
+
+**Supported Tools:**
+
+| Tool | Config Method |
+|------|---------------|
+| Claude Code CLI | `~/.claude/settings.json` with `ANTHROPIC_BASE_URL` |
+| Mistral AI | `MISTRAL_API_BASE` env var or SDK `server_url` |
+| Continue.dev | `~/.continue/config.yaml` with `apiBase` per model |
+| Cursor IDE | Settings UI → "Override OpenAI Base URL" |
+| OpenAI SDK | `OPENAI_BASE_URL` env var |
+
+**MDM Deployment Options:**
+- **macOS**: Configuration profile (`.mobileconfig`) or deployment script for Jamf/Kandji
+- **Windows**: PowerShell script for Intune/SCCM or GPO registry keys
+- **Linux**: Ansible playbook or shell script
+
+**Files added:**
+- `deploy/client-config/DEPLOYMENT.md` — Main deployment guide
+- `deploy/client-config/examples/macos/` — macOS MDM profile + script
+- `deploy/client-config/examples/windows/` — PowerShell + GPO guide
+- `deploy/client-config/examples/linux/` — Ansible + shell script
+
+### Helm Chart Improvements
+
+Validated and enhanced the Kubernetes Helm chart with Kind cluster testing.
+
+**Templates added:**
+- `templates/pvc.yaml` — PersistentVolumeClaim for SQLite storage
+- `templates/pdb.yaml` — PodDisruptionBudget for HA
+- `templates/hpa.yaml` — HorizontalPodAutoscaler
+- `templates/NOTES.txt` — Post-install instructions
+- `README.md` — Comprehensive chart documentation
+
+**Fixes:**
+- Made `ELIDA_SESSION_STORE` configurable (was hardcoded to `redis`)
+- Added conditional Redis env vars (only set when Redis enabled)
+
+### Error Handling Standardization
+
+Addressed inconsistent error handling patterns identified in code review.
+
+**proxy/proxy.go (9 locations):**
+- Fixed unhandled `w.Write()` errors (gosec G104 / CWE-703)
+- Now logs at `Warn` level on write failures (matches nginx behavior)
+
+**storage/sqlite.go (10 locations):**
+- Added `unmarshalJSON()` helper for safe JSON parsing
+- Logs at `Debug` level if stored JSON is malformed
+
+### Configuration Validation
+
+Added `--validate` flag for config validation without starting the server.
+
+**Usage:**
+```bash
+./bin/elida -validate -config configs/elida.yaml
+```
+
+**Success output:**
+```
+✓ Configuration valid: configs/elida.yaml
+  Listen: :8080
+  Backends: 2 configured (default: anthropic)
+  Policy: enabled (preset: standard)
+  Storage: disabled
+```
+
+**Error output (with hints):**
+```
+✗ Configuration invalid: config.yaml
+  - listen: address is required
+    hint: e.g., :8080 or 0.0.0.0:8080
+  - backends.broken.url: unsupported scheme ""
+    hint: must be http or https
+```
+
+**Validations added:**
+- Listen address format
+- Backend URLs parseable with http/https scheme
+- Session timeout positive
+- Storage capture_mode valid
+- Policy mode valid
+- Control API key present when auth enabled
+
+### Docker Hub Integration
+
+Added Docker build/push to CI/CD pipeline and local scripts.
+
+**CI/CD (`.github/workflows/ci.yml`):**
+- New `docker` job runs on `main` branch and version tags
+- Multi-arch builds (linux/amd64 + linux/arm64)
+- Auto-tags: `latest`, `vX.Y.Z`, `vX.Y`, commit SHA
+- Uses GitHub Actions cache for faster builds
+
+**Required GitHub Secrets:**
+```
+DOCKERHUB_USERNAME  - Docker Hub username
+DOCKERHUB_TOKEN     - Docker Hub access token
+```
+
+**Local usage:**
+```bash
+DOCKER_USERNAME=youruser make docker-push
+# Or with specific version:
+DOCKER_USERNAME=youruser ./scripts/docker-push.sh v1.0.0 --latest
+```
+
+**Files added:**
+- `scripts/docker-push.sh` — Build and push script
+- `DOCKER_README.md` — Docker Hub description
+
+---
+
 ## Recent Changes (January 2026)
 
 ### WebSocket Support & Voice Session Tracking
