@@ -305,13 +305,13 @@ start_elida() {
 
     case "$mode" in
         "no-policy")
-            ELIDA_STORAGE_ENABLED=true ./bin/elida > /dev/null 2>&1 &
+            ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all ./bin/elida > /dev/null 2>&1 &
             ;;
         "audit")
-            ELIDA_POLICY_ENABLED=true ELIDA_POLICY_MODE=audit ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ./bin/elida > /dev/null 2>&1 &
+            ELIDA_POLICY_ENABLED=true ELIDA_POLICY_MODE=audit ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all ./bin/elida > /dev/null 2>&1 &
             ;;
         "enforce")
-            ELIDA_POLICY_ENABLED=true ELIDA_POLICY_MODE=enforce ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ./bin/elida > /dev/null 2>&1 &
+            ELIDA_POLICY_ENABLED=true ELIDA_POLICY_MODE=enforce ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all ./bin/elida > /dev/null 2>&1 &
             ;;
     esac
 
@@ -509,6 +509,7 @@ compare_modes() {
     echo "Memory notes:"
     echo "  • Base session overhead: ~2-5KB (metadata, tracking)"
     echo "  • Flagged sessions: +5-20KB (captured request/response bodies)"
+    echo "  • Capture-all mode: +10-30KB per session (all request/response bodies)"
     echo "  • Memory per session varies with payload size and capture settings"
     echo "  • Low values (0-5KB) indicate efficient GC or lightweight test payloads"
 

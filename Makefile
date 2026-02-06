@@ -31,9 +31,9 @@ restart: stop build
 run-policy: build
 	ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ./bin/${BINARY_NAME} -config configs/elida.yaml
 
-# Run with policy + storage (demo mode)
+# Run with policy + storage + capture-all (demo mode)
 run-demo: build
-	ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ./bin/${BINARY_NAME} -config configs/elida.yaml
+	ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all ./bin/${BINARY_NAME} -config configs/elida.yaml
 
 # Run unit tests (no external dependencies)
 test:
@@ -151,13 +151,13 @@ run-jaeger: build jaeger-up
 jaeger-ui:
 	open http://localhost:16686
 
-# Run with SQLite storage enabled
+# Run with SQLite storage enabled (capture-all mode)
 run-storage: build
-	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ./bin/${BINARY_NAME} -config configs/elida.yaml
+	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ELIDA_STORAGE_CAPTURE_MODE=all ./bin/${BINARY_NAME} -config configs/elida.yaml
 
-# Run with all features (storage + telemetry)
+# Run with all features (storage + telemetry + capture-all)
 run-full: build jaeger-up
-	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ELIDA_TELEMETRY_ENABLED=true ELIDA_TELEMETRY_EXPORTER=otlp ELIDA_TELEMETRY_ENDPOINT=localhost:4317 ./bin/${BINARY_NAME} -config configs/elida.yaml
+	ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_PATH=data/elida.db ELIDA_STORAGE_CAPTURE_MODE=all ELIDA_TELEMETRY_ENABLED=true ELIDA_TELEMETRY_EXPORTER=otlp ELIDA_TELEMETRY_ENDPOINT=localhost:4317 ./bin/${BINARY_NAME} -config configs/elida.yaml
 
 # Run with WebSocket support enabled
 run-websocket: build

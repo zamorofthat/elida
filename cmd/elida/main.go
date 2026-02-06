@@ -96,6 +96,7 @@ func main() {
 	// Forward-declare so session callback closure can reference them
 	var policyEngine *policy.Engine
 	var tp *telemetry.Provider
+	var proxyCaptureBuf *proxy.CaptureBuffer
 
 	// Initialize SQLite storage for session history
 	var sqliteStore *storage.SQLiteStore
@@ -164,6 +165,26 @@ func main() {
 						})
 					}
 				}
+			}
+
+			// Merge capture-all content (if policy didn't already capture this session)
+			if proxyCaptureBuf != nil && proxyCaptureBuf.HasContent(snap.ID) {
+				capturedAll := proxyCaptureBuf.GetContent(snap.ID)
+				if len(record.CapturedContent) == 0 {
+					// No policy captures — use capture-all content directly
+					for _, c := range capturedAll {
+						record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
+							Timestamp:    c.Timestamp,
+							Method:       c.Method,
+							Path:         c.Path,
+							RequestBody:  c.RequestBody,
+							ResponseBody: c.ResponseBody,
+							StatusCode:   c.StatusCode,
+						})
+					}
+				}
+				// If policy already captured content, policy captures take priority
+				// (they include violation context). Capture-all buffer is cleaned up either way.
 			}
 
 			if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
@@ -264,6 +285,9 @@ func main() {
 		proxyHandler.SetStorage(sqliteStore)
 	}
 
+	// Wire capture buffer for capture-all mode
+	proxyCaptureBuf = proxyHandler.GetCaptureBuffer()
+
 	// Initialize WebSocket handler if enabled
 	var wsHandler *websocket.Handler
 	if cfg.WebSocket.Enabled {
@@ -358,6 +382,9 @@ func main() {
 	)
 	if wsHandler != nil {
 		controlHandler.SetWebSocketHandler(wsHandler)
+	}
+	if cfg.Storage.Enabled {
+		controlHandler.SetCaptureMode(cfg.Storage.CaptureMode)
 	}
 
 	if cfg.Control.Auth.Enabled {

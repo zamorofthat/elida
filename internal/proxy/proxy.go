@@ -28,14 +28,16 @@ type WebSocketHandler interface {
 
 // Proxy handles proxying requests to the backend
 type Proxy struct {
-	config    *config.Config
-	store     session.Store
-	manager   *session.Manager
-	router    *router.Router
-	telemetry *telemetry.Provider
-	policy    *policy.Engine
-	storage   *storage.SQLiteStore // For persisting flagged sessions immediately
-	wsHandler WebSocketHandler     // WebSocket proxy handler
+	config        *config.Config
+	store         session.Store
+	manager       *session.Manager
+	router        *router.Router
+	telemetry     *telemetry.Provider
+	policy        *policy.Engine
+	storage       *storage.SQLiteStore // For persisting flagged sessions immediately
+	wsHandler     WebSocketHandler     // WebSocket proxy handler
+	captureBuffer *CaptureBuffer       // For capture-all mode (policy-independent)
+	captureAll    bool                 // True when capture_mode == "all"
 }
 
 // TODO: Security fix - use this helper to handle G104 (CWE-703) unhandled write errors
@@ -90,14 +92,26 @@ func NewWithRouter(cfg *config.Config, store session.Store, manager *session.Man
 		tp = telemetry.NoopProvider()
 	}
 
-	return &Proxy{
+	p := &Proxy{
 		config:    cfg,
 		store:     store,
 		manager:   manager,
 		router:    r,
 		telemetry: tp,
 		policy:    pe,
-	}, nil
+	}
+
+	// Initialize capture-all buffer when storage is enabled with capture_mode="all"
+	if cfg.Storage.Enabled && cfg.Storage.CaptureMode == "all" {
+		p.captureAll = true
+		p.captureBuffer = NewCaptureBuffer(cfg.Storage.MaxCaptureSize, cfg.Storage.MaxCapturedPerSession)
+		slog.Info("capture-all mode enabled",
+			"max_capture_size", cfg.Storage.MaxCaptureSize,
+			"max_per_session", cfg.Storage.MaxCapturedPerSession,
+		)
+	}
+
+	return p, nil
 }
 
 // SetStorage sets the SQLite storage for persisting flagged sessions immediately
@@ -113,6 +127,16 @@ func (p *Proxy) SetWebSocketHandler(h WebSocketHandler) {
 // GetRouter returns the router for use by the WebSocket handler
 func (p *Proxy) GetRouter() *router.Router {
 	return p.router
+}
+
+// GetCaptureBuffer returns the capture buffer (nil if capture-all is not enabled)
+func (p *Proxy) GetCaptureBuffer() *CaptureBuffer {
+	return p.captureBuffer
+}
+
+// IsCaptureAll returns true if capture-all mode is enabled
+func (p *Proxy) IsCaptureAll() bool {
+	return p.captureAll
 }
 
 // isWebSocketRequest checks if the request is a WebSocket upgrade request
@@ -300,6 +324,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"violations", len(result.Violations),
 			)
 		}
+	}
+
+	// Capture request body for capture-all mode (policy-independent)
+	if p.captureAll && p.captureBuffer != nil && len(requestBody) > 0 {
+		p.captureBuffer.Capture(sess.ID, CapturedRequest{
+			Timestamp:   time.Now(),
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			RequestBody: string(requestBody),
+		})
 	}
 
 	// Determine if this is a streaming request
@@ -512,6 +546,11 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 
 	sess.AddBytes(0, int64(len(responseBody)))
 
+	// Capture response for capture-all mode
+	if p.captureAll && p.captureBuffer != nil {
+		p.captureBuffer.UpdateLastResponse(sess.ID, string(responseBody), resp.StatusCode)
+	}
+
 	// Log response (truncated for large responses)
 	p.logResponse(sess.ID, responseBody)
 
@@ -629,6 +668,11 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 
 	// Response passed policy check - now send to client
 	sess.AddBytes(0, int64(len(responseBody)))
+
+	// Capture response for capture-all mode
+	if p.captureAll && p.captureBuffer != nil {
+		p.captureBuffer.UpdateLastResponse(sess.ID, responseBody, resp.StatusCode)
+	}
 
 	// Copy response headers and send buffered content
 	for key, values := range resp.Header {
@@ -770,6 +814,15 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
+	// Capture response for capture-all mode
+	if p.captureAll && p.captureBuffer != nil {
+		var response strings.Builder
+		for _, chunk := range chunks {
+			response.WriteString(chunk)
+		}
+		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
+	}
+
 	// Capture response for flagged sessions
 	if p.policy.IsFlagged(sess.ID) {
 		var response strings.Builder
@@ -863,6 +916,15 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
+
+	// Capture response for capture-all mode
+	if p.captureAll && p.captureBuffer != nil {
+		var response strings.Builder
+		for _, chunk := range chunks {
+			response.WriteString(chunk)
+		}
+		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
+	}
 
 	// Async scan for flag-only response rules (no latency impact)
 	go p.asyncScanResponse(sess, backend, chunks, resp.StatusCode)

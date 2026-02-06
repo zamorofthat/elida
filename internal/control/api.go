@@ -28,6 +28,9 @@ type Handler struct {
 	// Authentication
 	authEnabled bool
 	apiKey      string
+
+	// Capture mode for display in health endpoint
+	captureMode string
 }
 
 // New creates a new control API handler
@@ -56,6 +59,7 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 		mux:          http.NewServeMux(),
 		authEnabled:  authEnabled,
 		apiKey:       apiKey,
+		captureMode:  "disabled",
 	}
 
 	// Dashboard UI (catch-all pattern for Go 1.22+)
@@ -97,6 +101,11 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 // SetWebSocketHandler sets the WebSocket handler for voice session access
 func (h *Handler) SetWebSocketHandler(wsHandler *websocket.Handler) {
 	h.wsHandler = wsHandler
+}
+
+// SetCaptureMode sets the capture mode for display in the health endpoint
+func (h *Handler) SetCaptureMode(mode string) {
+	h.captureMode = mode
 }
 
 // ServeHTTP implements http.Handler
@@ -160,9 +169,10 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := HealthResponse{
-		Status:    "ok",
-		Timestamp: time.Now(),
-		Version:   "0.1.0",
+		Status:      "ok",
+		Timestamp:   time.Now(),
+		Version:     "0.1.0",
+		CaptureMode: h.captureMode,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -358,9 +368,10 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 // HealthResponse represents a health check response
 type HealthResponse struct {
-	Status    string    `json:"status"`
-	Timestamp time.Time `json:"timestamp"`
-	Version   string    `json:"version"`
+	Status      string    `json:"status"`
+	Timestamp   time.Time `json:"timestamp"`
+	Version     string    `json:"version"`
+	CaptureMode string    `json:"capture_mode"`
 }
 
 // SessionsResponse represents a list of sessions

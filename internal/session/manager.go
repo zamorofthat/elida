@@ -87,6 +87,11 @@ func (m *Manager) SetSessionEndCallback(cb SessionEndCallback) {
 	m.onSessionEnd = cb
 }
 
+// GetSessionEndCallback returns the current session end callback
+func (m *Manager) GetSessionEndCallback() SessionEndCallback {
+	return m.onSessionEnd
+}
+
 // Run starts the session manager's background tasks
 func (m *Manager) Run(ctx context.Context) {
 	ticker := time.NewTicker(m.cleanupInterval)
