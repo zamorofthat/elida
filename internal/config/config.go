@@ -67,11 +67,11 @@ type TLSConfig struct {
 
 // StorageConfig holds persistent storage configuration
 type StorageConfig struct {
-	Enabled              bool   `yaml:"enabled"`
-	Path                 string `yaml:"path"`                    // SQLite database path
-	RetentionDays        int    `yaml:"retention_days"`          // How long to keep history
-	CaptureMode          string `yaml:"capture_mode"`            // "all" or "flagged_only" (default)
-	MaxCaptureSize       int    `yaml:"max_capture_size"`        // Max bytes per request/response body (default 10KB)
+	Enabled               bool   `yaml:"enabled"`
+	Path                  string `yaml:"path"`                     // SQLite database path
+	RetentionDays         int    `yaml:"retention_days"`           // How long to keep history
+	CaptureMode           string `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
+	MaxCaptureSize        int    `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
 	MaxCapturedPerSession int    `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
 }
 
@@ -245,11 +245,11 @@ func defaults() *Config {
 			Insecure:    true,
 		},
 		Storage: StorageConfig{
-			Enabled:              false,
-			Path:                 "data/elida.db",
-			RetentionDays:        30,
-			CaptureMode:          "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
-			MaxCaptureSize:       10000,          // 10KB per body
+			Enabled:               false,
+			Path:                  "data/elida.db",
+			RetentionDays:         30,
+			CaptureMode:           "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
+			MaxCaptureSize:        10000,          // 10KB per body
 			MaxCapturedPerSession: 100,            // Max 100 request/response pairs per session
 		},
 		TLS: TLSConfig{

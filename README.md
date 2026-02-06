@@ -59,7 +59,7 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 ## Quick Start
 
 ### Prerequisites
-- Go 1.22+
+- Go 1.24+
 - An LLM backend (Ollama, OpenAI API, etc.)
 
 ### Build and Run

@@ -19,9 +19,9 @@ type CapturedRequest struct {
 // CaptureBuffer stores request/response bodies per session for capture-all mode.
 // Thread-safe. Independent of the policy engine.
 type CaptureBuffer struct {
-	mu                   sync.Mutex
-	sessions             map[string][]CapturedRequest
-	maxCaptureSize       int
+	mu                    sync.Mutex
+	sessions              map[string][]CapturedRequest
+	maxCaptureSize        int
 	maxCapturedPerSession int
 }
 
@@ -34,8 +34,8 @@ func NewCaptureBuffer(maxCaptureSize, maxCapturedPerSession int) *CaptureBuffer 
 		maxCapturedPerSession = 100
 	}
 	return &CaptureBuffer{
-		sessions:             make(map[string][]CapturedRequest),
-		maxCaptureSize:       maxCaptureSize,
+		sessions:              make(map[string][]CapturedRequest),
+		maxCaptureSize:        maxCaptureSize,
 		maxCapturedPerSession: maxCapturedPerSession,
 	}
 }

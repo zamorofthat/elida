@@ -995,7 +995,7 @@ ELIDA_STORAGE_MAX_CAPTURED_PER_SESSION=100
 
 ## Tech Stack
 
-- **Language:** Go 1.22+
+- **Language:** Go 1.24+
 - **Config:** YAML + environment variable overrides
 - **Dependencies:** Minimal (uuid, yaml)
 - **Deployment:** Single binary, Docker, Kubernetes, AWS ECS, Terraform
@@ -1962,11 +1962,59 @@ routing:
 
 ## Code Style
 
+### General Conventions
 - Standard Go conventions
 - `slog` for structured logging
 - Interfaces for testability (see `session.Store`)
 - Context for cancellation
 - Graceful shutdown handling
+
+### Linter Requirements (CI enforced)
+
+**IMPORTANT:** Always run `make fmt` before committing. CI runs `golangci-lint` and will fail on formatting issues.
+
+**gofmt rules:**
+- Use tabs for indentation, not spaces
+- Struct field alignment: Do NOT manually align struct fields with extra spaces
+  ```go
+  // BAD - manual alignment causes gofmt failures
+  type Config struct {
+      Enabled              bool   `yaml:"enabled"`
+      MaxSize              int    `yaml:"max_size"`
+  }
+
+  // GOOD - let gofmt handle it naturally
+  type Config struct {
+      Enabled bool `yaml:"enabled"`
+      MaxSize int  `yaml:"max_size"`
+  }
+  ```
+- Same applies to variable declarations and comments
+
+**Common patterns:**
+```go
+// Error handling - always check errors
+if err != nil {
+    return fmt.Errorf("operation failed: %w", err)
+}
+
+// Prefer early returns over deep nesting
+if !valid {
+    return errors.New("invalid input")
+}
+// continue with main logic...
+
+// Use named return values sparingly, mainly for documentation
+func (s *Store) Get(id string) (session *Session, found bool)
+```
+
+**Before committing:**
+```bash
+make fmt      # Format all Go files
+make lint     # Run full linter suite (optional, CI will catch issues)
+go build ./...  # Verify compilation
+make test     # Run tests
+```
 
 ## Build & Test Commands
 
