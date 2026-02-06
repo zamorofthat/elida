@@ -2025,6 +2025,9 @@ make build              # Build binary to bin/elida
 make run                # Build and run with default config
 make run-redis          # Run with Redis session store
 
+# Config validation
+./bin/elida -validate -config configs/elida.yaml  # Validate config and exit
+
 # Testing
 make test               # Run unit tests (fast, no dependencies)
 make test-integration   # Run integration tests (requires Redis)
