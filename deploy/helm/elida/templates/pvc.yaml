@@ -1,0 +1,17 @@
+{{- if .Values.elida.storage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "elida.fullname" . }}-data
+  labels:
+    {{- include "elida.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.elida.storage.storageClass }}
+  storageClassName: {{ .Values.elida.storage.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.elida.storage.size | default "1Gi" }}
+{{- end }}

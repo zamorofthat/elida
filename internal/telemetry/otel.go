@@ -10,7 +10,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -72,9 +74,15 @@ func NewProvider(cfg Config) (*Provider, error) {
 		}, nil
 	}
 
-	// Create simple trace provider without resource (avoids schema version conflicts)
+	// Create resource with service name (use NewSchemaless to avoid version conflicts)
+	res := resource.NewSchemaless(
+		semconv.ServiceName(cfg.ServiceName),
+	)
+
+	// Create trace provider with resource
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exporter), // Use sync exporter for simplicity
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithResource(res),
 	)
 
 	// Set as global provider
@@ -158,6 +166,16 @@ type Violation struct {
 	Action      string
 }
 
+// CapturedRequest represents a captured request/response for telemetry export
+type CapturedRequest struct {
+	Timestamp    string
+	Method       string
+	Path         string
+	RequestBody  string
+	ResponseBody string
+	StatusCode   int
+}
+
 // SessionRecord contains all data for telemetry export
 type SessionRecord struct {
 	SessionID    string
@@ -169,6 +187,7 @@ type SessionRecord struct {
 	BytesIn      int64
 	BytesOut     int64
 	Violations   []Violation
+	Captures     []CapturedRequest
 	CaptureCount int
 
 	// WebSocket fields
@@ -307,6 +326,21 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 				attribute.String("severity", v.Severity),
 				attribute.String("matched_text", v.MatchedText),
 				attribute.String("action", v.Action),
+			),
+		)
+	}
+
+	// Add captured request/response events
+	for i, c := range record.Captures {
+		span.AddEvent("captured.request",
+			trace.WithAttributes(
+				attribute.Int("capture.index", i),
+				attribute.String("capture.timestamp", c.Timestamp),
+				attribute.String("capture.method", c.Method),
+				attribute.String("capture.path", c.Path),
+				attribute.String("capture.request_body", c.RequestBody),
+				attribute.String("capture.response_body", c.ResponseBody),
+				attribute.Int("capture.status_code", c.StatusCode),
 			),
 		)
 	}

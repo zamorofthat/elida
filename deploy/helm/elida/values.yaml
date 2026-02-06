@@ -88,6 +88,8 @@ elida:
   storage:
     enabled: false
     path: /data/elida.db
+    size: 1Gi
+    storageClass: ""
 
 # Redis configuration (sub-chart or external)
 redis:

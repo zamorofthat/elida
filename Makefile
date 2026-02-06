@@ -80,6 +80,14 @@ docker:
 	docker build -t elida:${VERSION} .
 	docker tag elida:${VERSION} elida:latest
 
+# Push Docker image to Docker Hub
+docker-push:
+	./scripts/docker-push.sh ${VERSION} --latest
+
+# Push Docker image with specific version
+docker-push-version:
+	./scripts/docker-push.sh ${VERSION}
+
 # Run in Docker
 docker-run:
 	docker run -p 8080:8080 -p 9090:9090 elida:latest

@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -437,39 +439,198 @@ func (c *Config) applyEnvOverrides() {
 	}
 }
 
+// ValidationError represents a single validation error with context
+type ValidationError struct {
+	Field   string
+	Message string
+	Hint    string
+}
+
+func (e ValidationError) String() string {
+	if e.Hint != "" {
+		return fmt.Sprintf("%s: %s (%s)", e.Field, e.Message, e.Hint)
+	}
+	return fmt.Sprintf("%s: %s", e.Field, e.Message)
+}
+
+// ValidationResult holds the result of config validation
+type ValidationResult struct {
+	Valid   bool
+	Errors  []ValidationError
+	Summary ConfigSummary
+}
+
+// ConfigSummary provides a quick overview of the configuration
+type ConfigSummary struct {
+	Listen           string
+	BackendCount     int
+	DefaultBackend   string
+	PolicyEnabled    bool
+	PolicyPreset     string
+	PolicyRules      int
+	StorageEnabled   bool
+	CaptureMode      string
+	TLSEnabled       bool
+	WebSocketEnabled bool
+}
+
+// Error returns all validation errors as a single error
+func (r *ValidationResult) Error() error {
+	if r.Valid {
+		return nil
+	}
+	var msgs []string
+	for _, e := range r.Errors {
+		msgs = append(msgs, e.String())
+	}
+	return fmt.Errorf("configuration invalid:\n  - %s", strings.Join(msgs, "\n  - "))
+}
+
 // validate checks that the configuration is valid
 func (c *Config) validate() error {
+	result := c.Validate()
+	return result.Error()
+}
+
+// Validate performs comprehensive configuration validation
+func (c *Config) Validate() *ValidationResult {
+	result := &ValidationResult{Valid: true}
+	var errors []ValidationError
+
+	// Required: listen address
 	if c.Listen == "" {
-		return fmt.Errorf("listen address is required")
-	}
-	// Either Backend (old style) or Backends (new style) must be configured
-	if c.Backend == "" && len(c.Backends) == 0 {
-		return fmt.Errorf("backend URL or backends configuration is required")
-	}
-	if c.Session.Timeout <= 0 {
-		return fmt.Errorf("session timeout must be positive")
-	}
-	// Validate storage config
-	if c.Storage.CaptureMode != "" && c.Storage.CaptureMode != "all" && c.Storage.CaptureMode != "flagged_only" {
-		return fmt.Errorf("storage capture_mode must be \"all\" or \"flagged_only\", got %q", c.Storage.CaptureMode)
+		errors = append(errors, ValidationError{
+			Field:   "listen",
+			Message: "address is required",
+			Hint:    "e.g., :8080 or 0.0.0.0:8080",
+		})
+	} else if !strings.Contains(c.Listen, ":") {
+		errors = append(errors, ValidationError{
+			Field:   "listen",
+			Message: fmt.Sprintf("%q is not a valid address", c.Listen),
+			Hint:    "must include port, e.g., :8080",
+		})
 	}
 
-	// Validate backends config if present
+	// Required: backend configuration
+	if c.Backend == "" && len(c.Backends) == 0 {
+		errors = append(errors, ValidationError{
+			Field:   "backend/backends",
+			Message: "no backend configured",
+			Hint:    "set 'backend' URL or configure 'backends' map",
+		})
+	}
+
+	// Validate single backend URL
+	if c.Backend != "" {
+		if _, err := url.Parse(c.Backend); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   "backend",
+				Message: fmt.Sprintf("invalid URL %q", c.Backend),
+				Hint:    "must be valid URL like https://api.openai.com",
+			})
+		}
+	}
+
+	// Validate multi-backend config
+	var defaultBackend string
 	if len(c.Backends) > 0 {
 		hasDefault := false
 		for name, b := range c.Backends {
 			if b.URL == "" {
-				return fmt.Errorf("backend %q: URL is required", name)
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("backends.%s.url", name),
+					Message: "URL is required",
+				})
+			} else if parsed, err := url.Parse(b.URL); err != nil {
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("backends.%s.url", name),
+					Message: fmt.Sprintf("invalid URL %q", b.URL),
+					Hint:    "must start with http:// or https://",
+				})
+			} else if parsed.Scheme != "http" && parsed.Scheme != "https" {
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("backends.%s.url", name),
+					Message: fmt.Sprintf("unsupported scheme %q", parsed.Scheme),
+					Hint:    "must be http or https",
+				})
 			}
 			if b.Default {
 				hasDefault = true
+				defaultBackend = name
 			}
 		}
 		if !hasDefault {
-			return fmt.Errorf("at least one backend must be marked as default")
+			errors = append(errors, ValidationError{
+				Field:   "backends",
+				Message: "no default backend specified",
+				Hint:    "set 'default: true' on one backend",
+			})
 		}
 	}
-	return nil
+
+	// Session config
+	if c.Session.Timeout <= 0 {
+		errors = append(errors, ValidationError{
+			Field:   "session.timeout",
+			Message: fmt.Sprintf("%v is invalid", c.Session.Timeout),
+			Hint:    "must be positive duration, e.g., 5m",
+		})
+	}
+
+	// Storage config
+	if c.Storage.CaptureMode != "" && c.Storage.CaptureMode != "all" && c.Storage.CaptureMode != "flagged_only" {
+		errors = append(errors, ValidationError{
+			Field:   "storage.capture_mode",
+			Message: fmt.Sprintf("%q is invalid", c.Storage.CaptureMode),
+			Hint:    "must be \"all\" or \"flagged_only\"",
+		})
+	}
+
+	// Policy config
+	if c.Policy.Mode != "" && c.Policy.Mode != "enforce" && c.Policy.Mode != "audit" {
+		errors = append(errors, ValidationError{
+			Field:   "policy.mode",
+			Message: fmt.Sprintf("%q is invalid", c.Policy.Mode),
+			Hint:    "must be \"enforce\" or \"audit\"",
+		})
+	}
+
+	// Control API auth
+	if c.Control.Auth.Enabled && c.Control.Auth.APIKey == "" {
+		errors = append(errors, ValidationError{
+			Field:   "control.auth.api_key",
+			Message: "API key required when auth is enabled",
+			Hint:    "set ELIDA_CONTROL_API_KEY env var",
+		})
+	}
+
+	// Build result
+	result.Errors = errors
+	result.Valid = len(errors) == 0
+
+	// Build summary
+	result.Summary = ConfigSummary{
+		Listen:           c.Listen,
+		BackendCount:     len(c.Backends),
+		DefaultBackend:   defaultBackend,
+		PolicyEnabled:    c.Policy.Enabled,
+		PolicyPreset:     c.Policy.Preset,
+		PolicyRules:      len(c.Policy.Rules),
+		StorageEnabled:   c.Storage.Enabled,
+		CaptureMode:      c.Storage.CaptureMode,
+		TLSEnabled:       c.TLS.Enabled,
+		WebSocketEnabled: c.WebSocket.Enabled,
+	}
+	if result.Summary.BackendCount == 0 && c.Backend != "" {
+		result.Summary.BackendCount = 1
+		result.Summary.DefaultBackend = "default"
+	}
+	if result.Summary.CaptureMode == "" {
+		result.Summary.CaptureMode = "flagged_only"
+	}
+
+	return result
 }
 
 // HasMultiBackend returns true if multi-backend configuration is present

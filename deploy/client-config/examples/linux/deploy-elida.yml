@@ -1,0 +1,152 @@
+---
+# ELIDA Client Configuration Deployment - Ansible Playbook
+#
+# This playbook configures AI coding tools to route through ELIDA.
+#
+# Usage:
+#   ansible-playbook -i inventory deploy-elida.yml
+#
+# Variables:
+#   elida_host: ELIDA proxy URL (default: http://elida.corp.local:8080)
+#
+# Tags:
+#   - env: Deploy environment variables only
+#   - claude: Deploy Claude Code config only
+#   - continue: Deploy Continue.dev config only
+#   - all: Deploy everything (default)
+
+- name: Deploy ELIDA AI Proxy Configuration
+  hosts: developer_workstations
+  become: false  # Run as target user, not root
+
+  vars:
+    elida_host: "http://elida.corp.local:8080"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Environment Variables
+    # -------------------------------------------------------------------------
+    - name: Add ELIDA environment variables to .bashrc
+      tags: [env]
+      blockinfile:
+        path: "{{ ansible_env.HOME }}/.bashrc"
+        marker: "# {mark} ELIDA AI Proxy Configuration (managed by Ansible)"
+        create: true
+        mode: '0644'
+        block: |
+          export ANTHROPIC_BASE_URL="{{ elida_host }}"
+          export OPENAI_BASE_URL="{{ elida_host }}/v1"
+          export OPENAI_API_BASE="{{ elida_host }}/v1"
+          export MISTRAL_API_BASE="{{ elida_host }}"
+          export LLM_PROXY_URL="{{ elida_host }}"
+
+    - name: Add ELIDA environment variables to .zshrc (if exists)
+      tags: [env]
+      blockinfile:
+        path: "{{ ansible_env.HOME }}/.zshrc"
+        marker: "# {mark} ELIDA AI Proxy Configuration (managed by Ansible)"
+        create: false
+        mode: '0644'
+        block: |
+          export ANTHROPIC_BASE_URL="{{ elida_host }}"
+          export OPENAI_BASE_URL="{{ elida_host }}/v1"
+          export OPENAI_API_BASE="{{ elida_host }}/v1"
+          export MISTRAL_API_BASE="{{ elida_host }}"
+          export LLM_PROXY_URL="{{ elida_host }}"
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # Claude Code CLI
+    # -------------------------------------------------------------------------
+    - name: Create Claude Code config directory
+      tags: [claude]
+      file:
+        path: "{{ ansible_env.HOME }}/.claude"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Claude Code settings
+      tags: [claude]
+      copy:
+        content: |
+          {
+            "env": {
+              "ANTHROPIC_BASE_URL": "{{ elida_host }}"
+            }
+          }
+        dest: "{{ ansible_env.HOME }}/.claude/settings.json"
+        mode: '0644'
+
+    # -------------------------------------------------------------------------
+    # Continue.dev
+    # -------------------------------------------------------------------------
+    - name: Create Continue.dev config directory
+      tags: [continue]
+      file:
+        path: "{{ ansible_env.HOME }}/.continue"
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Continue.dev configuration
+      tags: [continue]
+      copy:
+        content: |
+          # ELIDA-managed Continue.dev configuration
+          # Managed by Ansible - do not edit manually
+
+          models:
+            # Anthropic Claude
+            - name: "claude-3-opus"
+              provider: "anthropic"
+              apiBase: "{{ elida_host }}"
+              apiKey: "${ANTHROPIC_API_KEY}"
+
+            - name: "claude-3-sonnet"
+              provider: "anthropic"
+              apiBase: "{{ elida_host }}"
+              apiKey: "${ANTHROPIC_API_KEY}"
+
+            # OpenAI GPT
+            - name: "gpt-4"
+              provider: "openai"
+              apiBase: "{{ elida_host }}/v1"
+              apiKey: "${OPENAI_API_KEY}"
+
+            - name: "gpt-4-turbo"
+              provider: "openai"
+              apiBase: "{{ elida_host }}/v1"
+              apiKey: "${OPENAI_API_KEY}"
+
+            # Mistral
+            - name: "codestral"
+              provider: "mistral"
+              apiBase: "{{ elida_host }}/v1"
+              apiKey: "${MISTRAL_API_KEY}"
+
+          tabAutocompleteModel:
+            provider: "openai"
+            apiBase: "{{ elida_host }}/v1"
+            apiKey: "${OPENAI_API_KEY}"
+            model: "gpt-4"
+        dest: "{{ ansible_env.HOME }}/.continue/config.yaml"
+        mode: '0644'
+
+    # -------------------------------------------------------------------------
+    # Verification
+    # -------------------------------------------------------------------------
+    - name: Display deployment summary
+      tags: [always]
+      debug:
+        msg: |
+          ELIDA configuration deployed successfully!
+
+          Configured:
+            - Environment variables (~/.bashrc)
+            - Claude Code CLI (~/.claude/settings.json)
+            - Continue.dev (~/.continue/config.yaml)
+
+          ELIDA Host: {{ elida_host }}
+
+          To apply changes:
+            1. Run: source ~/.bashrc
+            2. Restart AI coding tools
