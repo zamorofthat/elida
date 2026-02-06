@@ -166,6 +166,16 @@ type Violation struct {
 	Action      string
 }
 
+// CapturedRequest represents a captured request/response for telemetry export
+type CapturedRequest struct {
+	Timestamp    string
+	Method       string
+	Path         string
+	RequestBody  string
+	ResponseBody string
+	StatusCode   int
+}
+
 // SessionRecord contains all data for telemetry export
 type SessionRecord struct {
 	SessionID    string
@@ -177,6 +187,7 @@ type SessionRecord struct {
 	BytesIn      int64
 	BytesOut     int64
 	Violations   []Violation
+	Captures     []CapturedRequest
 	CaptureCount int
 
 	// WebSocket fields
@@ -315,6 +326,21 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 				attribute.String("severity", v.Severity),
 				attribute.String("matched_text", v.MatchedText),
 				attribute.String("action", v.Action),
+			),
+		)
+	}
+
+	// Add captured request/response events
+	for i, c := range record.Captures {
+		span.AddEvent("captured.request",
+			trace.WithAttributes(
+				attribute.Int("capture.index", i),
+				attribute.String("capture.timestamp", c.Timestamp),
+				attribute.String("capture.method", c.Method),
+				attribute.String("capture.path", c.Path),
+				attribute.String("capture.request_body", c.RequestBody),
+				attribute.String("capture.response_body", c.ResponseBody),
+				attribute.Int("capture.status_code", c.StatusCode),
 			),
 		)
 	}

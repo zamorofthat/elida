@@ -226,6 +226,17 @@ func main() {
 						Action:      v.Action,
 					})
 				}
+				// Add captured request/response content
+				for _, c := range record.CapturedContent {
+					telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
+						Timestamp:    c.Timestamp.Format(time.RFC3339),
+						Method:       c.Method,
+						Path:         c.Path,
+						RequestBody:  c.RequestBody,
+						ResponseBody: c.ResponseBody,
+						StatusCode:   c.StatusCode,
+					})
+				}
 				tp.ExportSessionRecord(context.Background(), telemRecord)
 			}
 		})
