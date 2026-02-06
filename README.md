@@ -1,8 +1,12 @@
 # ELIDA
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
+[![Security Policy](https://img.shields.io/badge/Security-Policy-green.svg)](SECURITY.md)
+
 **Edge Layer for Intelligent Defense of Agents**
 
-ELIDA is a session-aware proxy for AI agents. It provides visibility, control, and security for agent-to-agent and agent-to-LLM communication.
+ELIDA is a session-aware reverse proxy for AI clients—both autonomous AI agents and user-facing applications. It provides visibility, control, and security for AI model API traffic.
 
 ## Why ELIDA?
 
@@ -12,7 +16,7 @@ As enterprises deploy AI agents, security teams need:
 - **Audit** — Complete session logs for compliance
 - **Protection** — Policy enforcement with 40+ OWASP LLM Top 10 rules
 
-Think of it like a Session Border Controller (SBC) from telecom, but for AI agents.
+Think of it like a Session Border Controller (SBC) from telecom, but for AI.
 
 ## Features
 
@@ -60,13 +64,13 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 
 ### Prerequisites
 - Go 1.24+
-- An LLM backend (Ollama, OpenAI API, etc.)
+- An AI model backend (Ollama, OpenAI, Anthropic, etc.)
 
 ### Build and Run
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/elida.git
+git clone https://github.com/zamorofthat/elida.git
 cd elida
 
 # Build
@@ -139,7 +143,7 @@ ELIDA automatically groups requests from the same IP into a single session, so a
 
 ### Multi-Backend Routing
 
-ELIDA can route requests to different LLM backends based on model name, headers, or path:
+ELIDA can route requests to different AI model backends based on model name, headers, or path:
 
 ```yaml
 # In configs/elida.yaml
@@ -426,11 +430,16 @@ make health             # Health check
 make history            # View session history
 ```
 
+## Documentation
+
+- [Architecture](ARCHITECTURE.md) — Technical deep-dive and design decisions
+- [Security Policy](SECURITY.md) — Vulnerability reporting and security practices
+
 ## License
 
-MIT
+Apache License 2.0 — See [LICENSE](LICENSE) for details.
 
 ## Why "ELIDA"?
 
-**E**dge **L**ayer for **I**ntelligent **D**efense of **A**gents
+Named after the developer's grandmother. Also an acronym: **E**dge **L**ayer for **I**ntelligent **D**efense of **A**gents
 
