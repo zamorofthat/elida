@@ -210,6 +210,96 @@ curl http://localhost:9090/control/voice-history/stats | jq .
 curl http://localhost:9090/control/tts/stats | jq .
 ```
 
+### Capture-All Mode (February 2026)
+
+Added policy-independent capture-all mode for full audit/compliance requirements. When enabled, every request/response body is captured regardless of policy violations.
+
+**Key Concepts:**
+
+| Term | Description |
+|------|-------------|
+| **Capture Mode** | `flagged_only` (default) or `all` |
+| **CaptureBuffer** | Policy-independent buffer for all request/response pairs |
+| **Max Capture Size** | Per-body truncation limit (default 10KB) |
+| **Max Per Session** | Maximum captured pairs per session (default 100) |
+
+**How it works:**
+
+```
+Request arrives
+      │
+      ├─► Policy Engine (if enabled)
+      │         │
+      │         └─► Flagged? → Policy captures content
+      │
+      └─► CaptureBuffer (if capture_mode=all)
+                │
+                └─► Always captures request/response
+                    (independent of policy)
+```
+
+**Priority at session end:**
+1. If policy captured content → use policy captures (has violations)
+2. If no policy captures but CaptureBuffer has content → use capture-all content
+3. Both are saved to SQLite session history
+
+**Configuration:**
+```yaml
+storage:
+  enabled: true
+  capture_mode: "all"             # Capture everything
+  max_capture_size: 10000         # 10KB per body
+  max_captured_per_session: 100   # Max pairs per session
+```
+
+**Environment variables:**
+```bash
+# Enable capture-all mode
+ELIDA_STORAGE_ENABLED=true
+ELIDA_STORAGE_CAPTURE_MODE=all
+ELIDA_STORAGE_MAX_CAPTURE_SIZE=10000
+ELIDA_STORAGE_MAX_CAPTURED_PER_SESSION=100
+```
+
+**Quick start:**
+```bash
+# Run with capture-all enabled
+make run-demo    # or make run-storage
+
+# Verify capture mode in health check
+curl http://localhost:9090/control/health | jq .capture_mode
+# Returns: "all"
+
+# After some requests, check session history
+curl http://localhost:9090/control/history | jq '.[0].captured_content'
+```
+
+**Example captured content:**
+```json
+{
+  "id": "session-abc123",
+  "request_count": 3,
+  "captured_content": [
+    {
+      "timestamp": "2026-02-05T10:30:00Z",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "request_body": "{\"model\":\"gpt-4\",\"messages\":[...]}",
+      "response_body": "{\"choices\":[{\"message\":{\"content\":\"...\"}}]}",
+      "status_code": 200
+    }
+  ]
+}
+```
+
+**Files added/modified:**
+- `internal/proxy/capture.go` — NEW: CaptureBuffer implementation
+- `internal/config/config.go` — Added MaxCaptureSize, MaxCapturedPerSession fields
+- `internal/proxy/proxy.go` — Integrated CaptureBuffer into all streaming modes
+- `cmd/elida/main.go` — Wired capture-all content into session end callback
+- `internal/control/api.go` — Added capture_mode to health endpoint
+- `test/unit/capture_test.go` — NEW: 13 tests for CaptureBuffer
+
 ### Voice/Speech Services Reference
 
 ELIDA supports proxying to various voice AI services. Here's a reference for supported services, pricing, and how to test.
@@ -859,12 +949,19 @@ Memory per session (KB)         6        0         30
 **Files changed:**
 - `scripts/benchmark.sh` — Added `--compare-modes`, macOS millisecond fix, improved memory measurement
 
-### Session Records: All Sessions vs Flagged
+### Session Records: Capture Modes
 
-ELIDA follows the telecom CDR (Call Detail Record) model:
+ELIDA follows the telecom CDR (Call Detail Record) model with two capture modes:
 
-| Data | All Sessions | Flagged Only |
-|------|--------------|--------------|
+| Capture Mode | Description | Use Case |
+|--------------|-------------|----------|
+| `flagged_only` | Only policy-flagged sessions get request/response bodies | Production (default) |
+| `all` | Every request/response captured for all sessions | Audit/compliance mode |
+
+**What gets captured by mode:**
+
+| Data | flagged_only | all |
+|------|--------------|-----|
 | Session ID | ✓ | ✓ |
 | Duration | ✓ | ✓ |
 | Request count | ✓ | ✓ |
@@ -872,17 +969,33 @@ ELIDA follows the telecom CDR (Call Detail Record) model:
 | Backend used | ✓ | ✓ |
 | Client IP | ✓ | ✓ |
 | Start/end time | ✓ | ✓ |
-| **Request body** | ✗ | ✓ |
-| **Response body** | ✗ | ✓ |
-| **Violations** | ✗ | ✓ |
+| **Request body** | Flagged only | ✓ All |
+| **Response body** | Flagged only | ✓ All |
+| **Violations** | ✓ | ✓ |
 
-**Rationale:** Capturing every request/response body would be expensive. Only flagged sessions (security events) get full content capture for forensics.
+**Configuration:**
+```yaml
+storage:
+  enabled: true
+  capture_mode: "flagged_only"    # or "all" for full audit
+  max_capture_size: 10000         # 10KB per body (truncates with ...[truncated])
+  max_captured_per_session: 100   # Max request/response pairs per session
+```
+
+**Environment variables:**
+```bash
+ELIDA_STORAGE_CAPTURE_MODE=all
+ELIDA_STORAGE_MAX_CAPTURE_SIZE=10000
+ELIDA_STORAGE_MAX_CAPTURED_PER_SESSION=100
+```
+
+**Rationale:** `flagged_only` is the default because capturing every request/response body can be expensive for high-traffic deployments. Use `all` mode for audit/compliance requirements where full content capture is needed.
 
 ---
 
 ## Tech Stack
 
-- **Language:** Go 1.22+
+- **Language:** Go 1.24+
 - **Config:** YAML + environment variable overrides
 - **Dependencies:** Minimal (uuid, yaml)
 - **Deployment:** Single binary, Docker, Kubernetes, AWS ECS, Terraform
@@ -899,7 +1012,9 @@ elida/
 │   │   ├── store.go            # Store interface + in-memory impl
 │   │   ├── redis_store.go      # Redis Store implementation
 │   │   └── manager.go          # Lifecycle, timeouts, cleanup, kill block
-│   ├── proxy/proxy.go          # Core proxy logic
+│   ├── proxy/
+│   │   ├── proxy.go            # Core proxy logic
+│   │   └── capture.go          # CaptureBuffer for policy-independent capture
 │   ├── router/router.go        # Multi-backend routing
 │   ├── control/api.go          # Control API endpoints
 │   ├── policy/policy.go        # Policy engine, rules, flagging
@@ -1847,11 +1962,59 @@ routing:
 
 ## Code Style
 
+### General Conventions
 - Standard Go conventions
 - `slog` for structured logging
 - Interfaces for testability (see `session.Store`)
 - Context for cancellation
 - Graceful shutdown handling
+
+### Linter Requirements (CI enforced)
+
+**IMPORTANT:** Always run `make fmt` before committing. CI runs `golangci-lint` and will fail on formatting issues.
+
+**gofmt rules:**
+- Use tabs for indentation, not spaces
+- Struct field alignment: Do NOT manually align struct fields with extra spaces
+  ```go
+  // BAD - manual alignment causes gofmt failures
+  type Config struct {
+      Enabled              bool   `yaml:"enabled"`
+      MaxSize              int    `yaml:"max_size"`
+  }
+
+  // GOOD - let gofmt handle it naturally
+  type Config struct {
+      Enabled bool `yaml:"enabled"`
+      MaxSize int  `yaml:"max_size"`
+  }
+  ```
+- Same applies to variable declarations and comments
+
+**Common patterns:**
+```go
+// Error handling - always check errors
+if err != nil {
+    return fmt.Errorf("operation failed: %w", err)
+}
+
+// Prefer early returns over deep nesting
+if !valid {
+    return errors.New("invalid input")
+}
+// continue with main logic...
+
+// Use named return values sparingly, mainly for documentation
+func (s *Store) Get(id string) (session *Session, found bool)
+```
+
+**Before committing:**
+```bash
+make fmt      # Format all Go files
+make lint     # Run full linter suite (optional, CI will catch issues)
+go build ./...  # Verify compilation
+make test     # Run tests
+```
 
 ## Build & Test Commands
 
@@ -1944,9 +2107,9 @@ curl "http://localhost:9090/control/history?state=flagged"    # Historical flagg
 Tests are in `test/` directory (black-box testing using only exported APIs):
 
 ```bash
-make test              # Unit tests only (74 tests, fast)
+make test              # Unit tests only (87 tests, fast)
 make test-integration  # Integration tests (10 tests, requires Redis)
-make test-all          # All tests (84 tests)
+make test-all          # All tests (97 tests)
 ```
 
 | Directory | File | Tests |
@@ -1958,6 +2121,7 @@ make test-all          # All tests (84 tests)
 | `test/unit/` | `proxy_test.go` | Proxy: BasicRequest, CustomSessionID, KilledSessionRejected, BackendError, BytesTracking, HeadersForwarded |
 | `test/unit/` | `router_test.go` | Router: NewRouter, HeaderPriority, ModelMatching, PathRouting, DefaultFallback, SingleBackendRouter |
 | `test/unit/` | `control_test.go` | Control API: Health, Stats, Sessions list/get, Kill, CORS |
+| `test/unit/` | `capture_test.go` | CaptureBuffer: Capture, UpdateLastResponse, Truncation, MaxPerSession, PeekContent, Remove, MultipleSessions, ConcurrentAccess, Defaults |
 | `test/integration/` | `redis_test.go` | RedisStore: CRUD, KillChannel, Metadata, KillPersistsAcrossRestart, KilledStateLoadsCorrectly |
 
 **Key test scenarios:**
@@ -1994,7 +2158,9 @@ make test-all          # All tests (84 tests)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` — Standard OTel env var (also enables telemetry)
 - `ELIDA_STORAGE_ENABLED` — Enable SQLite storage for history (default: `false`)
 - `ELIDA_STORAGE_PATH` — SQLite database path (default: `data/elida.db`)
-- `ELIDA_STORAGE_CAPTURE_MODE` — Capture mode: `all` (default) or `flagged_only`
+- `ELIDA_STORAGE_CAPTURE_MODE` — Capture mode: `flagged_only` (default) or `all` for full audit
+- `ELIDA_STORAGE_MAX_CAPTURE_SIZE` — Max bytes per request/response body (default: `10000`)
+- `ELIDA_STORAGE_MAX_CAPTURED_PER_SESSION` — Max request/response pairs per session (default: `100`)
 - `ELIDA_POLICY_ENABLED` — Enable policy engine (default: `false`)
 - `ELIDA_POLICY_MODE` — Policy mode: `enforce` (default) or `audit` (dry-run)
 - `ELIDA_POLICY_CAPTURE` — Capture request content for flagged sessions (default: `true`)

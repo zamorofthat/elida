@@ -12,8 +12,8 @@
 #   - ELIDA running on localhost:8080 (proxy) and localhost:9090 (control)
 #   - A backend LLM or mock server
 #
-# To start ELIDA with policy enabled:
-#   ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard make run
+# To start ELIDA with policy + capture-all enabled:
+#   ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all make run
 #
 # Or use the mock backend:
 #   ./scripts/demo.sh --with-mock
@@ -202,8 +202,8 @@ check_elida() {
     else
         print_error "ELIDA is not running at ${CONTROL_URL}"
         echo ""
-        echo "Start ELIDA with policy enabled:"
-        echo "  ELIDA_POLICY_ENABLED=true ELIDA_POLICY_PRESET=standard make run"
+        echo "Start ELIDA with policy + capture-all enabled:"
+        echo "  make run-demo"
         echo ""
         echo "Or run with mock backend:"
         echo "  ./scripts/demo.sh --with-mock"

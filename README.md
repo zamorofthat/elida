@@ -10,7 +10,7 @@ As enterprises deploy AI agents, security teams need:
 - **Visibility** — See what agents are doing in real-time
 - **Control** — Kill runaway sessions, enforce timeouts
 - **Audit** — Complete session logs for compliance
-- **Protection** — Rate limiting, policy enforcement (roadmap)
+- **Protection** — Policy enforcement with 40+ OWASP LLM Top 10 rules
 
 Think of it like a Session Border Controller (SBC) from telecom, but for AI agents.
 
@@ -19,6 +19,9 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 ### Current Features
 - [x] HTTP reverse proxy with request/response capture
 - [x] Streaming support (NDJSON for Ollama, SSE for OpenAI/Anthropic/Mistral)
+- [x] WebSocket proxy for voice/real-time agents (OpenAI Realtime, Deepgram, ElevenLabs)
+- [x] Voice session tracking with SIP-inspired lifecycle (INVITE/BYE/Hold/Resume)
+- [x] Voice CDR persistence with full transcripts
 - [x] Session tracking and management
 - [x] Session timeout enforcement
 - [x] Kill/Resume/Terminate session lifecycle
@@ -31,6 +34,7 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 - [x] Client IP-based session tracking (for Claude Code)
 - [x] Multi-backend routing (route by header, model name, or path)
 - [x] TLS/HTTPS support
+- [x] Capture-all mode for full audit/compliance (every request/response)
 
 ### Security Features
 - [x] Policy engine with 40+ built-in rules (OWASP LLM Top 10)
@@ -47,15 +51,15 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI agen
 - [x] Immediate persistence of flagged sessions (crash-safe)
 
 ### Roadmap
-- [ ] WebSocket support for real-time/voice agents
-- [ ] LLM-as-judge content moderation (local Gemma models)
-- [ ] Validation webhook for model output QA
+- [ ] Real-time speech analytics (live sentiment/coaching during voice sessions)
+- [ ] LLM-as-judge content moderation (local Gemma/ShieldGemma models)
+- [ ] Per-model rate limits
 - [ ] SDK for native agent integration
 
 ## Quick Start
 
 ### Prerequisites
-- Go 1.22+
+- Go 1.24+
 - An LLM backend (Ollama, OpenAI API, etc.)
 
 ### Build and Run
@@ -169,6 +173,61 @@ Routing priority:
 3. **Path**: `/openai/v1/chat/completions` routes to OpenAI backend
 4. **Default**: Falls back to the backend marked `default: true`
 
+### WebSocket / Voice Sessions
+
+ELIDA supports WebSocket proxying for real-time voice AI agents:
+
+```yaml
+websocket:
+  enabled: true
+  voice_sessions:
+    enabled: true
+    max_concurrent: 5
+    protocols:
+      - openai_realtime  # OpenAI Realtime API
+      - deepgram         # Deepgram STT
+      - elevenlabs       # ElevenLabs TTS
+```
+
+Voice sessions use a SIP-inspired lifecycle:
+- **INVITE** → Session starts (detected from protocol messages)
+- **Active** → Conversation in progress, transcripts captured
+- **Hold/Resume** → Pause and continue
+- **BYE** → Session ends, CDR persisted with full transcript
+
+```bash
+# Run with WebSocket enabled
+make run-websocket
+
+# Run with WebSocket + policy scanning
+make run-websocket-policy
+
+# Test with mock voice server (no API keys needed)
+make mock-voice  # Terminal 1
+make run-websocket  # Terminal 2
+wscat -c ws://localhost:8080  # Terminal 3
+```
+
+### Capture-All Mode
+
+For audit/compliance, capture every request/response body (not just policy-flagged):
+
+```yaml
+storage:
+  enabled: true
+  capture_mode: "all"             # or "flagged_only" (default)
+  max_capture_size: 10000         # 10KB per body
+  max_captured_per_session: 100   # Max pairs per session
+```
+
+```bash
+# Run with capture-all mode
+make run-demo
+
+# Or via environment variables
+ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all ./bin/elida
+```
+
 ## Usage
 
 ### Proxy Traffic
@@ -208,11 +267,23 @@ curl http://localhost:9090/control/sessions/{session-id}
 # Kill a session
 curl -X POST http://localhost:9090/control/sessions/{session-id}/kill
 
+# Resume a killed session
+curl -X POST http://localhost:9090/control/sessions/{session-id}/resume
+
 # View flagged sessions (policy violations)
 curl http://localhost:9090/control/flagged
 
 # View session history
 curl http://localhost:9090/control/history
+
+# Voice sessions (WebSocket - live)
+curl http://localhost:9090/control/voice
+
+# Voice session history (persisted CDRs with transcripts)
+curl http://localhost:9090/control/voice-history
+
+# TTS request tracking
+curl http://localhost:9090/control/tts
 
 # Access the dashboard UI
 open http://localhost:9090/
@@ -251,25 +322,46 @@ curl -H "X-Session-ID: my-agent-task-123" http://localhost:8080/api/generate ...
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                        ELIDA                            │
-├──────────────┬──────────────┬───────────────────────────┤
-│    Proxy     │   Session    │     Control API           │
-│   Handler    │   Manager    │   GET  /sessions          │
-│              │              │   POST /sessions/{id}/kill│
-│  HTTP/NDJSON │  Lifecycle   │   GET  /stats             │
-│  SSE         │  Timeouts    │   GET  /health            │
-│  (WebSocket) │  Cleanup     │                           │
-├──────────────┴──────────────┴───────────────────────────┤
-│              Session Store (In-Memory / Redis)          │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                            ELIDA                                  │
+├──────────────┬──────────────┬──────────────┬─────────────────────┤
+│    Proxy     │  WebSocket   │   Session    │    Control API      │
+│   Handler    │   Handler    │   Manager    │  GET  /sessions     │
+│              │              │              │  POST /kill         │
+│  HTTP/NDJSON │  Voice       │  Lifecycle   │  GET  /voice        │
+│  SSE         │  Sessions    │  Timeouts    │  GET  /flagged      │
+│              │  Transcripts │  Cleanup     │  GET  /history      │
+├──────────────┴──────────────┴──────────────┴─────────────────────┤
+│     Policy Engine (40+ rules, OWASP LLM Top 10)                   │
+├───────────────────────────────────────────────────────────────────┤
+│     Session Store (In-Memory / Redis) + SQLite History            │
+└───────────────────────────────────────────────────────────────────┘
            │                              │
            ▼                              ▼
-    ┌─────────────┐               ┌─────────────┐
-    │   Agents    │               │   Backend   │
-    │  (Clients)  │               │   (LLMs)    │
-    └─────────────┘               └─────────────┘
+    ┌─────────────┐               ┌─────────────────────────┐
+    │   Agents    │               │       Backends          │
+    │  (Clients)  │               │  Ollama, OpenAI,        │
+    │             │               │  Anthropic, Mistral,    │
+    │             │               │  Deepgram, ElevenLabs   │
+    └─────────────┘               └─────────────────────────┘
 ```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ELIDA_LISTEN` | `:8080` | Proxy listen address |
+| `ELIDA_BACKEND` | `http://localhost:11434` | Backend URL |
+| `ELIDA_CONTROL_LISTEN` | `:9090` | Control API address |
+| `ELIDA_SESSION_STORE` | `memory` | Session store: `memory` or `redis` |
+| `ELIDA_POLICY_ENABLED` | `false` | Enable policy engine |
+| `ELIDA_POLICY_MODE` | `enforce` | Policy mode: `enforce` or `audit` |
+| `ELIDA_POLICY_PRESET` | - | Policy preset: `minimal`, `standard`, `strict` |
+| `ELIDA_STORAGE_ENABLED` | `false` | Enable SQLite storage |
+| `ELIDA_STORAGE_CAPTURE_MODE` | `flagged_only` | Capture mode: `flagged_only` or `all` |
+| `ELIDA_WEBSOCKET_ENABLED` | `false` | Enable WebSocket proxy |
+| `ELIDA_TLS_ENABLED` | `false` | Enable TLS/HTTPS |
+| `ELIDA_TELEMETRY_ENABLED` | `false` | Enable OpenTelemetry |
 
 ## Benchmarking
 
@@ -305,14 +397,33 @@ ELIDA includes a benchmark suite for performance testing:
 ## Development
 
 ```bash
-# Run tests
-make test
+# Build and run
+make build              # Build binary
+make run                # Run with default config
+make run-demo           # Run with policy + storage + capture-all
 
-# Format code
-make fmt
+# Testing
+make test               # Unit tests (87 tests)
+make test-all           # All tests including integration (requires Redis)
 
-# Build Docker image
-make docker
+# Code quality
+make fmt                # Format code
+make lint               # Run linter (requires golangci-lint)
+
+# Docker
+make docker             # Build Docker image
+make up                 # Start full stack (Redis + ELIDA)
+make down               # Stop stack
+
+# WebSocket / Voice
+make mock-voice         # Start mock voice server
+make run-websocket      # Run with WebSocket enabled
+
+# Useful shortcuts
+make sessions           # View active sessions
+make stats              # View stats
+make health             # Health check
+make history            # View session history
 ```
 
 ## License

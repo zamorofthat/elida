@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -66,10 +67,12 @@ type TLSConfig struct {
 
 // StorageConfig holds persistent storage configuration
 type StorageConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	Path          string `yaml:"path"`           // SQLite database path
-	RetentionDays int    `yaml:"retention_days"` // How long to keep history
-	CaptureMode   string `yaml:"capture_mode"`   // "all" (default) or "flagged_only"
+	Enabled               bool   `yaml:"enabled"`
+	Path                  string `yaml:"path"`                     // SQLite database path
+	RetentionDays         int    `yaml:"retention_days"`           // How long to keep history
+	CaptureMode           string `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
+	MaxCaptureSize        int    `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
+	MaxCapturedPerSession int    `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
 }
 
 // PolicyConfig holds policy engine configuration
@@ -242,10 +245,12 @@ func defaults() *Config {
 			Insecure:    true,
 		},
 		Storage: StorageConfig{
-			Enabled:       false,
-			Path:          "data/elida.db",
-			RetentionDays: 30,
-			CaptureMode:   "all", // Capture all session content (CDR-style)
+			Enabled:               false,
+			Path:                  "data/elida.db",
+			RetentionDays:         30,
+			CaptureMode:           "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
+			MaxCaptureSize:        10000,          // 10KB per body
+			MaxCapturedPerSession: 100,            // Max 100 request/response pairs per session
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -372,6 +377,16 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_STORAGE_CAPTURE_MODE"); v != "" {
 		c.Storage.CaptureMode = v // "all" or "flagged_only"
 	}
+	if v := os.Getenv("ELIDA_STORAGE_MAX_CAPTURE_SIZE"); v != "" {
+		if size, err := strconv.Atoi(v); err == nil && size > 0 {
+			c.Storage.MaxCaptureSize = size
+		}
+	}
+	if v := os.Getenv("ELIDA_STORAGE_MAX_CAPTURED_PER_SESSION"); v != "" {
+		if max, err := strconv.Atoi(v); err == nil && max > 0 {
+			c.Storage.MaxCapturedPerSession = max
+		}
+	}
 
 	// Policy overrides
 	if os.Getenv("ELIDA_POLICY_ENABLED") == "true" {
@@ -434,6 +449,11 @@ func (c *Config) validate() error {
 	if c.Session.Timeout <= 0 {
 		return fmt.Errorf("session timeout must be positive")
 	}
+	// Validate storage config
+	if c.Storage.CaptureMode != "" && c.Storage.CaptureMode != "all" && c.Storage.CaptureMode != "flagged_only" {
+		return fmt.Errorf("storage capture_mode must be \"all\" or \"flagged_only\", got %q", c.Storage.CaptureMode)
+	}
+
 	// Validate backends config if present
 	if len(c.Backends) > 0 {
 		hasDefault := false

@@ -1,14 +1,14 @@
 # Build stage - Dashboard
-FROM node:20-alpine AS dashboard-builder
+FROM oven/bun:1-alpine AS dashboard-builder
 
 WORKDIR /app/web
-COPY web/package*.json ./
-RUN npm ci
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
 COPY web/ ./
-RUN npm run build
+RUN bun run build
 
 # Build stage - Go binary
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 

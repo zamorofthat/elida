@@ -109,8 +109,16 @@ storage:
   path: "data/elida.db"
   # How many days to retain session history
   retention_days: 30
-  # Capture mode: "all" (CDR-style, capture all session content) or "flagged_only"
-  capture_mode: "all"
+  # Capture mode: "flagged_only" (default) or "all" (CDR-style full audit)
+  #   flagged_only - Only capture request/response bodies for policy-flagged sessions
+  #   all          - Capture every request/response body for full audit/compliance
+  capture_mode: "flagged_only"
+  # Max bytes to capture per request/response body (default 10KB)
+  # Bodies larger than this are truncated with "...[truncated]" suffix
+  max_capture_size: 10000
+  # Max request/response pairs to capture per session (default 100)
+  # Once reached, new captures for that session are dropped
+  max_captured_per_session: 100
 
 # Policy configuration (for flagging suspicious sessions)
 # Based on OWASP LLM Top 10, NIST AI RMF, and OWASP API Security
