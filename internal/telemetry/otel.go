@@ -10,7 +10,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -72,9 +74,15 @@ func NewProvider(cfg Config) (*Provider, error) {
 		}, nil
 	}
 
-	// Create simple trace provider without resource (avoids schema version conflicts)
+	// Create resource with service name (use NewSchemaless to avoid version conflicts)
+	res := resource.NewSchemaless(
+		semconv.ServiceName(cfg.ServiceName),
+	)
+
+	// Create trace provider with resource
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exporter), // Use sync exporter for simplicity
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithResource(res),
 	)
 
 	// Set as global provider
