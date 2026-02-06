@@ -10,6 +10,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// unmarshalJSON safely unmarshals JSON from a nullable SQL string.
+// Logs at debug level if unmarshal fails (indicates data corruption).
+func unmarshalJSON(src sql.NullString, dst interface{}, field, id string) {
+	if !src.Valid || src.String == "" {
+		return
+	}
+	if err := json.Unmarshal([]byte(src.String), dst); err != nil {
+		slog.Debug("failed to unmarshal JSON field", "field", field, "id", id, "error", err)
+	}
+}
+
 // SessionRecord represents a historical session record
 // CapturedRequest stores request/response content for session records
 type CapturedRequest struct {
@@ -274,15 +285,9 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}
 
-	if metadataStr.Valid && metadataStr.String != "" {
-		_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
-	}
-	if capturedStr.Valid && capturedStr.String != "" {
-		_ = json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
-	}
-	if violationsStr.Valid && violationsStr.String != "" {
-		_ = json.Unmarshal([]byte(violationsStr.String), &record.Violations)
-	}
+	unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
+	unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
+	unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
 
 	return &record, nil
 }
@@ -362,15 +367,9 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 			return nil, fmt.Errorf("failed to scan session: %w", err)
 		}
 
-		if metadataStr.Valid && metadataStr.String != "" {
-			_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
-		}
-		if capturedStr.Valid && capturedStr.String != "" {
-			_ = json.Unmarshal([]byte(capturedStr.String), &record.CapturedContent)
-		}
-		if violationsStr.Valid && violationsStr.String != "" {
-			_ = json.Unmarshal([]byte(violationsStr.String), &record.Violations)
-		}
+		unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
+		unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
+		unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
 
 		records = append(records, record)
 	}
@@ -649,12 +648,8 @@ func (s *SQLiteStore) GetVoiceSession(id string) (*VoiceSessionRecord, error) {
 	if protocol.Valid {
 		record.Protocol = protocol.String
 	}
-	if metadataStr.Valid && metadataStr.String != "" {
-		_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
-	}
-	if transcriptStr.Valid && transcriptStr.String != "" {
-		_ = json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
-	}
+	unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
+	unmarshalJSON(transcriptStr, &record.Transcript, "transcript", record.ID)
 
 	return &record, nil
 }
@@ -759,12 +754,8 @@ func (s *SQLiteStore) ListVoiceSessions(opts ListVoiceSessionsOptions) ([]VoiceS
 		if protocol.Valid {
 			record.Protocol = protocol.String
 		}
-		if metadataStr.Valid && metadataStr.String != "" {
-			_ = json.Unmarshal([]byte(metadataStr.String), &record.Metadata)
-		}
-		if transcriptStr.Valid && transcriptStr.String != "" {
-			_ = json.Unmarshal([]byte(transcriptStr.String), &record.Transcript)
-		}
+		unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
+		unmarshalJSON(transcriptStr, &record.Transcript, "transcript", record.ID)
 
 		records = append(records, record)
 	}

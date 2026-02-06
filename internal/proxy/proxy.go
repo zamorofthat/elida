@@ -40,17 +40,6 @@ type Proxy struct {
 	captureAll    bool                 // True when capture_mode == "all"
 }
 
-// TODO: Security fix - use this helper to handle G104 (CWE-703) unhandled write errors
-// Replace w.Write() calls with writeJSONError() to properly log write failures
-// See: gosec G104 findings
-//
-// func writeJSONError(w http.ResponseWriter, statusCode int, body string) {
-// 	w.Header().Set("Content-Type", "application/json")
-// 	w.WriteHeader(statusCode)
-// 	if _, err := w.Write([]byte(body)); err != nil {
-// 		slog.Debug("failed to write error response", "error", err)
-// 	}
-// }
 
 // New creates a new proxy handler
 func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
@@ -260,7 +249,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Session was killed - reject request
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed and cannot be reused"}`))
+		if _, err := w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed and cannot be reused"}`)); err != nil {
+			slog.Warn("write failed", "error", err)
+		}
 		return
 	}
 	sess.Touch()
@@ -276,7 +267,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed"}`))
+		if _, err := w.Write([]byte(`{"error":"session_terminated","message":"Session has been killed"}`)); err != nil {
+			slog.Warn("write failed", "session_id", sess.ID, "error", err)
+		}
 		return
 	default:
 	}
@@ -305,7 +298,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy - session terminated"}`))
+				if _, err := w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy - session terminated"}`)); err != nil {
+					slog.Warn("write failed", "session_id", sess.ID, "error", err)
+				}
 				return
 			}
 			if result.ShouldBlock {
@@ -315,7 +310,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy"}`))
+				if _, err := w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy"}`)); err != nil {
+					slog.Warn("write failed", "session_id", sess.ID, "error", err)
+				}
 				return
 			}
 			// Just flagged - continue but log
@@ -556,7 +553,9 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 
 	// Write response
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(responseBody)
+	if _, err := w.Write(responseBody); err != nil {
+		slog.Warn("write failed", "session_id", sess.ID, "error", err)
+	}
 
 	return resp.StatusCode, int64(len(responseBody))
 }
@@ -681,7 +680,9 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(buffer.Bytes())
+	if _, err := w.Write(buffer.Bytes()); err != nil {
+		slog.Warn("write failed", "session_id", sess.ID, "error", err)
+	}
 
 	// Flush if supported
 	if flusher, ok := w.(http.Flusher); ok {
@@ -751,7 +752,9 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 						"bytes_sent", totalBytes-int64(n), // Bytes already sent before this chunk
 					)
 					// Write termination message inline (client already received partial response)
-					_, _ = w.Write([]byte("\n\n[ELIDA: Stream terminated - security policy violation detected]\n"))
+					if _, err := w.Write([]byte("\n\n[ELIDA: Stream terminated - security policy violation detected]\n")); err != nil {
+						slog.Warn("write failed", "session_id", sess.ID, "error", err)
+					}
 					flusher.Flush()
 					return resp.StatusCode, totalBytes
 				}
@@ -762,7 +765,9 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 						"violations", len(result.Violations),
 						"bytes_sent", totalBytes-int64(n),
 					)
-					_, _ = w.Write([]byte("\n\n[ELIDA: Stream blocked - security policy violation detected]\n"))
+					if _, err := w.Write([]byte("\n\n[ELIDA: Stream blocked - security policy violation detected]\n")); err != nil {
+						slog.Warn("write failed", "session_id", sess.ID, "error", err)
+					}
 					flusher.Flush()
 					return resp.StatusCode, totalBytes
 				}
@@ -1058,7 +1063,9 @@ func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, message string, term
 
 	body, _ := json.Marshal(response)
 	w.WriteHeader(http.StatusForbidden)
-	_, _ = w.Write(body)
+	if _, err := w.Write(body); err != nil {
+		slog.Warn("write failed", "context", "blocked_response", "error", err)
+	}
 
 	return http.StatusForbidden, int64(len(body))
 }

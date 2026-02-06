@@ -33,13 +33,24 @@ import (
 
 func main() {
 	configPath := flag.String("config", "configs/elida.yaml", "path to config file")
+	validateOnly := flag.Bool("validate", false, "validate config and exit")
 	flag.Parse()
 
 	// Load configuration
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		slog.Error("failed to load config", "error", err)
+		fmt.Fprintf(os.Stderr, "✗ Failed to load config: %s\n  %v\n", *configPath, err)
 		os.Exit(1)
+	}
+
+	// Validate-only mode
+	if *validateOnly {
+		result := cfg.Validate()
+		printValidationResult(*configPath, result)
+		if !result.Valid {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	// Setup structured logging
@@ -567,4 +578,44 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
 
 	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// printValidationResult prints a human-readable validation result
+func printValidationResult(configPath string, result *config.ValidationResult) {
+	if result.Valid {
+		fmt.Printf("✓ Configuration valid: %s\n", configPath)
+		fmt.Printf("  Listen: %s\n", result.Summary.Listen)
+		if result.Summary.BackendCount > 0 {
+			fmt.Printf("  Backends: %d configured (default: %s)\n", result.Summary.BackendCount, result.Summary.DefaultBackend)
+		}
+		if result.Summary.PolicyEnabled {
+			if result.Summary.PolicyPreset != "" {
+				fmt.Printf("  Policy: enabled (preset: %s)\n", result.Summary.PolicyPreset)
+			} else {
+				fmt.Printf("  Policy: enabled (%d rules)\n", result.Summary.PolicyRules)
+			}
+		} else {
+			fmt.Printf("  Policy: disabled\n")
+		}
+		if result.Summary.StorageEnabled {
+			fmt.Printf("  Storage: enabled (capture_mode: %s)\n", result.Summary.CaptureMode)
+		} else {
+			fmt.Printf("  Storage: disabled\n")
+		}
+		if result.Summary.TLSEnabled {
+			fmt.Printf("  TLS: enabled\n")
+		}
+		if result.Summary.WebSocketEnabled {
+			fmt.Printf("  WebSocket: enabled\n")
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "✗ Configuration invalid: %s\n", configPath)
+		for _, e := range result.Errors {
+			if e.Hint != "" {
+				fmt.Fprintf(os.Stderr, "  - %s: %s\n    hint: %s\n", e.Field, e.Message, e.Hint)
+			} else {
+				fmt.Fprintf(os.Stderr, "  - %s: %s\n", e.Field, e.Message)
+			}
+		}
+	}
 }
