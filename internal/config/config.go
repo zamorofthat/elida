@@ -462,15 +462,15 @@ type ValidationResult struct {
 
 // ConfigSummary provides a quick overview of the configuration
 type ConfigSummary struct {
-	Listen        string
-	BackendCount  int
-	DefaultBackend string
-	PolicyEnabled bool
-	PolicyPreset  string
-	PolicyRules   int
-	StorageEnabled bool
-	CaptureMode   string
-	TLSEnabled    bool
+	Listen           string
+	BackendCount     int
+	DefaultBackend   string
+	PolicyEnabled    bool
+	PolicyPreset     string
+	PolicyRules      int
+	StorageEnabled   bool
+	CaptureMode      string
+	TLSEnabled       bool
 	WebSocketEnabled bool
 }
 

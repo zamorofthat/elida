@@ -40,7 +40,6 @@ type Proxy struct {
 	captureAll    bool                 // True when capture_mode == "all"
 }
 
-
 // New creates a new proxy handler
 func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
 	return NewWithPolicy(cfg, store, manager, nil, nil)
@@ -752,8 +751,8 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 						"bytes_sent", totalBytes-int64(n), // Bytes already sent before this chunk
 					)
 					// Write termination message inline (client already received partial response)
-					if _, err := w.Write([]byte("\n\n[ELIDA: Stream terminated - security policy violation detected]\n")); err != nil {
-						slog.Warn("write failed", "session_id", sess.ID, "error", err)
+					if _, wErr := w.Write([]byte("\n\n[ELIDA: Stream terminated - security policy violation detected]\n")); wErr != nil {
+						slog.Warn("write failed", "session_id", sess.ID, "error", wErr)
 					}
 					flusher.Flush()
 					return resp.StatusCode, totalBytes
@@ -765,8 +764,8 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 						"violations", len(result.Violations),
 						"bytes_sent", totalBytes-int64(n),
 					)
-					if _, err := w.Write([]byte("\n\n[ELIDA: Stream blocked - security policy violation detected]\n")); err != nil {
-						slog.Warn("write failed", "session_id", sess.ID, "error", err)
+					if _, wErr := w.Write([]byte("\n\n[ELIDA: Stream blocked - security policy violation detected]\n")); wErr != nil {
+						slog.Warn("write failed", "session_id", sess.ID, "error", wErr)
 					}
 					flusher.Flush()
 					return resp.StatusCode, totalBytes
