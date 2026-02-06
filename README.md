@@ -54,12 +54,6 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI.
 - [x] Response body capture for flagged sessions (forensics)
 - [x] Immediate persistence of flagged sessions (crash-safe)
 
-### Roadmap
-- [ ] Real-time speech analytics (live sentiment/coaching during voice sessions)
-- [ ] LLM-as-judge content moderation (local Gemma/ShieldGemma models)
-- [ ] Per-model rate limits
-- [ ] SDK for native agent integration
-
 ## Quick Start
 
 ### Prerequisites
