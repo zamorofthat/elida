@@ -435,5 +435,5 @@ Apache License 2.0 — See [LICENSE](LICENSE) for details.
 
 ## Why "ELIDA"?
 
-Named after the developer's grandmother. Also an acronym: **E**dge **L**ayer for **I**ntelligent **D**efense of **A**gents
+Named after my grandmother. Also an acronym: **E**dge **L**ayer for **I**ntelligent **D**efense of **A**gents
 
