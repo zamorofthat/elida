@@ -29,6 +29,10 @@ linters-settings:
     local-prefixes: elida
   misspell:
     locale: US
+  gosec:
+    excludes:
+      - G117  # Secret field names in config structs (false positive)
+      - G706  # Log injection - we use slog with generated session IDs
 
 issues:
   exclude-rules:
