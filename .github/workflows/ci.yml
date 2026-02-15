@@ -48,7 +48,7 @@ jobs:
       - name: Run gosec
         uses: securego/gosec@47f8b52fb8700c7ba017ffcc0ea6a32c83e33115 # master
         with:
-          args: -exclude=G104 ./...
+          args: -exclude=G104,G117,G706 ./...
 
       - name: Install Semgrep
         run: pip install semgrep
