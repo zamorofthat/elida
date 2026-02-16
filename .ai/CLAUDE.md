@@ -91,6 +91,7 @@ New() → NewWithHistory() → NewWithPolicy() → NewWithAuth()
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Technical deep-dive
 - [SECURITY.md](SECURITY.md) — Security policy, vulnerability reporting
+- [docs/AGENTS.md](docs/AGENTS.md) — Autonomous agent monitoring guide
 - [docs/ROADMAP.md](docs/ROADMAP.md) — Planned features
 - [docs/POLICY_RULES_REFERENCE.md](docs/POLICY_RULES_REFERENCE.md) — Policy rule details
 - [docs/SESSION_RECORDS.md](docs/SESSION_RECORDS.md) — SDR/CDR documentation
