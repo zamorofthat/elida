@@ -126,6 +126,10 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("SQLite storage enabled", "path", cfg.Storage.Path, "retention_days", cfg.Storage.RetentionDays)
+	}
+
+	// Set up session end callback if storage OR telemetry is enabled
+	if cfg.Storage.Enabled || cfg.Telemetry.Enabled {
 
 		// Set up callback to save sessions when they end
 		manager.SetSessionEndCallback(func(sess *session.Session) {
@@ -198,8 +202,11 @@ func main() {
 				// (they include violation context). Capture-all buffer is cleaned up either way.
 			}
 
-			if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
-				slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
+			// Save to SQLite if storage is enabled
+			if sqliteStore != nil {
+				if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
+					slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
+				}
 			}
 
 			// Export to telemetry (if enabled)
