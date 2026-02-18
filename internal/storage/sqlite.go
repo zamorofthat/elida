@@ -201,6 +201,22 @@ func (s *SQLiteStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_tts_session ON tts_requests(session_id);
 	CREATE INDEX IF NOT EXISTS idx_tts_timestamp ON tts_requests(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_tts_provider ON tts_requests(provider);
+
+	-- Events table (immutable audit log)
+	CREATE TABLE IF NOT EXISTS events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp DATETIME NOT NULL,
+		event_type TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		severity TEXT,
+		data TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+	CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);
 	`
 
 	_, err := s.db.Exec(schema)

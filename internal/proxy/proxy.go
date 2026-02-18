@@ -322,6 +322,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Extract tool calls from request (tools being defined or tool results being sent)
+	if len(requestBody) > 0 {
+		if toolCalls := ExtractToolCalls(requestBody); len(toolCalls) > 0 {
+			for _, tc := range toolCalls {
+				sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+			}
+		}
+	}
+
 	// Capture request body for capture-all mode (policy-independent)
 	if p.captureAll && p.captureBuffer != nil && len(requestBody) > 0 {
 		p.captureBuffer.Capture(sess.ID, CapturedRequest{
@@ -419,6 +428,10 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 		IdleTime:     sess.IdleTime(),
 		StartTime:    snap.StartTime,
 		RequestTimes: sess.GetRequestTimes(),
+		TokensIn:     snap.TokensIn,
+		TokensOut:    snap.TokensOut,
+		ToolCalls:    snap.ToolCalls,
+		ToolFanout:   sess.GetToolFanout(),
 	}
 
 	violations := p.policy.Evaluate(metrics)
@@ -541,6 +554,18 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 	}
 
 	sess.AddBytes(0, int64(len(responseBody)))
+
+	// Extract token usage from response
+	if tokenUsage := ExtractTokenUsage(responseBody); tokenUsage != nil {
+		sess.AddTokens(tokenUsage.PromptTokens, tokenUsage.CompletionTokens)
+	}
+
+	// Extract tool calls from response (when model decides to call tools)
+	if toolCalls := ExtractToolCallsFromResponse(responseBody); len(toolCalls) > 0 {
+		for _, tc := range toolCalls {
+			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+		}
+	}
 
 	// Capture response for capture-all mode
 	if p.captureAll && p.captureBuffer != nil {

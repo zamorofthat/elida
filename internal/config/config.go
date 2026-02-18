@@ -69,23 +69,68 @@ type TLSConfig struct {
 
 // StorageConfig holds persistent storage configuration
 type StorageConfig struct {
-	Enabled               bool   `yaml:"enabled"`
-	Path                  string `yaml:"path"`                     // SQLite database path
-	RetentionDays         int    `yaml:"retention_days"`           // How long to keep history
-	CaptureMode           string `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
-	MaxCaptureSize        int    `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
-	MaxCapturedPerSession int    `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
+	Enabled               bool            `yaml:"enabled"`
+	Path                  string          `yaml:"path"`                     // SQLite database path
+	RetentionDays         int             `yaml:"retention_days"`           // How long to keep history
+	CaptureMode           string          `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
+	MaxCaptureSize        int             `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
+	MaxCapturedPerSession int             `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
+	Events                EventsConfig    `yaml:"events"`                   // Immutable event stream config
+	Redaction             RedactionConfig `yaml:"redaction"`                // PII redaction config
+}
+
+// EventsConfig holds event stream configuration
+type EventsConfig struct {
+	Enabled       bool `yaml:"enabled"`
+	RetentionDays int  `yaml:"retention_days"` // How long to keep events (default: 90)
+}
+
+// RedactionConfig holds redaction configuration
+type RedactionConfig struct {
+	Enabled        bool                   `yaml:"enabled"`
+	CustomPatterns []RedactionPatternConfig `yaml:"patterns"`
+}
+
+// RedactionPatternConfig represents a custom redaction pattern
+type RedactionPatternConfig struct {
+	Name        string `yaml:"name"`
+	Pattern     string `yaml:"pattern"`
+	Replacement string `yaml:"replacement"`
 }
 
 // PolicyConfig holds policy engine configuration
 type PolicyConfig struct {
-	Enabled        bool            `yaml:"enabled"`
-	Mode           string          `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
-	CaptureContent bool            `yaml:"capture_flagged"`  // Capture content for flagged sessions
-	MaxCaptureSize int             `yaml:"max_capture_size"` // Max bytes to capture per request
-	Preset         string          `yaml:"preset"`           // minimal, standard, or strict
-	Rules          []PolicyRule    `yaml:"rules"`
-	Streaming      StreamingConfig `yaml:"streaming"` // Response streaming scan configuration
+	Enabled        bool                 `yaml:"enabled"`
+	Mode           string               `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
+	CaptureContent bool                 `yaml:"capture_flagged"`  // Capture content for flagged sessions
+	MaxCaptureSize int                  `yaml:"max_capture_size"` // Max bytes to capture per request
+	Preset         string               `yaml:"preset"`           // minimal, standard, or strict
+	Rules          []PolicyRule         `yaml:"rules"`
+	Streaming      StreamingConfig      `yaml:"streaming"`       // Response streaming scan configuration
+	RiskLadder     RiskLadderConfig     `yaml:"risk_ladder"`     // Progressive escalation based on risk score
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"` // Token and tool call limits
+}
+
+// RiskLadderConfig configures progressive escalation based on cumulative risk score
+type RiskLadderConfig struct {
+	Enabled    bool                  `yaml:"enabled"`
+	Thresholds []RiskThresholdConfig `yaml:"thresholds"`
+}
+
+// RiskThresholdConfig defines a threshold and action for the risk ladder
+type RiskThresholdConfig struct {
+	Score        float64 `yaml:"score"`
+	Action       string  `yaml:"action"`        // observe, warn, throttle, block, terminate
+	ThrottleRate int     `yaml:"throttle_rate"` // Requests per minute when action is throttle
+}
+
+// CircuitBreakerConfig configures token and tool call limits
+type CircuitBreakerConfig struct {
+	Enabled            bool  `yaml:"enabled"`
+	TokensPerMinute    int64 `yaml:"tokens_per_minute"`     // Block if token rate exceeds this
+	MaxTokensPerSession int64 `yaml:"max_tokens_per_session"` // Block if total tokens exceed this
+	MaxToolCalls       int   `yaml:"max_tool_calls"`         // Block if tool calls exceed this
+	MaxToolFanout      int   `yaml:"max_tool_fanout"`        // Block if distinct tools exceed this
 }
 
 // StreamingConfig holds streaming response scanning configuration

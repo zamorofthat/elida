@@ -63,6 +63,25 @@ type Session struct {
 
 	// For kill signaling
 	killChan chan struct{}
+
+	// Token tracking (for LLM API usage)
+	TokensIn  int64 `json:"tokens_in"`
+	TokensOut int64 `json:"tokens_out"`
+
+	// Tool/function call tracking
+	ToolCalls      int            `json:"tool_calls"`
+	ToolCallCounts map[string]int `json:"tool_call_counts,omitempty"` // Per-tool counts
+
+	// Tool call history (who called what)
+	ToolCallHistory []ToolCallRecord `json:"tool_call_history,omitempty"`
+}
+
+// ToolCallRecord tracks a single tool/function call
+type ToolCallRecord struct {
+	Timestamp time.Time `json:"timestamp"`
+	ToolName  string    `json:"tool_name"`
+	ToolType  string    `json:"tool_type,omitempty"` // "function", "code_interpreter", etc.
+	RequestID string    `json:"request_id,omitempty"`
 }
 
 // NewSession creates a new session with the given ID
@@ -112,6 +131,80 @@ func (s *Session) AddBytes(in, out int64) {
 	defer s.mu.Unlock()
 	s.BytesIn += in
 	s.BytesOut += out
+}
+
+// AddTokens adds token counts to the session
+func (s *Session) AddTokens(in, out int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.TokensIn += in
+	s.TokensOut += out
+}
+
+// GetTokens returns current token counts
+func (s *Session) GetTokens() (in, out int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.TokensIn, s.TokensOut
+}
+
+// RecordToolCall records a tool/function call
+func (s *Session) RecordToolCall(toolName, toolType, requestID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ToolCalls++
+
+	if s.ToolCallCounts == nil {
+		s.ToolCallCounts = make(map[string]int)
+	}
+	s.ToolCallCounts[toolName]++
+
+	// Keep history (limited to last 100 calls to avoid memory bloat)
+	record := ToolCallRecord{
+		Timestamp: time.Now(),
+		ToolName:  toolName,
+		ToolType:  toolType,
+		RequestID: requestID,
+	}
+	s.ToolCallHistory = append(s.ToolCallHistory, record)
+	if len(s.ToolCallHistory) > 100 {
+		s.ToolCallHistory = s.ToolCallHistory[1:]
+	}
+}
+
+// GetToolCalls returns total tool call count
+func (s *Session) GetToolCalls() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ToolCalls
+}
+
+// GetToolFanout returns the number of distinct tools used
+func (s *Session) GetToolFanout() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.ToolCallCounts)
+}
+
+// GetToolCallCounts returns a copy of per-tool call counts
+func (s *Session) GetToolCallCounts() map[string]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]int, len(s.ToolCallCounts))
+	for k, v := range s.ToolCallCounts {
+		result[k] = v
+	}
+	return result
+}
+
+// GetToolCallHistory returns a copy of the tool call history
+func (s *Session) GetToolCallHistory() []ToolCallRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]ToolCallRecord, len(s.ToolCallHistory))
+	copy(result, s.ToolCallHistory)
+	return result
 }
 
 // FrameType represents the type of WebSocket frame
@@ -318,12 +411,25 @@ func (s *Session) Snapshot() Session {
 		FrameCount:   s.FrameCount,
 		TextFrames:   s.TextFrames,
 		BinaryFrames: s.BinaryFrames,
+		TokensIn:     s.TokensIn,
+		TokensOut:    s.TokensOut,
+		ToolCalls:    s.ToolCalls,
 	}
 	for k, v := range s.Metadata {
 		snap.Metadata[k] = v
 	}
 	for k, v := range s.BackendsUsed {
 		snap.BackendsUsed[k] = v
+	}
+	if s.ToolCallCounts != nil {
+		snap.ToolCallCounts = make(map[string]int, len(s.ToolCallCounts))
+		for k, v := range s.ToolCallCounts {
+			snap.ToolCallCounts[k] = v
+		}
+	}
+	if s.ToolCallHistory != nil {
+		snap.ToolCallHistory = make([]ToolCallRecord, len(s.ToolCallHistory))
+		copy(snap.ToolCallHistory, s.ToolCallHistory)
 	}
 	return snap
 }
