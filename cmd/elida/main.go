@@ -62,7 +62,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("starting ELIDA",
-		"version", "0.1.0",
+		"version", "0.2.0",
 		"listen", cfg.Listen,
 		"backend", cfg.Backend,
 		"session_store", cfg.Session.Store,

@@ -176,7 +176,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	response := HealthResponse{
 		Status:      "ok",
 		Timestamp:   time.Now(),
-		Version:     "0.1.0",
+		Version:     "0.2.0",
 		CaptureMode: h.captureMode,
 	}
 
