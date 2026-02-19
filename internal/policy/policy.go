@@ -30,15 +30,15 @@ const (
 	RuleTypeRequestsPerMin RuleType = "requests_per_minute"
 	RuleTypeIdleTime       RuleType = "idle_time"
 
-	// Token-based rules
-	RuleTypeTokensIn       RuleType = "tokens_in"
-	RuleTypeTokensOut      RuleType = "tokens_out"
-	RuleTypeTokensTotal    RuleType = "tokens_total"
-	RuleTypeTokensPerMin   RuleType = "tokens_per_minute"
+	// Token-based rules (not credentials, gosec false positive)
+	RuleTypeTokensIn     RuleType = "tokens_in"
+	RuleTypeTokensOut    RuleType = "tokens_out"
+	RuleTypeTokensTotal  RuleType = "tokens_total"
+	RuleTypeTokensPerMin RuleType = "tokens_per_minute" // #nosec G101 -- not a credential
 
 	// Tool call rules
-	RuleTypeToolCallCount  RuleType = "tool_call_count"
-	RuleTypeToolFanout     RuleType = "tool_fanout" // Distinct tools used
+	RuleTypeToolCallCount RuleType = "tool_call_count"
+	RuleTypeToolFanout    RuleType = "tool_fanout" // Distinct tools used
 
 	// Content inspection rules
 	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request/response body
@@ -94,8 +94,8 @@ type SessionMetrics struct {
 	TokensOut int64
 
 	// Tool call metrics
-	ToolCalls   int
-	ToolFanout  int // Distinct tools used
+	ToolCalls  int
+	ToolFanout int // Distinct tools used
 }
 
 // FlaggedSession tracks a session that has policy violations
@@ -108,10 +108,10 @@ type FlaggedSession struct {
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
 
 	// Risk ladder fields
-	RiskScore       float64        `json:"risk_score"`        // Cumulative weighted risk score
-	ViolationCounts map[string]int `json:"violation_counts"`  // Count per rule (not deduplicated)
-	CurrentAction   string         `json:"current_action"`    // Current ladder action based on score
-	ThrottleRate    int            `json:"throttle_rate"`     // Requests per minute when throttled (0 = no throttle)
+	RiskScore       float64        `json:"risk_score"`       // Cumulative weighted risk score
+	ViolationCounts map[string]int `json:"violation_counts"` // Count per rule (not deduplicated)
+	CurrentAction   string         `json:"current_action"`   // Current ladder action based on score
+	ThrottleRate    int            `json:"throttle_rate"`    // Requests per minute when throttled (0 = no throttle)
 }
 
 // SeverityWeights defines risk score multipliers for each severity level
@@ -780,16 +780,16 @@ func (e *Engine) Stats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_flagged":    len(e.flaggedSessions),
-		"critical":         critical,
-		"warning":          warning,
-		"info":             info,
-		"rules_count":      len(e.rules),
-		"risk_ladder":      e.riskLadderEnabled,
-		"high_risk":        highRisk,
-		"throttled":        throttled,
-		"blocked":          blocked,
-		"avg_risk_score":   avgRiskScore,
+		"total_flagged":  len(e.flaggedSessions),
+		"critical":       critical,
+		"warning":        warning,
+		"info":           info,
+		"rules_count":    len(e.rules),
+		"risk_ladder":    e.riskLadderEnabled,
+		"high_risk":      highRisk,
+		"throttled":      throttled,
+		"blocked":        blocked,
+		"avg_risk_score": avgRiskScore,
 	}
 }
 

@@ -87,7 +87,7 @@ type EventsConfig struct {
 
 // RedactionConfig holds redaction configuration
 type RedactionConfig struct {
-	Enabled        bool                   `yaml:"enabled"`
+	Enabled        bool                     `yaml:"enabled"`
 	CustomPatterns []RedactionPatternConfig `yaml:"patterns"`
 }
 
@@ -126,11 +126,11 @@ type RiskThresholdConfig struct {
 
 // CircuitBreakerConfig configures token and tool call limits
 type CircuitBreakerConfig struct {
-	Enabled            bool  `yaml:"enabled"`
-	TokensPerMinute    int64 `yaml:"tokens_per_minute"`     // Block if token rate exceeds this
+	Enabled             bool  `yaml:"enabled"`
+	TokensPerMinute     int64 `yaml:"tokens_per_minute"`      // Block if token rate exceeds this
 	MaxTokensPerSession int64 `yaml:"max_tokens_per_session"` // Block if total tokens exceed this
-	MaxToolCalls       int   `yaml:"max_tool_calls"`         // Block if tool calls exceed this
-	MaxToolFanout      int   `yaml:"max_tool_fanout"`        // Block if distinct tools exceed this
+	MaxToolCalls        int   `yaml:"max_tool_calls"`         // Block if tool calls exceed this
+	MaxToolFanout       int   `yaml:"max_tool_fanout"`        // Block if distinct tools exceed this
 }
 
 // StreamingConfig holds streaming response scanning configuration

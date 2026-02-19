@@ -372,16 +372,18 @@ func TestRiskLadder_Stats(t *testing.T) {
 		t.Error("expected risk_ladder=true in stats")
 	}
 
-	if stats["throttled"].(int) < 1 {
+	throttled, ok := stats["throttled"].(int)
+	if !ok || throttled < 1 {
 		t.Error("expected at least 1 throttled session")
 	}
 
-	if stats["blocked"].(int) < 1 {
+	blocked, ok := stats["blocked"].(int)
+	if !ok || blocked < 1 {
 		t.Error("expected at least 1 blocked session")
 	}
 
-	avgScore := stats["avg_risk_score"].(float64)
-	if avgScore == 0 {
+	avgScore, ok := stats["avg_risk_score"].(float64)
+	if !ok || avgScore == 0 {
 		t.Error("expected non-zero average risk score")
 	}
 }

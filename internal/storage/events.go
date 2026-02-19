@@ -12,16 +12,16 @@ import (
 type EventType string
 
 const (
-	EventSessionStarted    EventType = "session_started"
-	EventSessionEnded      EventType = "session_ended"
-	EventViolationDetected EventType = "violation_detected"
-	EventCaptureRecorded   EventType = "capture_recorded"
-	EventPolicyAction      EventType = "policy_action"
-	EventKillRequested     EventType = "kill_requested"
+	EventSessionStarted     EventType = "session_started"
+	EventSessionEnded       EventType = "session_ended"
+	EventViolationDetected  EventType = "violation_detected"
+	EventCaptureRecorded    EventType = "capture_recorded"
+	EventPolicyAction       EventType = "policy_action"
+	EventKillRequested      EventType = "kill_requested"
 	EventTerminateRequested EventType = "terminate_requested"
-	EventRiskEscalated     EventType = "risk_escalated"
-	EventToolCalled        EventType = "tool_called"
-	EventTokensUsed        EventType = "tokens_used"
+	EventRiskEscalated      EventType = "risk_escalated"
+	EventToolCalled         EventType = "tool_called"
+	EventTokensUsed         EventType = "tokens_used"
 )
 
 // Event represents an immutable audit event
@@ -67,9 +67,9 @@ type ViolationDetectedData struct {
 
 // PolicyActionData contains data for policy_action events
 type PolicyActionData struct {
-	Action      string  `json:"action"`
-	RiskScore   float64 `json:"risk_score,omitempty"`
-	Reason      string  `json:"reason"`
+	Action    string  `json:"action"`
+	RiskScore float64 `json:"risk_score,omitempty"`
+	Reason    string  `json:"reason"`
 }
 
 // ToolCalledData contains data for tool_called events
@@ -95,29 +95,6 @@ type ListEventsOptions struct {
 	Severity  string
 	Since     *time.Time
 	Until     *time.Time
-}
-
-// migrateEvents creates the events table (called from main migrate)
-func (s *SQLiteStore) migrateEvents() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		timestamp DATETIME NOT NULL,
-		event_type TEXT NOT NULL,
-		session_id TEXT NOT NULL,
-		severity TEXT,
-		data TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
-	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-	CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);
-	`
-
-	_, err := s.db.Exec(schema)
-	return err
 }
 
 // RecordEvent records an immutable event
@@ -228,10 +205,10 @@ func (s *SQLiteStore) GetSessionEvents(sessionID string) ([]Event, error) {
 
 // EventStats represents aggregate event statistics
 type EventStats struct {
-	TotalEvents     int64            `json:"total_events"`
-	EventsByType    map[string]int64 `json:"events_by_type"`
+	TotalEvents      int64            `json:"total_events"`
+	EventsByType     map[string]int64 `json:"events_by_type"`
 	EventsBySeverity map[string]int64 `json:"events_by_severity"`
-	UniqueSessionIDs int64           `json:"unique_session_ids"`
+	UniqueSessionIDs int64            `json:"unique_session_ids"`
 }
 
 // GetEventStats retrieves aggregate event statistics
