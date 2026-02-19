@@ -54,6 +54,14 @@ Think of it like a Session Border Controller (SBC) from telecom, but for AI.
 - [x] Response body capture for flagged sessions (forensics)
 - [x] Immediate persistence of flagged sessions (crash-safe)
 
+### Telco-Style Controls
+- [x] **Risk Ladder** — Progressive escalation based on cumulative risk score
+- [x] **Token Burn Rate** — Track token consumption with circuit breaker thresholds
+- [x] **Tool Call Tracking** — Monitor which tools are called and by whom
+- [x] **Immutable Event Stream** — Append-only audit log for postmortems
+- [x] **PII Redaction** — Automatic redaction of sensitive data in logs
+- [x] **Chaos Suite** — Benchmarking suite for policy accuracy testing
+
 ## Quick Start
 
 ### Prerequisites
@@ -226,6 +234,99 @@ make run-demo
 ELIDA_STORAGE_ENABLED=true ELIDA_STORAGE_CAPTURE_MODE=all ./bin/elida
 ```
 
+### Telco-Style Controls
+
+ELIDA includes telco-inspired controls for enterprise deployments. See [docs/TELCO_CONTROLS.md](docs/TELCO_CONTROLS.md) for full documentation.
+
+#### Risk Ladder (Progressive Escalation)
+
+Accumulate risk scores per session and escalate actions as the score climbs:
+
+```yaml
+policy:
+  enabled: true
+  risk_ladder:
+    enabled: true
+    thresholds:
+      - score: 5
+        action: warn       # Log warning
+      - score: 15
+        action: throttle   # Rate limit to 10 req/min
+      - score: 30
+        action: block      # Block new requests
+      - score: 50
+        action: terminate  # Kill session
+```
+
+Severity weights: `info=1`, `warning=3`, `critical=10`. A session with 2 critical violations (20 points) and 3 warnings (9 points) has a risk score of 29.
+
+#### Token Burn Rate & Circuit Breaker
+
+Track token consumption and tool usage with automatic circuit breaker:
+
+```yaml
+policy:
+  circuit_breaker:
+    enabled: true
+    tokens_per_minute: 50000      # Block if exceeds
+    max_tokens_per_session: 500000
+    max_tool_calls: 100           # Max total tool invocations
+    max_tool_fanout: 20           # Max distinct tools used
+```
+
+#### Immutable Event Stream
+
+Append-only audit log for compliance and postmortems:
+
+```yaml
+storage:
+  enabled: true
+  events:
+    enabled: true
+    retention_days: 90
+  redaction:
+    enabled: true
+    patterns:
+      - name: "custom_id"
+        pattern: "CUST-\\d{8}"
+        replacement: "[REDACTED_CUSTOMER]"
+```
+
+Query events via API:
+```bash
+# All events
+curl http://localhost:9090/control/events
+
+# Filter by session
+curl http://localhost:9090/control/events?session_id=abc123
+
+# Filter by type and severity
+curl http://localhost:9090/control/events?type=violation_detected&severity=critical
+
+# Event statistics
+curl http://localhost:9090/control/events/stats
+```
+
+#### Chaos Suite (Benchmarking)
+
+Test policy accuracy with known attack scenarios:
+
+```bash
+# Run chaos suite
+./scripts/chaos.sh
+
+# Run specific category
+./scripts/chaos.sh --category prompt_injection
+
+# Expected output:
+# Chaos Suite Results:
+#   True Positives:  16
+#   False Positives: 4
+#   True Negatives:  0
+#   False Negatives: 0
+#   Accuracy:        80.0%
+```
+
 ## Usage
 
 ### Proxy Traffic
@@ -282,6 +383,11 @@ curl http://localhost:9090/control/voice-history
 
 # TTS request tracking
 curl http://localhost:9090/control/tts
+
+# Event audit log
+curl http://localhost:9090/control/events
+curl http://localhost:9090/control/events/stats
+curl http://localhost:9090/control/events/{session-id}
 
 # Access the dashboard UI
 open http://localhost:9090/
@@ -426,7 +532,12 @@ make history            # View session history
 
 ## Documentation
 
-- [Architecture](ARCHITECTURE.md) — Technical deep-dive and design decisions
+- [Architecture](docs/ARCHITECTURE.md) — Technical deep-dive and design decisions
+- [Telco Controls](docs/TELCO_CONTROLS.md) — Risk ladder, token tracking, event stream, chaos suite
+- [Policy Rules Reference](docs/POLICY_RULES_REFERENCE.md) — All 40+ built-in security rules
+- [Security Controls](docs/SECURITY_CONTROLS.md) — Security features and configuration
+- [Session Records](docs/SESSION_RECORDS.md) — Session data model and storage
+- [Deployment](docs/DEPLOYMENT.md) — Production deployment guide
 - [Security Policy](SECURITY.md) — Vulnerability reporting and security practices
 
 ## License

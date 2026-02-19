@@ -69,23 +69,68 @@ type TLSConfig struct {
 
 // StorageConfig holds persistent storage configuration
 type StorageConfig struct {
-	Enabled               bool   `yaml:"enabled"`
-	Path                  string `yaml:"path"`                     // SQLite database path
-	RetentionDays         int    `yaml:"retention_days"`           // How long to keep history
-	CaptureMode           string `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
-	MaxCaptureSize        int    `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
-	MaxCapturedPerSession int    `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
+	Enabled               bool            `yaml:"enabled"`
+	Path                  string          `yaml:"path"`                     // SQLite database path
+	RetentionDays         int             `yaml:"retention_days"`           // How long to keep history
+	CaptureMode           string          `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
+	MaxCaptureSize        int             `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
+	MaxCapturedPerSession int             `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
+	Events                EventsConfig    `yaml:"events"`                   // Immutable event stream config
+	Redaction             RedactionConfig `yaml:"redaction"`                // PII redaction config
+}
+
+// EventsConfig holds event stream configuration
+type EventsConfig struct {
+	Enabled       bool `yaml:"enabled"`
+	RetentionDays int  `yaml:"retention_days"` // How long to keep events (default: 90)
+}
+
+// RedactionConfig holds redaction configuration
+type RedactionConfig struct {
+	Enabled        bool                     `yaml:"enabled"`
+	CustomPatterns []RedactionPatternConfig `yaml:"patterns"`
+}
+
+// RedactionPatternConfig represents a custom redaction pattern
+type RedactionPatternConfig struct {
+	Name        string `yaml:"name"`
+	Pattern     string `yaml:"pattern"`
+	Replacement string `yaml:"replacement"`
 }
 
 // PolicyConfig holds policy engine configuration
 type PolicyConfig struct {
-	Enabled        bool            `yaml:"enabled"`
-	Mode           string          `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
-	CaptureContent bool            `yaml:"capture_flagged"`  // Capture content for flagged sessions
-	MaxCaptureSize int             `yaml:"max_capture_size"` // Max bytes to capture per request
-	Preset         string          `yaml:"preset"`           // minimal, standard, or strict
-	Rules          []PolicyRule    `yaml:"rules"`
-	Streaming      StreamingConfig `yaml:"streaming"` // Response streaming scan configuration
+	Enabled        bool                 `yaml:"enabled"`
+	Mode           string               `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
+	CaptureContent bool                 `yaml:"capture_flagged"`  // Capture content for flagged sessions
+	MaxCaptureSize int                  `yaml:"max_capture_size"` // Max bytes to capture per request
+	Preset         string               `yaml:"preset"`           // minimal, standard, or strict
+	Rules          []PolicyRule         `yaml:"rules"`
+	Streaming      StreamingConfig      `yaml:"streaming"`       // Response streaming scan configuration
+	RiskLadder     RiskLadderConfig     `yaml:"risk_ladder"`     // Progressive escalation based on risk score
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"` // Token and tool call limits
+}
+
+// RiskLadderConfig configures progressive escalation based on cumulative risk score
+type RiskLadderConfig struct {
+	Enabled    bool                  `yaml:"enabled"`
+	Thresholds []RiskThresholdConfig `yaml:"thresholds"`
+}
+
+// RiskThresholdConfig defines a threshold and action for the risk ladder
+type RiskThresholdConfig struct {
+	Score        float64 `yaml:"score"`
+	Action       string  `yaml:"action"`        // observe, warn, throttle, block, terminate
+	ThrottleRate int     `yaml:"throttle_rate"` // Requests per minute when action is throttle
+}
+
+// CircuitBreakerConfig configures token and tool call limits
+type CircuitBreakerConfig struct {
+	Enabled             bool  `yaml:"enabled"`
+	TokensPerMinute     int64 `yaml:"tokens_per_minute"`      // Block if token rate exceeds this
+	MaxTokensPerSession int64 `yaml:"max_tokens_per_session"` // Block if total tokens exceed this
+	MaxToolCalls        int   `yaml:"max_tool_calls"`         // Block if tool calls exceed this
+	MaxToolFanout       int   `yaml:"max_tool_fanout"`        // Block if distinct tools exceed this
 }
 
 // StreamingConfig holds streaming response scanning configuration
@@ -688,8 +733,8 @@ func getStandardPreset() []PolicyRule {
 
 		// OWASP LLM01 - Prompt Injection (REQUEST-SIDE)
 		{Name: "prompt_injection_ignore", Type: "content_match", Target: "request", Patterns: []string{
-			"ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions|prompts|rules)",
-			"disregard\\s+(all\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
+			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
+			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
 			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
 		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - instruction override"},
 		{Name: "prompt_injection_jailbreak", Type: "content_match", Target: "request", Patterns: []string{
@@ -697,6 +742,11 @@ func getStandardPreset() []PolicyRule {
 			"enable\\s+(DAN|developer|jailbreak)\\s+mode",
 			"jailbreak(ed)?\\s+(mode|prompt|enabled)",
 		}, Severity: "critical", Action: "terminate", Description: "LLM01: Prompt injection - jailbreak attempt"},
+		{Name: "prompt_injection_roleplay", Type: "content_match", Target: "request", Patterns: []string{
+			"you\\s+are\\s+(now\\s+)?a\\s+.{0,30}(without|no)\\s+(any\\s+)?restrictions",
+			"(pretend|act|behave)\\s+(like\\s+)?you\\s+(have|are)\\s+no\\s+(rules|restrictions|limits)",
+			"(without|bypass|ignore)\\s+(any\\s+)?(safety|ethical)\\s+(guidelines|restrictions|rules)",
+		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - roleplay restriction bypass"},
 
 		// OWASP LLM02 - Insecure Output Handling (RESPONSE-SIDE)
 		// NOTE: Using 'flag' action to avoid latency impact. Use 'block' only if you accept buffering latency.
@@ -735,9 +785,9 @@ func getStandardPreset() []PolicyRule {
 			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
 		}, Severity: "critical", Action: "terminate", Description: "LLM08: Destructive file operation"},
 		{Name: "privilege_escalation", Type: "content_match", Target: "request", Patterns: []string{
-			"sudo\\s+",
-			"(run|execute)\\s+(as|with)\\s+root",
-			"privilege\\s+(escalation|elevation)",
+			"sudo\\s+(rm|chmod|chown|kill|bash|sh|python|perl|ruby|apt|yum|dnf|pip|npm|make|gcc|curl|wget)\\b",
+			"(run|execute)\\s+(this\\s+)?(command\\s+)?(as|with)\\s+root",
+			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
 		}, Severity: "critical", Action: "block", Description: "LLM08: Privilege escalation attempt"},
 		{Name: "network_exfiltration", Type: "content_match", Target: "request", Patterns: []string{
 			"curl.*\\|\\s*(ba)?sh",
@@ -750,6 +800,21 @@ func getStandardPreset() []PolicyRule {
 			"(extract|dump|export)\\s+(the\\s+)?(model|weights|parameters)",
 			"(what|describe)\\s+(is|are)\\s+your\\s+(weights|parameters|architecture)",
 		}, Severity: "warning", Action: "flag", Description: "LLM10: Model extraction attempt"},
+
+		// OWASP LLM06 - Data Exfiltration (REQUEST-SIDE)
+		{Name: "bulk_data_extraction", Type: "content_match", Target: "request", Patterns: []string{
+			"(list|show|give|dump)\\s+(all\\s+)?(user|customer|employee)\\s+(data|info|records|passwords)",
+			"(extract|export|download)\\s+(all\\s+)?(user|database|customer)\\s+(data|records|table)",
+			"(get|read|fetch)\\s+(all|every)\\s+(user|customer|account)\\s+from",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Bulk data extraction attempt"},
+
+		// Recursive/Exhaustive Prompts (REQUEST-SIDE)
+		{Name: "recursive_prompt", Type: "content_match", Target: "request", Patterns: []string{
+			"for\\s+(each|every|all)\\s+(possible\\s+)?(input|combination|permutation)",
+			"test\\s+(all|every|each)\\s+(possible\\s+)?(combination|permutation|input)",
+			"(exhaustive|brute\\s*force)\\s+(test|search|scan|check)",
+			"(iterate|loop)\\s+(through\\s+)?(all|every|each)\\s+(possible|input)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Recursive/exhaustive prompt detected"},
 	}
 }
 

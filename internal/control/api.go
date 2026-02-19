@@ -95,6 +95,11 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 	h.mux.HandleFunc("/control/tts", h.handleTTSRequests)
 	h.mux.HandleFunc("/control/tts/stats", h.handleTTSStats)
 
+	// Events audit log endpoints
+	h.mux.HandleFunc("/control/events", h.handleEvents)
+	h.mux.HandleFunc("/control/events/stats", h.handleEventStats)
+	h.mux.HandleFunc("/control/events/", h.handleSessionEvents)
+
 	return h
 }
 
@@ -171,7 +176,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	response := HealthResponse{
 		Status:      "ok",
 		Timestamp:   time.Now(),
-		Version:     "0.1.0",
+		Version:     "0.2.0",
 		CaptureMode: h.captureMode,
 	}
 
@@ -1048,4 +1053,135 @@ func (h *Handler) handleTTSStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleEvents handles GET /control/events
+func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"count":  0,
+			"events": nil,
+			"error":  "storage not enabled",
+		})
+		return
+	}
+
+	// Parse query parameters
+	opts := storage.ListEventsOptions{
+		Limit:  100,
+		Offset: 0,
+	}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		if l, err := strconv.Atoi(limit); err == nil && l > 0 {
+			opts.Limit = l
+		}
+	}
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		if o, err := strconv.Atoi(offset); err == nil && o >= 0 {
+			opts.Offset = o
+		}
+	}
+	if sessionID := r.URL.Query().Get("session_id"); sessionID != "" {
+		opts.SessionID = sessionID
+	}
+	if eventType := r.URL.Query().Get("type"); eventType != "" {
+		opts.Type = storage.EventType(eventType)
+	}
+	if severity := r.URL.Query().Get("severity"); severity != "" {
+		opts.Severity = severity
+	}
+	if since := r.URL.Query().Get("since"); since != "" {
+		if t, err := time.Parse(time.RFC3339, since); err == nil {
+			opts.Since = &t
+		}
+	}
+	if until := r.URL.Query().Get("until"); until != "" {
+		if t, err := time.Parse(time.RFC3339, until); err == nil {
+			opts.Until = &t
+		}
+	}
+
+	events, err := h.historyStore.ListEvents(opts)
+	if err != nil {
+		slog.Error("failed to list events", "error", err)
+		http.Error(w, "Failed to retrieve events", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"count":  len(events),
+		"events": events,
+	})
+}
+
+// handleEventStats handles GET /control/events/stats
+func (h *Handler) handleEventStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"error": "storage not enabled",
+		})
+		return
+	}
+
+	var since *time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			since = &t
+		}
+	}
+
+	stats, err := h.historyStore.GetEventStats(since)
+	if err != nil {
+		slog.Error("failed to get event stats", "error", err)
+		http.Error(w, "Failed to retrieve event stats", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleSessionEvents handles GET /control/events/{sessionID}
+func (h *Handler) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "Storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Extract session ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/control/events/")
+	if path == "" || path == "stats" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	sessionID := strings.Split(path, "/")[0]
+
+	events, err := h.historyStore.GetSessionEvents(sessionID)
+	if err != nil {
+		slog.Error("failed to get session events", "session_id", sessionID, "error", err)
+		http.Error(w, "Failed to retrieve session events", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"count":      len(events),
+		"events":     events,
+	})
 }

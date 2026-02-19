@@ -1,0 +1,101 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go
+vendor/
+go.work
+
+# Coverage
+coverage.html
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data and databases (don't include local data in image)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# TLS certificates and keys (should be mounted at runtime)
+*.pem
+*.key
+*.crt
+*.csr
+certs/
+ssl/
+
+# Secrets and credentials
+.env
+.env.*
+secrets/
+credentials/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Local config overrides
+configs/elida.local.yaml
+configs/*.local.yaml
+
+# Documentation (not needed in image)
+docs/
+*.md
+!README.md
+LICENSE
+SECURITY.md
+
+# Test files
+test/
+*_test.go
+testdata/
+
+# Scripts (build scripts not needed in runtime image)
+scripts/
+
+# Docker files (avoid recursive context)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Web build artifacts (will be built fresh in multi-stage)
+web/node_modules/
+web/dist/
+web/.bun/
+
+# Claude/AI artifacts
+.claude/
+CLAUDE.md
+CLAUDE.md.backup
+*.backup
+
+# Misc
+Makefile
+*.md
+!configs/*.yaml

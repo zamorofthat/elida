@@ -62,7 +62,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("starting ELIDA",
-		"version", "0.1.0",
+		"version", "0.2.0",
 		"listen", cfg.Listen,
 		"backend", cfg.Backend,
 		"session_store", cfg.Session.Store,
@@ -206,6 +206,54 @@ func main() {
 			if sqliteStore != nil {
 				if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
 					slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
+				}
+
+				// Record events to audit log
+				eventCtx := context.Background()
+
+				// Record session ended event
+				if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventSessionEnded, snap.ID, "", storage.SessionEndedData{
+					State:        snap.State.String(),
+					DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
+					RequestCount: snap.RequestCount,
+					BytesIn:      snap.BytesIn,
+					BytesOut:     snap.BytesOut,
+				}); eventErr != nil {
+					slog.Error("failed to record session_ended event", "session_id", snap.ID, "error", eventErr)
+				}
+
+				// Record violation events
+				for _, v := range record.Violations {
+					if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
+						RuleName:    v.RuleName,
+						Description: v.Description,
+						Severity:    v.Severity,
+						MatchedText: v.MatchedText,
+						Action:      v.Action,
+					}); eventErr != nil {
+						slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
+					}
+				}
+
+				// Record token usage if tracked
+				tokensIn, tokensOut := sess.GetTokens()
+				if tokensIn > 0 || tokensOut > 0 {
+					if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventTokensUsed, snap.ID, "", storage.TokensUsedData{
+						TokensIn:  tokensIn,
+						TokensOut: tokensOut,
+					}); eventErr != nil {
+						slog.Error("failed to record tokens_used event", "session_id", snap.ID, "error", eventErr)
+					}
+				}
+
+				// Record tool call events
+				for toolName, count := range sess.GetToolCallCounts() {
+					if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventToolCalled, snap.ID, "", storage.ToolCalledData{
+						ToolName:  toolName,
+						CallCount: count,
+					}); eventErr != nil {
+						slog.Error("failed to record tool_called event", "session_id", snap.ID, "error", eventErr)
+					}
 				}
 			}
 

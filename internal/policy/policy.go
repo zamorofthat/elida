@@ -30,6 +30,16 @@ const (
 	RuleTypeRequestsPerMin RuleType = "requests_per_minute"
 	RuleTypeIdleTime       RuleType = "idle_time"
 
+	// Token-based rules (not credentials, gosec false positive)
+	RuleTypeTokensIn     RuleType = "tokens_in"
+	RuleTypeTokensOut    RuleType = "tokens_out"
+	RuleTypeTokensTotal  RuleType = "tokens_total"
+	RuleTypeTokensPerMin RuleType = "tokens_per_minute" // #nosec G101 -- not a credential
+
+	// Tool call rules
+	RuleTypeToolCallCount RuleType = "tool_call_count"
+	RuleTypeToolFanout    RuleType = "tool_fanout" // Distinct tools used
+
 	// Content inspection rules
 	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request/response body
 )
@@ -78,6 +88,14 @@ type SessionMetrics struct {
 	IdleTime     time.Duration
 	StartTime    time.Time
 	RequestTimes []time.Time // For rate calculation
+
+	// Token metrics
+	TokensIn  int64
+	TokensOut int64
+
+	// Tool call metrics
+	ToolCalls  int
+	ToolFanout int // Distinct tools used
 }
 
 // FlaggedSession tracks a session that has policy violations
@@ -88,6 +106,37 @@ type FlaggedSession struct {
 	FirstFlagged    time.Time         `json:"first_flagged"`
 	LastFlagged     time.Time         `json:"last_flagged"`
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
+
+	// Risk ladder fields
+	RiskScore       float64        `json:"risk_score"`       // Cumulative weighted risk score
+	ViolationCounts map[string]int `json:"violation_counts"` // Count per rule (not deduplicated)
+	CurrentAction   string         `json:"current_action"`   // Current ladder action based on score
+	ThrottleRate    int            `json:"throttle_rate"`    // Requests per minute when throttled (0 = no throttle)
+}
+
+// SeverityWeights defines risk score multipliers for each severity level
+var SeverityWeights = map[Severity]float64{
+	SeverityInfo:     1.0,
+	SeverityWarning:  3.0,
+	SeverityCritical: 10.0,
+}
+
+// RiskLadderAction defines actions that can be taken based on risk score
+type RiskLadderAction string
+
+const (
+	ActionObserve   RiskLadderAction = "observe"   // Log only (default)
+	ActionWarn      RiskLadderAction = "warn"      // Log warning + increment risk
+	ActionThrottle  RiskLadderAction = "throttle"  // Reduce rate limit
+	ActionBlock     RiskLadderAction = "block"     // Block new requests
+	ActionTerminate RiskLadderAction = "terminate" // Kill session
+)
+
+// RiskThreshold defines a threshold and action for the risk ladder
+type RiskThreshold struct {
+	Score        float64          `yaml:"score" json:"score"`
+	Action       RiskLadderAction `yaml:"action" json:"action"`
+	ThrottleRate int              `yaml:"throttle_rate" json:"throttle_rate"` // Only for throttle action
 }
 
 // CapturedRequest stores request/response content for flagged sessions
@@ -115,6 +164,10 @@ type Engine struct {
 	captureContent  bool
 	maxCaptureSize  int  // Max bytes to capture per request
 	auditMode       bool // If true, log but don't enforce (dry-run)
+
+	// Risk ladder configuration
+	riskLadderEnabled bool
+	riskThresholds    []RiskThreshold
 }
 
 // Config for the policy engine
@@ -124,6 +177,15 @@ type Config struct {
 	CaptureContent bool   `yaml:"capture_flagged"`
 	MaxCaptureSize int    `yaml:"max_capture_size"`
 	Rules          []Rule `yaml:"rules"`
+
+	// Risk ladder configuration
+	RiskLadder RiskLadderConfig `yaml:"risk_ladder"`
+}
+
+// RiskLadderConfig configures progressive escalation based on cumulative risk score
+type RiskLadderConfig struct {
+	Enabled    bool            `yaml:"enabled"`
+	Thresholds []RiskThreshold `yaml:"thresholds"`
 }
 
 // NewEngine creates a new policy engine
@@ -135,13 +197,26 @@ func NewEngine(cfg Config) *Engine {
 	// Default to enforce mode if not specified
 	auditMode := cfg.Mode == "audit"
 
+	// Default risk thresholds if enabled but none specified
+	thresholds := cfg.RiskLadder.Thresholds
+	if cfg.RiskLadder.Enabled && len(thresholds) == 0 {
+		thresholds = []RiskThreshold{
+			{Score: 5, Action: ActionWarn},
+			{Score: 15, Action: ActionThrottle, ThrottleRate: 10},
+			{Score: 30, Action: ActionBlock},
+			{Score: 50, Action: ActionTerminate},
+		}
+	}
+
 	e := &Engine{
-		rules:           cfg.Rules,
-		compiledRules:   make([]CompiledRule, 0),
-		flaggedSessions: make(map[string]*FlaggedSession),
-		captureContent:  cfg.CaptureContent,
-		maxCaptureSize:  cfg.MaxCaptureSize,
-		auditMode:       auditMode,
+		rules:             cfg.Rules,
+		compiledRules:     make([]CompiledRule, 0),
+		flaggedSessions:   make(map[string]*FlaggedSession),
+		captureContent:    cfg.CaptureContent,
+		maxCaptureSize:    cfg.MaxCaptureSize,
+		auditMode:         auditMode,
+		riskLadderEnabled: cfg.RiskLadder.Enabled,
+		riskThresholds:    thresholds,
 	}
 
 	// Compile regex patterns for content rules
@@ -233,6 +308,30 @@ func (e *Engine) evaluateRule(rule Rule, metrics SessionMetrics) *Violation {
 		actualValue = e.calculateRequestsPerMinute(metrics)
 		exceeded = actualValue > rule.Threshold
 
+	case RuleTypeTokensIn:
+		actualValue = metrics.TokensIn
+		exceeded = actualValue > rule.Threshold
+
+	case RuleTypeTokensOut:
+		actualValue = metrics.TokensOut
+		exceeded = actualValue > rule.Threshold
+
+	case RuleTypeTokensTotal:
+		actualValue = metrics.TokensIn + metrics.TokensOut
+		exceeded = actualValue > rule.Threshold
+
+	case RuleTypeTokensPerMin:
+		actualValue = e.calculateTokensPerMinute(metrics)
+		exceeded = actualValue > rule.Threshold
+
+	case RuleTypeToolCallCount:
+		actualValue = int64(metrics.ToolCalls)
+		exceeded = actualValue > rule.Threshold
+
+	case RuleTypeToolFanout:
+		actualValue = int64(metrics.ToolFanout)
+		exceeded = actualValue > rule.Threshold
+
 	default:
 		return nil
 	}
@@ -249,6 +348,15 @@ func (e *Engine) evaluateRule(rule Rule, metrics SessionMetrics) *Violation {
 	}
 
 	return nil
+}
+
+// calculateTokensPerMinute calculates the token rate (approximation based on session duration)
+func (e *Engine) calculateTokensPerMinute(metrics SessionMetrics) int64 {
+	if metrics.Duration.Minutes() < 0.1 {
+		return 0 // Avoid division by zero for very short sessions
+	}
+	totalTokens := metrics.TokensIn + metrics.TokensOut
+	return int64(float64(totalTokens) / metrics.Duration.Minutes())
 }
 
 // calculateRequestsPerMinute calculates the request rate
@@ -407,20 +515,29 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	flagged, exists := e.flaggedSessions[sessionID]
 	if !exists {
 		flagged = &FlaggedSession{
-			SessionID:    sessionID,
-			FirstFlagged: time.Now(),
-			Violations:   []Violation{},
+			SessionID:       sessionID,
+			FirstFlagged:    time.Now(),
+			Violations:      []Violation{},
+			ViolationCounts: make(map[string]int),
 		}
 		e.flaggedSessions[sessionID] = flagged
 	}
 
-	// Add new violations (avoid duplicates by rule name)
+	// Initialize ViolationCounts if nil (for backwards compatibility)
+	if flagged.ViolationCounts == nil {
+		flagged.ViolationCounts = make(map[string]int)
+	}
+
+	// Add new violations (avoid duplicates by rule name for the list)
 	existingRules := make(map[string]bool)
 	for _, v := range flagged.Violations {
 		existingRules[v.RuleName] = true
 	}
 
 	for _, v := range violations {
+		// Always increment count (don't deduplicate)
+		flagged.ViolationCounts[v.RuleName]++
+
 		if !existingRules[v.RuleName] {
 			flagged.Violations = append(flagged.Violations, v)
 			existingRules[v.RuleName] = true
@@ -438,6 +555,54 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 
 	flagged.LastFlagged = time.Now()
 	flagged.MaxSeverity = e.calculateMaxSeverity(flagged.Violations)
+
+	// Calculate risk score and determine ladder action
+	if e.riskLadderEnabled {
+		flagged.RiskScore = e.calculateRiskScore(flagged)
+		flagged.CurrentAction, flagged.ThrottleRate = e.determineRiskAction(flagged.RiskScore)
+
+		slog.Info("risk score updated",
+			"session_id", sessionID,
+			"risk_score", flagged.RiskScore,
+			"action", flagged.CurrentAction,
+			"throttle_rate", flagged.ThrottleRate,
+		)
+	}
+}
+
+// calculateRiskScore computes cumulative weighted risk score
+func (e *Engine) calculateRiskScore(fs *FlaggedSession) float64 {
+	var score float64
+	for _, v := range fs.Violations {
+		count := fs.ViolationCounts[v.RuleName]
+		if count == 0 {
+			count = 1 // At least 1 occurrence
+		}
+		weight := SeverityWeights[v.Severity]
+		if weight == 0 {
+			weight = 1.0 // Default weight
+		}
+		score += float64(count) * weight
+	}
+	return score
+}
+
+// determineRiskAction determines the appropriate action based on risk score
+func (e *Engine) determineRiskAction(score float64) (string, int) {
+	action := string(ActionObserve)
+	throttleRate := 0
+
+	// Find the highest threshold that the score exceeds
+	for _, threshold := range e.riskThresholds {
+		if score >= threshold.Score {
+			action = string(threshold.Action)
+			if threshold.Action == ActionThrottle {
+				throttleRate = threshold.ThrottleRate
+			}
+		}
+	}
+
+	return action, throttleRate
 }
 
 // calculateMaxSeverity returns the highest severity from violations
@@ -583,6 +748,9 @@ func (e *Engine) Stats() map[string]interface{} {
 	defer e.mu.RUnlock()
 
 	var critical, warning, info int
+	var highRisk, throttled, blocked int
+	var totalRiskScore float64
+
 	for _, f := range e.flaggedSessions {
 		switch f.MaxSeverity {
 		case SeverityCritical:
@@ -592,15 +760,88 @@ func (e *Engine) Stats() map[string]interface{} {
 		case SeverityInfo:
 			info++
 		}
+
+		// Risk ladder stats
+		if f.RiskScore >= 30 {
+			highRisk++
+		}
+		if f.CurrentAction == string(ActionThrottle) {
+			throttled++
+		}
+		if f.CurrentAction == string(ActionBlock) {
+			blocked++
+		}
+		totalRiskScore += f.RiskScore
+	}
+
+	avgRiskScore := 0.0
+	if len(e.flaggedSessions) > 0 {
+		avgRiskScore = totalRiskScore / float64(len(e.flaggedSessions))
 	}
 
 	return map[string]interface{}{
-		"total_flagged": len(e.flaggedSessions),
-		"critical":      critical,
-		"warning":       warning,
-		"info":          info,
-		"rules_count":   len(e.rules),
+		"total_flagged":  len(e.flaggedSessions),
+		"critical":       critical,
+		"warning":        warning,
+		"info":           info,
+		"rules_count":    len(e.rules),
+		"risk_ladder":    e.riskLadderEnabled,
+		"high_risk":      highRisk,
+		"throttled":      throttled,
+		"blocked":        blocked,
+		"avg_risk_score": avgRiskScore,
 	}
+}
+
+// GetSessionRiskScore returns the risk score for a session
+func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if flagged, exists := e.flaggedSessions[sessionID]; exists {
+		return flagged.RiskScore, flagged.CurrentAction, flagged.ThrottleRate
+	}
+	return 0, string(ActionObserve), 0
+}
+
+// ShouldThrottle returns true if the session should be rate limited
+func (e *Engine) ShouldThrottle(sessionID string) (bool, int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if flagged, exists := e.flaggedSessions[sessionID]; exists {
+		if flagged.CurrentAction == string(ActionThrottle) {
+			return true, flagged.ThrottleRate
+		}
+	}
+	return false, 0
+}
+
+// ShouldBlockByRisk returns true if the session should be blocked based on risk score
+func (e *Engine) ShouldBlockByRisk(sessionID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if flagged, exists := e.flaggedSessions[sessionID]; exists {
+		return flagged.CurrentAction == string(ActionBlock) || flagged.CurrentAction == string(ActionTerminate)
+	}
+	return false
+}
+
+// ShouldTerminateByRisk returns true if the session should be terminated based on risk score
+func (e *Engine) ShouldTerminateByRisk(sessionID string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if flagged, exists := e.flaggedSessions[sessionID]; exists {
+		return flagged.CurrentAction == string(ActionTerminate)
+	}
+	return false
+}
+
+// IsRiskLadderEnabled returns true if risk ladder is enabled
+func (e *Engine) IsRiskLadderEnabled() bool {
+	return e.riskLadderEnabled
 }
 
 // StreamingScanner handles chunk-based content scanning with overlap for cross-boundary patterns
