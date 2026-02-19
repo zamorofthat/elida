@@ -202,8 +202,8 @@ func (r *PatternRedactor) redactSlice(data []interface{}) []interface{} {
 
 // Config holds redaction configuration
 type Config struct {
-	Enabled         bool             `yaml:"enabled"`
-	CustomPatterns  []PatternConfig  `yaml:"patterns"`
+	Enabled        bool            `yaml:"enabled"`
+	CustomPatterns []PatternConfig `yaml:"patterns"`
 }
 
 // PatternConfig represents a custom pattern in config

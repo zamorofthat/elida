@@ -78,15 +78,15 @@ func createStrictPolicyEngine() *policy.Engine {
 
 // ChaosResults tracks test results for reporting
 type ChaosResults struct {
-	Total             int
-	Passed            int
-	Failed            int
-	TruePositives     int // Correctly detected attacks
-	TrueNegatives     int // Correctly passed benign
-	FalsePositives    int // Benign flagged as attack
-	FalseNegatives    int // Attack not detected
-	FailedByCategory  map[string]int
-	DetailedFailures  []string
+	Total            int
+	Passed           int
+	Failed           int
+	TruePositives    int // Correctly detected attacks
+	TrueNegatives    int // Correctly passed benign
+	FalsePositives   int // Benign flagged as attack
+	FalseNegatives   int // Attack not detected
+	FailedByCategory map[string]int
+	DetailedFailures []string
 }
 
 // TestChaos_StandardPreset runs all scenarios against the standard policy preset

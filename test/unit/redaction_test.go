@@ -177,9 +177,9 @@ func TestRedactor_RedactMap(t *testing.T) {
 	r := redaction.NewPatternRedactor()
 
 	data := map[string]interface{}{
-		"email":    "user@example.com",
-		"ssn":      "123-45-6789",
-		"name":     "John Doe",
+		"email": "user@example.com",
+		"ssn":   "123-45-6789",
+		"name":  "John Doe",
 		"nested": map[string]interface{}{
 			"api_key": "sk-abcdefghij1234567890",
 		},

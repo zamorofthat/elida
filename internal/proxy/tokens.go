@@ -260,9 +260,9 @@ func ExtractToolCallsFromResponse(body []byte) []ToolCallInfo {
 	// Anthropic response format with tool_use
 	var anthropicResp struct {
 		Content []struct {
-			Type  string `json:"type"`
-			ID    string `json:"id"`
-			Name  string `json:"name"`
+			Type  string      `json:"type"`
+			ID    string      `json:"id"`
+			Name  string      `json:"name"`
 			Input interface{} `json:"input"`
 		} `json:"content"`
 	}

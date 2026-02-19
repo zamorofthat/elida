@@ -247,8 +247,8 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 	for rows.Next() {
 		var eventType string
 		var count int64
-		if err := rows.Scan(&eventType, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&eventType, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.EventsByType[eventType] = count
 	}
@@ -263,8 +263,8 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 	for rows.Next() {
 		var severity string
 		var count int64
-		if err := rows.Scan(&severity, &count); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&severity, &count); scanErr != nil {
+			return nil, scanErr
 		}
 		stats.EventsBySeverity[severity] = count
 	}
