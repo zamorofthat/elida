@@ -377,8 +377,8 @@ func getStandardPresetRules() []policy.Rule {
 
 		// OWASP LLM01 - Prompt Injection
 		{Name: "prompt_injection_ignore", Type: "content_match", Target: "request", Patterns: []string{
-			"ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions|prompts|rules)",
-			"disregard\\s+(all\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
+			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
+			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
 			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
 		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - instruction override"},
 		{Name: "prompt_injection_jailbreak", Type: "content_match", Target: "request", Patterns: []string{
@@ -386,6 +386,11 @@ func getStandardPresetRules() []policy.Rule {
 			"enable\\s+(DAN|developer|jailbreak)\\s+mode",
 			"jailbreak(ed)?\\s+(mode|prompt|enabled)",
 		}, Severity: "critical", Action: "terminate", Description: "LLM01: Prompt injection - jailbreak attempt"},
+		{Name: "prompt_injection_roleplay", Type: "content_match", Target: "request", Patterns: []string{
+			"you\\s+are\\s+(now\\s+)?a\\s+.{0,30}(without|no)\\s+(any\\s+)?restrictions",
+			"(pretend|act|behave)\\s+(like\\s+)?you\\s+(have|are)\\s+no\\s+(rules|restrictions|limits)",
+			"(without|bypass|ignore)\\s+(any\\s+)?(safety|ethical)\\s+(guidelines|restrictions|rules)",
+		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - roleplay restriction bypass"},
 
 		// OWASP LLM02 - Insecure Output Handling
 		{Name: "output_script_injection", Type: "content_match", Target: "response", Patterns: []string{
@@ -423,9 +428,9 @@ func getStandardPresetRules() []policy.Rule {
 			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
 		}, Severity: "critical", Action: "terminate", Description: "LLM08: Destructive file operation"},
 		{Name: "privilege_escalation", Type: "content_match", Target: "request", Patterns: []string{
-			"sudo\\s+",
-			"(run|execute)\\s+(as|with)\\s+root",
-			"privilege\\s+(escalation|elevation)",
+			"sudo\\s+(rm|chmod|chown|kill|bash|sh|python|perl|ruby|apt|yum|dnf|pip|npm|make|gcc|curl|wget)\\b",
+			"(run|execute)\\s+(this\\s+)?(command\\s+)?(as|with)\\s+root",
+			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
 		}, Severity: "critical", Action: "block", Description: "LLM08: Privilege escalation attempt"},
 		{Name: "network_exfiltration", Type: "content_match", Target: "request", Patterns: []string{
 			"curl.*\\|\\s*(ba)?sh",
@@ -438,6 +443,21 @@ func getStandardPresetRules() []policy.Rule {
 			"(extract|dump|export)\\s+(the\\s+)?(model|weights|parameters)",
 			"(what|describe)\\s+(is|are)\\s+your\\s+(weights|parameters|architecture)",
 		}, Severity: "warning", Action: "flag", Description: "LLM10: Model extraction attempt"},
+
+		// OWASP LLM06 - Data Exfiltration
+		{Name: "bulk_data_extraction", Type: "content_match", Target: "request", Patterns: []string{
+			"(list|show|give|dump)\\s+(all\\s+)?(user|customer|employee)\\s+(data|info|records|passwords)",
+			"(extract|export|download)\\s+(all\\s+)?(user|database|customer)\\s+(data|records|table)",
+			"(get|read|fetch)\\s+(all|every)\\s+(user|customer|account)\\s+from",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Bulk data extraction attempt"},
+
+		// Recursive/Exhaustive Prompts
+		{Name: "recursive_prompt", Type: "content_match", Target: "request", Patterns: []string{
+			"for\\s+(each|every|all)\\s+(possible\\s+)?(input|combination|permutation)",
+			"test\\s+(all|every|each)\\s+(possible\\s+)?(combination|permutation|input)",
+			"(exhaustive|brute\\s*force)\\s+(test|search|scan|check)",
+			"(iterate|loop)\\s+(through\\s+)?(all|every|each)\\s+(possible|input)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Recursive/exhaustive prompt detected"},
 
 		// OWASP LLM06 - Sensitive data
 		{Name: "credentials_request", Type: "content_match", Target: "request", Patterns: []string{
