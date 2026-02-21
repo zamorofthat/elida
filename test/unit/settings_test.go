@@ -95,7 +95,8 @@ func TestSettingsStore_GetMerged(t *testing.T) {
 			Mode: &audit, // Only override mode, not preset
 		},
 	}
-	if err := store.SaveLocal(local); err != nil {
+	err = store.SaveLocal(local)
+	if err != nil {
 		t.Fatalf("failed to save local settings: %v", err)
 	}
 
@@ -132,7 +133,8 @@ func TestSettingsStore_ResetToDefault(t *testing.T) {
 			Mode: &audit,
 		},
 	}
-	if err := store.SaveLocal(local); err != nil {
+	err = store.SaveLocal(local)
+	if err != nil {
 		t.Fatalf("failed to save local settings: %v", err)
 	}
 
@@ -185,7 +187,8 @@ func TestSettingsStore_GetDiff(t *testing.T) {
 			},
 		},
 	}
-	if err := store.SaveLocal(local); err != nil {
+	err = store.SaveLocal(local)
+	if err != nil {
 		t.Fatalf("failed to save local settings: %v", err)
 	}
 
@@ -229,7 +232,8 @@ func TestSettingsStore_MergeRiskLadder(t *testing.T) {
 			},
 		},
 	}
-	if err := store.SaveLocal(local); err != nil {
+	err = store.SaveLocal(local)
+	if err != nil {
 		t.Fatalf("failed to save local settings: %v", err)
 	}
 
@@ -268,7 +272,8 @@ func TestSettingsStore_FailoverSettings(t *testing.T) {
 			FallbackOrder: []string{"groq", "openai", "ollama"},
 		},
 	}
-	if err := store.SaveLocal(local); err != nil {
+	err = store.SaveLocal(local)
+	if err != nil {
 		t.Fatalf("failed to save local settings: %v", err)
 	}
 
