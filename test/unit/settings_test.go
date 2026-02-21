@@ -62,7 +62,7 @@ func TestSettingsStore_SaveAndLoadLocal(t *testing.T) {
 
 	// Check file was created
 	settingsPath := filepath.Join(dir, "settings.json")
-	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(settingsPath); os.IsNotExist(statErr) {
 		t.Error("settings.json file was not created")
 	}
 
@@ -95,7 +95,9 @@ func TestSettingsStore_GetMerged(t *testing.T) {
 			Mode: &audit, // Only override mode, not preset
 		},
 	}
-	store.SaveLocal(local)
+	if err := store.SaveLocal(local); err != nil {
+		t.Fatalf("failed to save local settings: %v", err)
+	}
 
 	// Get merged
 	merged := store.GetMerged()
@@ -130,7 +132,9 @@ func TestSettingsStore_ResetToDefault(t *testing.T) {
 			Mode: &audit,
 		},
 	}
-	store.SaveLocal(local)
+	if err := store.SaveLocal(local); err != nil {
+		t.Fatalf("failed to save local settings: %v", err)
+	}
 
 	// Verify local is set
 	if store.GetLocal().Policy.Mode == nil {
@@ -181,7 +185,9 @@ func TestSettingsStore_GetDiff(t *testing.T) {
 			},
 		},
 	}
-	store.SaveLocal(local)
+	if err := store.SaveLocal(local); err != nil {
+		t.Fatalf("failed to save local settings: %v", err)
+	}
 
 	// Check diff
 	diff = store.GetDiff()
@@ -223,7 +229,9 @@ func TestSettingsStore_MergeRiskLadder(t *testing.T) {
 			},
 		},
 	}
-	store.SaveLocal(local)
+	if err := store.SaveLocal(local); err != nil {
+		t.Fatalf("failed to save local settings: %v", err)
+	}
 
 	merged := store.GetMerged()
 	rl := merged.Policy.RiskLadder
@@ -260,7 +268,9 @@ func TestSettingsStore_FailoverSettings(t *testing.T) {
 			FallbackOrder: []string{"groq", "openai", "ollama"},
 		},
 	}
-	store.SaveLocal(local)
+	if err := store.SaveLocal(local); err != nil {
+		t.Fatalf("failed to save local settings: %v", err)
+	}
 
 	merged := store.GetMerged()
 
