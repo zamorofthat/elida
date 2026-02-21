@@ -38,6 +38,7 @@ type Proxy struct {
 	wsHandler     WebSocketHandler     // WebSocket proxy handler
 	captureBuffer *CaptureBuffer       // For capture-all mode (policy-independent)
 	captureAll    bool                 // True when capture_mode == "all"
+	failover      *FailoverController  // Session-aware failover controller
 }
 
 // New creates a new proxy handler
@@ -120,6 +121,11 @@ func (p *Proxy) GetRouter() *router.Router {
 // GetCaptureBuffer returns the capture buffer (nil if capture-all is not enabled)
 func (p *Proxy) GetCaptureBuffer() *CaptureBuffer {
 	return p.captureBuffer
+}
+
+// SetFailoverController sets the failover controller for session-aware failover
+func (p *Proxy) SetFailoverController(fc *FailoverController) {
+	p.failover = fc
 }
 
 // IsCaptureAll returns true if capture-all mode is enabled
@@ -498,6 +504,17 @@ func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backendURL *u
 // handleStandard handles non-streaming requests
 func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *session.Session, backend *router.Backend) (int, int64) {
 	resp, err := backend.Transport.RoundTrip(req)
+
+	// Check for failover conditions
+	failureType := DetectFailure(resp, err)
+	if failureType != FailureNone && p.failover != nil && p.failover.IsEnabled() {
+		statusCode, bytesOut, retried := p.attemptFailover(w, req, sess, backend, failureType)
+		if retried {
+			return statusCode, bytesOut
+		}
+		// Failover failed or not possible, continue with error handling
+	}
+
 	if err != nil {
 		slog.Error("backend request failed",
 			"session_id", sess.ID,
@@ -1104,6 +1121,124 @@ func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 		},
 		Transport: defaultBackend.Transport,
 	}
+}
+
+// attemptFailover tries to failover to another backend after a failure
+// Returns (statusCode, bytesOut, retried) where retried indicates if failover was attempted
+func (p *Proxy) attemptFailover(w http.ResponseWriter, originalReq *http.Request, sess *session.Session, failedBackend *router.Backend, failureType FailureType) (int, int64, bool) {
+	ctx := originalReq.Context()
+
+	// Get next available backend
+	fallbackInfo, err := p.failover.HandleFailover(ctx, sess, failedBackend.Name, failureType)
+	if err != nil {
+		slog.Warn("failover failed",
+			"session_id", sess.ID,
+			"failed_backend", failedBackend.Name,
+			"error", err,
+		)
+		return 0, 0, false
+	}
+
+	// Get the actual backend from the router
+	fallbackBackend, ok := p.router.GetBackend(fallbackInfo.Name)
+	if !ok {
+		slog.Error("failover backend not found in router",
+			"session_id", sess.ID,
+			"backend", fallbackInfo.Name,
+		)
+		return 0, 0, false
+	}
+
+	// Get session state for rehydration
+	state := sess.Serialize()
+
+	// Get the appropriate rehydrator for the target backend
+	rehydrator := GetRehydrator(fallbackInfo.Type)
+
+	// Rehydrate the request with full conversation history
+	newReq, err := rehydrator.Rehydrate(state, originalReq)
+	if err != nil {
+		slog.Error("failed to rehydrate request for failover",
+			"session_id", sess.ID,
+			"target_backend", fallbackInfo.Name,
+			"error", err,
+		)
+		return 0, 0, false
+	}
+
+	// Update request URL for new backend
+	newReq.URL.Scheme = fallbackBackend.URL.Scheme
+	newReq.URL.Host = fallbackBackend.URL.Host
+	newReq.Host = fallbackBackend.URL.Host
+
+	slog.Info("executing failover request",
+		"session_id", sess.ID,
+		"from_backend", failedBackend.Name,
+		"to_backend", fallbackInfo.Name,
+		"messages", len(state.Messages),
+	)
+
+	// Record the backend switch
+	sess.RecordBackend(fallbackInfo.Name)
+
+	// Execute request on new backend
+	resp, err := fallbackBackend.Transport.RoundTrip(newReq)
+	if err != nil {
+		// Failover also failed - check if we should try another
+		failureType := DetectFailure(resp, err)
+		if failureType != FailureNone {
+			// Try next fallback
+			return p.attemptFailover(w, originalReq, sess, fallbackBackend, failureType)
+		}
+		slog.Error("failover request failed",
+			"session_id", sess.ID,
+			"backend", fallbackInfo.Name,
+			"error", err,
+		)
+		http.Error(w, "Backend unavailable after failover", http.StatusBadGateway)
+		return http.StatusBadGateway, 0, true
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Read and process response
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Error("failed to read failover response",
+			"session_id", sess.ID,
+			"error", err,
+		)
+		http.Error(w, "Failed to read backend response", http.StatusBadGateway)
+		return http.StatusBadGateway, 0, true
+	}
+
+	sess.AddBytes(0, int64(len(responseBody)))
+
+	// Extract token usage from response
+	if tokenUsage := ExtractTokenUsage(responseBody); tokenUsage != nil {
+		sess.AddTokens(tokenUsage.PromptTokens, tokenUsage.CompletionTokens)
+	}
+
+	// Write response
+	w.WriteHeader(resp.StatusCode)
+	if _, err := w.Write(responseBody); err != nil {
+		slog.Warn("write failed", "session_id", sess.ID, "error", err)
+	}
+
+	slog.Info("failover request completed",
+		"session_id", sess.ID,
+		"backend", fallbackInfo.Name,
+		"status", resp.StatusCode,
+		"bytes", len(responseBody),
+	)
+
+	return resp.StatusCode, int64(len(responseBody)), true
 }
 
 // persistFlaggedSession saves a flagged session to storage immediately

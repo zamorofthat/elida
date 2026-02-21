@@ -67,3 +67,6 @@ credentials/
 # ELIDA runtime
 .elida/
 /elida
+
+# Internal docs
+elida-internal/
