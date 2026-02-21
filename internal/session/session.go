@@ -74,14 +74,45 @@ type Session struct {
 
 	// Tool call history (who called what)
 	ToolCallHistory []ToolCallRecord `json:"tool_call_history,omitempty"`
+
+	// Conversation history for failover/replay
+	Messages     []Message `json:"messages,omitempty"`
+	SystemPrompt string    `json:"system_prompt,omitempty"`
+
+	// Failed backends for this session (for failover)
+	FailedBackends []string `json:"failed_backends,omitempty"`
 }
 
 // ToolCallRecord tracks a single tool/function call
 type ToolCallRecord struct {
+	Timestamp time.Time      `json:"timestamp"`
+	ToolName  string         `json:"tool_name"`
+	ToolType  string         `json:"tool_type,omitempty"` // "function", "code_interpreter", etc.
+	RequestID string         `json:"request_id,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Result    string         `json:"result,omitempty"`
+}
+
+// Message represents a single message in the conversation history
+type Message struct {
+	Role      string    `json:"role"` // "user", "assistant", "system"
+	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
-	ToolName  string    `json:"tool_name"`
-	ToolType  string    `json:"tool_type,omitempty"` // "function", "code_interpreter", etc.
-	RequestID string    `json:"request_id,omitempty"`
+	Backend   string    `json:"backend,omitempty"` // which backend generated this
+}
+
+// SessionState is a serializable snapshot of session state for failover
+type SessionState struct {
+	ID             string            `json:"id"`
+	StartTime      time.Time         `json:"start_time"`
+	Messages       []Message         `json:"messages"`
+	ToolCalls      []ToolCallRecord  `json:"tool_calls"`
+	SystemPrompt   string            `json:"system_prompt,omitempty"`
+	TokensIn       int64             `json:"tokens_in"`
+	TokensOut      int64             `json:"tokens_out"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	CurrentBackend string            `json:"current_backend"`
+	FailedBackends []string          `json:"failed_backends,omitempty"`
 }
 
 // NewSession creates a new session with the given ID
@@ -386,6 +417,102 @@ func (s *Session) SetMetadata(key, value string) {
 	s.Metadata[key] = value
 }
 
+// RecordMessage adds a message to the conversation history
+func (s *Session) RecordMessage(role, content, backend string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	msg := Message{
+		Role:      role,
+		Content:   content,
+		Timestamp: time.Now(),
+		Backend:   backend,
+	}
+
+	s.Messages = append(s.Messages, msg)
+
+	// Keep last 100 messages to avoid memory bloat
+	if len(s.Messages) > 100 {
+		s.Messages = s.Messages[1:]
+	}
+}
+
+// SetSystemPrompt sets the system prompt for the session
+func (s *Session) SetSystemPrompt(prompt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SystemPrompt = prompt
+}
+
+// GetMessages returns a copy of the conversation history
+func (s *Session) GetMessages() []Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Message, len(s.Messages))
+	copy(result, s.Messages)
+	return result
+}
+
+// AddFailedBackend records a backend that failed for this session
+func (s *Session) AddFailedBackend(backend string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if already recorded
+	for _, b := range s.FailedBackends {
+		if b == backend {
+			return
+		}
+	}
+	s.FailedBackends = append(s.FailedBackends, backend)
+}
+
+// GetFailedBackends returns the list of failed backends
+func (s *Session) GetFailedBackends() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]string, len(s.FailedBackends))
+	copy(result, s.FailedBackends)
+	return result
+}
+
+// Serialize creates a serializable snapshot of session state for failover
+func (s *Session) Serialize() *SessionState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Copy messages
+	messages := make([]Message, len(s.Messages))
+	copy(messages, s.Messages)
+
+	// Copy tool calls
+	toolCalls := make([]ToolCallRecord, len(s.ToolCallHistory))
+	copy(toolCalls, s.ToolCallHistory)
+
+	// Copy metadata
+	metadata := make(map[string]string, len(s.Metadata))
+	for k, v := range s.Metadata {
+		metadata[k] = v
+	}
+
+	// Copy failed backends
+	failedBackends := make([]string, len(s.FailedBackends))
+	copy(failedBackends, s.FailedBackends)
+
+	return &SessionState{
+		ID:             s.ID,
+		StartTime:      s.StartTime,
+		Messages:       messages,
+		ToolCalls:      toolCalls,
+		SystemPrompt:   s.SystemPrompt,
+		TokensIn:       s.TokensIn,
+		TokensOut:      s.TokensOut,
+		Metadata:       metadata,
+		CurrentBackend: s.Backend,
+		FailedBackends: failedBackends,
+	}
+}
+
 // Snapshot returns a copy of the session for safe reading.
 // Note: Returns a new Session with a fresh zero-value mutex, not copying s.mu.
 //
@@ -430,6 +557,15 @@ func (s *Session) Snapshot() Session {
 	if s.ToolCallHistory != nil {
 		snap.ToolCallHistory = make([]ToolCallRecord, len(s.ToolCallHistory))
 		copy(snap.ToolCallHistory, s.ToolCallHistory)
+	}
+	if s.Messages != nil {
+		snap.Messages = make([]Message, len(s.Messages))
+		copy(snap.Messages, s.Messages)
+	}
+	snap.SystemPrompt = s.SystemPrompt
+	if s.FailedBackends != nil {
+		snap.FailedBackends = make([]string, len(s.FailedBackends))
+		copy(snap.FailedBackends, s.FailedBackends)
 	}
 	return snap
 }

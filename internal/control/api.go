@@ -2,12 +2,14 @@ package control
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"elida/internal/config"
 	"elida/internal/dashboard"
 	"elida/internal/policy"
 	"elida/internal/session"
@@ -17,13 +19,14 @@ import (
 
 // Handler handles control API requests
 type Handler struct {
-	store        session.Store
-	manager      *session.Manager
-	historyStore *storage.SQLiteStore
-	policyEngine *policy.Engine
-	wsHandler    *websocket.Handler
-	dashboard    *dashboard.Handler
-	mux          *http.ServeMux
+	store         session.Store
+	manager       *session.Manager
+	historyStore  *storage.SQLiteStore
+	policyEngine  *policy.Engine
+	wsHandler     *websocket.Handler
+	dashboard     *dashboard.Handler
+	settingsStore *config.SettingsStore
+	mux           *http.ServeMux
 
 	// Authentication
 	authEnabled bool
@@ -100,6 +103,12 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 	h.mux.HandleFunc("/control/events/stats", h.handleEventStats)
 	h.mux.HandleFunc("/control/events/", h.handleSessionEvents)
 
+	// Settings endpoints (layered config)
+	h.mux.HandleFunc("/control/settings", h.handleSettings)
+	h.mux.HandleFunc("/control/settings/defaults", h.handleSettingsDefaults)
+	h.mux.HandleFunc("/control/settings/local", h.handleSettingsLocal)
+	h.mux.HandleFunc("/control/settings/diff", h.handleSettingsDiff)
+
 	return h
 }
 
@@ -111,6 +120,11 @@ func (h *Handler) SetWebSocketHandler(wsHandler *websocket.Handler) {
 // SetCaptureMode sets the capture mode for display in the health endpoint
 func (h *Handler) SetCaptureMode(mode string) {
 	h.captureMode = mode
+}
+
+// SetSettingsStore sets the settings store for the handler
+func (h *Handler) SetSettingsStore(store *config.SettingsStore) {
+	h.settingsStore = store
 }
 
 // ServeHTTP implements http.Handler
@@ -1183,5 +1197,120 @@ func (h *Handler) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		"session_id": sessionID,
 		"count":      len(events),
 		"events":     events,
+	})
+}
+
+// =============================================================================
+// Settings Handlers (Layered Configuration)
+// =============================================================================
+
+// handleSettings returns merged settings (local overrides defaults)
+func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if h.settingsStore == nil {
+		http.Error(w, "Settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		settings := h.settingsStore.GetMerged()
+		writeJSON(w, http.StatusOK, settings)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSettingsDefaults returns ELIDA's built-in defaults (read-only)
+func (h *Handler) handleSettingsDefaults(w http.ResponseWriter, r *http.Request) {
+	if h.settingsStore == nil {
+		http.Error(w, "Settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	defaults := h.settingsStore.GetDefaults()
+	writeJSON(w, http.StatusOK, defaults)
+}
+
+// handleSettingsLocal manages user customizations
+func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
+	if h.settingsStore == nil {
+		http.Error(w, "Settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		// Get local customizations only
+		local := h.settingsStore.GetLocal()
+		writeJSON(w, http.StatusOK, local)
+
+	case http.MethodPut:
+		// Save local customizations
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+
+		var settings config.Settings
+		if err := json.Unmarshal(body, &settings); err != nil {
+			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := h.settingsStore.SaveLocal(settings); err != nil {
+			slog.Error("failed to save settings", "error", err)
+			http.Error(w, "Failed to save settings", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("local settings saved")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "saved",
+			"message": "Local settings saved successfully",
+		})
+
+	case http.MethodDelete:
+		// Reset to defaults (remove local customizations)
+		if err := h.settingsStore.ResetToDefault(); err != nil {
+			slog.Error("failed to reset settings", "error", err)
+			http.Error(w, "Failed to reset settings", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("settings reset to defaults")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "reset",
+			"message": "Settings reset to ELIDA defaults",
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSettingsDiff shows which settings differ from defaults
+func (h *Handler) handleSettingsDiff(w http.ResponseWriter, r *http.Request) {
+	if h.settingsStore == nil {
+		http.Error(w, "Settings not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	diff := h.settingsStore.GetDiff()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"modified_count": len(diff),
+		"modifications":  diff,
 	})
 }
