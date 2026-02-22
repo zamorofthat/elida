@@ -81,6 +81,28 @@ const IconEmpty = () => (
   </svg>
 )
 
+const IconSettings = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+)
+
+const IconSave = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+    <polyline points="17 21 17 13 7 13 7 21" />
+    <polyline points="7 3 7 8 15 8" />
+  </svg>
+)
+
+const IconReset = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </svg>
+)
+
 // ============================================================================
 // Sparkline Component
 // ============================================================================
@@ -175,6 +197,7 @@ function Sidebar({ activePage, onNavigate, flaggedCount }) {
     { id: 'flagged', label: 'Flagged', icon: IconShield, badge: flaggedCount },
     { id: 'voice', label: 'Voice', icon: IconMic },
     { id: 'history', label: 'History', icon: IconClock },
+    { id: 'settings', label: 'Settings', icon: IconSettings },
   ]
 
   return (
@@ -810,6 +833,540 @@ function VoiceDetails({ voiceSession, onClose }) {
 }
 
 // ============================================================================
+// Settings Page
+// ============================================================================
+
+function SettingsPage() {
+  const [settings, setSettings] = useState(null)
+  const [defaults, setDefaults] = useState(null)
+  const [diff, setDiff] = useState({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState(null)
+
+  const fetchSettings = async () => {
+    try {
+      const [settingsRes, defaultsRes, diffRes] = await Promise.all([
+        fetch(API_BASE + '/control/settings'),
+        fetch(API_BASE + '/control/settings/defaults'),
+        fetch(API_BASE + '/control/settings/diff'),
+      ])
+
+      if (settingsRes.ok) setSettings(await settingsRes.json())
+      if (defaultsRes.ok) setDefaults(await defaultsRes.json())
+      if (diffRes.ok) setDiff(await diffRes.json())
+    } catch (err) {
+      console.error('Failed to fetch settings:', err)
+      setMessage({ type: 'error', text: 'Failed to load settings' })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchSettings()
+  }, [])
+
+  const handleSave = async () => {
+    setSaving(true)
+    setMessage(null)
+    try {
+      const res = await fetch(API_BASE + '/control/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      })
+      if (res.ok) {
+        setMessage({ type: 'success', text: 'Settings saved to configs/settings.yaml' })
+        fetchSettings() // Refresh diff
+      } else {
+        const err = await res.text()
+        setMessage({ type: 'error', text: 'Failed to save: ' + err })
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Failed to save settings' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleReset = async () => {
+    if (!confirm('Reset all settings to defaults? This will delete configs/settings.yaml')) return
+    setSaving(true)
+    setMessage(null)
+    try {
+      const res = await fetch(API_BASE + '/control/settings', { method: 'DELETE' })
+      if (res.ok) {
+        setMessage({ type: 'success', text: 'Settings reset to defaults' })
+        fetchSettings()
+      } else {
+        setMessage({ type: 'error', text: 'Failed to reset settings' })
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: 'Failed to reset settings' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateSetting = (section, key, value) => {
+    setSettings(prev => ({
+      ...prev,
+      [section]: {
+        ...prev[section],
+        [key]: value,
+      },
+    }))
+  }
+
+  const updateNestedSetting = (section, subsection, key, value) => {
+    setSettings(prev => ({
+      ...prev,
+      [section]: {
+        ...prev[section],
+        [subsection]: {
+          ...prev[section]?.[subsection],
+          [key]: value,
+        },
+      },
+    }))
+  }
+
+  const addCustomRule = () => {
+    const newRule = {
+      name: 'new_rule_' + Date.now(),
+      type: 'content_match',
+      target: 'both',
+      patterns: [],
+      severity: 'warning',
+      action: 'flag',
+      description: '',
+    }
+    setSettings(prev => ({
+      ...prev,
+      policy: {
+        ...prev.policy,
+        custom_rules: [...(prev.policy?.custom_rules || []), newRule],
+      },
+    }))
+  }
+
+  const updateCustomRule = (index, field, value) => {
+    setSettings(prev => {
+      const rules = [...(prev.policy?.custom_rules || [])]
+      rules[index] = { ...rules[index], [field]: value }
+      return {
+        ...prev,
+        policy: { ...prev.policy, custom_rules: rules },
+      }
+    })
+  }
+
+  const removeCustomRule = (index) => {
+    setSettings(prev => {
+      const rules = [...(prev.policy?.custom_rules || [])]
+      rules.splice(index, 1)
+      return {
+        ...prev,
+        policy: { ...prev.policy, custom_rules: rules },
+      }
+    })
+  }
+
+  const isModified = (path) => diff && diff[path]
+
+  if (loading) {
+    return (
+      <div class="panel">
+        <div class="panel-body">
+          <p>Loading settings...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!settings) {
+    return (
+      <div class="panel">
+        <div class="panel-body">
+          <p class="error">Settings not available. Is the settings store initialized?</p>
+        </div>
+      </div>
+    )
+  }
+
+  const diffCount = Object.keys(diff || {}).length
+
+  return (
+    <>
+      {message && (
+        <div class={'settings-message ' + message.type}>
+          {message.text}
+        </div>
+      )}
+
+      <div class="settings-actions">
+        <button class="btn btn-primary" onClick={handleSave} disabled={saving}>
+          <IconSave />
+          <span>{saving ? 'Saving...' : 'Save Settings'}</span>
+        </button>
+        <button class="btn btn-secondary" onClick={handleReset} disabled={saving}>
+          <IconReset />
+          <span>Reset to Defaults</span>
+        </button>
+        {diffCount > 0 && (
+          <span class="settings-diff-count">{diffCount} setting{diffCount !== 1 ? 's' : ''} modified</span>
+        )}
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Policy Settings</h2>
+        </div>
+        <div class="panel-body">
+          <div class="settings-grid">
+            <div class={'settings-item' + (isModified('policy.enabled') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Policy Enabled</span>
+                {isModified('policy.enabled') && <span class="modified-badge">modified</span>}
+              </label>
+              <select
+                class="settings-select"
+                value={settings.policy?.enabled ? 'true' : 'false'}
+                onChange={(e) => updateSetting('policy', 'enabled', e.target.value === 'true')}
+              >
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+
+            <div class={'settings-item' + (isModified('policy.mode') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Policy Mode</span>
+                {isModified('policy.mode') && <span class="modified-badge">modified</span>}
+              </label>
+              <select
+                class="settings-select"
+                value={settings.policy?.mode || 'enforce'}
+                onChange={(e) => updateSetting('policy', 'mode', e.target.value)}
+              >
+                <option value="enforce">Enforce (block violations)</option>
+                <option value="audit">Audit (log only)</option>
+              </select>
+            </div>
+
+            <div class={'settings-item' + (isModified('policy.preset') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Policy Preset</span>
+                {isModified('policy.preset') && <span class="modified-badge">modified</span>}
+              </label>
+              <select
+                class="settings-select"
+                value={settings.policy?.preset || 'standard'}
+                onChange={(e) => updateSetting('policy', 'preset', e.target.value)}
+              >
+                <option value="minimal">Minimal (rate limits only)</option>
+                <option value="standard">Standard (OWASP basics)</option>
+                <option value="strict">Strict (full OWASP + PII)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Risk Ladder Thresholds</h2>
+        </div>
+        <div class="panel-body">
+          <div class="settings-grid">
+            <div class={'settings-item' + (isModified('policy.risk_ladder.warn_score') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Warn Score</span>
+                {isModified('policy.risk_ladder.warn_score') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.policy?.risk_ladder?.warn_score ?? 5}
+                onChange={(e) => updateNestedSetting('policy', 'risk_ladder', 'warn_score', parseInt(e.target.value))}
+              />
+            </div>
+
+            <div class={'settings-item' + (isModified('policy.risk_ladder.throttle_score') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Throttle Score</span>
+                {isModified('policy.risk_ladder.throttle_score') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.policy?.risk_ladder?.throttle_score ?? 15}
+                onChange={(e) => updateNestedSetting('policy', 'risk_ladder', 'throttle_score', parseInt(e.target.value))}
+              />
+            </div>
+
+            <div class={'settings-item' + (isModified('policy.risk_ladder.block_score') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Block Score</span>
+                {isModified('policy.risk_ladder.block_score') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.policy?.risk_ladder?.block_score ?? 30}
+                onChange={(e) => updateNestedSetting('policy', 'risk_ladder', 'block_score', parseInt(e.target.value))}
+              />
+            </div>
+
+            <div class={'settings-item' + (isModified('policy.risk_ladder.terminate_score') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Terminate Score</span>
+                {isModified('policy.risk_ladder.terminate_score') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.policy?.risk_ladder?.terminate_score ?? 50}
+                onChange={(e) => updateNestedSetting('policy', 'risk_ladder', 'terminate_score', parseInt(e.target.value))}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Capture Settings</h2>
+        </div>
+        <div class="panel-body">
+          <div class="settings-grid">
+            <div class={'settings-item' + (isModified('capture.mode') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Capture Mode</span>
+                {isModified('capture.mode') && <span class="modified-badge">modified</span>}
+              </label>
+              <select
+                class="settings-select"
+                value={settings.capture?.mode || 'flagged_only'}
+                onChange={(e) => updateSetting('capture', 'mode', e.target.value)}
+              >
+                <option value="flagged_only">Flagged Only (policy violations)</option>
+                <option value="all">All (CDR-style full audit)</option>
+              </select>
+            </div>
+
+            <div class={'settings-item' + (isModified('capture.max_capture_size') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Max Capture Size (bytes)</span>
+                {isModified('capture.max_capture_size') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.capture?.max_capture_size ?? 10000}
+                onChange={(e) => updateSetting('capture', 'max_capture_size', parseInt(e.target.value))}
+              />
+            </div>
+
+            <div class={'settings-item' + (isModified('capture.max_per_session') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Max Per Session</span>
+                {isModified('capture.max_per_session') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.capture?.max_per_session ?? 100}
+                onChange={(e) => updateSetting('capture', 'max_per_session', parseInt(e.target.value))}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Failover Settings</h2>
+        </div>
+        <div class="panel-body">
+          <div class="settings-grid">
+            <div class={'settings-item' + (isModified('failover.enabled') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Failover Enabled</span>
+                {isModified('failover.enabled') && <span class="modified-badge">modified</span>}
+              </label>
+              <select
+                class="settings-select"
+                value={settings.failover?.enabled ? 'true' : 'false'}
+                onChange={(e) => updateSetting('failover', 'enabled', e.target.value === 'true')}
+              >
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+
+            <div class={'settings-item' + (isModified('failover.max_retries') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Max Retries</span>
+                {isModified('failover.max_retries') && <span class="modified-badge">modified</span>}
+              </label>
+              <input
+                type="number"
+                class="settings-input"
+                value={settings.failover?.max_retries ?? 2}
+                onChange={(e) => updateSetting('failover', 'max_retries', parseInt(e.target.value))}
+              />
+            </div>
+
+            <div class={'settings-item' + (isModified('failover.auto_select') ? ' modified' : '')}>
+              <label class="settings-label">
+                <span>Auto-Select Best Backend</span>
+                {isModified('failover.auto_select') && <span class="modified-badge">modified</span>}
+              </label>
+              <select
+                class="settings-select"
+                value={settings.failover?.auto_select ? 'true' : 'false'}
+                onChange={(e) => updateSetting('failover', 'auto_select', e.target.value === 'true')}
+              >
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">Custom Rules</h2>
+          <button class="btn btn-primary btn-sm" onClick={addCustomRule}>
+            + Add Rule
+          </button>
+        </div>
+        <div class="panel-body">
+          <p class="settings-hint">
+            Custom rules are <strong>appended</strong> to the preset rules.
+            They run in addition to the built-in rules, not instead of them.
+            Patterns use <a href="https://github.com/google/re2/wiki/Syntax" target="_blank" rel="noopener">RE2 regex syntax</a> (case-insensitive).
+          </p>
+          {(!settings.policy?.custom_rules || settings.policy.custom_rules.length === 0) ? (
+            <p class="muted">No custom rules defined. Click "Add Rule" to create one.</p>
+          ) : (
+            <div class="custom-rules-list">
+              {settings.policy.custom_rules.map((rule, index) => (
+                <div key={index} class="custom-rule-card">
+                  <div class="custom-rule-header">
+                    <input
+                      type="text"
+                      class="settings-input rule-name-input"
+                      value={rule.name}
+                      onChange={(e) => updateCustomRule(index, 'name', e.target.value)}
+                      placeholder="Rule name"
+                    />
+                    <button
+                      class="btn btn-danger btn-sm"
+                      onClick={() => removeCustomRule(index)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <div class="custom-rule-grid">
+                    <div class="settings-item">
+                      <label class="settings-label">Type</label>
+                      <select
+                        class="settings-select"
+                        value={rule.type}
+                        onChange={(e) => updateCustomRule(index, 'type', e.target.value)}
+                      >
+                        <option value="content_match">Content Match (regex)</option>
+                        <option value="bytes_out">Bytes Out (threshold)</option>
+                        <option value="bytes_in">Bytes In (threshold)</option>
+                        <option value="request_count">Request Count</option>
+                        <option value="duration">Duration (seconds)</option>
+                        <option value="requests_per_minute">Requests/Minute</option>
+                      </select>
+                    </div>
+                    <div class="settings-item">
+                      <label class="settings-label">Target</label>
+                      <select
+                        class="settings-select"
+                        value={rule.target || 'both'}
+                        onChange={(e) => updateCustomRule(index, 'target', e.target.value)}
+                      >
+                        <option value="both">Both</option>
+                        <option value="request">Request Only</option>
+                        <option value="response">Response Only</option>
+                      </select>
+                    </div>
+                    <div class="settings-item">
+                      <label class="settings-label">Severity</label>
+                      <select
+                        class="settings-select"
+                        value={rule.severity}
+                        onChange={(e) => updateCustomRule(index, 'severity', e.target.value)}
+                      >
+                        <option value="info">Info</option>
+                        <option value="warning">Warning</option>
+                        <option value="critical">Critical</option>
+                      </select>
+                    </div>
+                    <div class="settings-item">
+                      <label class="settings-label">Action</label>
+                      <select
+                        class="settings-select"
+                        value={rule.action}
+                        onChange={(e) => updateCustomRule(index, 'action', e.target.value)}
+                      >
+                        <option value="flag">Flag (log only)</option>
+                        <option value="block">Block (reject request)</option>
+                        <option value="terminate">Terminate (kill session)</option>
+                      </select>
+                    </div>
+                    {rule.type === 'content_match' ? (
+                      <div class="settings-item full-width">
+                        <label class="settings-label">Patterns (one regex per line)</label>
+                        <textarea
+                          class="settings-textarea"
+                          value={(rule.patterns || []).join('\n')}
+                          onChange={(e) => updateCustomRule(index, 'patterns', e.target.value.split('\n').filter(p => p.trim()))}
+                          placeholder="Enter regex patterns, one per line"
+                          rows={3}
+                        />
+                      </div>
+                    ) : (
+                      <div class="settings-item">
+                        <label class="settings-label">Threshold</label>
+                        <input
+                          type="number"
+                          class="settings-input"
+                          value={rule.threshold || 0}
+                          onChange={(e) => updateCustomRule(index, 'threshold', parseInt(e.target.value))}
+                        />
+                      </div>
+                    )}
+                    <div class="settings-item full-width">
+                      <label class="settings-label">Description</label>
+                      <input
+                        type="text"
+                        class="settings-input"
+                        value={rule.description || ''}
+                        onChange={(e) => updateCustomRule(index, 'description', e.target.value)}
+                        placeholder="What does this rule detect?"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )
+}
+
+// ============================================================================
 // Dashboard Page
 // ============================================================================
 
@@ -1052,6 +1609,7 @@ export function App() {
       case 'flagged': return 'Flagged Sessions'
       case 'voice': return 'Voice Sessions'
       case 'history': return 'Session History'
+      case 'settings': return 'Settings'
       default: return 'ELIDA'
     }
   }
@@ -1181,6 +1739,8 @@ export function App() {
             </div>
           </div>
         )}
+
+        {page === 'settings' && <SettingsPage />}
       </main>
 
       {selectedFlagged && (

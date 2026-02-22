@@ -448,6 +448,22 @@ func main() {
 		)
 	}
 
+	// Initialize settings store with Config-based defaults (yaml → env → settings.yaml)
+	// Settings go in configs/ dir alongside elida.yaml
+	var settingsStore *config.SettingsStore
+	configDir := filepath.Dir(*configPath)
+	if mkdirErr := os.MkdirAll(configDir, 0750); mkdirErr != nil {
+		slog.Warn("failed to create config directory for settings", "error", mkdirErr, "path", configDir)
+	} else {
+		var settingsErr error
+		settingsStore, settingsErr = config.NewSettingsStoreFromConfig(cfg, configDir)
+		if settingsErr != nil {
+			slog.Warn("failed to initialize settings store", "error", settingsErr)
+		} else {
+			slog.Info("settings store initialized", "path", filepath.Join(configDir, "settings.yaml"))
+		}
+	}
+
 	// Initialize control API
 	controlHandler := control.NewWithAuth(
 		store,
@@ -457,6 +473,9 @@ func main() {
 		cfg.Control.Auth.Enabled,
 		cfg.Control.Auth.APIKey,
 	)
+	if settingsStore != nil {
+		controlHandler.SetSettingsStore(settingsStore)
+	}
 	if wsHandler != nil {
 		controlHandler.SetWebSocketHandler(wsHandler)
 	}
