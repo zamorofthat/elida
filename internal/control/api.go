@@ -127,11 +127,84 @@ func (h *Handler) SetSettingsStore(store *config.SettingsStore) {
 	h.settingsStore = store
 }
 
+// reloadPolicyEngine applies current settings to the policy engine without restart
+func (h *Handler) reloadPolicyEngine() {
+	if h.policyEngine == nil || h.settingsStore == nil {
+		return
+	}
+
+	merged := h.settingsStore.GetMerged()
+
+	// Convert Settings to policy.Config
+	mode := "enforce"
+	if merged.Policy.Mode != nil {
+		mode = *merged.Policy.Mode
+	}
+
+	cfg := policy.Config{
+		Enabled:        merged.Policy.Enabled != nil && *merged.Policy.Enabled,
+		Mode:           mode,
+		CaptureContent: true,
+	}
+
+	if merged.Capture.MaxCaptureSize != nil {
+		cfg.MaxCaptureSize = *merged.Capture.MaxCaptureSize
+	}
+
+	// Build risk ladder config
+	if merged.Policy.RiskLadder != nil {
+		cfg.RiskLadder.Enabled = merged.Policy.RiskLadder.Enabled != nil && *merged.Policy.RiskLadder.Enabled
+		// Convert Settings thresholds to policy thresholds
+		if merged.Policy.RiskLadder.WarnScore != nil {
+			cfg.RiskLadder.Thresholds = append(cfg.RiskLadder.Thresholds, policy.RiskThreshold{
+				Score:  float64(*merged.Policy.RiskLadder.WarnScore),
+				Action: policy.ActionWarn,
+			})
+		}
+		if merged.Policy.RiskLadder.ThrottleScore != nil {
+			cfg.RiskLadder.Thresholds = append(cfg.RiskLadder.Thresholds, policy.RiskThreshold{
+				Score:        float64(*merged.Policy.RiskLadder.ThrottleScore),
+				Action:       policy.ActionThrottle,
+				ThrottleRate: 10,
+			})
+		}
+		if merged.Policy.RiskLadder.BlockScore != nil {
+			cfg.RiskLadder.Thresholds = append(cfg.RiskLadder.Thresholds, policy.RiskThreshold{
+				Score:  float64(*merged.Policy.RiskLadder.BlockScore),
+				Action: policy.ActionBlock,
+			})
+		}
+		if merged.Policy.RiskLadder.TerminateScore != nil {
+			cfg.RiskLadder.Thresholds = append(cfg.RiskLadder.Thresholds, policy.RiskThreshold{
+				Score:  float64(*merged.Policy.RiskLadder.TerminateScore),
+				Action: policy.ActionTerminate,
+			})
+		}
+	}
+
+	// Convert custom rules from Settings to policy Rules
+	for _, cr := range merged.Policy.CustomRules {
+		rule := policy.Rule{
+			Name:        cr.Name,
+			Type:        policy.RuleType(cr.Type),
+			Target:      policy.RuleTarget(cr.Target),
+			Patterns:    cr.Patterns,
+			Threshold:   cr.Threshold,
+			Severity:    policy.Severity(cr.Severity),
+			Description: cr.Description,
+			Action:      cr.Action,
+		}
+		cfg.Rules = append(cfg.Rules, rule)
+	}
+
+	h.policyEngine.ReloadConfig(cfg)
+}
+
 // ServeHTTP implements http.Handler
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add CORS headers for dashboard access
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 	if r.Method == "OPTIONS" {
@@ -190,7 +263,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	response := HealthResponse{
 		Status:      "ok",
 		Timestamp:   time.Now(),
-		Version:     "0.2.0",
+		Version:     "0.2.1",
 		CaptureMode: h.captureMode,
 	}
 
@@ -1204,7 +1277,7 @@ func (h *Handler) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 // Settings Handlers (Layered Configuration)
 // =============================================================================
 
-// handleSettings returns merged settings (local overrides defaults)
+// handleSettings manages settings (GET=merged, PUT=save, DELETE=reset)
 func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if h.settingsStore == nil {
 		http.Error(w, "Settings not configured", http.StatusServiceUnavailable)
@@ -1215,6 +1288,47 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		settings := h.settingsStore.GetMerged()
 		writeJSON(w, http.StatusOK, settings)
+
+	case http.MethodPut:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+
+		var settings config.Settings
+		if err := json.Unmarshal(body, &settings); err != nil {
+			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := h.settingsStore.SaveLocal(settings); err != nil {
+			slog.Error("failed to save settings", "error", err)
+			http.Error(w, "Failed to save settings", http.StatusInternalServerError)
+			return
+		}
+
+		h.reloadPolicyEngine()
+		slog.Info("settings saved and applied")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "saved",
+			"message": "Settings applied instantly (no restart required)",
+		})
+
+	case http.MethodDelete:
+		if err := h.settingsStore.ResetToDefault(); err != nil {
+			slog.Error("failed to reset settings", "error", err)
+			http.Error(w, "Failed to reset settings", http.StatusInternalServerError)
+			return
+		}
+
+		h.reloadPolicyEngine()
+		slog.Info("settings reset to defaults")
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":  "reset",
+			"message": "Settings reset to defaults (no restart required)",
+		})
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1271,10 +1385,13 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		slog.Info("local settings saved")
+		// Dynamically reload policy engine with new settings
+		h.reloadPolicyEngine()
+
+		slog.Info("local settings saved and applied")
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status":  "saved",
-			"message": "Local settings saved successfully",
+			"message": "Settings saved and applied (no restart required)",
 		})
 
 	case http.MethodDelete:
@@ -1285,10 +1402,13 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		slog.Info("settings reset to defaults")
+		// Dynamically reload policy engine with default settings
+		h.reloadPolicyEngine()
+
+		slog.Info("settings reset to defaults and applied")
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status":  "reset",
-			"message": "Settings reset to ELIDA defaults",
+			"message": "Settings reset to defaults and applied (no restart required)",
 		})
 
 	default:

@@ -38,8 +38,8 @@ func TestHandler_Health(t *testing.T) {
 	if health.Status != "ok" {
 		t.Errorf("expected status 'ok', got %s", health.Status)
 	}
-	if health.Version != "0.2.0" {
-		t.Errorf("expected version '0.1.0', got %s", health.Version)
+	if health.Version != "0.2.1" {
+		t.Errorf("expected version '0.2.1', got %s", health.Version)
 	}
 }
 

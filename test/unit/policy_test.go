@@ -787,3 +787,253 @@ func TestLongContent_Truncation(t *testing.T) {
 		t.Error("should detect pattern in long content")
 	}
 }
+
+// ============================================================
+// ReloadConfig Tests (Hot-Reload)
+// ============================================================
+
+func TestReloadConfig_SwitchMode(t *testing.T) {
+	// Start in enforce mode
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []policy.Rule{
+			{
+				Name:     "test_rule",
+				Type:     "content_match",
+				Patterns: []string{"BLOCKED"},
+				Severity: "critical",
+				Action:   "block",
+			},
+		},
+	})
+
+	// Verify enforce mode works
+	result := engine.EvaluateRequestContent("test", "BLOCKED content")
+	if result == nil || !result.ShouldBlock {
+		t.Fatal("expected blocking in enforce mode")
+	}
+
+	// Hot-reload to audit mode
+	engine.ReloadConfig(policy.Config{
+		Enabled: true,
+		Mode:    "audit",
+		Rules: []policy.Rule{
+			{
+				Name:     "test_rule",
+				Type:     "content_match",
+				Patterns: []string{"BLOCKED"},
+				Severity: "critical",
+				Action:   "block",
+			},
+		},
+	})
+
+	// Verify audit mode - violation detected but not enforced
+	result = engine.EvaluateRequestContent("test2", "BLOCKED content")
+	if result == nil {
+		t.Fatal("expected result in audit mode")
+	}
+	if result.ShouldBlock {
+		t.Error("should not block in audit mode after reload")
+	}
+	if len(result.Violations) == 0 {
+		t.Error("expected violations to still be recorded")
+	}
+}
+
+func TestReloadConfig_AddRules(t *testing.T) {
+	// Start with one rule
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []policy.Rule{
+			{
+				Name:     "rule_a",
+				Type:     "content_match",
+				Patterns: []string{"PATTERN_A"},
+				Action:   "flag",
+			},
+		},
+	})
+
+	// Verify only rule A matches
+	result := engine.EvaluateRequestContent("test", "PATTERN_B content")
+	if result != nil {
+		t.Error("PATTERN_B should not match before reload")
+	}
+
+	// Hot-reload with additional rule
+	engine.ReloadConfig(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []policy.Rule{
+			{
+				Name:     "rule_a",
+				Type:     "content_match",
+				Patterns: []string{"PATTERN_A"},
+				Action:   "flag",
+			},
+			{
+				Name:     "rule_b",
+				Type:     "content_match",
+				Patterns: []string{"PATTERN_B"},
+				Action:   "block",
+			},
+		},
+	})
+
+	// Now PATTERN_B should match
+	result = engine.EvaluateRequestContent("test2", "PATTERN_B content")
+	if result == nil {
+		t.Fatal("expected PATTERN_B to match after reload")
+	}
+	if !result.ShouldBlock {
+		t.Error("expected blocking for PATTERN_B")
+	}
+}
+
+func TestReloadConfig_UpdateCaptureSize(t *testing.T) {
+	engine := policy.NewEngine(policy.Config{
+		Enabled:        true,
+		Mode:           "enforce",
+		MaxCaptureSize: 1000,
+		Rules:          []policy.Rule{},
+	})
+
+	initialCfg := engine.GetConfig()
+	if initialCfg.MaxCaptureSize != 1000 {
+		t.Errorf("expected initial MaxCaptureSize 1000, got %d", initialCfg.MaxCaptureSize)
+	}
+
+	// Reload with new capture size
+	engine.ReloadConfig(policy.Config{
+		Enabled:        true,
+		Mode:           "enforce",
+		MaxCaptureSize: 5000,
+		Rules:          []policy.Rule{},
+	})
+
+	newCfg := engine.GetConfig()
+	if newCfg.MaxCaptureSize != 5000 {
+		t.Errorf("expected MaxCaptureSize 5000 after reload, got %d", newCfg.MaxCaptureSize)
+	}
+}
+
+func TestReloadConfig_RiskLadderThresholds(t *testing.T) {
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		RiskLadder: policy.RiskLadderConfig{
+			Enabled: true,
+			Thresholds: []policy.RiskThreshold{
+				{Score: 10, Action: policy.ActionWarn},
+				{Score: 20, Action: policy.ActionBlock},
+			},
+		},
+		Rules: []policy.Rule{},
+	})
+
+	// Reload with different thresholds
+	engine.ReloadConfig(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		RiskLadder: policy.RiskLadderConfig{
+			Enabled: true,
+			Thresholds: []policy.RiskThreshold{
+				{Score: 5, Action: policy.ActionWarn},
+				{Score: 15, Action: policy.ActionThrottle},
+				{Score: 30, Action: policy.ActionBlock},
+			},
+		},
+		Rules: []policy.Rule{},
+	})
+
+	cfg := engine.GetConfig()
+	if len(cfg.RiskLadder.Thresholds) != 3 {
+		t.Errorf("expected 3 thresholds after reload, got %d", len(cfg.RiskLadder.Thresholds))
+	}
+}
+
+func TestReloadConfig_Concurrent(t *testing.T) {
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []policy.Rule{
+			{
+				Name:     "test",
+				Type:     "content_match",
+				Patterns: []string{"TEST"},
+				Action:   "flag",
+			},
+		},
+	})
+
+	// Run concurrent evaluations and reloads
+	done := make(chan bool)
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				engine.EvaluateRequestContent("test", "TEST content")
+			}
+			done <- true
+		}()
+		go func() {
+			for j := 0; j < 10; j++ {
+				engine.ReloadConfig(policy.Config{
+					Enabled: true,
+					Mode:    "enforce",
+					Rules: []policy.Rule{
+						{
+							Name:     "test",
+							Type:     "content_match",
+							Patterns: []string{"TEST"},
+							Action:   "flag",
+						},
+					},
+				})
+			}
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}
+
+func TestGetConfig_ReturnsCurrentState(t *testing.T) {
+	engine := policy.NewEngine(policy.Config{
+		Enabled:        true,
+		Mode:           "audit",
+		CaptureContent: true,
+		MaxCaptureSize: 2000,
+		Rules: []policy.Rule{
+			{
+				Name:     "my_rule",
+				Type:     "content_match",
+				Patterns: []string{"PATTERN"},
+				Action:   "flag",
+			},
+		},
+	})
+
+	cfg := engine.GetConfig()
+
+	if cfg.Mode != "audit" {
+		t.Errorf("expected mode audit, got %s", cfg.Mode)
+	}
+	if !cfg.CaptureContent {
+		t.Error("expected CaptureContent true")
+	}
+	if cfg.MaxCaptureSize != 2000 {
+		t.Errorf("expected MaxCaptureSize 2000, got %d", cfg.MaxCaptureSize)
+	}
+	if len(cfg.Rules) != 1 {
+		t.Errorf("expected 1 rule, got %d", len(cfg.Rules))
+	}
+	if cfg.Rules[0].Name != "my_rule" {
+		t.Error("rule name mismatch")
+	}
+}

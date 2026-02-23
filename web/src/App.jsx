@@ -877,7 +877,7 @@ function SettingsPage() {
         body: JSON.stringify(settings),
       })
       if (res.ok) {
-        setMessage({ type: 'success', text: 'Settings saved to configs/settings.yaml' })
+        setMessage({ type: 'success', text: 'Settings applied instantly (no restart required)' })
         fetchSettings() // Refresh diff
       } else {
         const err = await res.text()

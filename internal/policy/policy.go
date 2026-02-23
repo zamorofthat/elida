@@ -253,6 +253,87 @@ func NewEngine(cfg Config) *Engine {
 	return e
 }
 
+// ReloadConfig dynamically updates the policy engine configuration.
+// This allows settings changes to take effect without restart.
+func (e *Engine) ReloadConfig(cfg Config) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Update mode
+	e.auditMode = cfg.Mode == "audit"
+
+	// Update capture settings
+	e.captureContent = cfg.CaptureContent
+	if cfg.MaxCaptureSize > 0 {
+		e.maxCaptureSize = cfg.MaxCaptureSize
+	}
+
+	// Update risk ladder
+	e.riskLadderEnabled = cfg.RiskLadder.Enabled
+	if len(cfg.RiskLadder.Thresholds) > 0 {
+		e.riskThresholds = cfg.RiskLadder.Thresholds
+	}
+
+	// Update rules
+	e.rules = cfg.Rules
+
+	// Recompile content match rules
+	e.compiledRules = make([]CompiledRule, 0)
+	for _, rule := range cfg.Rules {
+		if rule.Type == RuleTypeContentMatch && len(rule.Patterns) > 0 {
+			compiled := CompiledRule{Rule: rule}
+			for _, pattern := range rule.Patterns {
+				re, err := regexp.Compile("(?i)" + pattern)
+				if err != nil {
+					slog.Error("invalid regex pattern in rule",
+						"rule", rule.Name,
+						"pattern", pattern,
+						"error", err,
+					)
+					continue
+				}
+				compiled.CompiledPatterns = append(compiled.CompiledPatterns, re)
+			}
+			e.compiledRules = append(e.compiledRules, compiled)
+		}
+	}
+
+	mode := "enforce"
+	if e.auditMode {
+		mode = "audit"
+	}
+	slog.Info("policy engine reloaded",
+		"rules", len(e.rules),
+		"content_rules", len(e.compiledRules),
+		"capture_content", e.captureContent,
+		"mode", mode,
+		"risk_ladder_enabled", e.riskLadderEnabled,
+	)
+}
+
+// GetConfig returns the current policy engine configuration
+func (e *Engine) GetConfig() Config {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	mode := "enforce"
+	if e.auditMode {
+		mode = "audit"
+	}
+
+	return Config{
+		Enabled:        true,
+		Mode:           mode,
+		CaptureContent: e.captureContent,
+		MaxCaptureSize: e.maxCaptureSize,
+		Rules:          e.rules,
+		RiskLadder: RiskLadderConfig{
+			Enabled:    e.riskLadderEnabled,
+			Thresholds: e.riskThresholds,
+		},
+	}
+}
+
 // Evaluate checks a session against all policy rules
 func (e *Engine) Evaluate(metrics SessionMetrics) []Violation {
 	e.mu.RLock()
