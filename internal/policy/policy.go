@@ -482,16 +482,22 @@ func (e *Engine) EvaluateResponseContent(sessionID, content string) *ContentChec
 
 // evaluateContentWithTarget is the internal implementation that filters by target
 func (e *Engine) evaluateContentWithTarget(sessionID, content string, target RuleTarget) *ContentCheckResult {
-	if len(e.compiledRules) == 0 || content == "" {
+	// Snapshot rules and audit mode under read lock to avoid races with ReloadConfig
+	e.mu.RLock()
+	compiledRules := e.compiledRules
+	auditMode := e.auditMode
+	e.mu.RUnlock()
+
+	if len(compiledRules) == 0 || content == "" {
 		return nil
 	}
 
 	result := &ContentCheckResult{}
 	contentLower := strings.ToLower(content)
 
-	for _, cr := range e.compiledRules {
+	for _, cr := range compiledRules {
 		// Skip rules that don't apply to this target
-		if !e.ruleAppliesToTarget(cr.Target, target) {
+		if !ruleAppliesToTarget(cr.Target, target) {
 			continue
 		}
 
@@ -509,7 +515,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				result.Violations = append(result.Violations, violation)
 
 				// Only enforce actions if not in audit mode
-				if !e.auditMode {
+				if !auditMode {
 					switch cr.Action {
 					case "block":
 						result.ShouldBlock = true
@@ -522,7 +528,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				// Log with audit mode indicator
 				logFunc := slog.Warn
 				actionMsg := cr.Action
-				if e.auditMode {
+				if auditMode {
 					actionMsg = cr.Action + " (audit-only)"
 				}
 
@@ -538,7 +544,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					"action", actionMsg,
 					"target", targetStr,
 					"matched", truncateMatch(match, 50),
-					"audit_mode", e.auditMode,
+					"audit_mode", auditMode,
 				)
 
 				// Record the violation
@@ -555,7 +561,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 }
 
 // ruleAppliesToTarget checks if a rule should be evaluated for the given target
-func (e *Engine) ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) bool {
+func ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) bool {
 	// Default (empty or "both") applies to everything
 	if ruleTarget == "" || ruleTarget == RuleTargetBoth {
 		return true
@@ -565,8 +571,12 @@ func (e *Engine) ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget Rul
 
 // HasBlockingResponseRules returns true if any response rules have block/terminate action
 func (e *Engine) HasBlockingResponseRules() bool {
-	for _, cr := range e.compiledRules {
-		if e.ruleAppliesToTarget(cr.Target, RuleTargetResponse) {
+	e.mu.RLock()
+	compiledRules := e.compiledRules
+	e.mu.RUnlock()
+
+	for _, cr := range compiledRules {
+		if ruleAppliesToTarget(cr.Target, RuleTargetResponse) {
 			if cr.Action == "block" || cr.Action == "terminate" {
 				return true
 			}
@@ -577,6 +587,8 @@ func (e *Engine) HasBlockingResponseRules() bool {
 
 // IsAuditMode returns true if the engine is in audit (dry-run) mode
 func (e *Engine) IsAuditMode() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.auditMode
 }
 
@@ -922,6 +934,8 @@ func (e *Engine) ShouldTerminateByRisk(sessionID string) bool {
 
 // IsRiskLadderEnabled returns true if risk ladder is enabled
 func (e *Engine) IsRiskLadderEnabled() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.riskLadderEnabled
 }
 
