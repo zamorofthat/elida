@@ -101,3 +101,63 @@ curl -X POST http://localhost:9090/control/sessions/client-abc123/kill
 
 # All subsequent requests from that IP → 403 until block expires
 ```
+
+### Settings (Layered Configuration)
+
+ELIDA supports dynamic settings management with a layered hierarchy. See [CONFIGURATION.md](CONFIGURATION.md#settings-hierarchy-layered-configuration) for details.
+
+```bash
+# Get merged settings (all layers combined)
+curl http://localhost:9090/control/settings
+
+# Save settings (applies instantly, no restart)
+curl -X PUT http://localhost:9090/control/settings \
+  -H "Content-Type: application/json" \
+  -d '{"policy":{"mode":"audit"}}'
+
+# Reset to defaults (removes UI overrides)
+curl -X DELETE http://localhost:9090/control/settings
+```
+
+**Additional endpoints:**
+
+```bash
+# Get default settings (read-only, from elida.yaml + env vars)
+curl http://localhost:9090/control/settings/defaults
+
+# Get local overrides only (settings.yaml)
+curl http://localhost:9090/control/settings/local
+
+# Get diff — what's changed from defaults
+curl http://localhost:9090/control/settings/diff
+```
+
+**Settings structure:**
+
+```json
+{
+  "policy": {
+    "enabled": true,
+    "mode": "enforce",
+    "preset": "standard",
+    "risk_ladder": {
+      "enabled": true,
+      "warn_score": 5,
+      "throttle_score": 15,
+      "block_score": 30,
+      "terminate_score": 50
+    },
+    "custom_rules": []
+  },
+  "capture": {
+    "mode": "flagged_only",
+    "max_capture_size": 10000,
+    "max_per_session": 100
+  },
+  "failover": {
+    "enabled": false,
+    "max_retries": 2,
+    "auto_select": true
+  }
+}
+```

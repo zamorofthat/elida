@@ -164,7 +164,7 @@ func (s *SQLiteStore) ListEvents(opts ListEventsOptions) ([]Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var events []Event
 	for rows.Next() {
@@ -242,7 +242,7 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events by type: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var eventType string
@@ -258,7 +258,7 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events by severity: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var severity string

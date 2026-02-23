@@ -261,7 +261,7 @@ func (s *RedisStore) GetKillChan(id string) <-chan struct{} {
 // Close closes the Redis connection
 func (s *RedisStore) Close() error {
 	if s.pubsub != nil {
-		s.pubsub.Close()
+		_ = s.pubsub.Close()
 	}
 	return s.client.Close()
 }

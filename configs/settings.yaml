@@ -1,0 +1,18 @@
+policy:
+    enabled: false
+    mode: audit
+    preset: standard
+    risk_ladder:
+        enabled: true
+        warn_score: 5
+        throttle_score: 15
+        block_score: 30
+        terminate_score: 50
+failover:
+    enabled: false
+    max_retries: 2
+    auto_select: true
+capture:
+    mode: flagged_only
+    max_capture_size: 10000
+    max_per_session: 100

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-02-22
+
+### Added
+
+- **Settings UI Page**
+  - Full settings management in dashboard (Policy, Capture, Failover sections)
+  - Custom rules editor with add/edit/remove functionality
+  - RE2 regex pattern support for content matching rules
+  - Settings hint explaining custom rules append to preset rules
+
+- **Dynamic Settings Reload (Hot-Reload)**
+  - Policy engine reloads configuration without restart
+  - VS Code-style layered settings: `elida.yaml` → ENV vars → `settings.yaml` (UI)
+  - New policy engine method: `ReloadConfig(cfg Config)`
+
+- **Unified Settings Hierarchy**
+  - `NewSettingsStoreFromConfig()` initializes defaults from loaded config
+  - Local overrides saved to `configs/settings.yaml` (YAML format)
+  - Settings endpoints: GET/PUT/DELETE `/control/settings`
+
+- **Dashboard Improvements**
+  - ELIDA favicon (purple brand icon)
+  - Settings navigation in sidebar
+
+### Fixed
+
+- CORS headers now include PUT/DELETE methods for settings API
+- Settings stored in `configs/` directory alongside `elida.yaml`
+
 ## [0.2.0] - 2026-02-18
 
 ### Added

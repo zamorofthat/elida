@@ -253,6 +253,87 @@ func NewEngine(cfg Config) *Engine {
 	return e
 }
 
+// ReloadConfig dynamically updates the policy engine configuration.
+// This allows settings changes to take effect without restart.
+func (e *Engine) ReloadConfig(cfg Config) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Update mode
+	e.auditMode = cfg.Mode == "audit"
+
+	// Update capture settings
+	e.captureContent = cfg.CaptureContent
+	if cfg.MaxCaptureSize > 0 {
+		e.maxCaptureSize = cfg.MaxCaptureSize
+	}
+
+	// Update risk ladder
+	e.riskLadderEnabled = cfg.RiskLadder.Enabled
+	if len(cfg.RiskLadder.Thresholds) > 0 {
+		e.riskThresholds = cfg.RiskLadder.Thresholds
+	}
+
+	// Update rules
+	e.rules = cfg.Rules
+
+	// Recompile content match rules
+	e.compiledRules = make([]CompiledRule, 0)
+	for _, rule := range cfg.Rules {
+		if rule.Type == RuleTypeContentMatch && len(rule.Patterns) > 0 {
+			compiled := CompiledRule{Rule: rule}
+			for _, pattern := range rule.Patterns {
+				re, err := regexp.Compile("(?i)" + pattern)
+				if err != nil {
+					slog.Error("invalid regex pattern in rule",
+						"rule", rule.Name,
+						"pattern", pattern,
+						"error", err,
+					)
+					continue
+				}
+				compiled.CompiledPatterns = append(compiled.CompiledPatterns, re)
+			}
+			e.compiledRules = append(e.compiledRules, compiled)
+		}
+	}
+
+	mode := "enforce"
+	if e.auditMode {
+		mode = "audit"
+	}
+	slog.Info("policy engine reloaded",
+		"rules", len(e.rules),
+		"content_rules", len(e.compiledRules),
+		"capture_content", e.captureContent,
+		"mode", mode,
+		"risk_ladder_enabled", e.riskLadderEnabled,
+	)
+}
+
+// GetConfig returns the current policy engine configuration
+func (e *Engine) GetConfig() Config {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	mode := "enforce"
+	if e.auditMode {
+		mode = "audit"
+	}
+
+	return Config{
+		Enabled:        true,
+		Mode:           mode,
+		CaptureContent: e.captureContent,
+		MaxCaptureSize: e.maxCaptureSize,
+		Rules:          e.rules,
+		RiskLadder: RiskLadderConfig{
+			Enabled:    e.riskLadderEnabled,
+			Thresholds: e.riskThresholds,
+		},
+	}
+}
+
 // Evaluate checks a session against all policy rules
 func (e *Engine) Evaluate(metrics SessionMetrics) []Violation {
 	e.mu.RLock()
@@ -401,16 +482,22 @@ func (e *Engine) EvaluateResponseContent(sessionID, content string) *ContentChec
 
 // evaluateContentWithTarget is the internal implementation that filters by target
 func (e *Engine) evaluateContentWithTarget(sessionID, content string, target RuleTarget) *ContentCheckResult {
-	if len(e.compiledRules) == 0 || content == "" {
+	// Snapshot rules and audit mode under read lock to avoid races with ReloadConfig
+	e.mu.RLock()
+	compiledRules := e.compiledRules
+	auditMode := e.auditMode
+	e.mu.RUnlock()
+
+	if len(compiledRules) == 0 || content == "" {
 		return nil
 	}
 
 	result := &ContentCheckResult{}
 	contentLower := strings.ToLower(content)
 
-	for _, cr := range e.compiledRules {
+	for _, cr := range compiledRules {
 		// Skip rules that don't apply to this target
-		if !e.ruleAppliesToTarget(cr.Target, target) {
+		if !ruleAppliesToTarget(cr.Target, target) {
 			continue
 		}
 
@@ -428,7 +515,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				result.Violations = append(result.Violations, violation)
 
 				// Only enforce actions if not in audit mode
-				if !e.auditMode {
+				if !auditMode {
 					switch cr.Action {
 					case "block":
 						result.ShouldBlock = true
@@ -441,7 +528,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				// Log with audit mode indicator
 				logFunc := slog.Warn
 				actionMsg := cr.Action
-				if e.auditMode {
+				if auditMode {
 					actionMsg = cr.Action + " (audit-only)"
 				}
 
@@ -457,7 +544,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					"action", actionMsg,
 					"target", targetStr,
 					"matched", truncateMatch(match, 50),
-					"audit_mode", e.auditMode,
+					"audit_mode", auditMode,
 				)
 
 				// Record the violation
@@ -474,7 +561,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 }
 
 // ruleAppliesToTarget checks if a rule should be evaluated for the given target
-func (e *Engine) ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) bool {
+func ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) bool {
 	// Default (empty or "both") applies to everything
 	if ruleTarget == "" || ruleTarget == RuleTargetBoth {
 		return true
@@ -484,8 +571,12 @@ func (e *Engine) ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget Rul
 
 // HasBlockingResponseRules returns true if any response rules have block/terminate action
 func (e *Engine) HasBlockingResponseRules() bool {
-	for _, cr := range e.compiledRules {
-		if e.ruleAppliesToTarget(cr.Target, RuleTargetResponse) {
+	e.mu.RLock()
+	compiledRules := e.compiledRules
+	e.mu.RUnlock()
+
+	for _, cr := range compiledRules {
+		if ruleAppliesToTarget(cr.Target, RuleTargetResponse) {
 			if cr.Action == "block" || cr.Action == "terminate" {
 				return true
 			}
@@ -496,6 +587,8 @@ func (e *Engine) HasBlockingResponseRules() bool {
 
 // IsAuditMode returns true if the engine is in audit (dry-run) mode
 func (e *Engine) IsAuditMode() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.auditMode
 }
 
@@ -841,6 +934,8 @@ func (e *Engine) ShouldTerminateByRisk(sessionID string) bool {
 
 // IsRiskLadderEnabled returns true if risk ladder is enabled
 func (e *Engine) IsRiskLadderEnabled() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	return e.riskLadderEnabled
 }
 

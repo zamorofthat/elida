@@ -1,11 +1,12 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SettingsLayer identifies the source of settings
@@ -18,42 +19,55 @@ const (
 
 // Settings represents all user-configurable settings
 type Settings struct {
-	Policy   PolicySettings   `json:"policy"`
-	Failover FailoverSettings `json:"failover"`
-	Capture  CaptureSettings  `json:"capture"`
+	Policy   PolicySettings   `json:"policy" yaml:"policy"`
+	Failover FailoverSettings `json:"failover" yaml:"failover"`
+	Capture  CaptureSettings  `json:"capture" yaml:"capture"`
 }
 
 // PolicySettings holds policy-related settings
 type PolicySettings struct {
-	Enabled       *bool               `json:"enabled,omitempty"`
-	Mode          *string             `json:"mode,omitempty"`   // "enforce" or "audit"
-	Preset        *string             `json:"preset,omitempty"` // "minimal", "standard", "strict"
-	RiskLadder    *RiskLadderSettings `json:"risk_ladder,omitempty"`
-	DisabledRules []string            `json:"disabled_rules,omitempty"` // Rules to skip
+	Enabled       *bool               `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Mode          *string             `json:"mode,omitempty" yaml:"mode,omitempty"`     // "enforce" or "audit"
+	Preset        *string             `json:"preset,omitempty" yaml:"preset,omitempty"` // "minimal", "standard", "strict"
+	RiskLadder    *RiskLadderSettings `json:"risk_ladder,omitempty" yaml:"risk_ladder,omitempty"`
+	DisabledRules []string            `json:"disabled_rules,omitempty" yaml:"disabled_rules,omitempty"` // Rules to skip
+	CustomRules   []CustomRule        `json:"custom_rules,omitempty" yaml:"custom_rules,omitempty"`     // User-defined rules
+}
+
+// CustomRule represents a user-defined policy rule
+type CustomRule struct {
+	Name        string   `json:"name" yaml:"name"`
+	Type        string   `json:"type" yaml:"type"`               // content_match, bytes_out, bytes_in, request_count, duration, requests_per_minute
+	Target      string   `json:"target,omitempty" yaml:"target"` // request, response, both (default: both)
+	Patterns    []string `json:"patterns,omitempty" yaml:"patterns,omitempty"`
+	Threshold   int64    `json:"threshold,omitempty" yaml:"threshold,omitempty"`
+	Severity    string   `json:"severity" yaml:"severity"`       // info, warning, critical
+	Action      string   `json:"action,omitempty" yaml:"action"` // flag, block, terminate
+	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
 // RiskLadderSettings holds risk ladder thresholds
 type RiskLadderSettings struct {
-	Enabled        *bool `json:"enabled,omitempty"`
-	WarnScore      *int  `json:"warn_score,omitempty"`
-	ThrottleScore  *int  `json:"throttle_score,omitempty"`
-	BlockScore     *int  `json:"block_score,omitempty"`
-	TerminateScore *int  `json:"terminate_score,omitempty"`
+	Enabled        *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	WarnScore      *int  `json:"warn_score,omitempty" yaml:"warn_score,omitempty"`
+	ThrottleScore  *int  `json:"throttle_score,omitempty" yaml:"throttle_score,omitempty"`
+	BlockScore     *int  `json:"block_score,omitempty" yaml:"block_score,omitempty"`
+	TerminateScore *int  `json:"terminate_score,omitempty" yaml:"terminate_score,omitempty"`
 }
 
 // FailoverSettings holds failover-related settings
 type FailoverSettings struct {
-	Enabled       *bool    `json:"enabled,omitempty"`
-	FallbackOrder []string `json:"fallback_order,omitempty"`
-	MaxRetries    *int     `json:"max_retries,omitempty"`
-	AutoSelect    *bool    `json:"auto_select,omitempty"` // Auto-select best match
+	Enabled       *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	FallbackOrder []string `json:"fallback_order,omitempty" yaml:"fallback_order,omitempty"`
+	MaxRetries    *int     `json:"max_retries,omitempty" yaml:"max_retries,omitempty"`
+	AutoSelect    *bool    `json:"auto_select,omitempty" yaml:"auto_select,omitempty"` // Auto-select best match
 }
 
 // CaptureSettings holds capture-related settings
 type CaptureSettings struct {
-	Mode           *string `json:"mode,omitempty"` // "flagged_only" or "all"
-	MaxCaptureSize *int    `json:"max_capture_size,omitempty"`
-	MaxPerSession  *int    `json:"max_per_session,omitempty"`
+	Mode           *string `json:"mode,omitempty" yaml:"mode,omitempty"` // "flagged_only" or "all"
+	MaxCaptureSize *int    `json:"max_capture_size,omitempty" yaml:"max_capture_size,omitempty"`
+	MaxPerSession  *int    `json:"max_per_session,omitempty" yaml:"max_per_session,omitempty"`
 }
 
 // SettingsStore manages settings with layered configuration
@@ -64,11 +78,12 @@ type SettingsStore struct {
 	path     string // Path to local settings file
 }
 
-// NewSettingsStore creates a new settings store
+// NewSettingsStore creates a new settings store with hardcoded defaults.
+// Prefer NewSettingsStoreFromConfig to use Config-based defaults (yaml → env → settings.yaml).
 func NewSettingsStore(dataDir string) (*SettingsStore, error) {
 	store := &SettingsStore{
 		defaults: getDefaultSettings(),
-		path:     filepath.Join(dataDir, "settings.json"),
+		path:     filepath.Join(dataDir, "settings.yaml"),
 	}
 
 	// Load local settings if they exist
@@ -80,6 +95,79 @@ func NewSettingsStore(dataDir string) (*SettingsStore, error) {
 	}
 
 	return store, nil
+}
+
+// NewSettingsStoreFromConfig creates a settings store with defaults from loaded Config.
+// This implements the hierarchy: elida.yaml → ENV vars → settings.yaml (UI).
+// The Config should already have YAML and ENV overrides applied via config.Load().
+func NewSettingsStoreFromConfig(cfg *Config, dataDir string) (*SettingsStore, error) {
+	store := &SettingsStore{
+		defaults: settingsFromConfig(cfg),
+		path:     filepath.Join(dataDir, "settings.yaml"),
+	}
+
+	// Load local settings (UI overrides) if they exist
+	if err := store.loadLocal(); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to load local settings: %w", err)
+		}
+	}
+
+	return store, nil
+}
+
+// settingsFromConfig extracts Settings from a loaded Config.
+// Fields not present in Config use sensible defaults.
+func settingsFromConfig(cfg *Config) Settings {
+	// Start with hardcoded defaults for fields not in Config
+	settings := getDefaultSettings()
+
+	// Override with Config values where they exist
+
+	// Policy settings
+	settings.Policy.Enabled = &cfg.Policy.Enabled
+	if cfg.Policy.Mode != "" {
+		settings.Policy.Mode = &cfg.Policy.Mode
+	}
+	if cfg.Policy.Preset != "" {
+		settings.Policy.Preset = &cfg.Policy.Preset
+	}
+
+	// Risk ladder from Config thresholds
+	if cfg.Policy.RiskLadder.Enabled {
+		enabled := cfg.Policy.RiskLadder.Enabled
+		settings.Policy.RiskLadder.Enabled = &enabled
+	}
+	// Extract thresholds from Config's array format to Settings' named fields
+	for _, t := range cfg.Policy.RiskLadder.Thresholds {
+		score := int(t.Score)
+		switch t.Action {
+		case "warn":
+			settings.Policy.RiskLadder.WarnScore = &score
+		case "throttle":
+			settings.Policy.RiskLadder.ThrottleScore = &score
+		case "block":
+			settings.Policy.RiskLadder.BlockScore = &score
+		case "terminate":
+			settings.Policy.RiskLadder.TerminateScore = &score
+		}
+	}
+
+	// Capture settings from Storage config
+	if cfg.Storage.CaptureMode != "" {
+		settings.Capture.Mode = &cfg.Storage.CaptureMode
+	}
+	if cfg.Storage.MaxCaptureSize > 0 {
+		settings.Capture.MaxCaptureSize = &cfg.Storage.MaxCaptureSize
+	}
+	if cfg.Storage.MaxCapturedPerSession > 0 {
+		settings.Capture.MaxPerSession = &cfg.Storage.MaxCapturedPerSession
+	}
+
+	// Failover settings - not directly in Config yet, use defaults
+	// Future: could add failover section to Config
+
+	return settings
 }
 
 // getDefaultSettings returns ELIDA's built-in defaults
@@ -159,8 +247,8 @@ func (s *SettingsStore) SaveLocal(settings Settings) error {
 		return fmt.Errorf("failed to create settings directory: %w", err)
 	}
 
-	// Write to file
-	data, err := json.MarshalIndent(settings, "", "  ")
+	// Write to file as YAML (consistent with elida.yaml)
+	data, err := yaml.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
@@ -194,7 +282,7 @@ func (s *SettingsStore) loadLocal() error {
 		return err
 	}
 
-	if err := json.Unmarshal(data, &s.local); err != nil {
+	if err := yaml.Unmarshal(data, &s.local); err != nil {
 		return fmt.Errorf("failed to parse settings file: %w", err)
 	}
 

@@ -523,7 +523,7 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 		http.Error(w, "Backend unavailable", http.StatusBadGateway)
 		return http.StatusBadGateway, 0
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Copy response headers
 	for key, values := range resp.Header {
@@ -612,7 +612,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 		http.Error(w, "Backend unavailable", http.StatusBadGateway)
 		return http.StatusBadGateway, 0
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Determine streaming format from content type
 	contentType := resp.Header.Get("Content-Type")
@@ -1198,7 +1198,7 @@ func (p *Proxy) attemptFailover(w http.ResponseWriter, originalReq *http.Request
 		http.Error(w, "Backend unavailable after failover", http.StatusBadGateway)
 		return http.StatusBadGateway, 0, true
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Copy response headers
 	for key, values := range resp.Header {
