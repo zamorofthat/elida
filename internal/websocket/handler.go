@@ -388,7 +388,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"backend", backend.Name,
 			"error", err,
 		)
-		clientConn.Close(websocket.StatusInternalError, "Backend connection failed")
+		_ = clientConn.Close(websocket.StatusInternalError, "Backend connection failed")
 		return
 	}
 	defer backendConn.CloseNow() //nolint:errcheck
@@ -439,8 +439,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				voiceMgr.EndAll("session_killed")
 			}
 			// Send close frame to both connections
-			clientConn.Close(websocket.StatusNormalClosure, "Session terminated")
-			backendConn.Close(websocket.StatusNormalClosure, "Session terminated")
+			_ = clientConn.Close(websocket.StatusNormalClosure, "Session terminated")
+			_ = backendConn.Close(websocket.StatusNormalClosure, "Session terminated")
 			cancel()
 		}
 	}()
@@ -556,8 +556,8 @@ func (h *Handler) forwardFrames(ctx context.Context, src, dst *websocket.Conn, s
 						"direction", dirStr,
 					)
 					// Close both connections
-					src.Close(websocket.StatusPolicyViolation, "Policy violation: session terminated")
-					dst.Close(websocket.StatusPolicyViolation, "Policy violation: session terminated")
+					_ = src.Close(websocket.StatusPolicyViolation, "Policy violation: session terminated")
+					_ = dst.Close(websocket.StatusPolicyViolation, "Policy violation: session terminated")
 					cancel()
 					return
 				}

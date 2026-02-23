@@ -116,14 +116,14 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 
 	// Enable WAL mode for better concurrent performance
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
 
 	store := &SQLiteStore{db: db}
 
 	if err := store.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
@@ -358,7 +358,7 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []SessionRecord
 	for rows.Next() {
@@ -449,7 +449,7 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get state stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var state string
@@ -466,7 +466,7 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get backend stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var backend string
@@ -523,7 +523,7 @@ func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSer
 	if err != nil {
 		return nil, fmt.Errorf("failed to get time series: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var points []TimeSeriesPoint
 	for rows.Next() {
@@ -720,7 +720,7 @@ func (s *SQLiteStore) ListVoiceSessions(opts ListVoiceSessionsOptions) ([]VoiceS
 	if err != nil {
 		return nil, fmt.Errorf("failed to list voice sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []VoiceSessionRecord
 	for rows.Next() {
@@ -837,7 +837,7 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get voice state stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var state string
@@ -854,7 +854,7 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get voice model stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var model string
@@ -949,7 +949,7 @@ func (s *SQLiteStore) ListTTSRequests(opts ListTTSRequestsOptions) ([]TTSRequest
 	if err != nil {
 		return nil, fmt.Errorf("failed to list TTS requests: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var requests []TTSRequest
 	for rows.Next() {
@@ -1044,7 +1044,7 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TTS provider stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var provider string
@@ -1061,7 +1061,7 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TTS voice stats: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var voice string
