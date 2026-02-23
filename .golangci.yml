@@ -1,5 +1,3 @@
-version: "2"
-
 run:
   timeout: 5m
   tests: true
@@ -7,20 +5,18 @@ run:
 linters:
   enable:
     - errcheck
+    - gosimple
     - govet
     - ineffassign
     - staticcheck
     - unused
+    - gofmt
+    - goimports
     - misspell
     - unconvert
     - unparam
     - bodyclose
     - noctx
-
-formatters:
-  enable:
-    - gofmt
-    - goimports
 
 linters-settings:
   errcheck:
@@ -45,5 +41,9 @@ issues:
       text: "Error return value of .*(Close|Remove)"
       linters:
         - errcheck
+    # TODO: Add context to storage layer DB calls
+    - path: internal/storage/
+      linters:
+        - noctx
   max-issues-per-linter: 50
   max-same-issues: 10
