@@ -138,3 +138,86 @@ curl -H "X-Session-ID: my-agent-task-123" http://localhost:8080/api/generate ...
 ```
 
 For Claude Code, ELIDA uses client IP-based session tracking, so all requests from the same IP are grouped into a single session automatically.
+
+## Settings Hierarchy (Layered Configuration)
+
+ELIDA uses a VS Code-style layered settings system. Settings are merged in order, with later layers overriding earlier ones:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 3: settings.yaml (UI overrides) — highest       │
+│           Hot-reloaded, no restart needed               │
+├─────────────────────────────────────────────────────────┤
+│  Layer 2: Environment Variables                         │
+│           Override YAML at startup                      │
+├─────────────────────────────────────────────────────────┤
+│  Layer 1: elida.yaml (base config) — lowest            │
+│           Loaded at startup                             │
+└─────────────────────────────────────────────────────────┘
+```
+
+### How It Works
+
+1. **`configs/elida.yaml`** — Base configuration loaded at startup
+2. **Environment variables** — Override YAML values (e.g., `ELIDA_POLICY_MODE=audit`)
+3. **`configs/settings.yaml`** — UI overrides, created when you save settings in the dashboard
+
+### Example
+
+```yaml
+# configs/elida.yaml (base)
+policy:
+  enabled: true
+  mode: enforce
+  preset: standard
+```
+
+```bash
+# Environment override
+export ELIDA_POLICY_MODE=audit
+```
+
+```yaml
+# configs/settings.yaml (UI override, auto-generated)
+policy:
+  mode: enforce  # Overrides env var back to enforce
+  custom_rules:
+    - name: block_competitor_mentions
+      type: content_match
+      patterns: ["competitor-name"]
+      action: block
+```
+
+**Result:** Policy enabled, enforce mode (UI wins), standard preset, plus custom rule.
+
+### Dynamic Reload (Hot-Reload)
+
+Changes made via the Settings UI are applied instantly — no restart required. The policy engine reloads its configuration atomically while preserving active session state.
+
+```bash
+# Save settings via API
+curl -X PUT http://localhost:9090/control/settings \
+  -H "Content-Type: application/json" \
+  -d '{"policy":{"mode":"audit"}}'
+
+# Response
+{"status":"saved","message":"Settings applied instantly (no restart required)"}
+```
+
+### Custom Rules
+
+Custom rules defined in the UI are appended to the preset rules (they don't replace them). Rules use [RE2 regex syntax](https://github.com/google/re2/wiki/Syntax).
+
+```yaml
+# configs/settings.yaml
+policy:
+  custom_rules:
+    - name: pii_ssn_strict
+      type: content_match
+      target: both
+      patterns:
+        - "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+      severity: critical
+      action: block
+      description: "Block SSN patterns"
+```
