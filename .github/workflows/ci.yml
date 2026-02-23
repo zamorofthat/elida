@@ -7,7 +7,7 @@ on:
     branches: [main, master]
 
 env:
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.26"
 
 jobs:
   lint:
@@ -22,9 +22,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.10.1
 
   security:
     name: Security Scan
@@ -46,9 +46,9 @@ jobs:
           govulncheck ./... || echo "::warning::govulncheck found vulnerabilities (may be stdlib issues)"
 
       - name: Run gosec
-        uses: securego/gosec@47f8b52fb8700c7ba017ffcc0ea6a32c83e33115 # master
-        with:
-          args: -exclude=G104,G117,G706 ./...
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -exclude=G104,G117,G706 ./...
 
       - name: Install Semgrep
         run: pip install semgrep
