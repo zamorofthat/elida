@@ -1295,7 +1295,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to read request body", http.StatusBadRequest)
 			return
 		}
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 
 		var settings config.Settings
 		if err := json.Unmarshal(body, &settings); err != nil {
@@ -1371,7 +1371,7 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to read request body", http.StatusBadRequest)
 			return
 		}
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 
 		var settings config.Settings
 		if err := json.Unmarshal(body, &settings); err != nil {

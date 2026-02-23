@@ -41,8 +41,8 @@ type CustomRule struct {
 	Target      string   `json:"target,omitempty" yaml:"target"` // request, response, both (default: both)
 	Patterns    []string `json:"patterns,omitempty" yaml:"patterns,omitempty"`
 	Threshold   int64    `json:"threshold,omitempty" yaml:"threshold,omitempty"`
-	Severity    string   `json:"severity" yaml:"severity"`             // info, warning, critical
-	Action      string   `json:"action,omitempty" yaml:"action"`       // flag, block, terminate
+	Severity    string   `json:"severity" yaml:"severity"`       // info, warning, critical
+	Action      string   `json:"action,omitempty" yaml:"action"` // flag, block, terminate
 	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
