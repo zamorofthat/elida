@@ -205,7 +205,9 @@ jobs:
           cyclonedx-gomod mod -output sbom.cdx.xml
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0 # stable
+        uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0 # master
+        with:
+          toolchain: stable
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
