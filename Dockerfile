@@ -29,7 +29,7 @@ COPY --from=dashboard-builder /app/web/../internal/dashboard/static ./internal/d
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o elida ./cmd/elida
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.23
 
 # Create non-root user
 RUN addgroup -g 1000 elida && \
