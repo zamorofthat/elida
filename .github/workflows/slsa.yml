@@ -3,12 +3,13 @@ name: SLSA Provenance
 on:
   release:
     types: [created]
+  workflow_dispatch:  # Manual trigger for testing
 
 permissions: read-all
 
 jobs:
   build:
-    name: Build Binaries
+    name: Build All Binaries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,18 +27,21 @@ jobs:
 
       - name: Build all binaries
         run: |
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o elida-linux-amd64 ./cmd/elida
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o elida-linux-arm64 ./cmd/elida
-          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o elida-darwin-amd64 ./cmd/elida
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o elida-darwin-arm64 ./cmd/elida
+          # Build all platform variants
+          GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o elida-linux-amd64 ./cmd/elida
+          GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o elida-linux-arm64 ./cmd/elida
+          GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o elida-darwin-amd64 ./cmd/elida
+          GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o elida-darwin-arm64 ./cmd/elida
           GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o elida-windows-amd64.exe ./cmd/elida
 
       - name: Generate hashes
         id: hash
         run: |
+          # Generate SHA256 hashes for all binaries in SLSA format
           sha256sum elida-* > checksums.txt
           cat checksums.txt
-          echo "hashes=$(sha256sum elida-* | base64 -w0)" >> "$GITHUB_OUTPUT"
+          # Base64 encode for SLSA provenance
+          echo "hashes=$(cat checksums.txt | base64 -w0)" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
