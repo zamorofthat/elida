@@ -1,0 +1,73 @@
+# ELIDA Demo Configuration
+# Safe, frictionless demo with real AI responses via Groq (free tier)
+#
+# Environment variables needed:
+#   GROQ_API_KEY=gsk_...
+#
+# Deploy: fly deploy --config configs/demo.yaml
+
+listen: ":8080"
+backend: "https://api.groq.com/openai/v1"
+
+control:
+  listen: ":9090"
+  enabled: true
+
+session:
+  timeout: 10m
+  header: "X-Session-ID"
+  generate_if_missing: true
+  kill_block:
+    mode: "duration"
+    duration: 5m  # Short for demo
+
+# Policy: audit mode so visitors see flags without getting blocked
+policy:
+  enabled: true
+  mode: audit
+  preset: standard
+  capture_flagged: true
+
+  # Rate limiting for abuse prevention
+  rules:
+    - name: "demo_rate_limit"
+      type: "requests_per_minute"
+      threshold: 30
+      severity: "warning"
+      action: "throttle"
+
+    - name: "demo_session_limit"
+      type: "request_count"
+      threshold: 100
+      severity: "warning"
+      action: "block"
+
+  # Risk ladder for demo visualization
+  risk_ladder:
+    enabled: true
+    thresholds:
+      - score: 5
+        action: warn
+      - score: 15
+        action: throttle
+      - score: 30
+        action: block
+
+# Storage: capture everything for demo visibility
+storage:
+  enabled: true
+  path: "/var/lib/elida/demo.db"
+  capture_mode: "all"
+  max_capture_size: 5000      # 5KB per body (smaller for demo)
+  max_captured_per_session: 50
+
+  events:
+    enabled: true
+    retention_days: 7  # Short retention for demo
+
+  redaction:
+    enabled: true  # Still redact PII in demo
+
+# Telemetry: optional, enable if you have OTel collector
+telemetry:
+  enabled: false

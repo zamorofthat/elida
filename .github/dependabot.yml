@@ -11,6 +11,10 @@ updates:
     labels:
       - dependencies
       - go
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
 
   # GitHub Actions
   - package-ecosystem: github-actions
@@ -23,6 +27,10 @@ updates:
     labels:
       - dependencies
       - ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   # Docker base images
   - package-ecosystem: docker
@@ -47,3 +55,7 @@ updates:
     labels:
       - dependencies
       - frontend
+    groups:
+      npm-dependencies:
+        patterns:
+          - "*"
