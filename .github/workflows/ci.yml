@@ -33,6 +33,9 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # For SARIF upload
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -58,13 +61,24 @@ jobs:
         # - G706: Unsafe use of filepath.Clean (handled separately)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -exclude=G104,G117,G118,G704,G706 ./...
+          gosec -exclude=G104,G117,G118,G704,G706 -fmt sarif -out gosec.sarif ./...
 
-      - name: Install Semgrep
-        run: pip install semgrep
+      - name: Upload gosec SARIF
+        uses: github/codeql-action/upload-sarif@b20883b0cd1f46c72ae0ba6d1090936928f9fa30 # v4.32.0
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
 
       - name: Run Semgrep
-        run: semgrep scan --config p/golang --config p/security-audit --config p/secrets --error
+        run: |
+          pip install semgrep
+          semgrep scan --config p/golang --config p/security-audit --config p/secrets --sarif --output semgrep.sarif
+
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@b20883b0cd1f46c72ae0ba6d1090936928f9fa30 # v4.32.0
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
 
       - name: Run TruffleHog (secrets in git history)
         uses: trufflesecurity/trufflehog@6c05c4a00b91aa542267d8e32a8254774799d68d # main
