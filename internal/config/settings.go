@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -277,6 +278,9 @@ func (s *SettingsStore) ResetToDefault() error {
 
 // loadLocal loads local settings from file
 func (s *SettingsStore) loadLocal() error {
+	if strings.Contains(s.path, "..") {
+		return fmt.Errorf("invalid file path")
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return err
