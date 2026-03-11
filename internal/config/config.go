@@ -20,11 +20,23 @@ type Config struct {
 	TLS       TLSConfig                `yaml:"tls"`      // TLS/HTTPS configuration
 	Session   SessionConfig            `yaml:"session"`
 	Control   ControlConfig            `yaml:"control"`
+	Proxy     ProxyConfig              `yaml:"proxy"` // Proxy authentication configuration
 	Logging   LoggingConfig            `yaml:"logging"`
 	Telemetry TelemetryConfig          `yaml:"telemetry"`
 	Storage   StorageConfig            `yaml:"storage"`
 	Policy    PolicyConfig             `yaml:"policy"`
 	WebSocket WebSocketConfig          `yaml:"websocket"` // WebSocket proxy configuration
+}
+
+// ProxyConfig holds proxy-level configuration
+type ProxyConfig struct {
+	Auth ProxyAuthConfig `yaml:"auth"`
+}
+
+// ProxyAuthConfig holds proxy authentication settings
+type ProxyAuthConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	APIKey  string `yaml:"api_key"` // API key for Bearer token or X-API-Key header auth
 }
 
 // WebSocketConfig holds WebSocket proxy configuration
@@ -163,6 +175,7 @@ type BackendConfig struct {
 	Type    string   `yaml:"type"`    // ollama, openai, anthropic, mistral
 	Models  []string `yaml:"models"`  // glob patterns: ["gpt-*", "claude-*"]
 	Default bool     `yaml:"default"` // is this the default backend?
+	APIKey  string   `yaml:"api_key"` // API key to inject (keeps client keyless)
 }
 
 // RoutingConfig defines routing method priority
@@ -482,6 +495,15 @@ func (c *Config) applyEnvOverrides() {
 		c.Control.Auth.APIKey = v
 		c.Control.Auth.Enabled = true // Auto-enable if key is set
 	}
+
+	// Proxy auth overrides
+	if os.Getenv("ELIDA_PROXY_AUTH_ENABLED") == "true" {
+		c.Proxy.Auth.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_PROXY_API_KEY"); v != "" {
+		c.Proxy.Auth.APIKey = v
+		c.Proxy.Auth.Enabled = true // Auto-enable if key is set
+	}
 }
 
 // ValidationError represents a single validation error with context
@@ -647,6 +669,15 @@ func (c *Config) Validate() *ValidationResult {
 			Field:   "control.auth.api_key",
 			Message: "API key required when auth is enabled",
 			Hint:    "set ELIDA_CONTROL_API_KEY env var",
+		})
+	}
+
+	// Proxy auth
+	if c.Proxy.Auth.Enabled && c.Proxy.Auth.APIKey == "" {
+		errors = append(errors, ValidationError{
+			Field:   "proxy.auth.api_key",
+			Message: "API key required when proxy auth is enabled",
+			Hint:    "set ELIDA_PROXY_API_KEY env var",
 		})
 	}
 

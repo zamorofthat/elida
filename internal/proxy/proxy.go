@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strings"
 	"time"
 
@@ -219,6 +218,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Proxy authentication check (skip health endpoints)
+	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
+		if !p.validateProxyAuth(r) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
+				slog.Warn("write failed", "error", err)
+			}
+			return
+		}
+	}
+
 	startTime := time.Now()
 	ctx := r.Context()
 
@@ -355,7 +366,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	// Create the backend request with context
-	backendReq := p.createBackendRequest(r, requestBody, backend.URL).WithContext(ctx)
+	backendReq := p.createBackendRequest(r, requestBody, backend).WithContext(ctx)
 
 	// Log the request
 	slog.Info("proxying request",
@@ -481,8 +492,8 @@ func (p *Proxy) isStreamingRequest(r *http.Request, body []byte) bool {
 }
 
 // createBackendRequest creates a new request to the backend
-func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backendURL *url.URL) *http.Request {
-	targetURL := *backendURL
+func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backend *router.Backend) *http.Request {
+	targetURL := *backend.URL
 	targetURL.Path = r.URL.Path
 	targetURL.RawQuery = r.URL.RawQuery
 
@@ -495,8 +506,24 @@ func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backendURL *u
 		}
 	}
 
+	// Inject backend API key if configured (enables keyless clients)
+	if backend.APIKey != "" {
+		switch backend.Type {
+		case "anthropic":
+			req.Header.Set("x-api-key", backend.APIKey)
+		case "openai", "groq":
+			req.Header.Set("Authorization", "Bearer "+backend.APIKey)
+		default:
+			// For unknown types, try both common patterns
+			if req.Header.Get("x-api-key") == "" && req.Header.Get("Authorization") == "" {
+				req.Header.Set("Authorization", "Bearer "+backend.APIKey)
+			}
+		}
+		slog.Debug("injected backend API key", "backend", backend.Name, "type", backend.Type)
+	}
+
 	// Set host header
-	req.Host = backendURL.Host
+	req.Host = backend.URL.Host
 
 	return req
 }
@@ -1239,6 +1266,36 @@ func (p *Proxy) attemptFailover(w http.ResponseWriter, originalReq *http.Request
 	)
 
 	return resp.StatusCode, int64(len(responseBody)), true
+}
+
+// isHealthEndpoint returns true if the path is a health check endpoint
+func isHealthEndpoint(path string) bool {
+	return path == "/health" || path == "/healthz" || path == "/ready" || path == "/readyz"
+}
+
+// validateProxyAuth checks if the request has valid proxy authentication
+func (p *Proxy) validateProxyAuth(r *http.Request) bool {
+	expectedKey := p.config.Proxy.Auth.APIKey
+	if expectedKey == "" {
+		return false
+	}
+
+	// Check X-Elida-API-Key header (preferred - doesn't conflict with backend auth)
+	if r.Header.Get("X-Elida-API-Key") == expectedKey {
+		return true
+	}
+
+	// Check Authorization: Bearer <token> (if not already used for backend auth)
+	// Note: Anthropic uses x-api-key, not Bearer, so this is safe
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == expectedKey {
+			return true
+		}
+	}
+
+	return false
 }
 
 // persistFlaggedSession saves a flagged session to storage immediately
