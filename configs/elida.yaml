@@ -129,7 +129,7 @@ storage:
 # - For full rule documentation, see: docs/POLICY_RULES_REFERENCE.md
 policy:
   # Enable policy engine
-  enabled: false
+  enabled: true
 
   # Mode: "enforce" (default) or "audit" (dry-run, log but don't block)
   mode: enforce
@@ -167,6 +167,27 @@ policy:
     # Max time to wait for full response before giving up
     # Default: 60
     buffer_timeout: 60
+
+  # Trust configuration - bypass scanning for known-safe content
+  trust:
+    # XML-style tags whose content is stripped before scanning
+    trusted_tags:
+      - "system-reminder"
+    # Tool names that bypass request-side content scanning
+    # Requests containing only these tools skip policy checks
+    allowlisted_tools:
+      - "Read"
+      - "Glob"
+      - "Grep"
+      - "Edit"
+      - "Write"
+      - "Agent"
+      - "Skill"
+      - "NotebookEdit"
+      - "TaskCreate"
+      - "TaskUpdate"
+      - "TaskList"
+      - "TaskGet"
 
   # Policy preset - provides default rules based on security frameworks
   # Options:
