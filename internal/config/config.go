@@ -20,11 +20,23 @@ type Config struct {
 	TLS       TLSConfig                `yaml:"tls"`      // TLS/HTTPS configuration
 	Session   SessionConfig            `yaml:"session"`
 	Control   ControlConfig            `yaml:"control"`
+	Proxy     ProxyConfig              `yaml:"proxy"` // Proxy authentication configuration
 	Logging   LoggingConfig            `yaml:"logging"`
 	Telemetry TelemetryConfig          `yaml:"telemetry"`
 	Storage   StorageConfig            `yaml:"storage"`
 	Policy    PolicyConfig             `yaml:"policy"`
 	WebSocket WebSocketConfig          `yaml:"websocket"` // WebSocket proxy configuration
+}
+
+// ProxyConfig holds proxy-level configuration
+type ProxyConfig struct {
+	Auth ProxyAuthConfig `yaml:"auth"`
+}
+
+// ProxyAuthConfig holds proxy authentication settings
+type ProxyAuthConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	APIKey  string `yaml:"api_key"` // API key for Bearer token or X-API-Key header auth
 }
 
 // WebSocketConfig holds WebSocket proxy configuration
@@ -109,6 +121,21 @@ type PolicyConfig struct {
 	Streaming      StreamingConfig      `yaml:"streaming"`       // Response streaming scan configuration
 	RiskLadder     RiskLadderConfig     `yaml:"risk_ladder"`     // Progressive escalation based on risk score
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"` // Token and tool call limits
+	Trust          TrustConfig          `yaml:"trust"`           // SBC-style trust configuration
+}
+
+// TrustConfig holds SBC-style trust configuration for content scanning
+type TrustConfig struct {
+	// TrustedTags - content within these XML-style tags is not scanned
+	// Example: ["system-reminder"] skips <system-reminder>...</system-reminder>
+	TrustedTags []string `yaml:"trusted_tags"`
+
+	// TrustedIPs - client IPs/CIDRs that skip content scanning entirely
+	// Example: ["10.0.0.0/8", "192.168.1.100"]
+	TrustedIPs []string `yaml:"trusted_ips"`
+
+	// TrustedHashes - SHA256 hashes of known-safe content (system prompts)
+	TrustedHashes []string `yaml:"trusted_hashes"`
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
@@ -163,6 +190,7 @@ type BackendConfig struct {
 	Type    string   `yaml:"type"`    // ollama, openai, anthropic, mistral
 	Models  []string `yaml:"models"`  // glob patterns: ["gpt-*", "claude-*"]
 	Default bool     `yaml:"default"` // is this the default backend?
+	APIKey  string   `yaml:"api_key"` // API key to inject (keeps client keyless)
 }
 
 // RoutingConfig defines routing method priority
@@ -314,6 +342,11 @@ func defaults() *Config {
 				OverlapSize:   1024,      // 1KB overlap for cross-chunk patterns
 				MaxBufferSize: 10485760,  // 10MB max buffer
 				BufferTimeout: 60,        // 60 seconds
+			},
+			Trust: TrustConfig{
+				// Default trusted tags for Claude Code compatibility
+				// Content within <system-reminder>...</system-reminder> is not scanned
+				TrustedTags: []string{"system-reminder"},
 			},
 			Rules: []PolicyRule{
 				{
@@ -482,6 +515,15 @@ func (c *Config) applyEnvOverrides() {
 		c.Control.Auth.APIKey = v
 		c.Control.Auth.Enabled = true // Auto-enable if key is set
 	}
+
+	// Proxy auth overrides
+	if os.Getenv("ELIDA_PROXY_AUTH_ENABLED") == "true" {
+		c.Proxy.Auth.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_PROXY_API_KEY"); v != "" {
+		c.Proxy.Auth.APIKey = v
+		c.Proxy.Auth.Enabled = true // Auto-enable if key is set
+	}
 }
 
 // ValidationError represents a single validation error with context
@@ -647,6 +689,15 @@ func (c *Config) Validate() *ValidationResult {
 			Field:   "control.auth.api_key",
 			Message: "API key required when auth is enabled",
 			Hint:    "set ELIDA_CONTROL_API_KEY env var",
+		})
+	}
+
+	// Proxy auth
+	if c.Proxy.Auth.Enabled && c.Proxy.Auth.APIKey == "" {
+		errors = append(errors, ValidationError{
+			Field:   "proxy.auth.api_key",
+			Message: "API key required when proxy auth is enabled",
+			Hint:    "set ELIDA_PROXY_API_KEY env var",
 		})
 	}
 
