@@ -3,6 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
 [![CI](https://github.com/zamorofthat/elida/actions/workflows/ci.yml/badge.svg)](https://github.com/zamorofthat/elida/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zamorofthat/elida/badge)](https://scorecard.dev/viewer/?uri=github.com/zamorofthat/elida)
 
 **Edge Layer for Intelligent Defense of Agents**
 
