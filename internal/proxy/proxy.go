@@ -499,8 +499,12 @@ func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backend *rout
 
 	req, _ := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(body))
 
-	// Copy headers
+	// Copy headers (excluding ELIDA internal auth headers)
 	for key, values := range r.Header {
+		// Strip ELIDA proxy auth header - don't leak to backend
+		if strings.EqualFold(key, "X-Elida-API-Key") {
+			continue
+		}
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
