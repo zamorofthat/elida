@@ -52,6 +52,9 @@ type Session struct {
 	// Terminated sessions cannot be resumed (for malicious agents)
 	Terminated bool `json:"terminated,omitempty"`
 
+	// Cached system prompt hash (avoids re-scanning identical prompts)
+	SystemPromptHash string `json:"-"` // Not persisted, session-local cache
+
 	// WebSocket session fields
 	IsWebSocket  bool  `json:"is_websocket,omitempty"`
 	FrameCount   int64 `json:"frame_count,omitempty"`
@@ -236,6 +239,20 @@ func (s *Session) GetToolCallHistory() []ToolCallRecord {
 	result := make([]ToolCallRecord, len(s.ToolCallHistory))
 	copy(result, s.ToolCallHistory)
 	return result
+}
+
+// GetSystemPromptHash returns the cached system prompt hash
+func (s *Session) GetSystemPromptHash() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SystemPromptHash
+}
+
+// SetSystemPromptHash sets the cached system prompt hash
+func (s *Session) SetSystemPromptHash(hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SystemPromptHash = hash
 }
 
 // FrameType represents the type of WebSocket frame
