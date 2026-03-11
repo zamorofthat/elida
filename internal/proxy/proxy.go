@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -1278,6 +1279,7 @@ func isHealthEndpoint(path string) bool {
 }
 
 // validateProxyAuth checks if the request has valid proxy authentication
+// Uses constant-time comparison to prevent timing attacks
 func (p *Proxy) validateProxyAuth(r *http.Request) bool {
 	expectedKey := p.config.Proxy.Auth.APIKey
 	if expectedKey == "" {
@@ -1285,7 +1287,7 @@ func (p *Proxy) validateProxyAuth(r *http.Request) bool {
 	}
 
 	// Check X-Elida-API-Key header (preferred - doesn't conflict with backend auth)
-	if r.Header.Get("X-Elida-API-Key") == expectedKey {
+	if secureCompare(r.Header.Get("X-Elida-API-Key"), expectedKey) {
 		return true
 	}
 
@@ -1294,12 +1296,17 @@ func (p *Proxy) validateProxyAuth(r *http.Request) bool {
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
 		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if token == expectedKey {
+		if secureCompare(token, expectedKey) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// secureCompare performs constant-time string comparison to prevent timing attacks
+func secureCompare(provided, expected string) bool {
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }
 
 // persistFlaggedSession saves a flagged session to storage immediately
