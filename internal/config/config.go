@@ -136,6 +136,10 @@ type TrustConfig struct {
 
 	// TrustedHashes - SHA256 hashes of known-safe content (system prompts)
 	TrustedHashes []string `yaml:"trusted_hashes"`
+
+	// AllowlistedTools - tool names that bypass content scanning on request side
+	// Example: ["Bash", "Read", "Glob"] — requests invoking these tools skip request-side rules
+	AllowlistedTools []string `yaml:"allowlisted_tools"`
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
@@ -825,26 +829,46 @@ func getStandardPreset() []PolicyRule {
 		}, Severity: "critical", Action: "block", Description: "LLM07: Tool requests credential access"},
 
 		// OWASP LLM08 - Excessive Agency (REQUEST-SIDE)
-		{Name: "shell_execution", Type: "content_match", Target: "request", Patterns: []string{
+		{Name: "shell_execution", Type: "content_match", Target: "response", Patterns: []string{
 			"(run|execute)\\s+(a\\s+)?(bash|shell|terminal)\\s+(command|script)",
 			"bash\\s+-c\\s+",
 			"/bin/(ba)?sh\\s+",
-		}, Severity: "critical", Action: "block", Description: "LLM08: Shell execution request"},
-		{Name: "destructive_file_ops", Type: "content_match", Target: "request", Patterns: []string{
+		}, Severity: "critical", Action: "block", Description: "LLM08: Shell execution in response"},
+		{Name: "shell_execution_request", Type: "content_match", Target: "request", Patterns: []string{
+			"(run|execute)\\s+(a\\s+)?(bash|shell|terminal)\\s+(command|script)",
+			"bash\\s+-c\\s+",
+			"/bin/(ba)?sh\\s+",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Shell execution pattern in request"},
+		{Name: "destructive_file_ops", Type: "content_match", Target: "response", Patterns: []string{
 			"rm\\s+(-rf?|--recursive)\\s+/",
 			"rm\\s+-rf\\s+\\*",
 			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
-		}, Severity: "critical", Action: "terminate", Description: "LLM08: Destructive file operation"},
-		{Name: "privilege_escalation", Type: "content_match", Target: "request", Patterns: []string{
+		}, Severity: "critical", Action: "terminate", Description: "LLM08: Destructive file operation in response"},
+		{Name: "destructive_file_ops_request", Type: "content_match", Target: "request", Patterns: []string{
+			"rm\\s+(-rf?|--recursive)\\s+/",
+			"rm\\s+-rf\\s+\\*",
+			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Destructive file operation in request"},
+		{Name: "privilege_escalation", Type: "content_match", Target: "response", Patterns: []string{
 			"sudo\\s+(rm|chmod|chown|kill|bash|sh|python|perl|ruby|apt|yum|dnf|pip|npm|make|gcc|curl|wget)\\b",
 			"(run|execute)\\s+(this\\s+)?(command\\s+)?(as|with)\\s+root",
 			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
-		}, Severity: "critical", Action: "block", Description: "LLM08: Privilege escalation attempt"},
-		{Name: "network_exfiltration", Type: "content_match", Target: "request", Patterns: []string{
+		}, Severity: "critical", Action: "block", Description: "LLM08: Privilege escalation in response"},
+		{Name: "privilege_escalation_request", Type: "content_match", Target: "request", Patterns: []string{
+			"sudo\\s+(rm|chmod|chown|kill|bash|sh|python|perl|ruby|apt|yum|dnf|pip|npm|make|gcc|curl|wget)\\b",
+			"(run|execute)\\s+(this\\s+)?(command\\s+)?(as|with)\\s+root",
+			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Privilege escalation pattern in request"},
+		{Name: "network_exfiltration", Type: "content_match", Target: "response", Patterns: []string{
 			"curl.*\\|\\s*(ba)?sh",
 			"wget.*\\|\\s*(ba)?sh",
 			"reverse\\s+shell",
-		}, Severity: "critical", Action: "terminate", Description: "LLM08: Data exfiltration attempt"},
+		}, Severity: "critical", Action: "block", Description: "LLM08: Data exfiltration attempt (response)"},
+		{Name: "network_exfiltration_request", Type: "content_match", Target: "request", Patterns: []string{
+			"curl.*\\|\\s*(ba)?sh",
+			"wget.*\\|\\s*(ba)?sh",
+			"reverse\\s+shell",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Data exfiltration pattern in request"},
 
 		// OWASP LLM10 - Model Theft (REQUEST-SIDE)
 		{Name: "model_extraction", Type: "content_match", Target: "request", Patterns: []string{

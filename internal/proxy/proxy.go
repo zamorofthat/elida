@@ -303,7 +303,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Trusted tags (e.g., <system-reminder>) are stripped before scanning
 	if p.policy != nil && len(requestBody) > 0 {
 		trustedTags := p.config.Policy.Trust.TrustedTags
-		contentToScan := extractScannableContent(requestBody, sess, trustedTags)
+		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
+		contentToScan := extractScannableContent(requestBody, sess, trustedTags, allowlistedTools)
 		if contentToScan == "" {
 			contentToScan = string(requestBody) // Fallback for non-chat requests
 		}
@@ -511,10 +512,15 @@ func (p *Proxy) createBackendRequest(r *http.Request, body []byte, backend *rout
 
 	req, _ := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(body))
 
-	// Copy headers (excluding ELIDA internal auth headers)
+	// Copy headers (excluding ELIDA internal headers and compression)
 	for key, values := range r.Header {
 		// Strip ELIDA proxy auth header - don't leak to backend
 		if strings.EqualFold(key, "X-Elida-API-Key") {
+			continue
+		}
+		// Strip Accept-Encoding to get uncompressed responses
+		// (we don't decompress, so compressed data would be garbled)
+		if strings.EqualFold(key, "Accept-Encoding") {
 			continue
 		}
 		for _, value := range values {
@@ -1387,7 +1393,7 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 // Always scans: user messages, assistant responses, tool results.
 // Skips: system prompts that match the cached hash.
 // Strips content within trusted tags (e.g., <system-reminder>...</system-reminder>).
-func extractScannableContent(body []byte, sess *session.Session, trustedTags []string) string {
+func extractScannableContent(body []byte, sess *session.Session, trustedTags []string, allowlistedTools ...[]string) string {
 	// Try to parse as chat completion request
 	var req struct {
 		Messages []struct {
@@ -1398,6 +1404,16 @@ func extractScannableContent(body []byte, sess *session.Session, trustedTags []s
 
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
 		return "" // Not a chat request, fallback to full body
+	}
+
+	// Check if request contains only allowlisted tool usage — skip scanning if so
+	var allowed []string
+	if len(allowlistedTools) > 0 {
+		allowed = allowlistedTools[0]
+	}
+	if len(allowed) > 0 && containsOnlyAllowlistedTools(req.Messages, allowed) {
+		slog.Debug("skipping content scan — allowlisted tools only", "session_id", sess.ID)
+		return ""
 	}
 
 	var scannableContent strings.Builder
@@ -1440,6 +1456,45 @@ func extractScannableContent(body []byte, sess *session.Session, trustedTags []s
 	}
 
 	return scannableContent.String()
+}
+
+// containsOnlyAllowlistedTools checks if the most recent assistant message only uses allowlisted tools.
+// If any tool_use block references a non-allowlisted tool, returns false.
+func containsOnlyAllowlistedTools(messages []struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}, allowlisted []string) bool {
+	allowSet := make(map[string]bool, len(allowlisted))
+	for _, t := range allowlisted {
+		allowSet[strings.ToLower(t)] = true
+	}
+
+	// Check the last assistant message for tool_use blocks
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		blocks, ok := messages[i].Content.([]any)
+		if !ok {
+			return false
+		}
+		hasToolUse := false
+		for _, block := range blocks {
+			m, ok := block.(map[string]any)
+			if !ok {
+				continue
+			}
+			if m["type"] == "tool_use" {
+				hasToolUse = true
+				name, _ := m["name"].(string)
+				if !allowSet[strings.ToLower(name)] {
+					return false
+				}
+			}
+		}
+		return hasToolUse // Only check the most recent assistant message
+	}
+	return false
 }
 
 // extractMessageContent extracts text from message content (handles string or content blocks)
