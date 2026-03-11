@@ -121,6 +121,21 @@ type PolicyConfig struct {
 	Streaming      StreamingConfig      `yaml:"streaming"`       // Response streaming scan configuration
 	RiskLadder     RiskLadderConfig     `yaml:"risk_ladder"`     // Progressive escalation based on risk score
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"` // Token and tool call limits
+	Trust          TrustConfig          `yaml:"trust"`           // SBC-style trust configuration
+}
+
+// TrustConfig holds SBC-style trust configuration for content scanning
+type TrustConfig struct {
+	// TrustedTags - content within these XML-style tags is not scanned
+	// Example: ["system-reminder"] skips <system-reminder>...</system-reminder>
+	TrustedTags []string `yaml:"trusted_tags"`
+
+	// TrustedIPs - client IPs/CIDRs that skip content scanning entirely
+	// Example: ["10.0.0.0/8", "192.168.1.100"]
+	TrustedIPs []string `yaml:"trusted_ips"`
+
+	// TrustedHashes - SHA256 hashes of known-safe content (system prompts)
+	TrustedHashes []string `yaml:"trusted_hashes"`
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
@@ -327,6 +342,11 @@ func defaults() *Config {
 				OverlapSize:   1024,      // 1KB overlap for cross-chunk patterns
 				MaxBufferSize: 10485760,  // 10MB max buffer
 				BufferTimeout: 60,        // 60 seconds
+			},
+			Trust: TrustConfig{
+				// Default trusted tags for Claude Code compatibility
+				// Content within <system-reminder>...</system-reminder> is not scanned
+				TrustedTags: []string{"system-reminder"},
 			},
 			Rules: []PolicyRule{
 				{

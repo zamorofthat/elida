@@ -2,12 +2,15 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"regexp"
 	"strings"
 	"time"
 
@@ -295,8 +298,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(p.config.Session.Header, sess.ID)
 
 	// Content inspection - check request body against policy rules BEFORE forwarding
+	// Smart scanning: cache system prompt hash, re-scan only if changed
+	// Always scan: user messages, assistant responses, tool results
+	// Trusted tags (e.g., <system-reminder>) are stripped before scanning
 	if p.policy != nil && len(requestBody) > 0 {
-		if result := p.policy.EvaluateContent(sess.ID, string(requestBody)); result != nil {
+		trustedTags := p.config.Policy.Trust.TrustedTags
+		contentToScan := extractScannableContent(requestBody, sess, trustedTags)
+		if contentToScan == "" {
+			contentToScan = string(requestBody) // Fallback for non-chat requests
+		}
+		if result := p.policy.EvaluateContent(sess.ID, contentToScan); result != nil {
 			// Capture the request content for forensics (before potential early return)
 			p.policy.CaptureRequest(sess.ID, policy.CapturedRequest{
 				Timestamp:   time.Now(),
@@ -1369,4 +1380,115 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 	} else {
 		slog.Debug("persisted flagged session", "session_id", sess.ID, "violations", len(record.Violations))
 	}
+}
+
+// extractScannableContent parses the request body and returns content to scan.
+// Caches system prompt hash to avoid re-scanning identical prompts.
+// Always scans: user messages, assistant responses, tool results.
+// Skips: system prompts that match the cached hash.
+// Strips content within trusted tags (e.g., <system-reminder>...</system-reminder>).
+func extractScannableContent(body []byte, sess *session.Session, trustedTags []string) string {
+	// Try to parse as chat completion request
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"` // Can be string or array of content blocks
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
+		return "" // Not a chat request, fallback to full body
+	}
+
+	var scannableContent strings.Builder
+	cachedHash := sess.GetSystemPromptHash()
+
+	for _, msg := range req.Messages {
+		content := extractMessageContent(msg.Content)
+		if content == "" {
+			continue
+		}
+
+		// Strip content within trusted tags before scanning
+		if len(trustedTags) > 0 {
+			content = stripTrustedTags(content, trustedTags)
+		}
+
+		if msg.Role == "system" {
+			// Calculate hash of system prompt (after stripping trusted tags)
+			hash := hashContent(content)
+
+			if cachedHash == "" {
+				// First time seeing system prompt - scan it and cache hash
+				sess.SetSystemPromptHash(hash)
+				scannableContent.WriteString(content)
+				scannableContent.WriteString("\n")
+				slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
+			} else if hash != cachedHash {
+				// System prompt changed - scan it and update cache
+				sess.SetSystemPromptHash(hash)
+				scannableContent.WriteString(content)
+				scannableContent.WriteString("\n")
+				slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", cachedHash[:16], "new_hash", hash[:16])
+			}
+			// If hash matches cache, skip scanning (already validated)
+		} else {
+			// User, assistant, tool - always scan
+			scannableContent.WriteString(content)
+			scannableContent.WriteString("\n")
+		}
+	}
+
+	return scannableContent.String()
+}
+
+// extractMessageContent extracts text from message content (handles string or content blocks)
+func extractMessageContent(content any) string {
+	// Simple string content
+	if s, ok := content.(string); ok {
+		return s
+	}
+
+	// Array of content blocks (Anthropic/OpenAI vision format)
+	if blocks, ok := content.([]any); ok {
+		var result strings.Builder
+		for _, block := range blocks {
+			if m, ok := block.(map[string]any); ok {
+				if text, ok := m["text"].(string); ok {
+					result.WriteString(text)
+					result.WriteString(" ")
+				}
+			}
+		}
+		return result.String()
+	}
+
+	return ""
+}
+
+// hashContent returns a SHA256 hash of the content
+func hashContent(content string) string {
+	h := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", h)
+}
+
+// stripTrustedTags removes content within trusted XML-style tags.
+// For example, with trustedTags=["system-reminder"], it removes:
+// <system-reminder>...any content...</system-reminder>
+// This prevents false positives from scanning trusted system content.
+func stripTrustedTags(content string, trustedTags []string) string {
+	if len(trustedTags) == 0 {
+		return content
+	}
+
+	result := content
+	for _, tag := range trustedTags {
+		// Match <tag>...</tag> including multiline content (non-greedy)
+		// Uses (?s) flag for dotall mode (. matches newlines)
+		pattern := fmt.Sprintf(`(?s)<%s>.*?</%s>`, regexp.QuoteMeta(tag), regexp.QuoteMeta(tag))
+		re := regexp.MustCompile(pattern)
+		result = re.ReplaceAllString(result, "")
+	}
+
+	return result
 }
