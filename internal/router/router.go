@@ -21,6 +21,7 @@ type Backend struct {
 	Type      string   // ollama, openai, anthropic, mistral
 	Models    []string // glob patterns for model matching
 	Default   bool
+	APIKey    string // API key to inject for keyless clients
 	Transport *http.Transport
 }
 
@@ -68,6 +69,7 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 			Type:    bcfg.Type,
 			Models:  bcfg.Models,
 			Default: bcfg.Default,
+			APIKey:  bcfg.APIKey,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
