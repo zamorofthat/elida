@@ -14,6 +14,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/credentials"
 )
 
 // Config holds telemetry configuration
@@ -105,6 +106,9 @@ func createOTLPExporter(cfg Config) (sdktrace.SpanExporter, error) {
 
 	if cfg.Insecure {
 		opts = append(opts, otlptracegrpc.WithInsecure())
+	} else {
+		// Use system CA pool for TLS
+		opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")))
 	}
 
 	return otlptracegrpc.New(ctx, opts...)
