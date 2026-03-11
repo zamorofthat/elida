@@ -190,6 +190,44 @@ This is useful for:
 - Internal services without credential distribution
 - Multi-tenant setups with per-backend keys
 
+## Policy Direction Split
+
+ELIDA splits content policy rules by direction to prevent false positives from LLM conversation history while still catching real threats.
+
+### How It Works
+
+| Direction | Severity | Action | Purpose |
+|-----------|----------|--------|---------|
+| **Response** (AI output) | Critical | Block/Terminate | AI generating dangerous content is a real threat |
+| **Request** (user input) | Critical | Flag | Conversation history may contain matching patterns; risk ladder escalates |
+
+Request-side flags score **10.0 points** (critical severity) on the risk ladder. Repeated violations escalate automatically:
+
+| Risk Score | Action |
+|------------|--------|
+| 5 | Warn |
+| 15 | Throttle |
+| 30 | Block |
+| 50 | Terminate |
+
+### Allowlisted Tools
+
+Tools that bypass request-side content scanning. When the latest assistant message contains only allowlisted tools, the request skips policy checks entirely.
+
+```yaml
+policy:
+  trust:
+    allowlisted_tools:
+      - "Read"
+      - "Glob"
+      - "Grep"
+      - "Edit"
+      - "Write"
+      - "Agent"
+```
+
+Tools like `Bash` are intentionally excluded — they can execute dangerous commands and should be scanned.
+
 ## Session ID Behavior
 
 Sessions are identified by the `X-Session-ID` header. If not provided, ELIDA generates one automatically.

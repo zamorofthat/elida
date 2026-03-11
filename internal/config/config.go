@@ -787,21 +787,36 @@ func getStandardPreset() []PolicyRule {
 		{Name: "large_response", Type: "bytes_out", Threshold: 10485760, Severity: "warning", Action: "flag", Description: "FIREWALL: Large data transfer (>10MB)"},
 
 		// OWASP LLM01 - Prompt Injection (REQUEST-SIDE)
-		{Name: "prompt_injection_ignore", Type: "content_match", Target: "request", Patterns: []string{
+		{Name: "prompt_injection_ignore", Type: "content_match", Target: "response", Patterns: []string{
 			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
 			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
 			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
-		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - instruction override"},
-		{Name: "prompt_injection_jailbreak", Type: "content_match", Target: "request", Patterns: []string{
+		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - instruction override (response)"},
+		{Name: "prompt_injection_ignore_request", Type: "content_match", Target: "request", Patterns: []string{
+			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
+			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
+			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
+		}, Severity: "critical", Action: "flag", Description: "LLM01: Prompt injection pattern in request"},
+		{Name: "prompt_injection_jailbreak", Type: "content_match", Target: "response", Patterns: []string{
 			"you\\s+are\\s+now\\s+(DAN|a\\s+new|an?\\s+unrestricted)",
 			"enable\\s+(DAN|developer|jailbreak)\\s+mode",
 			"jailbreak(ed)?\\s+(mode|prompt|enabled)",
-		}, Severity: "critical", Action: "terminate", Description: "LLM01: Prompt injection - jailbreak attempt"},
-		{Name: "prompt_injection_roleplay", Type: "content_match", Target: "request", Patterns: []string{
+		}, Severity: "critical", Action: "terminate", Description: "LLM01: Prompt injection - jailbreak attempt (response)"},
+		{Name: "prompt_injection_jailbreak_request", Type: "content_match", Target: "request", Patterns: []string{
+			"you\\s+are\\s+now\\s+(DAN|a\\s+new|an?\\s+unrestricted)",
+			"enable\\s+(DAN|developer|jailbreak)\\s+mode",
+			"jailbreak(ed)?\\s+(mode|prompt|enabled)",
+		}, Severity: "critical", Action: "flag", Description: "LLM01: Prompt injection pattern in request"},
+		{Name: "prompt_injection_roleplay", Type: "content_match", Target: "response", Patterns: []string{
 			"you\\s+are\\s+(now\\s+)?a\\s+.{0,30}(without|no)\\s+(any\\s+)?restrictions",
 			"(pretend|act|behave)\\s+(like\\s+)?you\\s+(have|are)\\s+no\\s+(rules|restrictions|limits)",
 			"(without|bypass|ignore)\\s+(any\\s+)?(safety|ethical)\\s+(guidelines|restrictions|rules)",
-		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - roleplay restriction bypass"},
+		}, Severity: "critical", Action: "block", Description: "LLM01: Prompt injection - roleplay bypass (response)"},
+		{Name: "prompt_injection_roleplay_request", Type: "content_match", Target: "request", Patterns: []string{
+			"you\\s+are\\s+(now\\s+)?a\\s+.{0,30}(without|no)\\s+(any\\s+)?restrictions",
+			"(pretend|act|behave)\\s+(like\\s+)?you\\s+(have|are)\\s+no\\s+(rules|restrictions|limits)",
+			"(without|bypass|ignore)\\s+(any\\s+)?(safety|ethical)\\s+(guidelines|restrictions|rules)",
+		}, Severity: "critical", Action: "flag", Description: "LLM01: Prompt injection pattern in request"},
 
 		// OWASP LLM02 - Insecure Output Handling (RESPONSE-SIDE)
 		// NOTE: Using 'flag' action to avoid latency impact. Use 'block' only if you accept buffering latency.
