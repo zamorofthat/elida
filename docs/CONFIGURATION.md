@@ -21,11 +21,18 @@ backends:
     url: "https://api.openai.com"
     type: openai
     models: ["gpt-*", "o1-*"]
+    api_key: ""  # Optional: inject API key server-side (enables keyless clients)
   anthropic:
     url: "https://api.anthropic.com"
     type: anthropic
     models: ["claude-*"]
-  routing:
+    api_key: ""  # Optional: inject API key server-side
+  groq:
+    url: "https://api.groq.com/openai/v1"
+    type: groq
+    models: ["llama-*", "mixtral-*"]
+    api_key: ""  # Optional: use GROQ_API_KEY env var instead
+routing:
     methods:
       - header
       - model
@@ -51,6 +58,15 @@ session:
 control:
   listen: ":9090"
   enabled: true
+  auth:
+    enabled: true
+    api_key: "your-control-api-key"  # Or use ELIDA_CONTROL_API_KEY env var
+
+# Proxy authentication (optional - secures the proxy endpoint)
+proxy:
+  auth:
+    enabled: true
+    api_key: "your-proxy-api-key"  # Or use ELIDA_PROXY_API_KEY env var
 
 # Policy engine
 policy:
@@ -124,6 +140,55 @@ All configuration can be overridden with environment variables:
 | `ELIDA_REDIS_ADDR` | `localhost:6379` | Redis address |
 | `ELIDA_REDIS_PASSWORD` | — | Redis password |
 | `ELIDA_REDIS_DB` | `0` | Redis database number |
+| `ELIDA_CONTROL_API_KEY` | — | API key for control API auth (auto-enables auth) |
+| `ELIDA_PROXY_API_KEY` | — | API key for proxy auth (auto-enables auth) |
+
+## Proxy Authentication
+
+ELIDA supports optional API key authentication on the proxy endpoint to prevent unauthorized access.
+
+### Configuration
+
+```yaml
+proxy:
+  auth:
+    enabled: true
+    api_key: "your-secret-key"  # Or use ELIDA_PROXY_API_KEY env var
+```
+
+### Supported Auth Methods
+
+| Method | Header | Example |
+|--------|--------|---------|
+| ELIDA API Key | `X-Elida-API-Key` | `X-Elida-API-Key: your-secret-key` |
+| Bearer Token | `Authorization` | `Authorization: Bearer your-secret-key` |
+
+### Security Features
+
+- **Constant-time comparison** — Uses `crypto/subtle.ConstantTimeCompare` to prevent timing attacks
+- **Header stripping** — `X-Elida-API-Key` is stripped before forwarding to backend (not leaked)
+- **Health bypass** — `/health`, `/healthz`, `/ready`, `/readyz` bypass auth for load balancer probes
+
+### Backend API Key Injection (Keyless Clients)
+
+ELIDA can inject API keys server-side, enabling keyless clients (SBC pattern):
+
+```yaml
+backends:
+  openai:
+    url: "https://api.openai.com"
+    type: openai
+    api_key: "sk-..."  # Injected into requests automatically
+```
+
+Clients connect to ELIDA without any API key. ELIDA injects the correct auth header based on backend type:
+- **Anthropic**: `x-api-key: <key>`
+- **OpenAI/Groq/Mistral**: `Authorization: Bearer <key>`
+
+This is useful for:
+- Public demos with rate limiting
+- Internal services without credential distribution
+- Multi-tenant setups with per-backend keys
 
 ## Session ID Behavior
 
