@@ -251,11 +251,13 @@ type LoggingConfig struct {
 
 // TelemetryConfig holds OpenTelemetry configuration
 type TelemetryConfig struct {
-	Enabled     bool   `yaml:"enabled"`
-	Exporter    string `yaml:"exporter"` // "otlp", "stdout", or "none"
-	Endpoint    string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
-	ServiceName string `yaml:"service_name"`
-	Insecure    bool   `yaml:"insecure"` // Use insecure connection for OTLP
+	Enabled        bool   `yaml:"enabled"`
+	Exporter       string `yaml:"exporter"` // "otlp", "stdout", or "none"
+	Endpoint       string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
+	ServiceName    string `yaml:"service_name"`
+	Insecure       bool   `yaml:"insecure"`        // Use insecure connection for OTLP
+	CaptureContent bool   `yaml:"capture_content"` // Log full request/response bodies via OTEL logs
+	MaxBodySize    int    `yaml:"max_body_size"`   // Truncation limit for bodies (default 4096)
 }
 
 // Load reads and parses the configuration file
