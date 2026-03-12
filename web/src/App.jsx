@@ -1,7 +1,68 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { formatBytes, formatDuration, formatDurationStr, truncateId } from './utils'
+import { apiFetch, AUTH_KEY, setLogoutHandler } from './apiFetch'
 
 const API_BASE = ''
+
+// ============================================================================
+// Login Component
+// ============================================================================
+
+export function Login({ onLogin }) {
+  const [key, setKey] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    if (!key.trim()) return
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(API_BASE + '/control/health', {
+        headers: { 'Authorization': 'Bearer ' + key.trim() },
+      })
+      if (res.status === 401) {
+        setError('Invalid API key')
+      } else if (res.ok) {
+        localStorage.setItem(AUTH_KEY, key.trim())
+        onLogin()
+      } else {
+        setError('Connection failed')
+      }
+    } catch {
+      setError('Cannot reach server')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div class="login-container">
+      <div class="login-card">
+        <div class="login-header">
+          <IconLogo />
+          <h1>ELIDA</h1>
+          <p class="text-muted">Enter your API key to continue</p>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <input
+            type="password"
+            class="login-input"
+            placeholder="API key"
+            value={key}
+            onInput={(e) => setKey(e.target.value)}
+            autoFocus
+          />
+          {error && <div class="login-error">{error}</div>}
+          <button type="submit" class="btn btn-primary login-btn" disabled={loading || !key.trim()}>
+            {loading ? 'Verifying...' : 'Sign In'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
 
 // ============================================================================
 // Icons (SVG components)
@@ -347,14 +408,14 @@ function SessionDetails({ session, onClose }) {
   useEffect(() => {
     if (session?.id) {
       // Try live flagged endpoint first, then history endpoint
-      fetch(API_BASE + '/control/flagged/' + session.id)
+      apiFetch(API_BASE + '/control/flagged/' + session.id)
         .then(res => res.ok ? res.json() : null)
         .then(data => {
           if (data) {
             setFlaggedInfo(data)
           } else {
             // Fall back to history endpoint for persisted sessions
-            return fetch(API_BASE + '/control/history/' + session.id)
+            return apiFetch(API_BASE + '/control/history/' + session.id)
               .then(res => res.ok ? res.json() : null)
               .then(histData => setFlaggedInfo(histData))
           }
@@ -549,7 +610,7 @@ function FlaggedDetails({ flagged, onClose }) {
 
   useEffect(() => {
     if (flagged?.session_id) {
-      fetch(API_BASE + '/control/sessions/' + flagged.session_id)
+      apiFetch(API_BASE + '/control/sessions/' + flagged.session_id)
         .then(res => res.ok ? res.json() : null)
         .then(data => setSessionInfo(data))
         .catch(() => setSessionInfo(null))
@@ -736,7 +797,7 @@ function VoiceDetails({ voiceSession, onClose }) {
   useEffect(() => {
     if (voiceSession?.id && voiceSession?.parent_session_id) {
       // Try to get the full voice session with transcript
-      fetch(API_BASE + '/control/voice/' + voiceSession.parent_session_id + '/' + voiceSession.id)
+      apiFetch(API_BASE + '/control/voice/' + voiceSession.parent_session_id + '/' + voiceSession.id)
         .then(res => res.ok ? res.json() : null)
         .then(data => setFullSession(data || voiceSession))
         .catch(() => setFullSession(voiceSession))
@@ -847,9 +908,9 @@ function SettingsPage() {
   const fetchSettings = async () => {
     try {
       const [settingsRes, defaultsRes, diffRes] = await Promise.all([
-        fetch(API_BASE + '/control/settings'),
-        fetch(API_BASE + '/control/settings/defaults'),
-        fetch(API_BASE + '/control/settings/diff'),
+        apiFetch(API_BASE + '/control/settings'),
+        apiFetch(API_BASE + '/control/settings/defaults'),
+        apiFetch(API_BASE + '/control/settings/diff'),
       ])
 
       if (settingsRes.ok) setSettings(await settingsRes.json())
@@ -871,7 +932,7 @@ function SettingsPage() {
     setSaving(true)
     setMessage(null)
     try {
-      const res = await fetch(API_BASE + '/control/settings', {
+      const res = await apiFetch(API_BASE + '/control/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
@@ -895,7 +956,7 @@ function SettingsPage() {
     setSaving(true)
     setMessage(null)
     try {
-      const res = await fetch(API_BASE + '/control/settings', { method: 'DELETE' })
+      const res = await apiFetch(API_BASE + '/control/settings', { method: 'DELETE' })
       if (res.ok) {
         setMessage({ type: 'success', text: 'Settings reset to defaults' })
         fetchSettings()
@@ -1417,6 +1478,33 @@ function DashboardPage({ stats, flaggedStats, sparklineData }) {
 // ============================================================================
 
 export function App() {
+  const [authed, setAuthed] = useState(!!localStorage.getItem(AUTH_KEY))
+  const [checking, setChecking] = useState(!authed)
+
+  useEffect(() => {
+    setLogoutHandler(() => setAuthed(false))
+    if (!authed) {
+      fetch(API_BASE + '/control/health')
+        .then((res) => {
+          if (res.ok) {
+            setAuthed(true)
+          }
+        })
+        .catch(() => {})
+        .finally(() => setChecking(false))
+    }
+  }, [])
+
+  if (checking) return null
+
+  if (!authed) {
+    return <Login onLogin={() => setAuthed(true)} />
+  }
+
+  return <AppShell />
+}
+
+function AppShell() {
   const [page, setPage] = useState('dashboard')
   const [stats, setStats] = useState({})
   const [sessions, setSessions] = useState([])
@@ -1449,7 +1537,7 @@ export function App() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/stats')
+      const res = await apiFetch(API_BASE + '/control/stats')
       const data = await res.json()
       setStats(data)
       updateSparkline('active', data.active || 0)
@@ -1463,7 +1551,7 @@ export function App() {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/sessions')
+      const res = await apiFetch(API_BASE + '/control/sessions')
       const data = await res.json()
       setSessions(data.sessions || [])
     } catch (err) {
@@ -1473,7 +1561,7 @@ export function App() {
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/history?limit=50')
+      const res = await apiFetch(API_BASE + '/control/history?limit=50')
       const data = await res.json()
       setHistory(data.sessions || [])
     } catch (err) {
@@ -1483,7 +1571,7 @@ export function App() {
 
   const fetchFlagged = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/flagged')
+      const res = await apiFetch(API_BASE + '/control/flagged')
       if (res.status === 503) {
         setFlagged([])
         return
@@ -1497,7 +1585,7 @@ export function App() {
 
   const fetchFlaggedStats = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/flagged/stats')
+      const res = await apiFetch(API_BASE + '/control/flagged/stats')
       if (res.status === 503) {
         setFlaggedStats({})
         return
@@ -1512,7 +1600,7 @@ export function App() {
   const fetchVoiceSessions = async () => {
     try {
       // Fetch active voice sessions
-      const res = await fetch(API_BASE + '/control/voice')
+      const res = await apiFetch(API_BASE + '/control/voice')
       if (res.ok) {
         const data = await res.json()
         setVoiceSessions(data.voice_sessions || [])
@@ -1524,7 +1612,7 @@ export function App() {
 
   const fetchVoiceHistory = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/voice-history')
+      const res = await apiFetch(API_BASE + '/control/voice-history')
       if (res.ok) {
         const data = await res.json()
         setVoiceHistory(data.voice_sessions || [])
@@ -1536,7 +1624,7 @@ export function App() {
 
   const checkHealth = async () => {
     try {
-      const res = await fetch(API_BASE + '/control/health')
+      const res = await apiFetch(API_BASE + '/control/health')
       const data = await res.json()
       setStatus(data.status === 'ok' ? 'connected' : 'error')
     } catch {
@@ -1547,7 +1635,7 @@ export function App() {
   const killSession = async (id) => {
     if (!confirm('Kill this session?')) return
     try {
-      await fetch(API_BASE + '/control/sessions/' + id + '/kill', { method: 'POST' })
+      await apiFetch(API_BASE + '/control/sessions/' + id + '/kill', { method: 'POST' })
       fetchSessions()
       fetchStats()
     } catch {
