@@ -1,6 +1,6 @@
 policy:
-    enabled: false
-    mode: audit
+    enabled: true
+    mode: enforce
     preset: standard
     risk_ladder:
         enabled: true

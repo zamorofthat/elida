@@ -270,6 +270,8 @@ func main() {
 					BytesIn:      snap.BytesIn,
 					BytesOut:     snap.BytesOut,
 					CaptureCount: len(record.CapturedContent),
+					TokensIn:     snap.TokensIn,
+					TokensOut:    snap.TokensOut,
 				}
 				// Add violations
 				for _, v := range record.Violations {
@@ -301,11 +303,13 @@ func main() {
 	if cfg.Telemetry.Enabled {
 		var telemetryErr error
 		tp, telemetryErr = telemetry.NewProvider(telemetry.Config{
-			Enabled:     cfg.Telemetry.Enabled,
-			Exporter:    cfg.Telemetry.Exporter,
-			Endpoint:    cfg.Telemetry.Endpoint,
-			ServiceName: cfg.Telemetry.ServiceName,
-			Insecure:    cfg.Telemetry.Insecure,
+			Enabled:        cfg.Telemetry.Enabled,
+			Exporter:       cfg.Telemetry.Exporter,
+			Endpoint:       cfg.Telemetry.Endpoint,
+			ServiceName:    cfg.Telemetry.ServiceName,
+			Insecure:       cfg.Telemetry.Insecure,
+			CaptureContent: cfg.Telemetry.CaptureContent,
+			MaxBodySize:    cfg.Telemetry.MaxBodySize,
 		})
 		if telemetryErr != nil {
 			slog.Warn("telemetry initialization failed, continuing without tracing", "error", telemetryErr)
