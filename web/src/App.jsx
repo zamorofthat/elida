@@ -1479,10 +1479,23 @@ function DashboardPage({ stats, flaggedStats, sparklineData }) {
 
 export function App() {
   const [authed, setAuthed] = useState(!!localStorage.getItem(AUTH_KEY))
+  const [checking, setChecking] = useState(!authed)
 
   useEffect(() => {
     setLogoutHandler(() => setAuthed(false))
+    if (!authed) {
+      fetch(API_BASE + '/control/health')
+        .then((res) => {
+          if (res.ok) {
+            setAuthed(true)
+          }
+        })
+        .catch(() => {})
+        .finally(() => setChecking(false))
+    }
   }, [])
+
+  if (checking) return null
 
   if (!authed) {
     return <Login onLogin={() => setAuthed(true)} />
