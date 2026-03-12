@@ -100,7 +100,7 @@ jobs:
         run: go mod download
 
       - name: Run unit tests
-        run: go test -v -race -coverprofile=coverage.out ./test/unit/...
+        run: go test -v -race -coverpkg=./internal/... -coverprofile=coverage.out ./test/unit/...
 
       - name: Upload coverage
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # v5.5.2
@@ -156,7 +156,7 @@ jobs:
         run: go mod download
 
       - name: Build binary
-        run: go build -o bin/elida ./cmd/elida
+        run: go build -ldflags="-X main.Version=${{ github.ref_name }}" -o bin/elida ./cmd/elida
 
       - name: Verify binary
         run: ./bin/elida -version || true
@@ -285,6 +285,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64

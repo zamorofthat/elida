@@ -31,10 +31,19 @@ import (
 	"elida/internal/websocket"
 )
 
+// Version is set at build time via -ldflags "-X main.Version=..."
+var Version = "dev"
+
 func main() {
 	configPath := flag.String("config", "configs/elida.yaml", "path to config file")
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("elida " + Version)
+		return
+	}
 
 	// Load configuration
 	cfg, err := config.Load(*configPath)
@@ -62,7 +71,7 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("starting ELIDA",
-		"version", "0.2.3",
+		"version", Version,
 		"listen", cfg.Listen,
 		"backend", cfg.Backend,
 		"session_store", cfg.Session.Store,
