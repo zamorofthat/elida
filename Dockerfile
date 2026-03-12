@@ -26,7 +26,8 @@ COPY . .
 COPY --from=dashboard-builder /app/web/../internal/dashboard/static ./internal/dashboard/static
 
 # Build binary with embedded dashboard
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o elida ./cmd/elida
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s -X main.Version=${VERSION}" -o elida ./cmd/elida
 
 # Runtime stage
 FROM alpine:3.23
