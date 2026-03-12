@@ -6,5 +6,8 @@ export default defineConfig({
   build: {
     outDir: '../internal/dashboard/static',
     emptyOutDir: true
-  }
+  },
+  test: {
+    environment: 'jsdom',
+  },
 })
