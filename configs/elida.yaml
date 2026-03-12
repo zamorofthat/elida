@@ -100,6 +100,11 @@ telemetry:
   service_name: "elida"
   # Use insecure connection (for local development)
   insecure: true
+  # Capture request/response content in OTEL session records
+  # Currently boolean; T12 will change to: "all", "flagged", or "none"
+  capture_content: false
+  # Max bytes of request/response body to include in OTEL exports (default 4096)
+  max_body_size: 4096
 
 # Storage configuration (for dashboard history)
 storage:
