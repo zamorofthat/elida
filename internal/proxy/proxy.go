@@ -325,6 +325,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					"session_id", sess.ID,
 					"violations", len(result.Violations),
 				)
+				// Real-time OTEL block log
+				if p.telemetry != nil {
+					for _, v := range result.Violations {
+						p.telemetry.EmitBlockLog(ctx, sess.ID, v.RuleName, v.MatchedText, backend.Name, "")
+					}
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				if _, err := w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy - session terminated"}`)); err != nil {
@@ -337,6 +343,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					"session_id", sess.ID,
 					"violations", len(result.Violations),
 				)
+				// Real-time OTEL block log
+				if p.telemetry != nil {
+					for _, v := range result.Violations {
+						p.telemetry.EmitBlockLog(ctx, sess.ID, v.RuleName, v.MatchedText, backend.Name, "")
+					}
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusForbidden)
 				if _, err := w.Write([]byte(`{"error":"policy_violation","message":"Request violates security policy"}`)); err != nil {
@@ -393,6 +405,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var statusCode int
 	var bytesOut int64
 
+	// Snapshot token counts before request for per-request delta
+	tokInBefore, tokOutBefore := sess.GetTokens()
+
 	if isStreaming {
 		statusCode, bytesOut = p.handleStreaming(w, backendReq, sess, backend)
 	} else {
@@ -401,6 +416,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// End telemetry span with metrics
 	p.telemetry.EndRequestSpan(span, statusCode, int64(len(requestBody)), bytesOut, nil)
+
+	// Record per-request GenAI metrics (token usage + operation duration)
+	if p.telemetry != nil {
+		durationSec := time.Since(startTime).Seconds()
+		tokInAfter, tokOutAfter := sess.GetTokens()
+		reqModel := extractModelFromBody(requestBody)
+		hasError := statusCode >= 400
+
+		p.telemetry.RecordTokenUsage(ctx, tokInAfter-tokInBefore, tokOutAfter-tokOutBefore, reqModel, backend.Name)
+		p.telemetry.RecordOperationDuration(ctx, durationSec, reqModel, backend.Name, hasError)
+	}
 
 	// Evaluate policy rules
 	if p.policy != nil {
@@ -1518,6 +1544,20 @@ func extractMessageContent(content any) string {
 		return result.String()
 	}
 
+	return ""
+}
+
+// extractModelFromBody extracts the "model" field from a JSON request body
+func extractModelFromBody(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var req struct {
+		Model string `json:"model"`
+	}
+	if json.Unmarshal(body, &req) == nil {
+		return req.Model
+	}
 	return ""
 }
 
