@@ -8,8 +8,16 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/metric"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -19,99 +27,223 @@ import (
 
 // Config holds telemetry configuration
 type Config struct {
-	Enabled     bool   `yaml:"enabled"`
-	Exporter    string `yaml:"exporter"` // "otlp", "stdout", or "none"
-	Endpoint    string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
-	ServiceName string `yaml:"service_name"`
-	Insecure    bool   `yaml:"insecure"` // Use insecure connection for OTLP
+	Enabled        bool   `yaml:"enabled"`
+	Exporter       string `yaml:"exporter"` // "otlp", "stdout", or "none"
+	Endpoint       string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
+	ServiceName    string `yaml:"service_name"`
+	Insecure       bool   `yaml:"insecure"`        // Use insecure connection for OTLP
+	CaptureContent bool   `yaml:"capture_content"` // Log full request/response bodies
+	MaxBodySize    int    `yaml:"max_body_size"`   // Truncation limit for bodies (default 4096)
 }
 
-// Provider manages OpenTelemetry tracing
+// Provider manages OpenTelemetry tracing, logging, and metrics
 type Provider struct {
-	config   Config
-	tracer   trace.Tracer
-	provider *sdktrace.TracerProvider
+	config        Config
+	tracer        trace.Tracer
+	provider      *sdktrace.TracerProvider
+	logProvider   *sdklog.LoggerProvider
+	logger        otellog.Logger
+	meterProvider *sdkmetric.MeterProvider
+	meter         metric.Meter
+	// GenAI metrics instruments
+	tokenUsage        metric.Int64Histogram
+	operationDuration metric.Float64Histogram
 }
 
-// NewProvider creates a new telemetry provider
+// NewProvider creates a new telemetry provider with traces, logs, and metrics
 func NewProvider(cfg Config) (*Provider, error) {
 	if !cfg.Enabled {
-		return &Provider{
-			config: cfg,
-			tracer: otel.Tracer("elida"),
-		}, nil
+		return noopWithConfig(cfg), nil
 	}
 
 	if cfg.ServiceName == "" {
 		cfg.ServiceName = "elida"
 	}
-
-	slog.Info("creating exporter", "type", cfg.Exporter)
-
-	// Create exporter based on config
-	var exporter sdktrace.SpanExporter
-	var err error
-	switch cfg.Exporter {
-	case "otlp":
-		slog.Debug("creating OTLP exporter")
-		exporter, err = createOTLPExporter(cfg)
-		if err != nil {
-			return nil, err
-		}
-		slog.Info("OTLP exporter initialized", "endpoint", cfg.Endpoint)
-	case "stdout":
-		slog.Debug("creating stdout exporter")
-		exporter, err = stdouttrace.New(stdouttrace.WithPrettyPrint())
-		if err != nil {
-			slog.Error("stdout exporter creation failed", "error", err)
-			return nil, err
-		}
-		slog.Info("stdout trace exporter initialized")
-	default:
-		// No exporter - tracing disabled
-		return &Provider{
-			config: cfg,
-			tracer: otel.Tracer("elida"),
-		}, nil
+	if cfg.MaxBodySize == 0 {
+		cfg.MaxBodySize = 4096
 	}
 
-	// Create resource with service name (use NewSchemaless to avoid version conflicts)
+	slog.Info("creating telemetry exporters", "type", cfg.Exporter)
+
+	// Create resource with service name
 	res := resource.NewSchemaless(
 		semconv.ServiceName(cfg.ServiceName),
 	)
 
-	// Create trace provider with resource
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exporter),
-		sdktrace.WithResource(res),
-	)
+	p := &Provider{config: cfg}
 
-	// Set as global provider
-	otel.SetTracerProvider(tp)
+	switch cfg.Exporter {
+	case "otlp":
+		if err := p.initOTLP(cfg, res); err != nil {
+			return nil, err
+		}
+	case "stdout":
+		if err := p.initStdout(cfg, res); err != nil {
+			return nil, err
+		}
+	default:
+		return noopWithConfig(cfg), nil
+	}
 
-	return &Provider{
-		config:   cfg,
-		tracer:   tp.Tracer("elida"),
-		provider: tp,
-	}, nil
+	return p, nil
 }
 
-// createOTLPExporter creates an OTLP gRPC exporter
-func createOTLPExporter(cfg Config) (sdktrace.SpanExporter, error) {
+// initOTLP initializes OTLP gRPC exporters for traces, logs, and metrics
+func (p *Provider) initOTLP(cfg Config, res *resource.Resource) error {
 	ctx := context.Background()
 
-	opts := []otlptracegrpc.Option{
+	// Common gRPC options
+	var grpcCreds credentials.TransportCredentials
+	if !cfg.Insecure {
+		grpcCreds = credentials.NewClientTLSFromCert(nil, "")
+	}
+
+	// --- Trace exporter ---
+	traceOpts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(cfg.Endpoint),
 	}
-
 	if cfg.Insecure {
-		opts = append(opts, otlptracegrpc.WithInsecure())
+		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
 	} else {
-		// Use system CA pool for TLS
-		opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")))
+		traceOpts = append(traceOpts, otlptracegrpc.WithTLSCredentials(grpcCreds))
+	}
+	traceExp, err := otlptracegrpc.New(ctx, traceOpts...)
+	if err != nil {
+		return err
 	}
 
-	return otlptracegrpc.New(ctx, opts...)
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(traceExp),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	p.provider = tp
+	p.tracer = tp.Tracer("elida")
+
+	// --- Log exporter ---
+	logOpts := []otlploggrpc.Option{
+		otlploggrpc.WithEndpoint(cfg.Endpoint),
+	}
+	if cfg.Insecure {
+		logOpts = append(logOpts, otlploggrpc.WithInsecure())
+	} else {
+		logOpts = append(logOpts, otlploggrpc.WithTLSCredentials(grpcCreds))
+	}
+	logExp, err := otlploggrpc.New(ctx, logOpts...)
+	if err != nil {
+		slog.Warn("failed to create OTLP log exporter, logs disabled", "error", err)
+	} else {
+		lp := sdklog.NewLoggerProvider(
+			sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp)),
+			sdklog.WithResource(res),
+		)
+		p.logProvider = lp
+		p.logger = lp.Logger("elida")
+		slog.Info("OTLP log exporter initialized", "endpoint", cfg.Endpoint)
+	}
+
+	// --- Metric exporter ---
+	metricOpts := []otlpmetricgrpc.Option{
+		otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
+	}
+	if cfg.Insecure {
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
+	} else {
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithTLSCredentials(grpcCreds))
+	}
+	metricExp, err := otlpmetricgrpc.New(ctx, metricOpts...)
+	if err != nil {
+		slog.Warn("failed to create OTLP metric exporter, metrics disabled", "error", err)
+	} else {
+		mp := sdkmetric.NewMeterProvider(
+			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithInterval(30*time.Second))),
+			sdkmetric.WithResource(res),
+		)
+		p.meterProvider = mp
+		p.meter = mp.Meter("elida")
+		p.initMetricInstruments()
+		slog.Info("OTLP metric exporter initialized", "endpoint", cfg.Endpoint)
+	}
+
+	slog.Info("OTLP exporters initialized", "endpoint", cfg.Endpoint)
+	return nil
+}
+
+// initStdout initializes stdout exporters for traces, logs, and metrics
+func (p *Provider) initStdout(_ Config, res *resource.Resource) error {
+	// --- Trace exporter ---
+	traceExp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	if err != nil {
+		return err
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(traceExp),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	p.provider = tp
+	p.tracer = tp.Tracer("elida")
+
+	// --- Log exporter ---
+	logExp, err := stdoutlog.New()
+	if err != nil {
+		slog.Warn("failed to create stdout log exporter", "error", err)
+	} else {
+		lp := sdklog.NewLoggerProvider(
+			sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp)),
+			sdklog.WithResource(res),
+		)
+		p.logProvider = lp
+		p.logger = lp.Logger("elida")
+		slog.Info("stdout log exporter initialized")
+	}
+
+	// --- Metric exporter ---
+	metricExp, err := stdoutmetric.New()
+	if err != nil {
+		slog.Warn("failed to create stdout metric exporter", "error", err)
+	} else {
+		mp := sdkmetric.NewMeterProvider(
+			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithInterval(30*time.Second))),
+			sdkmetric.WithResource(res),
+		)
+		p.meterProvider = mp
+		p.meter = mp.Meter("elida")
+		p.initMetricInstruments()
+		slog.Info("stdout metric exporter initialized")
+	}
+
+	return nil
+}
+
+// initMetricInstruments creates the GenAI metric instruments
+func (p *Provider) initMetricInstruments() {
+	var err error
+
+	p.tokenUsage, err = p.meter.Int64Histogram(
+		"gen_ai.client.token.usage",
+		metric.WithDescription("Number of tokens used in GenAI client requests"),
+		metric.WithUnit("{token}"),
+	)
+	if err != nil {
+		slog.Warn("failed to create token usage metric", "error", err)
+	}
+
+	p.operationDuration, err = p.meter.Float64Histogram(
+		"gen_ai.client.operation.duration",
+		metric.WithDescription("Duration of GenAI client operations"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		slog.Warn("failed to create operation duration metric", "error", err)
+	}
+}
+
+func noopWithConfig(cfg Config) *Provider {
+	return &Provider{
+		config: cfg,
+		tracer: otel.Tracer("elida"),
+	}
 }
 
 // Tracer returns the tracer for creating spans
@@ -119,10 +251,26 @@ func (p *Provider) Tracer() trace.Tracer {
 	return p.tracer
 }
 
-// Shutdown gracefully shuts down the trace provider
+// Shutdown gracefully shuts down all providers
 func (p *Provider) Shutdown(ctx context.Context) error {
+	var errs []error
 	if p.provider != nil {
-		return p.provider.Shutdown(ctx)
+		if err := p.provider.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if p.logProvider != nil {
+		if err := p.logProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if p.meterProvider != nil {
+		if err := p.meterProvider.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errs[0]
 	}
 	return nil
 }
@@ -132,7 +280,205 @@ func (p *Provider) Enabled() bool {
 	return p.config.Enabled && p.provider != nil
 }
 
-// Session span attributes
+// LogsEnabled returns whether log export is available
+func (p *Provider) LogsEnabled() bool {
+	return p.logger != nil
+}
+
+// MetricsEnabled returns whether metric export is available
+func (p *Provider) MetricsEnabled() bool {
+	return p.meter != nil && p.meterProvider != nil
+}
+
+// --- Log Severity Mapping ---
+
+// otelSeverity maps violation/event severity to OTEL log severity
+func otelSeverity(severity string) otellog.Severity {
+	switch severity {
+	case "info":
+		return otellog.SeverityInfo
+	case "warning":
+		return otellog.SeverityWarn
+	case "critical":
+		return otellog.SeverityError
+	default:
+		return otellog.SeverityInfo
+	}
+}
+
+// --- Log Emit Functions ---
+
+// EmitViolationLog emits a per-violation OTEL log record
+func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Violation, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+
+	var rec otellog.Record
+	rec.SetTimestamp(time.Now())
+	rec.SetSeverity(otelSeverity(v.Severity))
+	rec.SetBody(otellog.StringValue("policy violation: " + v.RuleName))
+	rec.AddAttributes(
+		// GenAI semconv
+		otellog.String("gen_ai.conversation.id", sessionID),
+		otellog.String("gen_ai.provider.name", providerName),
+		otellog.String("gen_ai.operation.name", "chat"),
+		otellog.String("gen_ai.request.model", model),
+		// ELIDA-specific
+		otellog.String("elida.violation.rule", v.RuleName),
+		otellog.String("elida.violation.severity", v.Severity),
+		otellog.String("elida.violation.matched_text", truncateBody(v.MatchedText, 200)),
+		otellog.String("elida.violation.action", v.Action),
+		otellog.String("elida.violation.description", v.Description),
+	)
+
+	// Trace correlation
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitSessionKilledLog emits a session kill/terminate OTEL log record
+func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, backend, model string, durationMs int64, requestCount int) {
+	if p.logger == nil {
+		return
+	}
+
+	var rec otellog.Record
+	rec.SetTimestamp(time.Now())
+	rec.SetSeverity(otellog.SeverityError)
+	rec.SetBody(otellog.StringValue("session killed: " + reason))
+	rec.AddAttributes(
+		otellog.String("gen_ai.conversation.id", sessionID),
+		otellog.String("gen_ai.provider.name", backend),
+		otellog.String("gen_ai.operation.name", "chat"),
+		otellog.String("gen_ai.request.model", model),
+		otellog.String("elida.session.state", "killed"),
+		otellog.String("elida.session.kill_reason", reason),
+		otellog.Int64("elida.duration.ms", durationMs),
+		otellog.Int("elida.request.count", requestCount),
+	)
+
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitBlockLog emits a real-time block event OTEL log record
+func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matchedText, backend, model string) {
+	if p.logger == nil {
+		return
+	}
+
+	var rec otellog.Record
+	rec.SetTimestamp(time.Now())
+	rec.SetSeverity(otellog.SeverityWarn)
+	rec.SetBody(otellog.StringValue("request blocked: " + ruleName))
+	rec.AddAttributes(
+		otellog.String("gen_ai.conversation.id", sessionID),
+		otellog.String("gen_ai.provider.name", backend),
+		otellog.String("gen_ai.operation.name", "chat"),
+		otellog.String("gen_ai.request.model", model),
+		otellog.String("elida.violation.rule", ruleName),
+		otellog.String("elida.violation.matched_text", truncateBody(matchedText, 200)),
+		otellog.String("elida.violation.action", "block"),
+	)
+
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitCapturedContentLog emits captured request/response bodies as a log record (opt-in)
+func (p *Provider) EmitCapturedContentLog(ctx context.Context, sessionID, requestBody, responseBody, model, providerName string) {
+	if p.logger == nil || !p.config.CaptureContent {
+		return
+	}
+
+	maxSize := p.config.MaxBodySize
+	if maxSize == 0 {
+		maxSize = 4096
+	}
+
+	var rec otellog.Record
+	rec.SetTimestamp(time.Now())
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetBody(otellog.StringValue("captured content"))
+	rec.AddAttributes(
+		otellog.String("gen_ai.conversation.id", sessionID),
+		otellog.String("gen_ai.provider.name", providerName),
+		otellog.String("gen_ai.operation.name", "chat"),
+		otellog.String("gen_ai.request.model", model),
+		otellog.String("elida.capture.request_body", truncateBody(requestBody, maxSize)),
+		otellog.String("elida.capture.response_body", truncateBody(responseBody, maxSize)),
+	)
+
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
+// --- Metric Recording Functions ---
+
+// RecordTokenUsage records gen_ai.client.token.usage histogram
+func (p *Provider) RecordTokenUsage(ctx context.Context, inputTokens, outputTokens int64, model, providerName string) {
+	if p.tokenUsage == nil {
+		return
+	}
+
+	commonAttrs := []attribute.KeyValue{
+		attribute.String("gen_ai.request.model", model),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.operation.name", "chat"),
+	}
+
+	if inputTokens > 0 {
+		attrs := append(commonAttrs, attribute.String("gen_ai.token.type", "input"))
+		p.tokenUsage.Record(ctx, inputTokens, metric.WithAttributes(attrs...))
+	}
+	if outputTokens > 0 {
+		attrs := append(commonAttrs, attribute.String("gen_ai.token.type", "output"))
+		p.tokenUsage.Record(ctx, outputTokens, metric.WithAttributes(attrs...))
+	}
+}
+
+// RecordOperationDuration records gen_ai.client.operation.duration histogram
+func (p *Provider) RecordOperationDuration(ctx context.Context, durationSec float64, model, providerName string, hasError bool) {
+	if p.operationDuration == nil {
+		return
+	}
+
+	attrs := []attribute.KeyValue{
+		attribute.String("gen_ai.request.model", model),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.operation.name", "chat"),
+	}
+	if hasError {
+		attrs = append(attrs, attribute.String("error.type", "policy_violation"))
+	}
+
+	p.operationDuration.Record(ctx, durationSec, metric.WithAttributes(attrs...))
+}
+
+// --- Helper Functions ---
+
+// setTraceContext adds trace/span IDs as attributes for correlation
+func setTraceContext(rec *otellog.Record, ctx context.Context) {
+	spanCtx := trace.SpanFromContext(ctx).SpanContext()
+	if spanCtx.HasTraceID() {
+		rec.AddAttributes(otellog.String("trace_id", spanCtx.TraceID().String()))
+	}
+	if spanCtx.HasSpanID() {
+		rec.AddAttributes(otellog.String("span_id", spanCtx.SpanID().String()))
+	}
+}
+
+// truncateBody truncates a string to maxLen bytes
+func truncateBody(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "...[truncated]"
+}
+
+// --- Session span attributes ---
+
 const (
 	AttrSessionID     = "elida.session.id"
 	AttrSessionState  = "elida.session.state"
@@ -193,12 +539,17 @@ type SessionRecord struct {
 	Violations   []Violation
 	Captures     []CapturedRequest
 	CaptureCount int
+	Model        string // For GenAI semconv
 
 	// WebSocket fields
 	IsWebSocket  bool
 	FrameCount   int64
 	TextFrames   int64
 	BinaryFrames int64
+
+	// Token tracking
+	TokensIn  int64
+	TokensOut int64
 }
 
 // StartRequestSpan starts a span for an HTTP request
@@ -242,7 +593,6 @@ func (p *Provider) RecordSessionCreated(ctx context.Context, sessionID, backend,
 
 // RecordSessionEnded records a session end event (session record for audit)
 func (p *Provider) RecordSessionEnded(ctx context.Context, sessionID, state, backend, clientAddr string, durationMs int64, requestCount int, bytesIn, bytesOut int64) {
-	// Create a new span specifically for the session record
 	_, span := p.tracer.Start(ctx, "session.record",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
@@ -351,6 +701,31 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 
 	span.End()
 
+	// Emit OTEL logs for each violation
+	for _, v := range record.Violations {
+		p.EmitViolationLog(ctx, record.SessionID, v, record.Model, record.Backend)
+	}
+
+	// Emit session killed log if applicable
+	if record.State == "killed" || record.State == "terminated" {
+		p.EmitSessionKilledLog(ctx, record.SessionID, record.State, record.Backend, record.Model, record.DurationMs, record.RequestCount)
+	}
+
+	// Emit captured content logs if opt-in
+	for _, c := range record.Captures {
+		p.EmitCapturedContentLog(ctx, record.SessionID, c.RequestBody, c.ResponseBody, record.Model, record.Backend)
+	}
+
+	// Record token usage metrics
+	if record.TokensIn > 0 || record.TokensOut > 0 {
+		p.RecordTokenUsage(ctx, record.TokensIn, record.TokensOut, record.Model, record.Backend)
+	}
+
+	// Record operation duration metric
+	if record.DurationMs > 0 {
+		p.RecordOperationDuration(ctx, float64(record.DurationMs)/1000.0, record.Model, record.Backend, record.State == "killed")
+	}
+
 	slog.Debug("session record exported to telemetry",
 		"session_id", record.SessionID,
 		"state", record.State,
@@ -375,6 +750,7 @@ func DefaultConfig() Config {
 		Enabled:     false,
 		Exporter:    "none",
 		ServiceName: "elida",
+		MaxBodySize: 4096,
 	}
 }
 
