@@ -179,13 +179,13 @@ type StreamingConfig struct {
 // PolicyRule defines a single policy rule
 type PolicyRule struct {
 	Name        string   `yaml:"name"`
-	Type        string   `yaml:"type"`      // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match
+	Type        string   `yaml:"type"`      // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match, tool_blocked, tool_argument_pattern
 	Target      string   `yaml:"target"`    // request, response, both (default: both)
 	Threshold   int64    `yaml:"threshold"` // For metric rules
-	Patterns    []string `yaml:"patterns"`  // For content_match rules (regex patterns)
+	Patterns    []string `yaml:"patterns"`  // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
 	Severity    string   `yaml:"severity"`  // info, warning, critical
 	Description string   `yaml:"description"`
-	Action      string   `yaml:"action"` // flag, block, terminate (for content rules)
+	Action      string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
 }
 
 // BackendConfig defines a single backend configuration
@@ -907,6 +907,16 @@ func getStandardPreset() []PolicyRule {
 			"(exhaustive|brute\\s*force)\\s+(test|search|scan|check)",
 			"(iterate|loop)\\s+(through\\s+)?(all|every|each)\\s+(possible|input)",
 		}, Severity: "warning", Action: "flag", Description: "LLM08: Recursive/exhaustive prompt detected"},
+
+		// Tool call policy rules (RESPONSE-SIDE - block dangerous tool calls from LLM)
+		{Name: "block_dangerous_tools", Type: "tool_blocked", Target: "response", Patterns: []string{
+			"exec_*", "shell_*", "rm_*", "sudo_*", "eval_*",
+		}, Severity: "critical", Action: "block", Description: "LLM07: Block dangerous tool calls"},
+		{Name: "dangerous_tool_arguments", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
+			"rm\\s+-rf",
+			"chmod\\s+777",
+			"curl.*\\|.*sh",
+		}, Severity: "critical", Action: "terminate", Description: "LLM08: Dangerous patterns in tool arguments"},
 	}
 }
 
