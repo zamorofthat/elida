@@ -619,12 +619,12 @@ func (a *app) startServers() chan error {
 }
 
 func (a *app) shutdown(cancel context.CancelFunc) {
-	slog.Info("shutting down servers")
-	cancel()
+	slog.Info("shutting down gracefully", "timeout", a.cfg.ShutdownTimeout)
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
 	defer shutdownCancel()
 
+	// Step 1: Stop accepting new connections, drain in-flight HTTP requests
 	if err := a.proxyServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("proxy server shutdown error", "error", err)
 	}
@@ -635,6 +635,23 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 		}
 	}
 
+	// Step 2: Stop the session manager background loop
+	cancel()
+
+	// Step 3: Drain all active sessions (invoke session end callback for each)
+	drained := a.manager.DrainActiveSessions()
+	if drained > 0 {
+		slog.Info("drained sessions on shutdown", "count", drained)
+	}
+
+	// Step 4: Flush telemetry AFTER draining (drain creates new OTEL spans)
+	if a.tp != nil {
+		if err := a.tp.Shutdown(shutdownCtx); err != nil {
+			slog.Error("telemetry shutdown error", "error", err)
+		}
+	}
+
+	// Step 5: Close storage backends
 	if a.redisStore != nil {
 		if err := a.redisStore.Close(); err != nil {
 			slog.Error("Redis close error", "error", err)
@@ -644,12 +661,6 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 	if a.sqliteStore != nil {
 		if err := a.sqliteStore.Close(); err != nil {
 			slog.Error("SQLite close error", "error", err)
-		}
-	}
-
-	if a.tp != nil {
-		if err := a.tp.Shutdown(shutdownCtx); err != nil {
-			slog.Error("telemetry shutdown error", "error", err)
 		}
 	}
 

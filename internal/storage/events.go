@@ -22,6 +22,7 @@ const (
 	EventRiskEscalated      EventType = "risk_escalated"
 	EventToolCalled         EventType = "tool_called"
 	EventTokensUsed         EventType = "tokens_used"
+	EventGracefulDrain      EventType = "graceful_drain"
 )
 
 // Event represents an immutable audit event
