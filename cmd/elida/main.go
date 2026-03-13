@@ -34,6 +34,31 @@ import (
 // Version is set at build time via -ldflags "-X main.Version=..."
 var Version = "dev"
 
+// app holds all shared state for the ELIDA application.
+// This replaces forward-declared variables and makes dependencies explicit.
+type app struct {
+	cfg        *config.Config
+	configPath string
+
+	store      session.Store
+	redisStore *session.RedisStore
+	manager    *session.Manager
+
+	sqliteStore *storage.SQLiteStore
+
+	policyEngine   *policy.Engine
+	tp             *telemetry.Provider
+	proxyCaptureBuf *proxy.CaptureBuffer
+
+	proxyHandler   *proxy.Proxy
+	wsHandler      *websocket.Handler
+	settingsStore  *config.SettingsStore
+	controlHandler *control.Handler
+
+	proxyServer   *http.Server
+	controlServer *http.Server
+}
+
 func main() {
 	configPath := flag.String("config", "configs/elida.yaml", "path to config file")
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
@@ -62,13 +87,9 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Setup structured logging
-	logLevel := slog.LevelInfo
-	if cfg.Logging.Level == "debug" {
-		logLevel = slog.LevelDebug
-	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
-	slog.SetDefault(logger)
+	a := &app{cfg: cfg, configPath: *configPath}
+
+	initLogging(cfg)
 
 	slog.Info("starting ELIDA",
 		"version", Version,
@@ -77,489 +98,23 @@ func main() {
 		"session_store", cfg.Session.Store,
 	)
 
-	// Initialize session store based on configuration
-	var store session.Store
-	var redisStore *session.RedisStore
-
-	switch cfg.Session.Store {
-	case "redis":
-		var redisErr error
-		redisStore, redisErr = session.NewRedisStore(session.RedisConfig{
-			Addr:      cfg.Session.Redis.Addr,
-			Password:  cfg.Session.Redis.Password,
-			DB:        cfg.Session.Redis.DB,
-			KeyPrefix: cfg.Session.Redis.KeyPrefix,
-		}, cfg.Session.Timeout)
-		if redisErr != nil {
-			slog.Error("failed to connect to Redis", "error", redisErr)
-			os.Exit(1)
-		}
-		store = redisStore
-		slog.Info("using Redis session store", "addr", cfg.Session.Redis.Addr)
-	default:
-		store = session.NewMemoryStore()
-		slog.Info("using in-memory session store")
-	}
-
-	// Configure kill block settings
-	killBlockConfig := session.KillBlockConfig{
-		Mode:     session.KillBlockMode(cfg.Session.KillBlock.Mode),
-		Duration: cfg.Session.KillBlock.Duration,
-	}
-	if killBlockConfig.Mode == "" {
-		killBlockConfig.Mode = session.KillBlockUntilHourChange
-	}
-
-	manager := session.NewManagerWithKillBlock(store, cfg.Session.Timeout, killBlockConfig)
-	slog.Info("session manager configured", "kill_block_mode", killBlockConfig.Mode, "kill_block_duration", killBlockConfig.Duration)
-
-	// Forward-declare so session callback closure can reference them
-	var policyEngine *policy.Engine
-	var tp *telemetry.Provider
-	var proxyCaptureBuf *proxy.CaptureBuffer
-
-	// Initialize SQLite storage for session history
-	var sqliteStore *storage.SQLiteStore
-	if cfg.Storage.Enabled {
-		// Ensure data directory exists
-		dataDir := filepath.Dir(cfg.Storage.Path)
-		if mkdirErr := os.MkdirAll(dataDir, 0750); mkdirErr != nil {
-			slog.Error("failed to create data directory", "error", mkdirErr, "path", dataDir)
-			os.Exit(1)
-		}
-
-		var storageErr error
-		sqliteStore, storageErr = storage.NewSQLiteStore(cfg.Storage.Path)
-		if storageErr != nil {
-			slog.Error("failed to initialize SQLite storage", "error", storageErr)
-			os.Exit(1)
-		}
-		slog.Info("SQLite storage enabled", "path", cfg.Storage.Path, "retention_days", cfg.Storage.RetentionDays)
-	}
-
-	// Set up session end callback if storage OR telemetry is enabled
-	if cfg.Storage.Enabled || cfg.Telemetry.Enabled {
-
-		// Set up callback to save sessions when they end
-		manager.SetSessionEndCallback(func(sess *session.Session) {
-			snap := sess.Snapshot()
-			var endTime time.Time
-			if snap.EndTime != nil {
-				endTime = *snap.EndTime
-			} else {
-				endTime = time.Now()
-			}
-			record := storage.SessionRecord{
-				ID:           snap.ID,
-				State:        snap.State.String(),
-				StartTime:    snap.StartTime,
-				EndTime:      endTime,
-				DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
-				RequestCount: snap.RequestCount,
-				BytesIn:      snap.BytesIn,
-				BytesOut:     snap.BytesOut,
-				Backend:      snap.Backend,
-				ClientAddr:   snap.ClientAddr,
-				Metadata:     snap.Metadata,
-			}
-
-			// Include captured content and violations from policy engine
-			if policyEngine != nil {
-				if flagged := policyEngine.GetFlaggedSession(snap.ID); flagged != nil {
-					slog.Debug("found flagged session for history", "session_id", snap.ID, "captures", len(flagged.CapturedContent), "violations", len(flagged.Violations))
-					// Convert captured requests
-					for _, cap := range flagged.CapturedContent {
-						record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
-							Timestamp:    cap.Timestamp,
-							Method:       cap.Method,
-							Path:         cap.Path,
-							RequestBody:  cap.RequestBody,
-							ResponseBody: cap.ResponseBody,
-							StatusCode:   cap.StatusCode,
-						})
-					}
-					// Convert violations
-					for _, v := range flagged.Violations {
-						record.Violations = append(record.Violations, storage.Violation{
-							RuleName:    v.RuleName,
-							Description: v.Description,
-							Severity:    string(v.Severity),
-							MatchedText: v.MatchedText,
-							Action:      v.Action,
-						})
-					}
-				}
-			}
-
-			// Merge capture-all content (if policy didn't already capture this session)
-			if proxyCaptureBuf != nil && proxyCaptureBuf.HasContent(snap.ID) {
-				capturedAll := proxyCaptureBuf.GetContent(snap.ID)
-				if len(record.CapturedContent) == 0 {
-					// No policy captures — use capture-all content directly
-					for _, c := range capturedAll {
-						record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
-							Timestamp:    c.Timestamp,
-							Method:       c.Method,
-							Path:         c.Path,
-							RequestBody:  c.RequestBody,
-							ResponseBody: c.ResponseBody,
-							StatusCode:   c.StatusCode,
-						})
-					}
-				}
-				// If policy already captured content, policy captures take priority
-				// (they include violation context). Capture-all buffer is cleaned up either way.
-			}
-
-			// Save to SQLite if storage is enabled
-			if sqliteStore != nil {
-				if saveErr := sqliteStore.SaveSession(record); saveErr != nil {
-					slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
-				}
-
-				// Record events to audit log
-				eventCtx := context.Background()
-
-				// Record session ended event
-				if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventSessionEnded, snap.ID, "", storage.SessionEndedData{
-					State:        snap.State.String(),
-					DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
-					RequestCount: snap.RequestCount,
-					BytesIn:      snap.BytesIn,
-					BytesOut:     snap.BytesOut,
-				}); eventErr != nil {
-					slog.Error("failed to record session_ended event", "session_id", snap.ID, "error", eventErr)
-				}
-
-				// Record violation events
-				for _, v := range record.Violations {
-					if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
-						RuleName:    v.RuleName,
-						Description: v.Description,
-						Severity:    v.Severity,
-						MatchedText: v.MatchedText,
-						Action:      v.Action,
-					}); eventErr != nil {
-						slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
-					}
-				}
-
-				// Record token usage if tracked
-				tokensIn, tokensOut := sess.GetTokens()
-				if tokensIn > 0 || tokensOut > 0 {
-					if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventTokensUsed, snap.ID, "", storage.TokensUsedData{
-						TokensIn:  tokensIn,
-						TokensOut: tokensOut,
-					}); eventErr != nil {
-						slog.Error("failed to record tokens_used event", "session_id", snap.ID, "error", eventErr)
-					}
-				}
-
-				// Record tool call events
-				for toolName, count := range sess.GetToolCallCounts() {
-					if eventErr := sqliteStore.RecordEvent(eventCtx, storage.EventToolCalled, snap.ID, "", storage.ToolCalledData{
-						ToolName:  toolName,
-						CallCount: count,
-					}); eventErr != nil {
-						slog.Error("failed to record tool_called event", "session_id", snap.ID, "error", eventErr)
-					}
-				}
-			}
-
-			// Export to telemetry (if enabled)
-			slog.Debug("checking telemetry export", "tp_nil", tp == nil, "tp_enabled", tp != nil && tp.Enabled())
-			if tp != nil && tp.Enabled() {
-				telemRecord := telemetry.SessionRecord{
-					SessionID:    snap.ID,
-					State:        snap.State.String(),
-					Backend:      snap.Backend,
-					ClientAddr:   snap.ClientAddr,
-					DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
-					RequestCount: snap.RequestCount,
-					BytesIn:      snap.BytesIn,
-					BytesOut:     snap.BytesOut,
-					CaptureCount: len(record.CapturedContent),
-					TokensIn:     snap.TokensIn,
-					TokensOut:    snap.TokensOut,
-				}
-				// Add violations
-				for _, v := range record.Violations {
-					telemRecord.Violations = append(telemRecord.Violations, telemetry.Violation{
-						RuleName:    v.RuleName,
-						Description: v.Description,
-						Severity:    v.Severity,
-						MatchedText: v.MatchedText,
-						Action:      v.Action,
-					})
-				}
-				// Add captured request/response content
-				for _, c := range record.CapturedContent {
-					telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
-						Timestamp:    c.Timestamp.Format(time.RFC3339),
-						Method:       c.Method,
-						Path:         c.Path,
-						RequestBody:  c.RequestBody,
-						ResponseBody: c.ResponseBody,
-						StatusCode:   c.StatusCode,
-					})
-				}
-				tp.ExportSessionRecord(context.Background(), telemRecord)
-			}
-		})
-	}
-
-	// Initialize telemetry (graceful degradation if initialization fails)
-	if cfg.Telemetry.Enabled {
-		var telemetryErr error
-		tp, telemetryErr = telemetry.NewProvider(telemetry.Config{
-			Enabled:        cfg.Telemetry.Enabled,
-			Exporter:       cfg.Telemetry.Exporter,
-			Endpoint:       cfg.Telemetry.Endpoint,
-			ServiceName:    cfg.Telemetry.ServiceName,
-			Insecure:       cfg.Telemetry.Insecure,
-			CaptureContent: cfg.Telemetry.CaptureContent,
-			MaxBodySize:    cfg.Telemetry.MaxBodySize,
-		})
-		if telemetryErr != nil {
-			slog.Warn("telemetry initialization failed, continuing without tracing", "error", telemetryErr)
-			tp = nil // Continue without telemetry
-		} else {
-			slog.Info("telemetry enabled",
-				"exporter", cfg.Telemetry.Exporter,
-				"endpoint", cfg.Telemetry.Endpoint,
-			)
-		}
-	}
-
-	// Initialize policy engine
-	if cfg.Policy.Enabled {
-		// Convert config rules to policy rules
-		policyRules := make([]policy.Rule, len(cfg.Policy.Rules))
-		for i, r := range cfg.Policy.Rules {
-			policyRules[i] = policy.Rule{
-				Name:        r.Name,
-				Type:        policy.RuleType(r.Type),
-				Target:      policy.RuleTarget(r.Target),
-				Threshold:   r.Threshold,
-				Patterns:    r.Patterns,
-				Severity:    policy.Severity(r.Severity),
-				Description: r.Description,
-				Action:      r.Action,
-			}
-		}
-
-		policyEngine = policy.NewEngine(policy.Config{
-			Enabled:        cfg.Policy.Enabled,
-			Mode:           cfg.Policy.Mode,
-			CaptureContent: cfg.Policy.CaptureContent,
-			MaxCaptureSize: cfg.Policy.MaxCaptureSize,
-			Rules:          policyRules,
-		})
-		slog.Info("policy engine enabled", "rules", len(policyRules))
-	}
+	a.initSessionStore()
+	a.initSQLiteStorage()
+	a.initSessionEndCallback()
+	a.initTelemetry()
+	a.initPolicyEngine()
 
 	// Start session manager (handles timeouts, cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go manager.Run(ctx)
+	go a.manager.Run(ctx)
 
-	// Initialize proxy
-	proxyHandler, err := proxy.NewWithPolicy(cfg, store, manager, tp, policyEngine)
-	if err != nil {
-		slog.Error("failed to create proxy", "error", err)
-		os.Exit(1)
-	}
+	a.initProxy()
+	a.initWebSocket()
+	a.initSettings()
+	a.initControlAPI()
 
-	// Set storage for immediate persistence of flagged sessions
-	if sqliteStore != nil {
-		proxyHandler.SetStorage(sqliteStore)
-	}
-
-	// Wire capture buffer for capture-all mode
-	proxyCaptureBuf = proxyHandler.GetCaptureBuffer()
-
-	// Initialize WebSocket handler if enabled
-	var wsHandler *websocket.Handler
-	if cfg.WebSocket.Enabled {
-		wsHandler = websocket.NewHandler(
-			&cfg.WebSocket,
-			cfg.Session.Header,
-			manager,
-			proxyHandler.GetRouter(),
-		)
-		proxyHandler.SetWebSocketHandler(wsHandler)
-
-		// Wire up policy engine for text frame scanning
-		if policyEngine != nil {
-			wsHandler.SetPolicyEngine(policyEngine)
-			slog.Info("WebSocket policy scanning enabled",
-				"scan_text_frames", cfg.WebSocket.ScanTextFrames,
-			)
-		}
-
-		// Wire up voice session persistence (CDR)
-		if sqliteStore != nil {
-			wsHandler.SetVoiceSessionCallbacks(
-				nil, // onStart - no action needed
-				func(wsSession *session.Session, vs *websocket.VoiceSession) {
-					// Persist voice session CDR to SQLite
-					snap := vs.Snapshot()
-					record := storage.VoiceSessionRecord{
-						ID:              snap.ID,
-						ParentSessionID: snap.ParentSessionID,
-						State:           snap.State.String(),
-						StartTime:       snap.StartTime,
-						AnswerTime:      snap.AnswerTime,
-						EndTime:         snap.EndTime,
-						DurationMs:      snap.Duration().Milliseconds(),
-						AudioDurationMs: snap.AudioDurationMs,
-						TurnCount:       snap.TurnCount,
-						Model:           snap.Model,
-						Voice:           snap.Voice,
-						Language:        snap.Language,
-						AudioBytesIn:    snap.AudioBytesIn,
-						AudioBytesOut:   snap.AudioBytesOut,
-						Metadata:        snap.Metadata,
-					}
-
-					// Get protocol from metadata
-					if proto, ok := snap.Metadata["protocol"]; ok {
-						record.Protocol = proto
-					}
-
-					// Convert transcript entries
-					for _, t := range snap.Transcript {
-						record.Transcript = append(record.Transcript, storage.TranscriptEntry{
-							Timestamp: t.Timestamp,
-							Speaker:   t.Speaker,
-							Text:      t.Text,
-							IsFinal:   t.IsFinal,
-							Source:    t.Source,
-						})
-					}
-
-					if err := sqliteStore.SaveVoiceSession(record); err != nil {
-						slog.Error("failed to save voice session",
-							"voice_session_id", snap.ID,
-							"error", err,
-						)
-					} else {
-						slog.Info("voice session CDR saved",
-							"voice_session_id", snap.ID,
-							"parent_session_id", snap.ParentSessionID,
-							"transcript_entries", len(record.Transcript),
-						)
-					}
-				},
-			)
-			slog.Info("voice session CDR persistence enabled")
-		}
-
-		slog.Info("WebSocket proxy enabled",
-			"ping_interval", cfg.WebSocket.PingInterval,
-			"max_message_size", cfg.WebSocket.MaxMessageSize,
-		)
-	}
-
-	// Initialize settings store with Config-based defaults (yaml → env → settings.yaml)
-	// Settings go in configs/ dir alongside elida.yaml
-	var settingsStore *config.SettingsStore
-	configDir := filepath.Dir(*configPath)
-	if mkdirErr := os.MkdirAll(configDir, 0750); mkdirErr != nil {
-		slog.Warn("failed to create config directory for settings", "error", mkdirErr, "path", configDir)
-	} else {
-		var settingsErr error
-		settingsStore, settingsErr = config.NewSettingsStoreFromConfig(cfg, configDir)
-		if settingsErr != nil {
-			slog.Warn("failed to initialize settings store", "error", settingsErr)
-		} else {
-			slog.Info("settings store initialized", "path", filepath.Join(configDir, "settings.yaml"))
-		}
-	}
-
-	// Initialize control API
-	controlHandler := control.NewWithAuth(
-		store,
-		manager,
-		sqliteStore,
-		policyEngine,
-		cfg.Control.Auth.Enabled,
-		cfg.Control.Auth.APIKey,
-	)
-	if settingsStore != nil {
-		controlHandler.SetSettingsStore(settingsStore)
-	}
-	if wsHandler != nil {
-		controlHandler.SetWebSocketHandler(wsHandler)
-	}
-	if cfg.Storage.Enabled {
-		controlHandler.SetCaptureMode(cfg.Storage.CaptureMode)
-	}
-
-	if cfg.Control.Auth.Enabled {
-		slog.Info("control API authentication enabled")
-	} else {
-		slog.Warn("control API authentication is DISABLED — all endpoints are unauthenticated. Set control.auth.enabled=true in production.")
-	}
-
-	// Setup HTTP servers
-	proxyServer := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      proxyHandler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // Disable for streaming
-		IdleTimeout:  120 * time.Second,
-	}
-
-	var controlServer *http.Server
-	if cfg.Control.Enabled {
-		controlServer = &http.Server{
-			Addr:         cfg.Control.Listen,
-			Handler:      controlHandler,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-			IdleTimeout:  60 * time.Second,
-		}
-	}
-
-	// Start servers
-	errChan := make(chan error, 2)
-
-	// Configure TLS if enabled
-	var tlsConfig *tls.Config
-	if cfg.TLS.Enabled {
-		var err error
-		tlsConfig, err = setupTLS(cfg.TLS)
-		if err != nil {
-			slog.Error("failed to setup TLS", "error", err)
-			os.Exit(1)
-		}
-		proxyServer.TLSConfig = tlsConfig
-		slog.Info("TLS enabled for proxy server")
-	}
-
-	go func() {
-		if cfg.TLS.Enabled {
-			slog.Info("proxy server starting (HTTPS)", "addr", cfg.Listen)
-			if err := proxyServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				errChan <- fmt.Errorf("proxy server error: %w", err)
-			}
-		} else {
-			slog.Info("proxy server starting (HTTP)", "addr", cfg.Listen)
-			if err := proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				errChan <- fmt.Errorf("proxy server error: %w", err)
-			}
-		}
-	}()
-
-	if controlServer != nil {
-		go func() {
-			slog.Info("control server starting", "addr", cfg.Control.Listen)
-			if err := controlServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				errChan <- fmt.Errorf("control server error: %w", err)
-			}
-		}()
-	}
+	errChan := a.startServers()
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
@@ -572,40 +127,528 @@ func main() {
 		slog.Info("received shutdown signal", "signal", sig)
 	}
 
-	// Graceful shutdown
+	a.shutdown(cancel)
+}
+
+func initLogging(cfg *config.Config) {
+	logLevel := slog.LevelInfo
+	if cfg.Logging.Level == "debug" {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
+}
+
+func (a *app) initSessionStore() {
+	switch a.cfg.Session.Store {
+	case "redis":
+		var err error
+		a.redisStore, err = session.NewRedisStore(session.RedisConfig{
+			Addr:      a.cfg.Session.Redis.Addr,
+			Password:  a.cfg.Session.Redis.Password,
+			DB:        a.cfg.Session.Redis.DB,
+			KeyPrefix: a.cfg.Session.Redis.KeyPrefix,
+		}, a.cfg.Session.Timeout)
+		if err != nil {
+			slog.Error("failed to connect to Redis", "error", err)
+			os.Exit(1)
+		}
+		a.store = a.redisStore
+		slog.Info("using Redis session store", "addr", a.cfg.Session.Redis.Addr)
+	default:
+		a.store = session.NewMemoryStore()
+		slog.Info("using in-memory session store")
+	}
+
+	killBlockConfig := session.KillBlockConfig{
+		Mode:     session.KillBlockMode(a.cfg.Session.KillBlock.Mode),
+		Duration: a.cfg.Session.KillBlock.Duration,
+	}
+	if killBlockConfig.Mode == "" {
+		killBlockConfig.Mode = session.KillBlockUntilHourChange
+	}
+
+	a.manager = session.NewManagerWithKillBlock(a.store, a.cfg.Session.Timeout, killBlockConfig)
+	slog.Info("session manager configured", "kill_block_mode", killBlockConfig.Mode, "kill_block_duration", killBlockConfig.Duration)
+}
+
+func (a *app) initSQLiteStorage() {
+	if !a.cfg.Storage.Enabled {
+		return
+	}
+
+	dataDir := filepath.Dir(a.cfg.Storage.Path)
+	if err := os.MkdirAll(dataDir, 0750); err != nil {
+		slog.Error("failed to create data directory", "error", err, "path", dataDir)
+		os.Exit(1)
+	}
+
+	var err error
+	a.sqliteStore, err = storage.NewSQLiteStore(a.cfg.Storage.Path)
+	if err != nil {
+		slog.Error("failed to initialize SQLite storage", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
+}
+
+func (a *app) initSessionEndCallback() {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled {
+		return
+	}
+
+	a.manager.SetSessionEndCallback(func(sess *session.Session) {
+		snap := sess.Snapshot()
+		var endTime time.Time
+		if snap.EndTime != nil {
+			endTime = *snap.EndTime
+		} else {
+			endTime = time.Now()
+		}
+		record := storage.SessionRecord{
+			ID:           snap.ID,
+			State:        snap.State.String(),
+			StartTime:    snap.StartTime,
+			EndTime:      endTime,
+			DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
+			RequestCount: snap.RequestCount,
+			BytesIn:      snap.BytesIn,
+			BytesOut:     snap.BytesOut,
+			Backend:      snap.Backend,
+			ClientAddr:   snap.ClientAddr,
+			Metadata:     snap.Metadata,
+		}
+
+		a.enrichRecordFromPolicy(&record, snap.ID)
+		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
+		a.persistToSQLite(&record, sess, endTime)
+		a.exportToTelemetry(&record, &snap, endTime)
+	})
+}
+
+func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string) {
+	if a.policyEngine == nil {
+		return
+	}
+	flagged := a.policyEngine.GetFlaggedSession(sessionID)
+	if flagged == nil {
+		return
+	}
+	slog.Debug("found flagged session for history", "session_id", sessionID, "captures", len(flagged.CapturedContent), "violations", len(flagged.Violations))
+	for _, cap := range flagged.CapturedContent {
+		record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
+			Timestamp:    cap.Timestamp,
+			Method:       cap.Method,
+			Path:         cap.Path,
+			RequestBody:  cap.RequestBody,
+			ResponseBody: cap.ResponseBody,
+			StatusCode:   cap.StatusCode,
+		})
+	}
+	for _, v := range flagged.Violations {
+		record.Violations = append(record.Violations, storage.Violation{
+			RuleName:    v.RuleName,
+			Description: v.Description,
+			Severity:    string(v.Severity),
+			MatchedText: v.MatchedText,
+			Action:      v.Action,
+		})
+	}
+}
+
+func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessionID string) {
+	if a.proxyCaptureBuf == nil || !a.proxyCaptureBuf.HasContent(sessionID) {
+		return
+	}
+	capturedAll := a.proxyCaptureBuf.GetContent(sessionID)
+	if len(record.CapturedContent) > 0 {
+		// Policy captures take priority (they include violation context)
+		return
+	}
+	for _, c := range capturedAll {
+		record.CapturedContent = append(record.CapturedContent, storage.CapturedRequest{
+			Timestamp:    c.Timestamp,
+			Method:       c.Method,
+			Path:         c.Path,
+			RequestBody:  c.RequestBody,
+			ResponseBody: c.ResponseBody,
+			StatusCode:   c.StatusCode,
+		})
+	}
+}
+
+func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) {
+	if a.sqliteStore == nil {
+		return
+	}
+	snap := sess.Snapshot()
+
+	if saveErr := a.sqliteStore.SaveSession(*record); saveErr != nil {
+		slog.Error("failed to save session to history", "session_id", snap.ID, "error", saveErr)
+	}
+
+	eventCtx := context.Background()
+
+	if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventSessionEnded, snap.ID, "", storage.SessionEndedData{
+		State:        snap.State.String(),
+		DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
+		RequestCount: snap.RequestCount,
+		BytesIn:      snap.BytesIn,
+		BytesOut:     snap.BytesOut,
+	}); eventErr != nil {
+		slog.Error("failed to record session_ended event", "session_id", snap.ID, "error", eventErr)
+	}
+
+	for _, v := range record.Violations {
+		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
+			RuleName:    v.RuleName,
+			Description: v.Description,
+			Severity:    v.Severity,
+			MatchedText: v.MatchedText,
+			Action:      v.Action,
+		}); eventErr != nil {
+			slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
+		}
+	}
+
+	tokensIn, tokensOut := sess.GetTokens()
+	if tokensIn > 0 || tokensOut > 0 {
+		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventTokensUsed, snap.ID, "", storage.TokensUsedData{
+			TokensIn:  tokensIn,
+			TokensOut: tokensOut,
+		}); eventErr != nil {
+			slog.Error("failed to record tokens_used event", "session_id", snap.ID, "error", eventErr)
+		}
+	}
+
+	for toolName, count := range sess.GetToolCallCounts() {
+		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventToolCalled, snap.ID, "", storage.ToolCalledData{
+			ToolName:  toolName,
+			CallCount: count,
+		}); eventErr != nil {
+			slog.Error("failed to record tool_called event", "session_id", snap.ID, "error", eventErr)
+		}
+	}
+}
+
+func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Session, endTime time.Time) {
+	slog.Debug("checking telemetry export", "tp_nil", a.tp == nil, "tp_enabled", a.tp != nil && a.tp.Enabled())
+	if a.tp == nil || !a.tp.Enabled() {
+		return
+	}
+
+	telemRecord := telemetry.SessionRecord{
+		SessionID:    snap.ID,
+		State:        snap.State.String(),
+		Backend:      snap.Backend,
+		ClientAddr:   snap.ClientAddr,
+		DurationMs:   endTime.Sub(snap.StartTime).Milliseconds(),
+		RequestCount: snap.RequestCount,
+		BytesIn:      snap.BytesIn,
+		BytesOut:     snap.BytesOut,
+		CaptureCount: len(record.CapturedContent),
+		TokensIn:     snap.TokensIn,
+		TokensOut:    snap.TokensOut,
+	}
+	for _, v := range record.Violations {
+		telemRecord.Violations = append(telemRecord.Violations, telemetry.Violation{
+			RuleName:    v.RuleName,
+			Description: v.Description,
+			Severity:    v.Severity,
+			MatchedText: v.MatchedText,
+			Action:      v.Action,
+		})
+	}
+	for _, c := range record.CapturedContent {
+		telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
+			Timestamp:    c.Timestamp.Format(time.RFC3339),
+			Method:       c.Method,
+			Path:         c.Path,
+			RequestBody:  c.RequestBody,
+			ResponseBody: c.ResponseBody,
+			StatusCode:   c.StatusCode,
+		})
+	}
+	a.tp.ExportSessionRecord(context.Background(), telemRecord)
+}
+
+func (a *app) initTelemetry() {
+	if !a.cfg.Telemetry.Enabled {
+		return
+	}
+	var err error
+	a.tp, err = telemetry.NewProvider(telemetry.Config{
+		Enabled:        a.cfg.Telemetry.Enabled,
+		Exporter:       a.cfg.Telemetry.Exporter,
+		Endpoint:       a.cfg.Telemetry.Endpoint,
+		ServiceName:    a.cfg.Telemetry.ServiceName,
+		Insecure:       a.cfg.Telemetry.Insecure,
+		CaptureContent: a.cfg.Telemetry.CaptureContent,
+		MaxBodySize:    a.cfg.Telemetry.MaxBodySize,
+	})
+	if err != nil {
+		slog.Warn("telemetry initialization failed, continuing without tracing", "error", err)
+		a.tp = nil
+		return
+	}
+	slog.Info("telemetry enabled",
+		"exporter", a.cfg.Telemetry.Exporter,
+		"endpoint", a.cfg.Telemetry.Endpoint,
+	)
+}
+
+func (a *app) initPolicyEngine() {
+	if !a.cfg.Policy.Enabled {
+		return
+	}
+	policyRules := make([]policy.Rule, len(a.cfg.Policy.Rules))
+	for i, r := range a.cfg.Policy.Rules {
+		policyRules[i] = policy.Rule{
+			Name:        r.Name,
+			Type:        policy.RuleType(r.Type),
+			Target:      policy.RuleTarget(r.Target),
+			Threshold:   r.Threshold,
+			Patterns:    r.Patterns,
+			Severity:    policy.Severity(r.Severity),
+			Description: r.Description,
+			Action:      r.Action,
+		}
+	}
+
+	a.policyEngine = policy.NewEngine(policy.Config{
+		Enabled:        a.cfg.Policy.Enabled,
+		Mode:           a.cfg.Policy.Mode,
+		CaptureContent: a.cfg.Policy.CaptureContent,
+		MaxCaptureSize: a.cfg.Policy.MaxCaptureSize,
+		Rules:          policyRules,
+	})
+	slog.Info("policy engine enabled", "rules", len(policyRules))
+}
+
+func (a *app) initProxy() {
+	var err error
+	a.proxyHandler, err = proxy.NewWithPolicy(a.cfg, a.store, a.manager, a.tp, a.policyEngine)
+	if err != nil {
+		slog.Error("failed to create proxy", "error", err)
+		os.Exit(1)
+	}
+
+	if a.sqliteStore != nil {
+		a.proxyHandler.SetStorage(a.sqliteStore)
+	}
+
+	a.proxyCaptureBuf = a.proxyHandler.GetCaptureBuffer()
+}
+
+func (a *app) initWebSocket() {
+	if !a.cfg.WebSocket.Enabled {
+		return
+	}
+
+	a.wsHandler = websocket.NewHandler(
+		&a.cfg.WebSocket,
+		a.cfg.Session.Header,
+		a.manager,
+		a.proxyHandler.GetRouter(),
+	)
+	a.proxyHandler.SetWebSocketHandler(a.wsHandler)
+
+	if a.policyEngine != nil {
+		a.wsHandler.SetPolicyEngine(a.policyEngine)
+		slog.Info("WebSocket policy scanning enabled",
+			"scan_text_frames", a.cfg.WebSocket.ScanTextFrames,
+		)
+	}
+
+	if a.sqliteStore != nil {
+		a.wsHandler.SetVoiceSessionCallbacks(
+			nil,
+			func(wsSession *session.Session, vs *websocket.VoiceSession) {
+				snap := vs.Snapshot()
+				record := storage.VoiceSessionRecord{
+					ID:              snap.ID,
+					ParentSessionID: snap.ParentSessionID,
+					State:           snap.State.String(),
+					StartTime:       snap.StartTime,
+					AnswerTime:      snap.AnswerTime,
+					EndTime:         snap.EndTime,
+					DurationMs:      snap.Duration().Milliseconds(),
+					AudioDurationMs: snap.AudioDurationMs,
+					TurnCount:       snap.TurnCount,
+					Model:           snap.Model,
+					Voice:           snap.Voice,
+					Language:        snap.Language,
+					AudioBytesIn:    snap.AudioBytesIn,
+					AudioBytesOut:   snap.AudioBytesOut,
+					Metadata:        snap.Metadata,
+				}
+
+				if proto, ok := snap.Metadata["protocol"]; ok {
+					record.Protocol = proto
+				}
+
+				for _, t := range snap.Transcript {
+					record.Transcript = append(record.Transcript, storage.TranscriptEntry{
+						Timestamp: t.Timestamp,
+						Speaker:   t.Speaker,
+						Text:      t.Text,
+						IsFinal:   t.IsFinal,
+						Source:    t.Source,
+					})
+				}
+
+				if err := a.sqliteStore.SaveVoiceSession(record); err != nil {
+					slog.Error("failed to save voice session",
+						"voice_session_id", snap.ID,
+						"error", err,
+					)
+				} else {
+					slog.Info("voice session CDR saved",
+						"voice_session_id", snap.ID,
+						"parent_session_id", snap.ParentSessionID,
+						"transcript_entries", len(record.Transcript),
+					)
+				}
+			},
+		)
+		slog.Info("voice session CDR persistence enabled")
+	}
+
+	slog.Info("WebSocket proxy enabled",
+		"ping_interval", a.cfg.WebSocket.PingInterval,
+		"max_message_size", a.cfg.WebSocket.MaxMessageSize,
+	)
+}
+
+func (a *app) initSettings() {
+	configDir := filepath.Dir(a.configPath)
+	if err := os.MkdirAll(configDir, 0750); err != nil {
+		slog.Warn("failed to create config directory for settings", "error", err, "path", configDir)
+		return
+	}
+	var err error
+	a.settingsStore, err = config.NewSettingsStoreFromConfig(a.cfg, configDir)
+	if err != nil {
+		slog.Warn("failed to initialize settings store", "error", err)
+		return
+	}
+	slog.Info("settings store initialized", "path", filepath.Join(configDir, "settings.yaml"))
+}
+
+func (a *app) initControlAPI() {
+	a.controlHandler = control.NewWithAuth(
+		a.store,
+		a.manager,
+		a.sqliteStore,
+		a.policyEngine,
+		a.cfg.Control.Auth.Enabled,
+		a.cfg.Control.Auth.APIKey,
+	)
+	if a.settingsStore != nil {
+		a.controlHandler.SetSettingsStore(a.settingsStore)
+	}
+	if a.wsHandler != nil {
+		a.controlHandler.SetWebSocketHandler(a.wsHandler)
+	}
+	if a.cfg.Storage.Enabled {
+		a.controlHandler.SetCaptureMode(a.cfg.Storage.CaptureMode)
+	}
+
+	if a.cfg.Control.Auth.Enabled {
+		slog.Info("control API authentication enabled")
+	} else {
+		slog.Warn("control API authentication is DISABLED — all endpoints are unauthenticated. Set control.auth.enabled=true in production.")
+	}
+}
+
+func (a *app) startServers() chan error {
+	a.proxyServer = &http.Server{
+		Addr:         a.cfg.Listen,
+		Handler:      a.proxyHandler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0, // Disable for streaming
+		IdleTimeout:  120 * time.Second,
+	}
+
+	if a.cfg.Control.Enabled {
+		a.controlServer = &http.Server{
+			Addr:         a.cfg.Control.Listen,
+			Handler:      a.controlHandler,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+	}
+
+	errChan := make(chan error, 2)
+
+	if a.cfg.TLS.Enabled {
+		tlsConfig, err := setupTLS(a.cfg.TLS)
+		if err != nil {
+			slog.Error("failed to setup TLS", "error", err)
+			os.Exit(1)
+		}
+		a.proxyServer.TLSConfig = tlsConfig
+		slog.Info("TLS enabled for proxy server")
+	}
+
+	go func() {
+		if a.cfg.TLS.Enabled {
+			slog.Info("proxy server starting (HTTPS)", "addr", a.cfg.Listen)
+			if err := a.proxyServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				errChan <- fmt.Errorf("proxy server error: %w", err)
+			}
+		} else {
+			slog.Info("proxy server starting (HTTP)", "addr", a.cfg.Listen)
+			if err := a.proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errChan <- fmt.Errorf("proxy server error: %w", err)
+			}
+		}
+	}()
+
+	if a.controlServer != nil {
+		go func() {
+			slog.Info("control server starting", "addr", a.cfg.Control.Listen)
+			if err := a.controlServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errChan <- fmt.Errorf("control server error: %w", err)
+			}
+		}()
+	}
+
+	return errChan
+}
+
+func (a *app) shutdown(cancel context.CancelFunc) {
 	slog.Info("shutting down servers")
-	cancel() // Stop session manager
+	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	if err := proxyServer.Shutdown(shutdownCtx); err != nil {
+	if err := a.proxyServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("proxy server shutdown error", "error", err)
 	}
 
-	if controlServer != nil {
-		if err := controlServer.Shutdown(shutdownCtx); err != nil {
+	if a.controlServer != nil {
+		if err := a.controlServer.Shutdown(shutdownCtx); err != nil {
 			slog.Error("control server shutdown error", "error", err)
 		}
 	}
 
-	// Close Redis connection if used
-	if redisStore != nil {
-		if err := redisStore.Close(); err != nil {
+	if a.redisStore != nil {
+		if err := a.redisStore.Close(); err != nil {
 			slog.Error("Redis close error", "error", err)
 		}
 	}
 
-	// Close SQLite storage if used
-	if sqliteStore != nil {
-		if err := sqliteStore.Close(); err != nil {
+	if a.sqliteStore != nil {
+		if err := a.sqliteStore.Close(); err != nil {
 			slog.Error("SQLite close error", "error", err)
 		}
 	}
 
-	// Shutdown telemetry
-	if tp != nil {
-		if err := tp.Shutdown(shutdownCtx); err != nil {
+	if a.tp != nil {
+		if err := a.tp.Shutdown(shutdownCtx); err != nil {
 			slog.Error("telemetry shutdown error", "error", err)
 		}
 	}
