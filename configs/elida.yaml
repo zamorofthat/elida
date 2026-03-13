@@ -208,10 +208,11 @@ policy:
   #
   # Rule fields:
   #   name        - Unique identifier
-  #   type        - "content_match", "request_count", "requests_per_minute",
+  #   type        - "content_match", "tool_blocked", "tool_argument_pattern",
+  #                 "request_count", "requests_per_minute",
   #                 "duration", "bytes_in", "bytes_out", "bytes_total"
   #   target      - "request", "response", "both" (default: both)
-  #   patterns    - Regex patterns (for content_match type)
+  #   patterns    - Regex (content_match, tool_argument_pattern) or glob (tool_blocked)
   #   threshold   - Numeric limit (for metric types)
   #   severity    - "info", "warning", "critical"
   #   action      - "flag", "block", "terminate"

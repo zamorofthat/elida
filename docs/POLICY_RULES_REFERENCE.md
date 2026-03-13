@@ -541,6 +541,52 @@ General anomaly and abuse detection patterns.
 
 ---
 
+## Tool Call Policy Rules (RESPONSE-SIDE)
+
+Block specific tool calls by name or inspect tool arguments for dangerous patterns. These rules evaluate the LLM's response when it decides to call tools, before the response reaches the client.
+
+Supports OpenAI, Anthropic, Mistral, llama.cpp, Ollama, and any provider using OpenAI-compatible or standard tool call formats.
+
+### `tool_blocked` — Deny list by tool name
+
+Uses glob patterns (via `filepath.Match`) to match tool/function names.
+
+```yaml
+- name: "block_dangerous_tools"
+  type: "tool_blocked"
+  target: "response"
+  patterns:
+    - "exec_*"     # Any tool starting with exec_
+    - "shell_*"    # Any tool starting with shell_
+    - "rm_*"       # Any tool starting with rm_
+    - "sudo_*"     # Any tool starting with sudo_
+    - "eval_*"     # Any tool starting with eval_
+  severity: "critical"
+  action: "block"
+  description: "LLM07: Block dangerous tool calls"
+```
+
+### `tool_argument_pattern` — Regex match on tool arguments
+
+Inspects the JSON-encoded arguments string of tool calls using regex patterns (case-insensitive).
+
+```yaml
+- name: "dangerous_tool_arguments"
+  type: "tool_argument_pattern"
+  target: "response"
+  patterns:
+    - "rm\\s+-rf"           # Recursive force delete
+    - "chmod\\s+777"        # World-writable permissions
+    - "curl.*\\|.*sh"       # Pipe curl output to shell
+  severity: "critical"
+  action: "terminate"
+  description: "LLM08: Dangerous patterns in tool arguments"
+```
+
+Both rule types are included in the `standard` and `strict` presets.
+
+---
+
 ## Creating Custom Rules
 
 You can add your own rules by defining them in the `rules` section of your config:
@@ -551,7 +597,7 @@ policy:
   preset: standard  # Start with standard rules
 
   rules:
-    # Custom rule example
+    # Custom content rule
     - name: "block_competitor_mentions"
       type: "content_match"
       target: "request"
@@ -560,6 +606,44 @@ policy:
       severity: "warning"
       action: "flag"
       description: "Custom: Competitor mention detected"
+
+    # Custom tool call rule - block specific tools
+    - name: "block_internal_tools"
+      type: "tool_blocked"
+      patterns:
+        - "deploy_*"
+        - "database_drop"
+      severity: "critical"
+      action: "block"
+      description: "Custom: Block deployment and database tools"
+
+    # Custom argument inspection
+    - name: "block_production_args"
+      type: "tool_argument_pattern"
+      patterns:
+        - "production"
+        - "prod-db"
+      severity: "critical"
+      action: "block"
+      description: "Custom: Block tool calls targeting production"
 ```
 
 Custom rules are **appended** to preset rules, so you get both.
+
+---
+
+## Rule Type Reference
+
+| Type | Description | Patterns | Target |
+|------|-------------|----------|--------|
+| `content_match` | Regex match on request/response body | Regex | request, response, both |
+| `tool_blocked` | Deny list by tool name | Glob (`filepath.Match`) | response |
+| `tool_argument_pattern` | Regex match on tool arguments | Regex | response |
+| `bytes_in` / `bytes_out` / `bytes_total` | Byte threshold | — | — |
+| `request_count` | Request count threshold | — | — |
+| `requests_per_minute` | Rate limit | — | — |
+| `duration` | Session duration (seconds) | — | — |
+| `tokens_in` / `tokens_out` / `tokens_total` | Token threshold | — | — |
+| `tokens_per_minute` | Token rate limit | — | — |
+| `tool_call_count` | Total tool calls threshold | — | — |
+| `tool_fanout` | Distinct tools used threshold | — | — |
