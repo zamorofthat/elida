@@ -663,6 +663,19 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 		for _, tc := range toolCalls {
 			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
 		}
+		// Evaluate tool calls against tool call policy rules
+		if p.policy != nil {
+			policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
+			if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
+				if result.ShouldTerminate {
+					p.manager.Terminate(sess.ID)
+					return p.writeBlockedResponse(w, "Tool call violates security policy - session terminated", true)
+				}
+				if result.ShouldBlock {
+					return p.writeBlockedResponse(w, "Tool call violates security policy", false)
+				}
+			}
+		}
 	}
 
 	// Capture response for capture-all mode
@@ -784,6 +797,25 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 			p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, responseBody, resp.StatusCode)
 			// Persist flagged session immediately to survive crashes
 			p.persistFlaggedSession(sess, backend.Name)
+		}
+	}
+
+	// Evaluate tool calls in buffered streaming response
+	if p.policy != nil && len(responseBody) > 0 {
+		if toolCalls := ExtractToolCallsFromResponse([]byte(responseBody)); len(toolCalls) > 0 {
+			for _, tc := range toolCalls {
+				sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+			}
+			policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
+			if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
+				if result.ShouldTerminate {
+					p.manager.Terminate(sess.ID)
+					return p.writeBlockedResponse(w, "Tool call violates security policy - session terminated", true)
+				}
+				if result.ShouldBlock {
+					return p.writeBlockedResponse(w, "Tool call violates security policy", false)
+				}
+			}
 		}
 	}
 
@@ -1087,6 +1119,23 @@ func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend
 			)
 		}
 	}
+	// Evaluate tool calls in async-scanned response
+	if toolCalls := ExtractToolCallsFromResponse([]byte(content)); len(toolCalls) > 0 {
+		for _, tc := range toolCalls {
+			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+		}
+		policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
+		if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
+			for _, v := range result.Violations {
+				slog.Info("async tool call scan: violation detected",
+					"session_id", sess.ID,
+					"rule", v.RuleName,
+					"severity", v.Severity,
+					"action", v.Action,
+				)
+			}
+		}
+	}
 	// Capture response for flagged sessions (even if response itself has no violations)
 	if p.policy.IsFlagged(sess.ID) {
 		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, content, statusCode)
@@ -1096,6 +1145,18 @@ func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend
 }
 
 // logResponse logs a standard response
+// proxyToolCallsToPolicyToolCalls converts proxy ToolCallInfo to policy ToolCall
+func proxyToolCallsToPolicyToolCalls(toolCalls []ToolCallInfo) []policy.ToolCall {
+	result := make([]policy.ToolCall, len(toolCalls))
+	for i, tc := range toolCalls {
+		result[i] = policy.ToolCall{
+			Name:      tc.Name,
+			Arguments: tc.Arguments,
+		}
+	}
+	return result
+}
+
 func (p *Proxy) logResponse(sessionID string, body []byte) {
 	// Truncate for logging if too large
 	logBody := string(body)

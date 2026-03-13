@@ -14,9 +14,10 @@ type TokenUsage struct {
 
 // ToolCallInfo represents extracted tool/function call information
 type ToolCallInfo struct {
-	Name string `json:"name"`
-	Type string `json:"type"` // "function", "code_interpreter", etc.
-	ID   string `json:"id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"` // "function", "code_interpreter", etc.
+	ID        string `json:"id"`
+	Arguments string `json:"arguments"` // JSON-encoded arguments string
 }
 
 // ExtractTokenUsage extracts token usage from an LLM API response body.
@@ -93,7 +94,8 @@ func ExtractToolCalls(body []byte) []ToolCallInfo {
 				ID       string `json:"id"`
 				Type     string `json:"type"`
 				Function struct {
-					Name string `json:"name"`
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"messages"`
@@ -103,9 +105,10 @@ func ExtractToolCalls(body []byte) []ToolCallInfo {
 			for _, tc := range msg.ToolCalls {
 				if tc.Function.Name != "" {
 					result = append(result, ToolCallInfo{
-						Name: tc.Function.Name,
-						Type: tc.Type,
-						ID:   tc.ID,
+						Name:      tc.Function.Name,
+						Type:      tc.Type,
+						ID:        tc.ID,
+						Arguments: tc.Function.Arguments,
 					})
 				}
 			}
@@ -153,10 +156,17 @@ func ExtractToolCalls(body []byte) []ToolCallInfo {
 						if blockType, ok := blockMap["type"].(string); ok && blockType == "tool_use" {
 							if name, ok := blockMap["name"].(string); ok {
 								id, _ := blockMap["id"].(string)
+								args := ""
+								if input, ok := blockMap["input"]; ok && input != nil {
+									if argBytes, err := json.Marshal(input); err == nil {
+										args = string(argBytes)
+									}
+								}
 								result = append(result, ToolCallInfo{
-									Name: name,
-									Type: "tool_use",
-									ID:   id,
+									Name:      name,
+									Type:      "tool_use",
+									ID:        id,
+									Arguments: args,
 								})
 							}
 						}
@@ -187,21 +197,29 @@ func ExtractToolCalls(body []byte) []ToolCallInfo {
 func extractToolsRecursive(data interface{}, result *[]ToolCallInfo) {
 	switch v := data.(type) {
 	case map[string]interface{}:
-		// Check if this is a function/tool definition
+		// Check if this is a function/tool definition with arguments
 		if name, ok := v["name"].(string); ok {
-			// Check if this looks like a function/tool
 			if _, hasFunction := v["function"]; hasFunction || strings.Contains(name, "_") {
+				args := extractArgumentsFromMap(v)
 				*result = append(*result, ToolCallInfo{
-					Name: name,
-					Type: "function",
+					Name:      name,
+					Type:      "function",
+					Arguments: args,
 				})
 			}
 		}
 		if funcDef, ok := v["function"].(map[string]interface{}); ok {
 			if name, ok := funcDef["name"].(string); ok {
+				args := ""
+				if a, ok := funcDef["arguments"].(string); ok {
+					args = a
+				} else {
+					args = extractArgumentsFromMap(funcDef)
+				}
 				*result = append(*result, ToolCallInfo{
-					Name: name,
-					Type: "function",
+					Name:      name,
+					Type:      "function",
+					Arguments: args,
 				})
 			}
 		}
@@ -214,6 +232,27 @@ func extractToolsRecursive(data interface{}, result *[]ToolCallInfo) {
 			extractToolsRecursive(item, result)
 		}
 	}
+}
+
+// extractArgumentsFromMap tries to extract arguments/input from a map
+func extractArgumentsFromMap(m map[string]interface{}) string {
+	// Try "arguments" as string (OpenAI-style)
+	if a, ok := m["arguments"].(string); ok {
+		return a
+	}
+	// Try "arguments" as object
+	if a, ok := m["arguments"]; ok && a != nil {
+		if argBytes, err := json.Marshal(a); err == nil {
+			return string(argBytes)
+		}
+	}
+	// Try "input" as object (Anthropic-style)
+	if input, ok := m["input"]; ok && input != nil {
+		if argBytes, err := json.Marshal(input); err == nil {
+			return string(argBytes)
+		}
+	}
+	return ""
 }
 
 // ExtractToolCallsFromResponse extracts tool calls from an LLM response.
@@ -245,9 +284,10 @@ func ExtractToolCallsFromResponse(body []byte) []ToolCallInfo {
 			for _, tc := range choice.Message.ToolCalls {
 				if tc.Function.Name != "" {
 					result = append(result, ToolCallInfo{
-						Name: tc.Function.Name,
-						Type: tc.Type,
-						ID:   tc.ID,
+						Name:      tc.Function.Name,
+						Type:      tc.Type,
+						ID:        tc.ID,
+						Arguments: tc.Function.Arguments,
 					})
 				}
 			}
@@ -269,12 +309,33 @@ func ExtractToolCallsFromResponse(body []byte) []ToolCallInfo {
 	if json.Unmarshal(body, &anthropicResp) == nil {
 		for _, block := range anthropicResp.Content {
 			if block.Type == "tool_use" && block.Name != "" {
+				args := ""
+				if block.Input != nil {
+					if argBytes, err := json.Marshal(block.Input); err == nil {
+						args = string(argBytes)
+					}
+				}
 				result = append(result, ToolCallInfo{
-					Name: block.Name,
-					Type: "tool_use",
-					ID:   block.ID,
+					Name:      block.Name,
+					Type:      "tool_use",
+					ID:        block.ID,
+					Arguments: args,
 				})
 			}
+		}
+	}
+
+	if len(result) > 0 {
+		return result
+	}
+
+	// Generic fallback for non-standard providers (llama.cpp, Ollama, LangChain, etc.)
+	// that use tool_calls or function structures but don't match OpenAI/Anthropic exactly
+	bodyStr := string(body)
+	if strings.Contains(bodyStr, `"tool_calls"`) || strings.Contains(bodyStr, `"function"`) || strings.Contains(bodyStr, `"tool_use"`) {
+		var generic map[string]interface{}
+		if json.Unmarshal(body, &generic) == nil {
+			extractToolsRecursive(generic, &result)
 		}
 	}
 

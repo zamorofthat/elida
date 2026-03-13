@@ -2,6 +2,7 @@ package policy
 
 import (
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -42,6 +43,10 @@ const (
 
 	// Content inspection rules
 	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request/response body
+
+	// Tool call policy rules
+	RuleTypeToolBlocked         RuleType = "tool_blocked"          // Deny list by tool name (glob patterns)
+	RuleTypeToolArgumentPattern RuleType = "tool_argument_pattern" // Regex match on tool arguments
 )
 
 // RuleTarget defines what content the rule applies to
@@ -152,21 +157,38 @@ type CapturedRequest struct {
 	StatusCode   int       `json:"status_code"`
 }
 
+// ToolCall represents a tool call to be evaluated by the policy engine.
+// This is the policy package's view of tool call data, decoupled from proxy internals.
+type ToolCall struct {
+	Name      string // Tool/function name
+	Arguments string // JSON-encoded arguments
+}
+
 // CompiledRule is a rule with pre-compiled regex patterns
 type CompiledRule struct {
 	Rule
 	CompiledPatterns []*regexp.Regexp
 }
 
+// CompiledToolRule is a tool call rule with compiled patterns
+type CompiledToolRule struct {
+	Rule
+	// For tool_blocked: glob patterns (matched via filepath.Match)
+	GlobPatterns []string
+	// For tool_argument_pattern: compiled regex patterns
+	CompiledPatterns []*regexp.Regexp
+}
+
 // Engine evaluates sessions against policy rules
 type Engine struct {
-	mu              sync.RWMutex
-	rules           []Rule
-	compiledRules   []CompiledRule // Rules with compiled regex
-	flaggedSessions map[string]*FlaggedSession
-	captureContent  bool
-	maxCaptureSize  int  // Max bytes to capture per request
-	auditMode       bool // If true, log but don't enforce (dry-run)
+	mu                sync.RWMutex
+	rules             []Rule
+	compiledRules     []CompiledRule     // Rules with compiled regex
+	compiledToolRules []CompiledToolRule // Tool call rules with compiled patterns
+	flaggedSessions   map[string]*FlaggedSession
+	captureContent    bool
+	maxCaptureSize    int  // Max bytes to capture per request
+	auditMode         bool // If true, log but don't enforce (dry-run)
 
 	// Risk ladder configuration
 	riskLadderEnabled bool
@@ -242,6 +264,9 @@ func NewEngine(cfg Config) *Engine {
 		}
 	}
 
+	// Compile tool call rules
+	e.compiledToolRules = compileToolRules(cfg.Rules)
+
 	mode := "enforce"
 	if auditMode {
 		mode = "audit"
@@ -249,6 +274,7 @@ func NewEngine(cfg Config) *Engine {
 	slog.Info("policy engine initialized",
 		"rules", len(cfg.Rules),
 		"content_rules", len(e.compiledRules),
+		"tool_rules", len(e.compiledToolRules),
 		"capture_content", cfg.CaptureContent,
 		"mode", mode,
 	)
@@ -280,6 +306,9 @@ func (e *Engine) ReloadConfig(cfg Config) {
 		}
 	}
 
+	// Compile tool call rules outside the lock
+	newToolRules := compileToolRules(cfg.Rules)
+
 	// Swap all state under the write lock
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -298,6 +327,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 
 	e.rules = cfg.Rules
 	e.compiledRules = newCompiledRules
+	e.compiledToolRules = newToolRules
 
 	mode := "enforce"
 	if e.auditMode {
@@ -306,6 +336,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	slog.Info("policy engine reloaded",
 		"rules", len(e.rules),
 		"content_rules", len(e.compiledRules),
+		"tool_rules", len(e.compiledToolRules),
 		"capture_content", e.captureContent,
 		"mode", mode,
 		"risk_ladder_enabled", e.riskLadderEnabled,
@@ -574,6 +605,7 @@ func ruleAppliesToTarget(ruleTarget RuleTarget, evaluationTarget RuleTarget) boo
 func (e *Engine) HasBlockingResponseRules() bool {
 	e.mu.RLock()
 	compiledRules := e.compiledRules
+	toolRules := e.compiledToolRules
 	e.mu.RUnlock()
 
 	for _, cr := range compiledRules {
@@ -581,6 +613,11 @@ func (e *Engine) HasBlockingResponseRules() bool {
 			if cr.Action == "block" || cr.Action == "terminate" {
 				return true
 			}
+		}
+	}
+	for _, cr := range toolRules {
+		if cr.Action == "block" || cr.Action == "terminate" {
+			return true
 		}
 	}
 	return false
@@ -941,6 +978,163 @@ func (e *Engine) IsRiskLadderEnabled() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.riskLadderEnabled
+}
+
+// compileToolRules compiles tool_blocked and tool_argument_pattern rules
+func compileToolRules(rules []Rule) []CompiledToolRule {
+	var result []CompiledToolRule
+	for _, rule := range rules {
+		if len(rule.Patterns) == 0 {
+			continue
+		}
+		switch rule.Type {
+		case RuleTypeToolBlocked:
+			result = append(result, CompiledToolRule{
+				Rule:         rule,
+				GlobPatterns: rule.Patterns,
+			})
+		case RuleTypeToolArgumentPattern:
+			compiled := CompiledToolRule{Rule: rule}
+			for _, pattern := range rule.Patterns {
+				re, err := regexp.Compile("(?i)" + pattern)
+				if err != nil {
+					slog.Error("invalid regex pattern in tool argument rule",
+						"rule", rule.Name,
+						"pattern", pattern,
+						"error", err,
+					)
+					continue
+				}
+				compiled.CompiledPatterns = append(compiled.CompiledPatterns, re)
+			}
+			result = append(result, compiled)
+		}
+	}
+	return result
+}
+
+// EvaluateToolCalls checks extracted tool calls against tool call policy rules
+func (e *Engine) EvaluateToolCalls(sessionID string, toolCalls []ToolCall) *ContentCheckResult {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+
+	// Snapshot rules and audit mode under read lock
+	e.mu.RLock()
+	toolRules := e.compiledToolRules
+	auditMode := e.auditMode
+	e.mu.RUnlock()
+
+	if len(toolRules) == 0 {
+		return nil
+	}
+
+	result := &ContentCheckResult{}
+
+	for _, cr := range toolRules {
+		switch cr.Type {
+		case RuleTypeToolBlocked:
+			for _, tc := range toolCalls {
+				for _, pattern := range cr.GlobPatterns {
+					matched, err := filepath.Match(pattern, tc.Name)
+					if err != nil {
+						continue
+					}
+					if matched {
+						violation := Violation{
+							RuleName:       cr.Name,
+							Description:    cr.Description,
+							Severity:       cr.Severity,
+							MatchedText:    tc.Name,
+							MatchedPattern: pattern,
+							Action:         cr.Action,
+							Timestamp:      time.Now(),
+						}
+						result.Violations = append(result.Violations, violation)
+						if !auditMode {
+							switch cr.Action {
+							case "block":
+								result.ShouldBlock = true
+							case "terminate":
+								result.ShouldTerminate = true
+								result.ShouldBlock = true
+							}
+						}
+						logToolViolation(sessionID, cr, tc.Name, pattern, auditMode)
+						e.recordViolations(sessionID, []Violation{violation})
+						break // One match per tool per rule is enough
+					}
+				}
+			}
+		case RuleTypeToolArgumentPattern:
+			for _, tc := range toolCalls {
+				if tc.Arguments == "" {
+					continue
+				}
+				for i, re := range cr.CompiledPatterns {
+					if match := re.FindString(tc.Arguments); match != "" {
+						violation := Violation{
+							RuleName:       cr.Name,
+							Description:    cr.Description,
+							Severity:       cr.Severity,
+							MatchedText:    truncateMatch(match, 100),
+							MatchedPattern: cr.Patterns[i],
+							Action:         cr.Action,
+							Timestamp:      time.Now(),
+						}
+						result.Violations = append(result.Violations, violation)
+						if !auditMode {
+							switch cr.Action {
+							case "block":
+								result.ShouldBlock = true
+							case "terminate":
+								result.ShouldTerminate = true
+								result.ShouldBlock = true
+							}
+						}
+						logToolViolation(sessionID, cr, tc.Name+"(args)", cr.Patterns[i], auditMode)
+						e.recordViolations(sessionID, []Violation{violation})
+						break // One match per tool per rule is enough
+					}
+				}
+			}
+		}
+	}
+
+	if len(result.Violations) > 0 {
+		return result
+	}
+	return nil
+}
+
+// HasBlockingToolRules returns true if any tool call rules have block/terminate action
+func (e *Engine) HasBlockingToolRules() bool {
+	e.mu.RLock()
+	toolRules := e.compiledToolRules
+	e.mu.RUnlock()
+
+	for _, cr := range toolRules {
+		if cr.Action == "block" || cr.Action == "terminate" {
+			return true
+		}
+	}
+	return false
+}
+
+func logToolViolation(sessionID string, cr CompiledToolRule, matched, pattern string, auditMode bool) {
+	actionMsg := cr.Action
+	if auditMode {
+		actionMsg = cr.Action + " (audit-only)"
+	}
+	slog.Warn("tool call policy violation detected",
+		"session_id", sessionID,
+		"rule", cr.Name,
+		"severity", cr.Severity,
+		"action", actionMsg,
+		"matched", matched,
+		"pattern", pattern,
+		"audit_mode", auditMode,
+	)
 }
 
 // StreamingScanner handles chunk-based content scanning with overlap for cross-boundary patterns
