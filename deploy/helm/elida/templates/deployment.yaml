@@ -1,1 +1,99 @@
-
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "elida.fullname" . }}
+  labels:
+    {{- include "elida.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "elida.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "elida.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "elida.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "-config"
+            - "/etc/elida/elida.yaml"
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.elida.listenPort }}
+              protocol: TCP
+            - name: control
+              containerPort: {{ .Values.elida.controlPort }}
+              protocol: TCP
+          env:
+            - name: ELIDA_LISTEN
+              value: ":{{ .Values.elida.listenPort }}"
+            - name: ELIDA_CONTROL_LISTEN
+              value: ":{{ .Values.elida.controlPort }}"
+            {{- if .Values.redis.enabled }}
+            - name: ELIDA_SESSION_STORE
+              value: redis
+            - name: ELIDA_REDIS_ADDR
+              value: "{{ include "elida.redisHost" . }}:{{ include "elida.redisPort" . }}"
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /control/health
+              port: control
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /control/health
+              port: control
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/elida
+              readOnly: true
+            {{- if .Values.elida.storage.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "elida.fullname" . }}
+        {{- if .Values.elida.storage.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "elida.fullname" . }}-data
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

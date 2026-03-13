@@ -374,6 +374,9 @@ func (m *Manager) Complete(id string) {
 
 	sess.SetState(Completed)
 
+	// Persist completed state to store (important for Redis-backed deployments)
+	m.store.Put(sess)
+
 	slog.Info("session completed",
 		"session_id", id,
 		"duration", sess.Duration(),
