@@ -863,3 +863,68 @@ func TestSQLiteStore_Cleanup(t *testing.T) {
 		t.Error("new session should still exist")
 	}
 }
+
+func TestSQLiteStore_CountSessions(t *testing.T) {
+	store := newTestStore(t)
+
+	now := time.Now()
+	records := []storage.SessionRecord{
+		{
+			ID: "sess-1", State: "completed",
+			StartTime: now.Add(-10 * time.Minute), EndTime: now,
+			Backend: "ollama", ClientAddr: "127.0.0.1:1111",
+		},
+		{
+			ID: "sess-2", State: "completed",
+			StartTime: now.Add(-5 * time.Minute), EndTime: now,
+			Backend: "anthropic", ClientAddr: "127.0.0.1:2222",
+		},
+		{
+			ID: "sess-3", State: "killed",
+			StartTime: now.Add(-2 * time.Minute), EndTime: now,
+			Backend: "ollama", ClientAddr: "127.0.0.1:3333",
+		},
+	}
+	for _, r := range records {
+		if err := store.SaveSession(r); err != nil {
+			t.Fatalf("failed to save session: %v", err)
+		}
+	}
+
+	// Count all
+	count, err := store.CountSessions(storage.ListSessionsOptions{})
+	if err != nil {
+		t.Fatalf("CountSessions() failed: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 total, got %d", count)
+	}
+
+	// Count by state
+	count, err = store.CountSessions(storage.ListSessionsOptions{State: "completed"})
+	if err != nil {
+		t.Fatalf("CountSessions(completed) failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 completed, got %d", count)
+	}
+
+	// Count by backend
+	count, err = store.CountSessions(storage.ListSessionsOptions{Backend: "ollama"})
+	if err != nil {
+		t.Fatalf("CountSessions(ollama) failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 ollama, got %d", count)
+	}
+
+	// Count with since filter
+	since := now.Add(-3 * time.Minute)
+	count, err = store.CountSessions(storage.ListSessionsOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("CountSessions(since) failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 since 3m ago, got %d", count)
+	}
+}

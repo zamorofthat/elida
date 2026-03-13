@@ -1529,6 +1529,9 @@ function AppShell() {
   const [lastUpdated, setLastUpdated] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const [historyPage, setHistoryPage] = useState(0)
+  const [historyTotal, setHistoryTotal] = useState(0)
+  const historyPageSize = 50
 
   // Sparkline data (last 20 values)
   const sparklineData = useRef({
@@ -1568,11 +1571,13 @@ function AppShell() {
     }
   }
 
-  const fetchHistory = async () => {
+  const fetchHistory = async (pageNum = historyPage) => {
     try {
-      const res = await apiFetch(API_BASE + '/control/history?limit=50')
+      const offset = pageNum * historyPageSize
+      const res = await apiFetch(API_BASE + '/control/history?limit=' + historyPageSize + '&offset=' + offset)
       const data = await res.json()
       setHistory(data.sessions || [])
+      setHistoryTotal(data.total_count || 0)
     } catch (err) {
       console.error('Failed to fetch history:', err)
     }
@@ -1669,7 +1674,7 @@ function AppShell() {
     // Initial data load for current page
     refreshData()
     checkHealth()
-    if (page === 'history') fetchHistory()
+    if (page === 'history') { setHistoryPage(0); fetchHistory(0) }
     if (page === 'flagged') {
       fetchFlagged()
       fetchFlaggedStats()
@@ -1835,6 +1840,29 @@ function AppShell() {
                 searchTerm={searchTerm}
               />
             </div>
+            {historyTotal > historyPageSize && (
+              <div class="panel-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem 1rem' }}>
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                  Showing {historyPage * historyPageSize + 1}–{Math.min((historyPage + 1) * historyPageSize, historyTotal)} of {historyTotal}
+                </span>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button
+                    class="btn btn-secondary btn-sm"
+                    disabled={historyPage === 0}
+                    onClick={() => { const p = historyPage - 1; setHistoryPage(p); fetchHistory(p) }}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    class="btn btn-secondary btn-sm"
+                    disabled={(historyPage + 1) * historyPageSize >= historyTotal}
+                    onClick={() => { const p = historyPage + 1; setHistoryPage(p); fetchHistory(p) }}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

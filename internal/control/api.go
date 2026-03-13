@@ -541,9 +541,18 @@ func (h *Handler) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	totalCount, err := h.historyStore.CountSessions(opts)
+	if err != nil {
+		slog.Error("failed to count history", "error", err)
+		totalCount = len(sessions)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sessions": sessions,
-		"count":    len(sessions),
+		"sessions":    sessions,
+		"count":       len(sessions),
+		"total_count": totalCount,
+		"offset":      opts.Offset,
+		"limit":       opts.Limit,
 	})
 }
 

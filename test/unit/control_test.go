@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"elida/internal/control"
 	"elida/internal/session"
+	"elida/internal/storage"
 )
 
 func newTestHandler() (*control.Handler, *session.Manager) {
@@ -420,5 +422,84 @@ func TestHandler_Auth_AllControlEndpoints(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s: expected status 401 without auth, got %d", ep, w.Code)
 		}
+	}
+}
+
+func TestHandler_History_Pagination(t *testing.T) {
+	// Create a SQLite store with test data
+	tmpFile, err := os.CreateTemp("", "elida-control-test-*.db")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	sqliteStore, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer sqliteStore.Close()
+
+	// Insert test sessions
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		record := storage.SessionRecord{
+			ID:        "hist-sess-" + string(rune('a'+i)),
+			State:     "completed",
+			StartTime: now.Add(-time.Duration(i) * time.Minute),
+			EndTime:   now,
+			Backend:   "ollama",
+		}
+		if err := sqliteStore.SaveSession(record); err != nil {
+			t.Fatalf("failed to save session: %v", err)
+		}
+	}
+
+	memStore := session.NewMemoryStore()
+	manager := session.NewManager(memStore, 5*time.Minute)
+	handler := control.NewWithHistory(memStore, manager, sqliteStore)
+
+	// Request first page with limit=2
+	req := httptest.NewRequest("GET", "/control/history?limit=2&offset=0", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify pagination fields
+	getFloat := func(key string) float64 {
+		v, ok := resp[key].(float64)
+		if !ok {
+			t.Fatalf("expected %s to be a number, got %T", key, resp[key])
+		}
+		return v
+	}
+
+	if int(getFloat("total_count")) != 5 {
+		t.Errorf("expected total_count 5, got %v", resp["total_count"])
+	}
+	if int(getFloat("count")) != 2 {
+		t.Errorf("expected count 2, got %v", resp["count"])
+	}
+	if int(getFloat("offset")) != 0 {
+		t.Errorf("expected offset 0, got %v", resp["offset"])
+	}
+	if int(getFloat("limit")) != 2 {
+		t.Errorf("expected limit 2, got %v", resp["limit"])
+	}
+
+	sessions, ok := resp["sessions"].([]interface{})
+	if !ok {
+		t.Fatalf("expected sessions to be an array, got %T", resp["sessions"])
+	}
+	if len(sessions) != 2 {
+		t.Errorf("expected 2 sessions in page, got %d", len(sessions))
 	}
 }

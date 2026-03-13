@@ -1,3 +1,8 @@
+backend: "https://api.anthropic.com"
+control:
+    auth:
+        enabled: true
+        api_key: "elida-demo-key-2026"
 policy:
     enabled: true
     mode: enforce
@@ -8,6 +13,22 @@ policy:
         throttle_score: 15
         block_score: 30
         terminate_score: 50
+    trust:
+        trusted_tags:
+            - "system-reminder"
+        allowlisted_tools:
+            - "Read"
+            - "Glob"
+            - "Grep"
+            - "Edit"
+            - "Write"
+            - "Agent"
+            - "Skill"
+            - "NotebookEdit"
+            - "TaskCreate"
+            - "TaskUpdate"
+            - "TaskList"
+            - "TaskGet"
 failover:
     enabled: false
     max_retries: 2
@@ -16,3 +37,11 @@ capture:
     mode: flagged_only
     max_capture_size: 10000
     max_per_session: 100
+telemetry:
+    enabled: true
+    exporter: otlp
+    endpoint: "default.main.affectionate-rust-3izd4n6.cribl.cloud:4317"
+    service_name: elida
+    insecure: false
+    capture_content: true
+    max_body_size: 4096

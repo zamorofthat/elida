@@ -318,6 +318,35 @@ type ListSessionsOptions struct {
 	Until   *time.Time
 }
 
+// CountSessions returns the total number of sessions matching the filter options (ignoring Limit/Offset)
+func (s *SQLiteStore) CountSessions(opts ListSessionsOptions) (int, error) {
+	query := `SELECT COUNT(*) FROM sessions WHERE 1=1`
+	args := []interface{}{}
+
+	if opts.State != "" {
+		query += " AND state = ?"
+		args = append(args, opts.State)
+	}
+	if opts.Backend != "" {
+		query += " AND backend = ?"
+		args = append(args, opts.Backend)
+	}
+	if opts.Since != nil {
+		query += " AND start_time >= ?"
+		args = append(args, *opts.Since)
+	}
+	if opts.Until != nil {
+		query += " AND start_time <= ?"
+		args = append(args, *opts.Until)
+	}
+
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count sessions: %w", err)
+	}
+	return count, nil
+}
+
 // ListSessions retrieves sessions with filtering and pagination
 func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, error) {
 	query := `
