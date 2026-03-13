@@ -114,6 +114,9 @@ type FlaggedSession struct {
 	ThrottleRate    int            `json:"throttle_rate"`    // Requests per minute when throttled (0 = no throttle)
 }
 
+// MaxRiskScore is the saturation cap for cumulative risk scores
+const MaxRiskScore = 100.0
+
 // SeverityWeights defines risk score multipliers for each severity level
 var SeverityWeights = map[Severity]float64{
 	SeverityInfo:     1.0,
@@ -256,29 +259,8 @@ func NewEngine(cfg Config) *Engine {
 // ReloadConfig dynamically updates the policy engine configuration.
 // This allows settings changes to take effect without restart.
 func (e *Engine) ReloadConfig(cfg Config) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// Update mode
-	e.auditMode = cfg.Mode == "audit"
-
-	// Update capture settings
-	e.captureContent = cfg.CaptureContent
-	if cfg.MaxCaptureSize > 0 {
-		e.maxCaptureSize = cfg.MaxCaptureSize
-	}
-
-	// Update risk ladder
-	e.riskLadderEnabled = cfg.RiskLadder.Enabled
-	if len(cfg.RiskLadder.Thresholds) > 0 {
-		e.riskThresholds = cfg.RiskLadder.Thresholds
-	}
-
-	// Update rules
-	e.rules = cfg.Rules
-
-	// Recompile content match rules
-	e.compiledRules = make([]CompiledRule, 0)
+	// Compile regex patterns outside the lock to avoid blocking evaluations
+	newCompiledRules := make([]CompiledRule, 0)
 	for _, rule := range cfg.Rules {
 		if rule.Type == RuleTypeContentMatch && len(rule.Patterns) > 0 {
 			compiled := CompiledRule{Rule: rule}
@@ -294,9 +276,28 @@ func (e *Engine) ReloadConfig(cfg Config) {
 				}
 				compiled.CompiledPatterns = append(compiled.CompiledPatterns, re)
 			}
-			e.compiledRules = append(e.compiledRules, compiled)
+			newCompiledRules = append(newCompiledRules, compiled)
 		}
 	}
+
+	// Swap all state under the write lock
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.auditMode = cfg.Mode == "audit"
+
+	e.captureContent = cfg.CaptureContent
+	if cfg.MaxCaptureSize > 0 {
+		e.maxCaptureSize = cfg.MaxCaptureSize
+	}
+
+	e.riskLadderEnabled = cfg.RiskLadder.Enabled
+	if len(cfg.RiskLadder.Thresholds) > 0 {
+		e.riskThresholds = cfg.RiskLadder.Thresholds
+	}
+
+	e.rules = cfg.Rules
+	e.compiledRules = newCompiledRules
 
 	mode := "enforce"
 	if e.auditMode {
@@ -676,6 +677,9 @@ func (e *Engine) calculateRiskScore(fs *FlaggedSession) float64 {
 			weight = 1.0 // Default weight
 		}
 		score += float64(count) * weight
+	}
+	if score > MaxRiskScore {
+		score = MaxRiskScore
 	}
 	return score
 }

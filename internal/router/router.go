@@ -1,9 +1,11 @@
 package router
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -71,10 +73,17 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 			Default: bcfg.Default,
 			APIKey:  bcfg.APIKey,
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
-				DisableCompression:  true,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   100,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSClientConfig:    &tls.Config{MinVersion: tls.VersionTLS12},
+				DisableCompression: true,
 			},
 		}
 
