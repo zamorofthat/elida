@@ -406,22 +406,25 @@ function SessionDetails({ session, onClose }) {
   const [flaggedInfo, setFlaggedInfo] = useState(null)
 
   useEffect(() => {
-    if (session?.id) {
-      // Try live flagged endpoint first, then history endpoint
-      apiFetch(API_BASE + '/control/flagged/' + session.id)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => {
-          if (data) {
-            setFlaggedInfo(data)
-          } else {
-            // Fall back to history endpoint for persisted sessions
-            return apiFetch(API_BASE + '/control/history/' + session.id)
-              .then(res => res.ok ? res.json() : null)
-              .then(histData => setFlaggedInfo(histData))
-          }
-        })
-        .catch(() => setFlaggedInfo(null))
-    }
+    if (!session?.id) return
+    const controller = new AbortController()
+    const opts = { signal: controller.signal }
+
+    apiFetch(API_BASE + '/control/flagged/' + session.id, opts)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (controller.signal.aborted) return
+        if (data) {
+          setFlaggedInfo(data)
+        } else {
+          return apiFetch(API_BASE + '/control/history/' + session.id, opts)
+            .then(res => res.ok ? res.json() : null)
+            .then(histData => { if (!controller.signal.aborted) setFlaggedInfo(histData) })
+        }
+      })
+      .catch((err) => { if (!controller.signal.aborted) setFlaggedInfo(null) })
+
+    return () => controller.abort()
   }, [session?.id])
 
   if (!session) return null
@@ -609,12 +612,15 @@ function FlaggedDetails({ flagged, onClose }) {
   const [sessionInfo, setSessionInfo] = useState(null)
 
   useEffect(() => {
-    if (flagged?.session_id) {
-      apiFetch(API_BASE + '/control/sessions/' + flagged.session_id)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => setSessionInfo(data))
-        .catch(() => setSessionInfo(null))
-    }
+    if (!flagged?.session_id) return
+    const controller = new AbortController()
+
+    apiFetch(API_BASE + '/control/sessions/' + flagged.session_id, { signal: controller.signal })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (!controller.signal.aborted) setSessionInfo(data) })
+      .catch(() => { if (!controller.signal.aborted) setSessionInfo(null) })
+
+    return () => controller.abort()
   }, [flagged?.session_id])
 
   if (!flagged) return null
@@ -796,11 +802,14 @@ function VoiceDetails({ voiceSession, onClose }) {
 
   useEffect(() => {
     if (voiceSession?.id && voiceSession?.parent_session_id) {
-      // Try to get the full voice session with transcript
-      apiFetch(API_BASE + '/control/voice/' + voiceSession.parent_session_id + '/' + voiceSession.id)
+      const controller = new AbortController()
+
+      apiFetch(API_BASE + '/control/voice/' + voiceSession.parent_session_id + '/' + voiceSession.id, { signal: controller.signal })
         .then(res => res.ok ? res.json() : null)
-        .then(data => setFullSession(data || voiceSession))
-        .catch(() => setFullSession(voiceSession))
+        .then(data => { if (!controller.signal.aborted) setFullSession(data || voiceSession) })
+        .catch(() => { if (!controller.signal.aborted) setFullSession(voiceSession) })
+
+      return () => controller.abort()
     } else if (voiceSession) {
       setFullSession(voiceSession)
     }
@@ -1655,29 +1664,11 @@ function AppShell() {
   }
 
   useEffect(() => {
+    const controller = new AbortController()
+
+    // Initial data load for current page
     refreshData()
     checkHealth()
-
-    const interval = setInterval(() => {
-      refreshData()
-      if (page === 'flagged') {
-        fetchFlagged()
-      }
-      if (page === 'voice') {
-        fetchVoiceSessions()
-        fetchVoiceHistory()
-      }
-    }, 2000)
-
-    const healthInterval = setInterval(checkHealth, 10000)
-
-    return () => {
-      clearInterval(interval)
-      clearInterval(healthInterval)
-    }
-  }, [page])
-
-  useEffect(() => {
     if (page === 'history') fetchHistory()
     if (page === 'flagged') {
       fetchFlagged()
@@ -1688,6 +1679,25 @@ function AppShell() {
       fetchVoiceHistory()
     }
     setSearchTerm('')
+
+    // Polling intervals
+    const interval = setInterval(() => {
+      if (controller.signal.aborted) return
+      refreshData()
+      if (page === 'flagged') fetchFlagged()
+      if (page === 'voice') {
+        fetchVoiceSessions()
+        fetchVoiceHistory()
+      }
+    }, 2000)
+
+    const healthInterval = setInterval(checkHealth, 10000)
+
+    return () => {
+      controller.abort()
+      clearInterval(interval)
+      clearInterval(healthInterval)
+    }
   }, [page])
 
   const getPageTitle = () => {
