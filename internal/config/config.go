@@ -13,19 +13,20 @@ import (
 
 // Config holds all configuration for ELIDA
 type Config struct {
-	Listen    string                   `yaml:"listen"`
-	Backend   string                   `yaml:"backend"`  // Single backend (backward compat)
-	Backends  map[string]BackendConfig `yaml:"backends"` // Multi-backend configuration
-	Routing   RoutingConfig            `yaml:"routing"`  // Routing method priority
-	TLS       TLSConfig                `yaml:"tls"`      // TLS/HTTPS configuration
-	Session   SessionConfig            `yaml:"session"`
-	Control   ControlConfig            `yaml:"control"`
-	Proxy     ProxyConfig              `yaml:"proxy"` // Proxy authentication configuration
-	Logging   LoggingConfig            `yaml:"logging"`
-	Telemetry TelemetryConfig          `yaml:"telemetry"`
-	Storage   StorageConfig            `yaml:"storage"`
-	Policy    PolicyConfig             `yaml:"policy"`
-	WebSocket WebSocketConfig          `yaml:"websocket"` // WebSocket proxy configuration
+	Listen          string                   `yaml:"listen"`
+	Backend         string                   `yaml:"backend"`  // Single backend (backward compat)
+	Backends        map[string]BackendConfig `yaml:"backends"` // Multi-backend configuration
+	Routing         RoutingConfig            `yaml:"routing"`  // Routing method priority
+	TLS             TLSConfig                `yaml:"tls"`      // TLS/HTTPS configuration
+	Session         SessionConfig            `yaml:"session"`
+	Control         ControlConfig            `yaml:"control"`
+	Proxy           ProxyConfig              `yaml:"proxy"` // Proxy authentication configuration
+	Logging         LoggingConfig            `yaml:"logging"`
+	Telemetry       TelemetryConfig          `yaml:"telemetry"`
+	Storage         StorageConfig            `yaml:"storage"`
+	Policy          PolicyConfig             `yaml:"policy"`
+	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
+	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
 
 // ProxyConfig holds proxy-level configuration
@@ -403,6 +404,7 @@ func defaults() *Config {
 				Protocols:        []string{"openai_realtime", "deepgram", "elevenlabs", "livekit"},
 			},
 		},
+		ShutdownTimeout: 30 * time.Second,
 	}
 }
 
@@ -529,6 +531,13 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_PROXY_API_KEY"); v != "" {
 		c.Proxy.Auth.APIKey = v
 		c.Proxy.Auth.Enabled = true // Auto-enable if key is set
+	}
+
+	// Shutdown timeout override
+	if v := os.Getenv("ELIDA_SHUTDOWN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			c.ShutdownTimeout = d
+		}
 	}
 }
 

@@ -495,6 +495,53 @@ func (m *Manager) cleanup() {
 	}
 }
 
+// DrainActiveSessions marks all active sessions as completed and invokes
+// the session end callback for each. Called during graceful shutdown to
+// ensure all session data is persisted and exported before process exit.
+// Returns the number of sessions drained.
+func (m *Manager) DrainActiveSessions() int {
+	// Snapshot active sessions
+	active := m.store.List(ActiveFilter)
+
+	// Also grab timed-out sessions that haven't been cleaned up yet
+	timedOut := m.store.List(func(s *Session) bool {
+		return s.GetState() == TimedOut
+	})
+
+	drained := 0
+
+	for _, sess := range active {
+		sess.SetState(Completed)
+		m.store.Put(sess)
+
+		if m.onSessionEnd != nil {
+			m.onSessionEnd(sess)
+		}
+
+		slog.Info("drained active session",
+			"session_id", sess.ID,
+			"duration", sess.Duration(),
+			"requests", sess.RequestCount,
+		)
+		drained++
+	}
+
+	for _, sess := range timedOut {
+		if m.onSessionEnd != nil {
+			m.onSessionEnd(sess)
+		}
+
+		slog.Info("drained timed-out session",
+			"session_id", sess.ID,
+			"duration", sess.Duration(),
+			"requests", sess.RequestCount,
+		)
+		drained++
+	}
+
+	return drained
+}
+
 // generateID creates a new unique session ID
 func (m *Manager) generateID() string {
 	return uuid.New().String()
