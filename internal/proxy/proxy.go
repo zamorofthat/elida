@@ -240,7 +240,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Capture request body first (needed for routing and forwarding)
 	var requestBody []byte
 	if r.Body != nil {
-		requestBody, _ = io.ReadAll(r.Body)
+		var err error
+		requestBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			slog.Error("failed to read request body", "error", err)
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewReader(requestBody))
 	}
 
