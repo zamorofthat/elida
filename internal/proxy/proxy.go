@@ -1201,6 +1201,21 @@ func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 // attemptFailover tries to failover to another backend after a failure
 // Returns (statusCode, bytesOut, retried) where retried indicates if failover was attempted
 func (p *Proxy) attemptFailover(w http.ResponseWriter, originalReq *http.Request, sess *session.Session, failedBackend *router.Backend, failureType FailureType) (int, int64, bool) {
+	return p.attemptFailoverWithDepth(w, originalReq, sess, failedBackend, failureType, 0)
+}
+
+const maxFailoverRetries = 3
+
+func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *http.Request, sess *session.Session, failedBackend *router.Backend, failureType FailureType, depth int) (int, int64, bool) {
+	if depth >= maxFailoverRetries {
+		slog.Error("failover exhausted max retries",
+			"session_id", sess.ID,
+			"max_retries", maxFailoverRetries,
+			"last_backend", failedBackend.Name,
+		)
+		http.Error(w, "All backends unavailable", http.StatusBadGateway)
+		return http.StatusBadGateway, 0, true
+	}
 	ctx := originalReq.Context()
 
 	// Get next available backend
@@ -1263,7 +1278,7 @@ func (p *Proxy) attemptFailover(w http.ResponseWriter, originalReq *http.Request
 		failureType := DetectFailure(resp, err)
 		if failureType != FailureNone {
 			// Try next fallback
-			return p.attemptFailover(w, originalReq, sess, fallbackBackend, failureType)
+			return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
 		}
 		slog.Error("failover request failed",
 			"session_id", sess.ID,
