@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -547,6 +548,264 @@ func TestSQLiteStore_EmptyCapturedContentAndViolations(t *testing.T) {
 	}
 	if len(retrieved.Violations) != 0 {
 		t.Errorf("expected 0 violations, got %d", len(retrieved.Violations))
+	}
+}
+
+// newTestStore creates a temp SQLite store for testing
+func newTestStore(t *testing.T) *storage.SQLiteStore {
+	t.Helper()
+	tmpFile, err := os.CreateTemp("", "elida-test-*.db")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+	tmpFile.Close()
+
+	store, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store
+}
+
+func TestSQLiteStore_GetStats_WithSinceFilter(t *testing.T) {
+	store := newTestStore(t)
+
+	now := time.Now()
+	// Old session (2 hours ago) and recent session (5 min ago)
+	records := []storage.SessionRecord{
+		{
+			ID: "old-session", State: "completed",
+			StartTime: now.Add(-2 * time.Hour), EndTime: now.Add(-1 * time.Hour),
+			DurationMs: 3600000, RequestCount: 10, BytesIn: 500, BytesOut: 1000,
+			Backend: "ollama", ClientAddr: "127.0.0.1:1111",
+		},
+		{
+			ID: "recent-session", State: "completed",
+			StartTime: now.Add(-5 * time.Minute), EndTime: now,
+			DurationMs: 300000, RequestCount: 3, BytesIn: 200, BytesOut: 400,
+			Backend: "anthropic", ClientAddr: "127.0.0.1:2222",
+		},
+	}
+	for _, r := range records {
+		if err := store.SaveSession(r); err != nil {
+			t.Fatalf("failed to save session: %v", err)
+		}
+	}
+
+	// Without filter — both sessions
+	stats, err := store.GetStats(nil)
+	if err != nil {
+		t.Fatalf("GetStats(nil) failed: %v", err)
+	}
+	if stats.TotalSessions != 2 {
+		t.Errorf("expected 2 total sessions, got %d", stats.TotalSessions)
+	}
+	if stats.SessionsByBackend["ollama"] != 1 || stats.SessionsByBackend["anthropic"] != 1 {
+		t.Errorf("unexpected backends: %v", stats.SessionsByBackend)
+	}
+
+	// With since filter — only recent session
+	since := now.Add(-30 * time.Minute)
+	stats, err = store.GetStats(&since)
+	if err != nil {
+		t.Fatalf("GetStats(since) failed: %v", err)
+	}
+	if stats.TotalSessions != 1 {
+		t.Errorf("expected 1 session since 30m ago, got %d", stats.TotalSessions)
+	}
+	if stats.TotalRequests != 3 {
+		t.Errorf("expected 3 requests, got %d", stats.TotalRequests)
+	}
+}
+
+func TestSQLiteStore_GetVoiceStats(t *testing.T) {
+	store := newTestStore(t)
+
+	now := time.Now()
+	endTime := now
+	sessions := []storage.VoiceSessionRecord{
+		{
+			ID: "voice-1", ParentSessionID: "parent-1", State: "completed",
+			StartTime: now.Add(-10 * time.Minute), EndTime: &endTime,
+			DurationMs: 600000, AudioDurationMs: 300000, TurnCount: 5,
+			Model: "gpt-4o-realtime", Voice: "alloy",
+		},
+		{
+			ID: "voice-2", ParentSessionID: "parent-2", State: "completed",
+			StartTime: now.Add(-5 * time.Minute), EndTime: &endTime,
+			DurationMs: 300000, AudioDurationMs: 150000, TurnCount: 3,
+			Model: "gpt-4o-realtime", Voice: "nova",
+		},
+		{
+			ID: "voice-3", ParentSessionID: "parent-3", State: "killed",
+			StartTime: now.Add(-2 * time.Minute), EndTime: &endTime,
+			DurationMs: 120000, AudioDurationMs: 60000, TurnCount: 1,
+			Model: "gemini-2.0", Voice: "puck",
+		},
+	}
+	for _, s := range sessions {
+		if err := store.SaveVoiceSession(s); err != nil {
+			t.Fatalf("failed to save voice session: %v", err)
+		}
+	}
+
+	// All voice stats
+	stats, err := store.GetVoiceStats(nil)
+	if err != nil {
+		t.Fatalf("GetVoiceStats(nil) failed: %v", err)
+	}
+	if stats.TotalSessions != 3 {
+		t.Errorf("expected 3 voice sessions, got %d", stats.TotalSessions)
+	}
+	if stats.TotalAudioMs != 510000 {
+		t.Errorf("expected 510000 total audio ms, got %d", stats.TotalAudioMs)
+	}
+	if stats.TotalTurns != 9 {
+		t.Errorf("expected 9 total turns, got %d", stats.TotalTurns)
+	}
+	if stats.SessionsByState["completed"] != 2 {
+		t.Errorf("expected 2 completed, got %d", stats.SessionsByState["completed"])
+	}
+	if stats.SessionsByState["killed"] != 1 {
+		t.Errorf("expected 1 killed, got %d", stats.SessionsByState["killed"])
+	}
+	if stats.SessionsByModel["gpt-4o-realtime"] != 2 {
+		t.Errorf("expected 2 gpt-4o-realtime, got %d", stats.SessionsByModel["gpt-4o-realtime"])
+	}
+
+	// With since filter
+	since := now.Add(-3 * time.Minute)
+	stats, err = store.GetVoiceStats(&since)
+	if err != nil {
+		t.Fatalf("GetVoiceStats(since) failed: %v", err)
+	}
+	if stats.TotalSessions != 1 {
+		t.Errorf("expected 1 voice session since 3m ago, got %d", stats.TotalSessions)
+	}
+}
+
+func TestSQLiteStore_GetTTSStats(t *testing.T) {
+	store := newTestStore(t)
+
+	now := time.Now()
+	requests := []storage.TTSRequest{
+		{
+			ID: "tts-1", SessionID: "sess-1", Timestamp: now.Add(-10 * time.Minute),
+			Provider: "openai", Model: "tts-1", Voice: "alloy",
+			Text: "Hello world", TextLength: 11, ResponseBytes: 4096, DurationMs: 200, StatusCode: 200,
+		},
+		{
+			ID: "tts-2", SessionID: "sess-1", Timestamp: now.Add(-5 * time.Minute),
+			Provider: "openai", Model: "tts-1", Voice: "nova",
+			Text: "Testing TTS", TextLength: 11, ResponseBytes: 3500, DurationMs: 180, StatusCode: 200,
+		},
+		{
+			ID: "tts-3", SessionID: "sess-2", Timestamp: now.Add(-1 * time.Minute),
+			Provider: "elevenlabs", Model: "eleven_turbo_v2", Voice: "rachel",
+			Text: "Another test here", TextLength: 17, ResponseBytes: 8000, DurationMs: 300, StatusCode: 200,
+		},
+	}
+	for _, r := range requests {
+		if err := store.SaveTTSRequest(r); err != nil {
+			t.Fatalf("failed to save TTS request: %v", err)
+		}
+	}
+
+	// All TTS stats
+	stats, err := store.GetTTSStats(nil)
+	if err != nil {
+		t.Fatalf("GetTTSStats(nil) failed: %v", err)
+	}
+	if stats.TotalRequests != 3 {
+		t.Errorf("expected 3 TTS requests, got %d", stats.TotalRequests)
+	}
+	if stats.TotalCharacters != 39 {
+		t.Errorf("expected 39 total characters, got %d", stats.TotalCharacters)
+	}
+	if stats.TotalResponseBytes != 15596 {
+		t.Errorf("expected 15596 response bytes, got %d", stats.TotalResponseBytes)
+	}
+	if stats.RequestsByProvider["openai"] != 2 {
+		t.Errorf("expected 2 openai requests, got %d", stats.RequestsByProvider["openai"])
+	}
+	if stats.RequestsByProvider["elevenlabs"] != 1 {
+		t.Errorf("expected 1 elevenlabs request, got %d", stats.RequestsByProvider["elevenlabs"])
+	}
+	if stats.RequestsByVoice["alloy"] != 1 || stats.RequestsByVoice["nova"] != 1 || stats.RequestsByVoice["rachel"] != 1 {
+		t.Errorf("unexpected voice distribution: %v", stats.RequestsByVoice)
+	}
+
+	// With since filter
+	since := now.Add(-3 * time.Minute)
+	stats, err = store.GetTTSStats(&since)
+	if err != nil {
+		t.Fatalf("GetTTSStats(since) failed: %v", err)
+	}
+	if stats.TotalRequests != 1 {
+		t.Errorf("expected 1 TTS request since 3m ago, got %d", stats.TotalRequests)
+	}
+}
+
+func TestSQLiteStore_GetEventStats(t *testing.T) {
+	store := newTestStore(t)
+
+	now := time.Now()
+	ctx := context.Background()
+
+	// Record different event types
+	events := []struct {
+		eventType storage.EventType
+		sessionID string
+		severity  string
+		data      interface{}
+	}{
+		{storage.EventViolationDetected, "sess-1", "critical", storage.ViolationDetectedData{
+			RuleName: "injection", Description: "Prompt injection", Severity: "critical", Action: "block",
+		}},
+		{storage.EventViolationDetected, "sess-2", "warning", storage.ViolationDetectedData{
+			RuleName: "pii", Description: "PII detected", Severity: "warning", Action: "flag",
+		}},
+		{storage.EventSessionStarted, "sess-1", "", storage.SessionStartedData{
+			ClientAddr: "127.0.0.1", Backend: "ollama",
+		}},
+		{storage.EventToolCalled, "sess-1", "", storage.ToolCalledData{
+			ToolName: "bash", CallCount: 1,
+		}},
+	}
+	for _, e := range events {
+		if err := store.RecordEvent(ctx, e.eventType, e.sessionID, e.severity, e.data); err != nil {
+			t.Fatalf("failed to record event: %v", err)
+		}
+	}
+
+	// All event stats
+	stats, err := store.GetEventStats(nil)
+	if err != nil {
+		t.Fatalf("GetEventStats(nil) failed: %v", err)
+	}
+	if stats.TotalEvents != 4 {
+		t.Errorf("expected 4 total events, got %d", stats.TotalEvents)
+	}
+	if stats.UniqueSessionIDs != 2 {
+		t.Errorf("expected 2 unique sessions, got %d", stats.UniqueSessionIDs)
+	}
+	if stats.EventsByType["violation_detected"] != 2 {
+		t.Errorf("expected 2 violation events, got %d", stats.EventsByType["violation_detected"])
+	}
+	if stats.EventsBySeverity["critical"] != 1 {
+		t.Errorf("expected 1 critical event, got %d", stats.EventsBySeverity["critical"])
+	}
+
+	// With since filter (future time = no events)
+	future := now.Add(1 * time.Hour)
+	stats, err = store.GetEventStats(&future)
+	if err != nil {
+		t.Fatalf("GetEventStats(future) failed: %v", err)
+	}
+	if stats.TotalEvents != 0 {
+		t.Errorf("expected 0 events in future, got %d", stats.TotalEvents)
 	}
 }
 
