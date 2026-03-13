@@ -7,10 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"elida/internal/config"
 	"elida/internal/proxy"
+	"elida/internal/router"
 	"elida/internal/session"
 )
 
@@ -601,6 +605,194 @@ func TestFailoverController_MaxRetries_StopsRecursion(t *testing.T) {
 	_, err = fc.HandleFailover(ctx, sess, "b", proxy.FailureServerError)
 	if err == nil {
 		t.Error("expected error when MaxRetries exceeded")
+	}
+}
+
+// =============================================================================
+// Proxy-Level Failover Depth Tests (exercises attemptFailoverWithDepth)
+// =============================================================================
+
+func TestProxy_FailoverDepthLimit_AllBackendsFail(t *testing.T) {
+	// Create 4 httptest servers that immediately close connections (transport error)
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer srv2.Close()
+	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer srv3.Close()
+	srv4 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer srv4.Close()
+
+	url1, _ := url.Parse(srv1.URL)
+	url2, _ := url.Parse(srv2.URL)
+	url3, _ := url.Parse(srv3.URL)
+	url4, _ := url.Parse(srv4.URL)
+
+	backends := map[string]config.BackendConfig{
+		"backend1": {URL: srv1.URL, Type: "openai", Default: true},
+		"backend2": {URL: srv2.URL, Type: "openai"},
+		"backend3": {URL: srv3.URL, Type: "openai"},
+		"backend4": {URL: srv4.URL, Type: "openai"},
+	}
+	r, err := router.NewRouter(backends, config.RoutingConfig{
+		Methods: []string{"default"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create router: %v", err)
+	}
+
+	// Override transports to use the test servers
+	b1, _ := r.GetBackend("backend1")
+	b1.URL = url1
+	b1.Transport = srv1.Client().Transport.(*http.Transport)
+	b2, _ := r.GetBackend("backend2")
+	b2.URL = url2
+	b2.Transport = srv2.Client().Transport.(*http.Transport)
+	b3, _ := r.GetBackend("backend3")
+	b3.URL = url3
+	b3.Transport = srv3.Client().Transport.(*http.Transport)
+	b4, _ := r.GetBackend("backend4")
+	b4.URL = url4
+	b4.Transport = srv4.Client().Transport.(*http.Transport)
+
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	cfg := &config.Config{
+		Backend: srv1.URL,
+		Session: config.SessionConfig{
+			Timeout:           5 * time.Minute,
+			Header:            "X-Session-ID",
+			GenerateIfMissing: true,
+		},
+	}
+
+	p, err := proxy.NewWithRouter(cfg, store, manager, nil, nil, r)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	fc := proxy.NewFailoverController(proxy.FailoverConfig{
+		Enabled:    true,
+		MaxRetries: 5, // More than depth limit (3)
+		RetryDelay: 0,
+	})
+	fc.RegisterBackend("backend1", srv1.URL, "openai", 1)
+	fc.RegisterBackend("backend2", srv2.URL, "openai", 2)
+	fc.RegisterBackend("backend3", srv3.URL, "openai", 3)
+	fc.RegisterBackend("backend4", srv4.URL, "openai", 4)
+	p.SetFailoverController(fc)
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", "depth-test")
+
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	// Should get 502 — all backends failed with connection errors
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", w.Code)
+	}
+}
+
+func TestProxy_FailoverSuccess_SecondBackendWorks(t *testing.T) {
+	// First backend returns 503, second returns 200
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"choices":[{"message":{"content":"hello from fallback"}}]}`))
+	}))
+	defer srv2.Close()
+
+	url1, _ := url.Parse(srv1.URL)
+	url2, _ := url.Parse(srv2.URL)
+
+	backends := map[string]config.BackendConfig{
+		"primary":  {URL: srv1.URL, Type: "openai", Default: true},
+		"fallback": {URL: srv2.URL, Type: "openai"},
+	}
+	r, err := router.NewRouter(backends, config.RoutingConfig{
+		Methods: []string{"default"},
+	})
+	if err != nil {
+		t.Fatalf("failed to create router: %v", err)
+	}
+
+	b1, _ := r.GetBackend("primary")
+	b1.URL = url1
+	b1.Transport = srv1.Client().Transport.(*http.Transport)
+	b2, _ := r.GetBackend("fallback")
+	b2.URL = url2
+	b2.Transport = srv2.Client().Transport.(*http.Transport)
+
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	cfg := &config.Config{
+		Backend: srv1.URL,
+		Session: config.SessionConfig{
+			Timeout:           5 * time.Minute,
+			Header:            "X-Session-ID",
+			GenerateIfMissing: true,
+		},
+	}
+
+	p, err := proxy.NewWithRouter(cfg, store, manager, nil, nil, r)
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	fc := proxy.NewFailoverController(proxy.FailoverConfig{
+		Enabled:    true,
+		MaxRetries: 3,
+		RetryDelay: 0,
+	})
+	fc.RegisterBackend("primary", srv1.URL, "openai", 1)
+	fc.RegisterBackend("fallback", srv2.URL, "openai", 2)
+	p.SetFailoverController(fc)
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", "failover-success-test")
+
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	// Should get 200 from the fallback backend
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 from fallback, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "hello from fallback") {
+		t.Errorf("expected response from fallback backend, got: %s", w.Body.String())
 	}
 }
 
