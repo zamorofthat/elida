@@ -213,6 +213,12 @@ type EventStats struct {
 
 // GetEventStats retrieves aggregate event statistics
 func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	stats := &EventStats{
 		EventsByType:     make(map[string]int64),
 		EventsBySeverity: make(map[string]int64),
@@ -226,19 +232,19 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 	}
 
 	// Total events
-	row := s.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM events %s`, whereClause), args...)
+	row := tx.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM events %s`, whereClause), args...)
 	if err := row.Scan(&stats.TotalEvents); err != nil {
 		return nil, fmt.Errorf("failed to get total events: %w", err)
 	}
 
 	// Unique sessions
-	row = s.db.QueryRow(fmt.Sprintf(`SELECT COUNT(DISTINCT session_id) FROM events %s`, whereClause), args...)
+	row = tx.QueryRow(fmt.Sprintf(`SELECT COUNT(DISTINCT session_id) FROM events %s`, whereClause), args...)
 	if err := row.Scan(&stats.UniqueSessionIDs); err != nil {
 		return nil, fmt.Errorf("failed to get unique sessions: %w", err)
 	}
 
 	// Events by type
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT event_type, COUNT(*) FROM events %s GROUP BY event_type`, whereClause), args...)
+	rows, err := tx.Query(fmt.Sprintf(`SELECT event_type, COUNT(*) FROM events %s GROUP BY event_type`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events by type: %w", err)
 	}
@@ -254,7 +260,7 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 	}
 
 	// Events by severity
-	rows, err = s.db.Query(fmt.Sprintf(`SELECT COALESCE(severity, 'none'), COUNT(*) FROM events %s GROUP BY severity`, whereClause), args...)
+	rows, err = tx.Query(fmt.Sprintf(`SELECT COALESCE(severity, 'none'), COUNT(*) FROM events %s GROUP BY severity`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get events by severity: %w", err)
 	}

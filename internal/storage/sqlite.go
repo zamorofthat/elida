@@ -407,6 +407,12 @@ type Stats struct {
 
 // GetStats retrieves aggregate statistics
 func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	stats := &Stats{
 		SessionsByState:   make(map[string]int64),
 		SessionsByBackend: make(map[string]int64),
@@ -421,7 +427,7 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 	}
 
 	// Get aggregate stats
-	row := s.db.QueryRow(fmt.Sprintf(`
+	row := tx.QueryRow(fmt.Sprintf(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(request_count), 0),
@@ -431,20 +437,19 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 			COALESCE(AVG(request_count), 0)
 		FROM sessions %s`, whereClause), args...)
 
-	err := row.Scan(
+	if err := row.Scan(
 		&stats.TotalSessions,
 		&stats.TotalRequests,
 		&stats.TotalBytesIn,
 		&stats.TotalBytesOut,
 		&stats.AvgDurationMs,
 		&stats.AvgRequestCount,
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("failed to get aggregate stats: %w", err)
 	}
 
 	// Get sessions by state
-	rows, err := s.db.Query(fmt.Sprintf(`
+	rows, err := tx.Query(fmt.Sprintf(`
 		SELECT state, COUNT(*) FROM sessions %s GROUP BY state`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get state stats: %w", err)
@@ -461,7 +466,7 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 	}
 
 	// Get sessions by backend
-	rows, err = s.db.Query(fmt.Sprintf(`
+	rows, err = tx.Query(fmt.Sprintf(`
 		SELECT backend, COUNT(*) FROM sessions %s GROUP BY backend`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get backend stats: %w", err)
@@ -799,6 +804,12 @@ type VoiceStats struct {
 
 // GetVoiceStats retrieves aggregate statistics for voice sessions
 func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	stats := &VoiceStats{
 		SessionsByState: make(map[string]int64),
 		SessionsByModel: make(map[string]int64),
@@ -811,7 +822,7 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 		args = append(args, *since)
 	}
 
-	row := s.db.QueryRow(fmt.Sprintf(`
+	row := tx.QueryRow(fmt.Sprintf(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(audio_duration_ms), 0),
@@ -820,19 +831,18 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 			COALESCE(AVG(turn_count), 0)
 		FROM voice_sessions %s`, whereClause), args...)
 
-	err := row.Scan(
+	if err := row.Scan(
 		&stats.TotalSessions,
 		&stats.TotalAudioMs,
 		&stats.TotalTurns,
 		&stats.AvgDurationMs,
 		&stats.AvgTurnsPerSession,
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("failed to get voice stats: %w", err)
 	}
 
 	// Sessions by state
-	rows, err := s.db.Query(fmt.Sprintf(`
+	rows, err := tx.Query(fmt.Sprintf(`
 		SELECT state, COUNT(*) FROM voice_sessions %s GROUP BY state`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get voice state stats: %w", err)
@@ -849,7 +859,7 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 	}
 
 	// Sessions by model
-	rows, err = s.db.Query(fmt.Sprintf(`
+	rows, err = tx.Query(fmt.Sprintf(`
 		SELECT COALESCE(model, 'unknown'), COUNT(*) FROM voice_sessions %s GROUP BY model`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get voice model stats: %w", err)
@@ -1008,6 +1018,12 @@ type TTSStats struct {
 
 // GetTTSStats retrieves aggregate TTS statistics
 func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	stats := &TTSStats{
 		RequestsByProvider: make(map[string]int64),
 		RequestsByVoice:    make(map[string]int64),
@@ -1020,7 +1036,7 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 		args = append(args, *since)
 	}
 
-	row := s.db.QueryRow(fmt.Sprintf(`
+	row := tx.QueryRow(fmt.Sprintf(`
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(text_length), 0),
@@ -1028,18 +1044,17 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 			COALESCE(AVG(text_length), 0)
 		FROM tts_requests %s`, whereClause), args...)
 
-	err := row.Scan(
+	if err := row.Scan(
 		&stats.TotalRequests,
 		&stats.TotalCharacters,
 		&stats.TotalResponseBytes,
 		&stats.AvgTextLength,
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("failed to get TTS stats: %w", err)
 	}
 
 	// Requests by provider
-	rows, err := s.db.Query(fmt.Sprintf(`
+	rows, err := tx.Query(fmt.Sprintf(`
 		SELECT provider, COUNT(*) FROM tts_requests %s GROUP BY provider`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TTS provider stats: %w", err)
@@ -1056,7 +1071,7 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 	}
 
 	// Requests by voice
-	rows, err = s.db.Query(fmt.Sprintf(`
+	rows, err = tx.Query(fmt.Sprintf(`
 		SELECT COALESCE(voice, 'unknown'), COUNT(*) FROM tts_requests %s GROUP BY voice`, whereClause), args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get TTS voice stats: %w", err)
