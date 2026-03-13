@@ -287,6 +287,48 @@ func TestManager_Complete(t *testing.T) {
 	}
 }
 
+func TestManager_Complete_PersistsToStore(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Create session and add some data
+	sess := manager.GetOrCreate("persist-complete", "http://backend", "127.0.0.1")
+	sess.AddBytes(500, 1000)
+	sess.RequestCount = 5
+
+	// Complete it
+	manager.Complete("persist-complete")
+
+	// Retrieve directly from store to verify persistence
+	stored, ok := store.Get("persist-complete")
+	if !ok {
+		t.Fatal("expected session to exist in store after Complete")
+	}
+	if stored.GetState() != session.Completed {
+		t.Errorf("expected persisted state Completed, got %s", stored.GetState())
+	}
+	if stored.BytesIn != 500 || stored.BytesOut != 1000 {
+		t.Errorf("expected persisted bytes in=500 out=1000, got in=%d out=%d", stored.BytesIn, stored.BytesOut)
+	}
+	if stored.RequestCount != 5 {
+		t.Errorf("expected persisted request count 5, got %d", stored.RequestCount)
+	}
+}
+
+func TestManager_Complete_NonExistent(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// Complete non-existent session should not panic
+	manager.Complete("nonexistent")
+
+	// Verify it wasn't created
+	_, ok := store.Get("nonexistent")
+	if ok {
+		t.Error("expected non-existent session to not be created by Complete")
+	}
+}
+
 func TestManager_Kill_PersistsState(t *testing.T) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)

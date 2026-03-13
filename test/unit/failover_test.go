@@ -530,6 +530,80 @@ func TestSession_Snapshot_IncludesNewFields(t *testing.T) {
 	}
 }
 
+func TestFailoverController_AllBackendsFail_Exhausted(t *testing.T) {
+	// Simulate all backends failing — controller should exhaust and return error
+	cfg := proxy.FailoverConfig{
+		Enabled:    true,
+		MaxRetries: 3,
+		RetryDelay: 0,
+	}
+	fc := proxy.NewFailoverController(cfg)
+	fc.RegisterBackend("anthropic", "https://api.anthropic.com", "anthropic", 1)
+	fc.RegisterBackend("openai", "https://api.openai.com", "openai", 2)
+	fc.RegisterBackend("ollama", "http://localhost:11434", "ollama", 3)
+
+	sess := session.NewSession("exhaust-test", "anthropic", "127.0.0.1")
+
+	ctx := context.Background()
+
+	// Fail all backends one by one
+	sess.AddFailedBackend("anthropic")
+	fallback1, err := fc.HandleFailover(ctx, sess, "anthropic", proxy.FailureServerError)
+	if err != nil {
+		t.Fatalf("first failover should succeed: %v", err)
+	}
+	if fallback1.Name != "openai" {
+		t.Errorf("expected openai, got %s", fallback1.Name)
+	}
+
+	sess.AddFailedBackend("openai")
+	fallback2, err := fc.HandleFailover(ctx, sess, "openai", proxy.FailureServerError)
+	if err != nil {
+		t.Fatalf("second failover should succeed: %v", err)
+	}
+	if fallback2.Name != "ollama" {
+		t.Errorf("expected ollama, got %s", fallback2.Name)
+	}
+
+	// All backends now failed — should return error
+	sess.AddFailedBackend("ollama")
+	_, err = fc.HandleFailover(ctx, sess, "ollama", proxy.FailureServerError)
+	if err == nil {
+		t.Error("expected error when all backends exhausted")
+	}
+}
+
+func TestFailoverController_MaxRetries_StopsRecursion(t *testing.T) {
+	// With MaxRetries=1, only one failover attempt is allowed
+	cfg := proxy.FailoverConfig{
+		Enabled:    true,
+		MaxRetries: 1,
+		RetryDelay: 0,
+	}
+	fc := proxy.NewFailoverController(cfg)
+	fc.RegisterBackend("a", "https://a.com", "openai", 1)
+	fc.RegisterBackend("b", "https://b.com", "openai", 2)
+	fc.RegisterBackend("c", "https://c.com", "openai", 3)
+
+	sess := session.NewSession("max-retry-test", "a", "127.0.0.1")
+
+	ctx := context.Background()
+
+	// First failover works
+	sess.AddFailedBackend("a")
+	_, err := fc.HandleFailover(ctx, sess, "a", proxy.FailureServerError)
+	if err != nil {
+		t.Fatalf("first failover should succeed: %v", err)
+	}
+
+	// Second failover exceeds MaxRetries=1
+	sess.AddFailedBackend("b")
+	_, err = fc.HandleFailover(ctx, sess, "b", proxy.FailureServerError)
+	if err == nil {
+		t.Error("expected error when MaxRetries exceeded")
+	}
+}
+
 func TestFailureType_String(t *testing.T) {
 	tests := []struct {
 		failure  proxy.FailureType
