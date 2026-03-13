@@ -474,20 +474,31 @@ func TestHandler_History_Pagination(t *testing.T) {
 	}
 
 	// Verify pagination fields
-	if int(resp["total_count"].(float64)) != 5 {
+	getFloat := func(key string) float64 {
+		v, ok := resp[key].(float64)
+		if !ok {
+			t.Fatalf("expected %s to be a number, got %T", key, resp[key])
+		}
+		return v
+	}
+
+	if int(getFloat("total_count")) != 5 {
 		t.Errorf("expected total_count 5, got %v", resp["total_count"])
 	}
-	if int(resp["count"].(float64)) != 2 {
+	if int(getFloat("count")) != 2 {
 		t.Errorf("expected count 2, got %v", resp["count"])
 	}
-	if int(resp["offset"].(float64)) != 0 {
+	if int(getFloat("offset")) != 0 {
 		t.Errorf("expected offset 0, got %v", resp["offset"])
 	}
-	if int(resp["limit"].(float64)) != 2 {
+	if int(getFloat("limit")) != 2 {
 		t.Errorf("expected limit 2, got %v", resp["limit"])
 	}
 
-	sessions := resp["sessions"].([]interface{})
+	sessions, ok := resp["sessions"].([]interface{})
+	if !ok {
+		t.Fatalf("expected sessions to be an array, got %T", resp["sessions"])
+	}
 	if len(sessions) != 2 {
 		t.Errorf("expected 2 sessions in page, got %d", len(sessions))
 	}
