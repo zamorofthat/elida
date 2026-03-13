@@ -46,8 +46,8 @@ type app struct {
 
 	sqliteStore *storage.SQLiteStore
 
-	policyEngine   *policy.Engine
-	tp             *telemetry.Provider
+	policyEngine    *policy.Engine
+	tp              *telemetry.Provider
 	proxyCaptureBuf *proxy.CaptureBuffer
 
 	proxyHandler   *proxy.Proxy

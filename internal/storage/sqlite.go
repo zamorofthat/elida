@@ -437,7 +437,7 @@ func (s *SQLiteStore) GetStats(since *time.Time) (*Stats, error) {
 			COALESCE(AVG(request_count), 0)
 		FROM sessions %s`, whereClause), args...)
 
-	if err := row.Scan(
+	if err = row.Scan(
 		&stats.TotalSessions,
 		&stats.TotalRequests,
 		&stats.TotalBytesIn,
@@ -831,7 +831,7 @@ func (s *SQLiteStore) GetVoiceStats(since *time.Time) (*VoiceStats, error) {
 			COALESCE(AVG(turn_count), 0)
 		FROM voice_sessions %s`, whereClause), args...)
 
-	if err := row.Scan(
+	if err = row.Scan(
 		&stats.TotalSessions,
 		&stats.TotalAudioMs,
 		&stats.TotalTurns,
@@ -1044,7 +1044,7 @@ func (s *SQLiteStore) GetTTSStats(since *time.Time) (*TTSStats, error) {
 			COALESCE(AVG(text_length), 0)
 		FROM tts_requests %s`, whereClause), args...)
 
-	if err := row.Scan(
+	if err = row.Scan(
 		&stats.TotalRequests,
 		&stats.TotalCharacters,
 		&stats.TotalResponseBytes,

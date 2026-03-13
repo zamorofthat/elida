@@ -233,13 +233,13 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 
 	// Total events
 	row := tx.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM events %s`, whereClause), args...)
-	if err := row.Scan(&stats.TotalEvents); err != nil {
+	if err = row.Scan(&stats.TotalEvents); err != nil {
 		return nil, fmt.Errorf("failed to get total events: %w", err)
 	}
 
 	// Unique sessions
 	row = tx.QueryRow(fmt.Sprintf(`SELECT COUNT(DISTINCT session_id) FROM events %s`, whereClause), args...)
-	if err := row.Scan(&stats.UniqueSessionIDs); err != nil {
+	if err = row.Scan(&stats.UniqueSessionIDs); err != nil {
 		return nil, fmt.Errorf("failed to get unique sessions: %w", err)
 	}
 
