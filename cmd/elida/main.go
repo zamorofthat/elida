@@ -498,6 +498,8 @@ func main() {
 
 	if cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
+	} else {
+		slog.Warn("control API authentication is DISABLED — all endpoints are unauthenticated. Set control.auth.enabled=true in production.")
 	}
 
 	// Setup HTTP servers
