@@ -668,17 +668,16 @@ func TestProxy_FailoverDepthLimit_AllBackendsFail(t *testing.T) {
 	// Override transports to use the test servers
 	b1, _ := r.GetBackend("backend1")
 	b1.URL = url1
-	b1.Transport = srv1.Client().Transport.(*http.Transport)
+	b1.Transport = srv1.Client().Transport.(*http.Transport) //nolint:errcheck
 	b2, _ := r.GetBackend("backend2")
 	b2.URL = url2
-	b2.Transport = srv2.Client().Transport.(*http.Transport)
+	b2.Transport = srv2.Client().Transport.(*http.Transport) //nolint:errcheck
 	b3, _ := r.GetBackend("backend3")
 	b3.URL = url3
-	b3.Transport = srv3.Client().Transport.(*http.Transport)
+	b3.Transport = srv3.Client().Transport.(*http.Transport) //nolint:errcheck
 	b4, _ := r.GetBackend("backend4")
 	b4.URL = url4
-	b4.Transport = srv4.Client().Transport.(*http.Transport)
-
+	b4.Transport = srv4.Client().Transport.(*http.Transport) //nolint:errcheck
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 	cfg := &config.Config{
@@ -729,7 +728,7 @@ func TestProxy_FailoverSuccess_SecondBackendWorks(t *testing.T) {
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[{"message":{"content":"hello from fallback"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello from fallback"}}]}`))
 	}))
 	defer srv2.Close()
 
@@ -749,10 +748,10 @@ func TestProxy_FailoverSuccess_SecondBackendWorks(t *testing.T) {
 
 	b1, _ := r.GetBackend("primary")
 	b1.URL = url1
-	b1.Transport = srv1.Client().Transport.(*http.Transport)
+	b1.Transport = srv1.Client().Transport.(*http.Transport) //nolint:errcheck
 	b2, _ := r.GetBackend("fallback")
 	b2.URL = url2
-	b2.Transport = srv2.Client().Transport.(*http.Transport)
+	b2.Transport = srv2.Client().Transport.(*http.Transport) //nolint:errcheck
 
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
