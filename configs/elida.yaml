@@ -4,6 +4,10 @@
 # Address to listen on for proxied traffic
 listen: ":8080"
 
+# Graceful shutdown timeout — how long to wait for in-flight requests
+# and session draining before force-exiting (default 30s)
+# shutdown_timeout: 30s
+
 # Single Backend Mode (backward compatible) - commented out when using multi-backend
 # backend: "https://api.anthropic.com"
 
