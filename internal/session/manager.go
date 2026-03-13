@@ -50,6 +50,9 @@ type Manager struct {
 	// Callback for when sessions end (for persistence)
 	onSessionEnd SessionEndCallback
 
+	// Mutex for session lifecycle operations (check-and-delete atomicity)
+	sessionMu sync.Mutex
+
 	// Map client IPs to session IDs for IP-based session tracking
 	clientSessions   map[string]string
 	clientSessionsMu sync.RWMutex
@@ -157,15 +160,18 @@ func (m *Manager) GetOrCreateByClient(clientAddr, backendName, backendURL string
 	// Generate the session ID (deterministic based on IP + backend + time window)
 	sessionID := m.generateClientSessionID(clientIP, backendName)
 
-	// Check if session already exists in store (regardless of client mapping)
+	// Atomic check-and-delete to prevent race between isKillBlockActive and Delete
+	m.sessionMu.Lock()
 	if sess, ok := m.store.Get(sessionID); ok {
 		if sess.IsActive() {
+			m.sessionMu.Unlock()
 			return sess
 		}
 		// Session exists but is not active - check state
 		if sess.GetState() == Killed {
 			// Check if kill block has expired based on mode
 			if m.isKillBlockActive(sess) {
+				m.sessionMu.Unlock()
 				slog.Warn("rejected request for killed client session",
 					"session_id", sessionID,
 					"client_ip", clientIP,
@@ -186,6 +192,7 @@ func (m *Manager) GetOrCreateByClient(clientAddr, backendName, backendURL string
 			m.store.Delete(sessionID)
 		}
 	}
+	m.sessionMu.Unlock()
 
 	// Create new session
 	sess := NewSession(sessionID, backendURL, clientAddr)
