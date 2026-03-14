@@ -359,16 +359,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Content inspection - check request body against policy rules BEFORE forwarding
-	// Smart scanning: cache system prompt hash, re-scan only if changed
-	// Always scan: user messages, assistant responses, tool results
+	// Per-message scanning: each message scanned individually with source attribution
+	// System prompts: hash-cached, only scanned on first request or if changed
 	// Trusted tags (e.g., <system-reminder>) are stripped before scanning
 	if p.policy != nil && len(requestBody) > 0 {
 		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
-		contentToScan := extractScannableContent(requestBody, sess, p.trustedTagRegexs, allowlistedTools)
-		if contentToScan == "" {
-			contentToScan = string(requestBody) // Fallback for non-chat requests
+		messages := extractScannableMessages(requestBody, sess, p.trustedTagRegexs, allowlistedTools)
+		var result *policy.ContentCheckResult
+		if len(messages) > 0 {
+			result = p.policy.EvaluateMessages(sess.ID, messages)
+		} else {
+			// Fallback for non-chat requests — scan raw body without attribution
+			result = p.policy.EvaluateContent(sess.ID, string(requestBody))
 		}
-		if result := p.policy.EvaluateContent(sess.ID, contentToScan); result != nil {
+		if result != nil {
 			// Capture the request content for forensics (before potential early return)
 			p.policy.CaptureRequest(sess.ID, policy.CapturedRequest{
 				Timestamp:   time.Now(),
@@ -1558,13 +1562,13 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 }
 
 // extractScannableContent parses the request body and returns content to scan.
-// Caches system prompt hash to avoid re-scanning identical prompts.
-// Always scans: user messages, assistant responses, tool results.
-// Skips: system prompts that match the cached hash.
-// Strips content within trusted tags (e.g., <system-reminder>...</system-reminder>).
-func extractScannableContent(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, allowlistedTools ...[]string) string {
-	// Try to parse as chat completion request
+// extractScannableMessages parses a chat request and returns individual messages to scan
+// with role/index attribution. System prompts are hash-cached — only scanned once per session
+// unless the content changes. Supports both Anthropic (top-level "system") and OpenAI
+// (role: "system" message) formats. Returns nil for non-chat requests (caller should fallback).
+func extractScannableMessages(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, allowlistedTools ...[]string) []policy.MessageToScan {
 	var req struct {
+		System   any `json:"system"` // Anthropic top-level system prompt (string or content blocks)
 		Messages []struct {
 			Role    string `json:"role"`
 			Content any    `json:"content"` // Can be string or array of content blocks
@@ -1572,7 +1576,7 @@ func extractScannableContent(body []byte, sess *session.Session, trustedTagRegex
 	}
 
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
-		return "" // Not a chat request, fallback to full body
+		return nil // Not a chat request, fallback to full body
 	}
 
 	// Check if request contains only allowlisted tool usage — skip scanning if so
@@ -1582,13 +1586,27 @@ func extractScannableContent(body []byte, sess *session.Session, trustedTagRegex
 	}
 	if len(allowed) > 0 && containsOnlyAllowlistedTools(req.Messages, allowed) {
 		slog.Debug("skipping content scan — allowlisted tools only", "session_id", sess.ID)
-		return ""
+		return nil
 	}
 
-	var scannableContent strings.Builder
+	var messages []policy.MessageToScan
 	cachedHash := sess.GetSystemPromptHash()
 
-	for _, msg := range req.Messages {
+	// Handle Anthropic top-level system field (scan once, then skip via hash cache)
+	if req.System != nil {
+		systemContent := extractMessageContent(req.System)
+		if systemContent != "" {
+			if len(trustedTagRegexs) > 0 {
+				systemContent = stripTrustedTags(systemContent, trustedTagRegexs)
+			}
+			if msg, newHash := systemMessageIfChanged(systemContent, cachedHash, sess, -1); msg != nil {
+				messages = append(messages, *msg)
+				cachedHash = newHash
+			}
+		}
+	}
+
+	for i, msg := range req.Messages {
 		content := extractMessageContent(msg.Content)
 		if content == "" {
 			continue
@@ -1600,31 +1618,44 @@ func extractScannableContent(body []byte, sess *session.Session, trustedTagRegex
 		}
 
 		if msg.Role == "system" {
-			// Calculate hash of system prompt (after stripping trusted tags)
-			hash := hashContent(content)
-
-			if cachedHash == "" {
-				// First time seeing system prompt - scan it and cache hash
-				sess.SetSystemPromptHash(hash)
-				scannableContent.WriteString(content)
-				scannableContent.WriteString("\n")
-				slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
-			} else if hash != cachedHash {
-				// System prompt changed - scan it and update cache
-				sess.SetSystemPromptHash(hash)
-				scannableContent.WriteString(content)
-				scannableContent.WriteString("\n")
-				slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", cachedHash[:16], "new_hash", hash[:16])
+			// OpenAI-style system message — same hash-cache logic
+			if m, newHash := systemMessageIfChanged(content, cachedHash, sess, i); m != nil {
+				messages = append(messages, *m)
+				cachedHash = newHash
 			}
-			// If hash matches cache, skip scanning (already validated)
 		} else {
-			// User, assistant, tool - always scan
-			scannableContent.WriteString(content)
-			scannableContent.WriteString("\n")
+			messages = append(messages, policy.MessageToScan{
+				Role:    msg.Role,
+				Index:   i,
+				Content: content,
+			})
 		}
 	}
 
-	return scannableContent.String()
+	return messages
+}
+
+// systemMessageIfChanged returns a MessageToScan for the system prompt only if it's new or changed.
+// Returns nil if the hash matches the cached version (already scanned).
+func systemMessageIfChanged(content, cachedHash string, sess *session.Session, index int) (*policy.MessageToScan, string) {
+	hash := hashContent(content)
+
+	if cachedHash == "" {
+		// First time seeing system prompt — scan it and cache hash
+		sess.SetSystemPromptHash(hash)
+		slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
+		return &policy.MessageToScan{Role: "system", Index: index, Content: content}, hash
+	}
+
+	if hash != cachedHash {
+		// System prompt changed — scan it and update cache
+		sess.SetSystemPromptHash(hash)
+		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", cachedHash[:16], "new_hash", hash[:16])
+		return &policy.MessageToScan{Role: "system", Index: index, Content: content}, hash
+	}
+
+	// Hash matches cache — skip scanning (already validated)
+	return nil, cachedHash
 }
 
 // containsOnlyAllowlistedTools checks if the most recent assistant message only uses allowlisted tools.

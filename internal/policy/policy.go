@@ -2,6 +2,7 @@ package policy
 
 import (
 	"log/slog"
+	"math"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -81,6 +82,19 @@ type Violation struct {
 	MatchedPattern string    `json:"matched_pattern,omitempty"` // Pattern that matched
 	Action         string    `json:"action,omitempty"`          // Recommended action
 	Timestamp      time.Time `json:"timestamp"`
+
+	// Source attribution — where in the request the violation was found
+	SourceRole    string `json:"source_role,omitempty"`    // "user", "assistant", "system", "tool"
+	MessageIndex  int    `json:"message_index,omitempty"`  // Position in the messages array
+	SourceContent string `json:"source_content,omitempty"` // Full message content that triggered the violation (truncated)
+
+	// Effective severity after source-role weighting
+	// e.g., critical rule + assistant source = "info" effective severity
+	EffectiveSeverity Severity `json:"effective_severity,omitempty"`
+
+	// Framework/SIEM classification
+	EventCategory string `json:"event_category,omitempty"` // "prompt_injection", "data_exfil", "rate_limit", etc.
+	FrameworkRef  string `json:"framework_ref,omitempty"`  // "OWASP-LLM01", "NIST-AI-600-1", etc.
 }
 
 // SessionMetrics contains the metrics needed for policy evaluation
@@ -113,20 +127,46 @@ type FlaggedSession struct {
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
 
 	// Risk ladder fields
-	RiskScore       float64        `json:"risk_score"`       // Cumulative weighted risk score
+	RiskScore       float64        `json:"risk_score"`       // Cumulative weighted risk score (with decay + source weighting)
 	ViolationCounts map[string]int `json:"violation_counts"` // Count per rule (not deduplicated)
 	CurrentAction   string         `json:"current_action"`   // Current ladder action based on score
 	ThrottleRate    int            `json:"throttle_rate"`    // Requests per minute when throttled (0 = no throttle)
+
+	// Time-series for exponential decay — each occurrence stored with timestamp and source
+	ViolationEvents []ViolationEvent `json:"violation_events,omitempty"`
+}
+
+// ViolationEvent is a lightweight record of a single violation occurrence for decay calculation
+type ViolationEvent struct {
+	RuleName   string    `json:"rule_name"`
+	Severity   Severity  `json:"severity"`
+	SourceRole string    `json:"source_role"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 // MaxRiskScore is the saturation cap for cumulative risk scores
 const MaxRiskScore = 100.0
+
+// DefaultDecayLambda is the default exponential decay rate.
+// At λ=0.002, a violation's contribution halves every ~5.8 minutes.
+// After 30 minutes it retains ~3% of its original weight.
+const DefaultDecayLambda = 0.002
 
 // SeverityWeights defines risk score multipliers for each severity level
 var SeverityWeights = map[Severity]float64{
 	SeverityInfo:     1.0,
 	SeverityWarning:  3.0,
 	SeverityCritical: 10.0,
+}
+
+// SourceRoleWeights defines risk score multipliers based on where the violation was found.
+// User input is fully untrusted; model output echoing patterns is mostly benign.
+var SourceRoleWeights = map[string]float64{
+	"user":      1.0, // Untrusted user input — full weight
+	"tool":      0.8, // External data from tool results — mostly untrusted
+	"assistant": 0.2, // Model output — likely benign echo of patterns
+	"system":    0.1, // Provider-controlled system prompt — almost always false positive
+	"":          1.0, // Unknown source (legacy/fallback) — full weight
 }
 
 // RiskLadderAction defines actions that can be taken based on risk score
@@ -497,6 +537,13 @@ type ContentCheckResult struct {
 	ShouldTerminate bool
 }
 
+// ContentSource provides attribution for where content originated in a request
+type ContentSource struct {
+	Role         string // "user", "assistant", "system", "tool"
+	MessageIndex int    // Position in the messages array (-1 for top-level system)
+	Content      string // Full message content (for audit logging)
+}
+
 // EvaluateContent checks request content against content rules (backward compatible)
 func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult {
 	return e.EvaluateRequestContent(sessionID, content)
@@ -504,16 +551,56 @@ func (e *Engine) EvaluateContent(sessionID, content string) *ContentCheckResult 
 
 // EvaluateRequestContent checks request content against request-applicable rules
 func (e *Engine) EvaluateRequestContent(sessionID, content string) *ContentCheckResult {
-	return e.evaluateContentWithTarget(sessionID, content, RuleTargetRequest)
+	return e.evaluateContentWithTarget(sessionID, content, RuleTargetRequest, nil)
 }
 
 // EvaluateResponseContent checks response content against response-applicable rules
 func (e *Engine) EvaluateResponseContent(sessionID, content string) *ContentCheckResult {
-	return e.evaluateContentWithTarget(sessionID, content, RuleTargetResponse)
+	return e.evaluateContentWithTarget(sessionID, content, RuleTargetResponse, nil)
+}
+
+// EvaluateContentWithSource checks content with source attribution for structured logging
+func (e *Engine) EvaluateContentWithSource(sessionID, content string, target RuleTarget, source *ContentSource) *ContentCheckResult {
+	return e.evaluateContentWithTarget(sessionID, content, target, source)
+}
+
+// EvaluateMessages scans each message individually, returning a merged result with per-message attribution.
+// This is the preferred method for request scanning — it preserves which role/message triggered each violation.
+func (e *Engine) EvaluateMessages(sessionID string, messages []MessageToScan) *ContentCheckResult {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	merged := &ContentCheckResult{}
+	for _, msg := range messages {
+		source := &ContentSource{Role: msg.Role, MessageIndex: msg.Index, Content: msg.Content}
+		result := e.evaluateContentWithTarget(sessionID, msg.Content, RuleTargetRequest, source)
+		if result != nil {
+			merged.Violations = append(merged.Violations, result.Violations...)
+			if result.ShouldBlock {
+				merged.ShouldBlock = true
+			}
+			if result.ShouldTerminate {
+				merged.ShouldTerminate = true
+			}
+		}
+	}
+
+	if len(merged.Violations) > 0 {
+		return merged
+	}
+	return nil
+}
+
+// MessageToScan represents a single message to evaluate
+type MessageToScan struct {
+	Role    string // "user", "assistant", "system", "tool"
+	Index   int    // Position in the messages array (-1 for top-level system)
+	Content string // Text content to scan
 }
 
 // evaluateContentWithTarget is the internal implementation that filters by target
-func (e *Engine) evaluateContentWithTarget(sessionID, content string, target RuleTarget) *ContentCheckResult {
+func (e *Engine) evaluateContentWithTarget(sessionID, content string, target RuleTarget, source *ContentSource) *ContentCheckResult {
 	// Snapshot rules and audit mode under read lock to avoid races with ReloadConfig
 	e.mu.RLock()
 	compiledRules := e.compiledRules
@@ -543,7 +630,20 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					MatchedPattern: cr.Patterns[i],
 					Action:         cr.Action,
 					Timestamp:      time.Now(),
+					EventCategory:  categoryFromRuleName(cr.Name),
+					FrameworkRef:   frameworkRefFromDescription(cr.Description),
 				}
+
+				// Add source attribution and compute effective severity
+				if source != nil {
+					violation.SourceRole = source.Role
+					violation.MessageIndex = source.MessageIndex
+					violation.SourceContent = truncateMatch(source.Content, e.maxCaptureSize)
+					violation.EffectiveSeverity = effectiveSeverity(cr.Severity, source.Role)
+				} else {
+					violation.EffectiveSeverity = cr.Severity
+				}
+
 				result.Violations = append(result.Violations, violation)
 
 				// Only enforce actions if not in audit mode
@@ -557,8 +657,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					}
 				}
 
-				// Log with audit mode indicator
-				logFunc := slog.Warn
+				// Structured log for dashboard + SIEM consumption
 				actionMsg := cr.Action
 				if auditMode {
 					actionMsg = cr.Action + " (audit-only)"
@@ -569,15 +668,27 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					targetStr = "response"
 				}
 
-				logFunc("content policy violation detected",
+				logAttrs := []any{
 					"session_id", sessionID,
 					"rule", cr.Name,
 					"severity", cr.Severity,
 					"action", actionMsg,
 					"target", targetStr,
 					"matched", truncateMatch(match, 50),
+					"event_category", violation.EventCategory,
+					"framework_ref", violation.FrameworkRef,
 					"audit_mode", auditMode,
-				)
+				}
+				if source != nil {
+					logAttrs = append(logAttrs,
+						"source_role", source.Role,
+						"message_index", source.MessageIndex,
+						"effective_severity", violation.EffectiveSeverity,
+						"source_content", truncateMatch(source.Content, 4096),
+					)
+				}
+
+				slog.Warn("content policy violation detected", logAttrs...)
 
 				// Record the violation
 				e.recordViolations(sessionID, []Violation{violation})
@@ -669,6 +780,14 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 		// Always increment count (don't deduplicate)
 		flagged.ViolationCounts[v.RuleName]++
 
+		// Record event for decay calculation
+		flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
+			RuleName:   v.RuleName,
+			Severity:   v.Severity,
+			SourceRole: v.SourceRole,
+			Timestamp:  v.Timestamp,
+		})
+
 		if !existingRules[v.RuleName] {
 			flagged.Violations = append(flagged.Violations, v)
 			existingRules[v.RuleName] = true
@@ -701,20 +820,37 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	}
 }
 
-// calculateRiskScore computes cumulative weighted risk score
+// calculateRiskScore computes risk score using exponential decay and source-role weighting.
+//
+// Each violation event contributes: severityWeight × sourceRoleWeight × e^(-λt)
+// where t is seconds since the event occurred and λ is the decay rate.
+//
+// This means:
+//   - Recent violations from user messages score highest
+//   - Old violations from assistant echoes contribute almost nothing
+//   - Score naturally decays over time, so one-time false positives don't permanently inflate risk
 func (e *Engine) calculateRiskScore(fs *FlaggedSession) float64 {
+	now := time.Now()
 	var score float64
-	for _, v := range fs.Violations {
-		count := fs.ViolationCounts[v.RuleName]
-		if count == 0 {
-			count = 1 // At least 1 occurrence
+
+	for _, event := range fs.ViolationEvents {
+		severityWeight := SeverityWeights[event.Severity]
+		if severityWeight == 0 {
+			severityWeight = 1.0
 		}
-		weight := SeverityWeights[v.Severity]
-		if weight == 0 {
-			weight = 1.0 // Default weight
+
+		sourceWeight := SourceRoleWeights[event.SourceRole]
+		if sourceWeight == 0 {
+			sourceWeight = 1.0 // Unknown source — full weight
 		}
-		score += float64(count) * weight
+
+		// Exponential decay: e^(-λt) where t is seconds since event
+		elapsed := now.Sub(event.Timestamp).Seconds()
+		decay := math.Exp(-DefaultDecayLambda * elapsed)
+
+		score += severityWeight * sourceWeight * decay
 	}
+
 	if score > MaxRiskScore {
 		score = MaxRiskScore
 	}
@@ -739,15 +875,20 @@ func (e *Engine) determineRiskAction(score float64) (string, int) {
 	return action, throttleRate
 }
 
-// calculateMaxSeverity returns the highest severity from violations
+// calculateMaxSeverity returns the highest effective severity from violations.
+// Uses EffectiveSeverity (source-weighted) when available, falls back to raw Severity.
 func (e *Engine) calculateMaxSeverity(violations []Violation) Severity {
 	maxSeverity := SeverityInfo
 
 	for _, v := range violations {
-		if v.Severity == SeverityCritical {
+		sev := v.EffectiveSeverity
+		if sev == "" {
+			sev = v.Severity // Fallback for violations without source attribution
+		}
+		if sev == SeverityCritical {
 			return SeverityCritical
 		}
-		if v.Severity == SeverityWarning && maxSeverity != SeverityCritical {
+		if sev == SeverityWarning && maxSeverity != SeverityCritical {
 			maxSeverity = SeverityWarning
 		}
 	}
@@ -1216,4 +1357,69 @@ func (s *StreamingScanner) TotalScanned() int64 {
 func (s *StreamingScanner) Reset() {
 	s.overlapBuf = s.overlapBuf[:0]
 	s.totalScanned = 0
+}
+
+// effectiveSeverity computes a downgraded severity based on source role.
+// A critical rule triggered by an assistant echo is less concerning than one from user input.
+func effectiveSeverity(ruleSeverity Severity, sourceRole string) Severity {
+	weight := SourceRoleWeights[sourceRole]
+	if weight == 0 {
+		weight = 1.0
+	}
+
+	baseWeight := SeverityWeights[ruleSeverity]
+	effective := baseWeight * weight
+
+	switch {
+	case effective >= 5.0:
+		return SeverityCritical
+	case effective >= 1.5:
+		return SeverityWarning
+	default:
+		return SeverityInfo
+	}
+}
+
+// categoryFromRuleName derives an event category from the rule name for SIEM classification.
+// Categories align with common SIEM taxonomy: prompt_injection, data_exfil, rate_limit, etc.
+func categoryFromRuleName(name string) string {
+	switch {
+	case strings.HasPrefix(name, "prompt_injection"):
+		return "prompt_injection"
+	case strings.HasPrefix(name, "rate_limit") || strings.HasPrefix(name, "requests_per_minute"):
+		return "rate_limit"
+	case strings.Contains(name, "exfiltration") || strings.Contains(name, "extraction"):
+		return "data_exfil"
+	case strings.HasPrefix(name, "destructive") || strings.Contains(name, "privilege"):
+		return "dangerous_command"
+	case strings.Contains(name, "pii") || strings.Contains(name, "credential") || strings.Contains(name, "secret"):
+		return "sensitive_data"
+	case strings.HasPrefix(name, "high_request") || strings.HasPrefix(name, "very_high") ||
+		strings.HasPrefix(name, "long_running") || strings.HasPrefix(name, "excessive"):
+		return "resource_abuse"
+	case strings.HasPrefix(name, "large_response") || strings.Contains(name, "bytes"):
+		return "data_volume"
+	case strings.Contains(name, "recursive") || strings.Contains(name, "dos"):
+		return "denial_of_service"
+	case strings.Contains(name, "model"):
+		return "model_abuse"
+	default:
+		return "policy_violation"
+	}
+}
+
+// frameworkRefFromDescription extracts a framework reference (e.g., "OWASP-LLM01") from the rule description.
+// Preset rules embed the framework ID in the description prefix (e.g., "LLM01: Prompt injection...").
+func frameworkRefFromDescription(desc string) string {
+	// Match "LLM01", "LLM02", etc. — OWASP LLM Top 10
+	if strings.HasPrefix(desc, "LLM") {
+		if idx := strings.Index(desc, ":"); idx > 0 && idx <= 6 {
+			return "OWASP-" + desc[:idx]
+		}
+	}
+	// Match "FIREWALL:" prefix — WAF-style rate/volume rules
+	if strings.HasPrefix(desc, "FIREWALL:") {
+		return "ELIDA-FIREWALL"
+	}
+	return ""
 }
