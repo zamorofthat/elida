@@ -255,6 +255,16 @@ policy:
     #   severity: "warning"
     #   action: "block"
     #   description: "Custom rate limit for controlled environment"
+    #
+    # Block dangerous tool usage (glob patterns match tool names)
+    # - name: "block_dangerous_tools"
+    #   type: "tool_blocked"
+    #   patterns:
+    #     - "Bash"
+    #     - "Write"
+    #   severity: "critical"
+    #   action: "block"
+    #   description: "Block execution of dangerous tools"
 
 # WebSocket proxy configuration
 # Enables proxying of WebSocket connections for real-time AI agents
