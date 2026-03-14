@@ -427,7 +427,14 @@ func (a *app) initPolicyEngine() {
 
 func (a *app) initProxy() {
 	var err error
-	a.proxyHandler, err = proxy.NewWithPolicy(a.cfg, a.store, a.manager, a.tp, a.policyEngine)
+	var proxyOpts []proxy.ProxyOption
+	if a.tp != nil {
+		proxyOpts = append(proxyOpts, proxy.WithTelemetry(a.tp))
+	}
+	if a.policyEngine != nil {
+		proxyOpts = append(proxyOpts, proxy.WithPolicyEngine(a.policyEngine))
+	}
+	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
 		slog.Error("failed to create proxy", "error", err)
 		os.Exit(1)
@@ -536,14 +543,17 @@ func (a *app) initSettings() {
 }
 
 func (a *app) initControlAPI() {
-	a.controlHandler = control.NewWithAuth(
-		a.store,
-		a.manager,
-		a.sqliteStore,
-		a.policyEngine,
-		a.cfg.Control.Auth.Enabled,
-		a.cfg.Control.Auth.APIKey,
-	)
+	var controlOpts []control.Option
+	if a.sqliteStore != nil {
+		controlOpts = append(controlOpts, control.WithHistory(a.sqliteStore))
+	}
+	if a.policyEngine != nil {
+		controlOpts = append(controlOpts, control.WithPolicy(a.policyEngine))
+	}
+	if a.cfg.Control.Auth.Enabled {
+		controlOpts = append(controlOpts, control.WithAuth(a.cfg.Control.Auth.APIKey))
+	}
+	a.controlHandler = control.New(a.store, a.manager, controlOpts...)
 	if a.settingsStore != nil {
 		a.controlHandler.SetSettingsStore(a.settingsStore)
 	}

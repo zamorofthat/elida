@@ -38,34 +38,41 @@ type Handler struct {
 	captureMode string
 }
 
-// New creates a new control API handler
-func New(store session.Store, manager *session.Manager) *Handler {
-	return NewWithHistory(store, manager, nil)
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithHistory enables session history storage.
+func WithHistory(store *storage.SQLiteStore) Option {
+	return func(h *Handler) { h.historyStore = store }
 }
 
-// NewWithHistory creates a new control API handler with history support
-func NewWithHistory(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore) *Handler {
-	return NewWithPolicy(store, manager, historyStore, nil)
+// WithPolicy enables the policy engine.
+func WithPolicy(engine *policy.Engine) Option {
+	return func(h *Handler) { h.policyEngine = engine }
 }
 
-// NewWithPolicy creates a new control API handler with history and policy support
-func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine) *Handler {
-	return NewWithAuth(store, manager, historyStore, policyEngine, false, "")
-}
-
-// NewWithAuth creates a new control API handler with all options including authentication
-func NewWithAuth(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine, authEnabled bool, apiKey string) *Handler {
-	h := &Handler{
-		store:        store,
-		manager:      manager,
-		historyStore: historyStore,
-		policyEngine: policyEngine,
-		dashboard:    dashboard.New(),
-		mux:          http.NewServeMux(),
-		authEnabled:  authEnabled,
-		apiKey:       apiKey,
-		captureMode:  "disabled",
+// WithAuth enables API key authentication on /control/* endpoints.
+func WithAuth(apiKey string) Option {
+	return func(h *Handler) {
+		h.authEnabled = true
+		h.apiKey = apiKey
 	}
+}
+
+// New creates a new control API handler with the given options.
+func New(store session.Store, manager *session.Manager, opts ...Option) *Handler {
+	h := &Handler{
+		store:       store,
+		manager:     manager,
+		dashboard:   dashboard.New(),
+		mux:         http.NewServeMux(),
+		captureMode: "disabled",
+	}
+
+	for _, opt := range opts {
+		opt(h)
+	}
+
 
 	// Dashboard UI (catch-all pattern for Go 1.22+)
 	h.mux.Handle("/{path...}", h.dashboard)

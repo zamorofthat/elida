@@ -689,7 +689,7 @@ func TestProxy_FailoverDepthLimit_AllBackendsFail(t *testing.T) {
 		},
 	}
 
-	p, err := proxy.NewWithRouter(cfg, store, manager, nil, nil, r)
+	p, err := proxy.New(cfg, store, manager, proxy.WithRouter(r))
 	if err != nil {
 		t.Fatalf("failed to create proxy: %v", err)
 	}
@@ -764,7 +764,7 @@ func TestProxy_FailoverSuccess_SecondBackendWorks(t *testing.T) {
 		},
 	}
 
-	p, err := proxy.NewWithRouter(cfg, store, manager, nil, nil, r)
+	p, err := proxy.New(cfg, store, manager, proxy.WithRouter(r))
 	if err != nil {
 		t.Fatalf("failed to create proxy: %v", err)
 	}
