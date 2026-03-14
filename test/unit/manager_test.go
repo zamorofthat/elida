@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -498,5 +499,37 @@ func TestManager_GetOrCreateByClient_SessionIDFormat(t *testing.T) {
 	expectedSuffix := "-default"
 	if len(sess.ID) < len(expectedSuffix) || sess.ID[len(sess.ID)-len(expectedSuffix):] != expectedSuffix {
 		t.Errorf("expected session ID to end with '%s', got %s", expectedSuffix, sess.ID)
+	}
+}
+
+func TestRealClientAddr(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+		xri        string
+		want       string
+	}{
+		{"no headers", "192.168.1.1:1234", "", "", "192.168.1.1:1234"},
+		{"xff single", "10.0.0.1:1234", "203.0.113.50", "", "203.0.113.50"},
+		{"xff multiple", "10.0.0.1:1234", "203.0.113.50, 70.41.3.18", "", "203.0.113.50"},
+		{"xri", "10.0.0.1:1234", "", "203.0.113.50", "203.0.113.50"},
+		{"xff takes precedence over xri", "10.0.0.1:1234", "1.2.3.4", "5.6.7.8", "1.2.3.4"},
+		{"xff with spaces", "10.0.0.1:1234", "  203.0.113.50 , 70.41.3.18", "", "203.0.113.50"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			if tt.xff != "" {
+				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			if tt.xri != "" {
+				r.Header.Set("X-Real-IP", tt.xri)
+			}
+			if got := session.RealClientAddr(r); got != tt.want {
+				t.Errorf("RealClientAddr() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
