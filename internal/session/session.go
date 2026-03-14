@@ -167,6 +167,34 @@ func (s *Session) AddBytes(in, out int64) {
 	s.BytesOut += out
 }
 
+// TouchAndRecord atomically updates activity time, adds request bytes,
+// and records the backend — all under a single lock acquisition.
+// This prevents concurrent requests from observing inconsistent state
+// between individual Touch/AddBytes/RecordBackend calls.
+func (s *Session) TouchAndRecord(bytesIn int64, backend string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	s.LastActivity = now
+	s.RequestCount++
+
+	// Track request time for rate limiting (keep last 2 minutes)
+	s.RequestTimes = append(s.RequestTimes, now)
+	cutoff := now.Add(-2 * time.Minute)
+	for len(s.RequestTimes) > 0 && s.RequestTimes[0].Before(cutoff) {
+		s.RequestTimes = s.RequestTimes[1:]
+	}
+
+	s.BytesIn += bytesIn
+
+	if s.BackendsUsed == nil {
+		s.BackendsUsed = make(map[string]int)
+	}
+	s.BackendsUsed[backend]++
+	s.Backend = backend
+}
+
 // AddTokens adds token counts to the session
 func (s *Session) AddTokens(in, out int64) {
 	s.mu.Lock()

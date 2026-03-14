@@ -298,9 +298,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	sess.Touch()
-	sess.AddBytes(int64(len(requestBody)), 0)
-	sess.RecordBackend(backend.Name)
+	sess.TouchAndRecord(int64(len(requestBody)), backend.Name)
 
 	// Check if session was killed
 	select {
@@ -1077,8 +1075,15 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 		select {
 		case <-sess.KillChan():
 			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
-			// Still do async scan on what we have
-			go p.asyncScanResponse(sess, backend, chunks, resp.StatusCode)
+			// Record tool calls on live session before async goroutine
+			abortContent := strings.Join(chunks, "")
+			if toolCalls := ExtractToolCallsFromResponse([]byte(abortContent)); len(toolCalls) > 0 {
+				for _, tc := range toolCalls {
+					sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+				}
+			}
+			abortSnap := sess.Snapshot()
+			go p.asyncScanResponse(sess.ID, &abortSnap, backend, chunks, resp.StatusCode)
 			return resp.StatusCode, totalBytes
 		default:
 		}
@@ -1136,14 +1141,29 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
 	}
 
+	// Record tool calls on the live session before launching the async goroutine
+	// to avoid mutating session state from a detached goroutine
+	responseContent := strings.Join(chunks, "")
+	if toolCalls := ExtractToolCallsFromResponse([]byte(responseContent)); len(toolCalls) > 0 {
+		for _, tc := range toolCalls {
+			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+		}
+	}
+
 	// Async scan for flag-only response rules (no latency impact)
-	go p.asyncScanResponse(sess, backend, chunks, resp.StatusCode)
+	// Pass session ID and snapshot — not the live session pointer — to avoid
+	// accessing a session that may be cleaned up by the manager
+	sessionID := sess.ID
+	sessSnap := sess.Snapshot()
+	go p.asyncScanResponse(sessionID, &sessSnap, backend, chunks, resp.StatusCode)
 
 	return resp.StatusCode, totalBytes
 }
 
-// asyncScanResponse scans response content asynchronously for flag-only rules
-func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend, chunks []string, statusCode int) {
+// asyncScanResponse scans response content asynchronously for flag-only rules.
+// Takes a session ID and snapshot instead of a live session pointer to avoid
+// races with session cleanup.
+func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, backend *router.Backend, chunks []string, statusCode int) {
 	if p.policy == nil {
 		return
 	}
@@ -1159,11 +1179,10 @@ func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend
 		return
 	}
 
-	if result := p.policy.EvaluateResponseContent(sess.ID, content); result != nil {
-		// Log violations (already logged in EvaluateResponseContent, but add async context)
+	if result := p.policy.EvaluateResponseContent(sessionID, content); result != nil {
 		for _, v := range result.Violations {
 			slog.Info("async response scan: violation detected",
-				"session_id", sess.ID,
+				"session_id", sessionID,
 				"rule", v.RuleName,
 				"severity", v.Severity,
 				"action", v.Action,
@@ -1172,14 +1191,11 @@ func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend
 	}
 	// Evaluate tool calls in async-scanned response
 	if toolCalls := ExtractToolCallsFromResponse([]byte(content)); len(toolCalls) > 0 {
-		for _, tc := range toolCalls {
-			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
-		}
 		policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
-		if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
+		if result := p.policy.EvaluateToolCalls(sessionID, policyToolCalls); result != nil {
 			for _, v := range result.Violations {
 				slog.Info("async tool call scan: violation detected",
-					"session_id", sess.ID,
+					"session_id", sessionID,
 					"rule", v.RuleName,
 					"severity", v.Severity,
 					"action", v.Action,
@@ -1188,10 +1204,10 @@ func (p *Proxy) asyncScanResponse(sess *session.Session, backend *router.Backend
 		}
 	}
 	// Capture response for flagged sessions (even if response itself has no violations)
-	if p.policy.IsFlagged(sess.ID) {
-		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, content, statusCode)
+	if p.policy.IsFlagged(sessionID) {
+		p.policy.UpdateLastCaptureWithResponseAndStatus(sessionID, content, statusCode)
 		// Persist flagged session immediately to survive crashes
-		p.persistFlaggedSession(sess, backend.Name)
+		p.persistFlaggedSession(sessSnap, backend.Name)
 	}
 }
 
