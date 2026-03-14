@@ -1,10 +1,12 @@
 package control
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -202,8 +204,19 @@ func (h *Handler) reloadPolicyEngine() {
 
 // ServeHTTP implements http.Handler
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Add CORS headers for dashboard access
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Add CORS headers for dashboard access (same-origin only)
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		// Parse the Origin URL and compare hostname directly to prevent
+		// subdomain tricks (e.g., evil-api.example.com.attacker.net)
+		parsedOrigin, err := url.Parse(origin)
+		if err == nil && parsedOrigin.Host == r.Host {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+	} else {
+		// No Origin header — non-browser request (curl, etc.), allow
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -227,7 +240,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-// checkAuth verifies the request has a valid API key
+// checkAuth verifies the request has a valid API key using constant-time comparison
 func (h *Handler) checkAuth(r *http.Request) bool {
 	// Check Authorization header (Bearer token)
 	authHeader := r.Header.Get("Authorization")
@@ -235,22 +248,27 @@ func (h *Handler) checkAuth(r *http.Request) bool {
 		// Support "Bearer <key>" format
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			token := strings.TrimPrefix(authHeader, "Bearer ")
-			if token == h.apiKey {
+			if secureCompare(token, h.apiKey) {
 				return true
 			}
 		}
 		// Also support just the key directly
-		if authHeader == h.apiKey {
+		if secureCompare(authHeader, h.apiKey) {
 			return true
 		}
 	}
 
 	// Check X-API-Key header as alternative
-	if apiKey := r.Header.Get("X-API-Key"); apiKey == h.apiKey {
+	if apiKey := r.Header.Get("X-API-Key"); secureCompare(apiKey, h.apiKey) {
 		return true
 	}
 
 	return false
+}
+
+// secureCompare performs a constant-time string comparison to prevent timing attacks
+func secureCompare(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // handleHealth handles GET /control/health
@@ -1299,7 +1317,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, settings)
 
 	case http.MethodPut:
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusBadRequest)
 			return
@@ -1375,7 +1393,7 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPut:
 		// Save local customizations
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusBadRequest)
 			return
