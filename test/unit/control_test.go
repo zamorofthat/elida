@@ -541,3 +541,18 @@ func TestHandler_History_Pagination(t *testing.T) {
 		t.Errorf("expected 2 sessions in page, got %d", len(sessions))
 	}
 }
+
+func TestHandler_WithPolicyOption(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// WithPolicy should not panic and handler should work
+	handler := control.New(store, manager, control.WithPolicy(nil))
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
