@@ -43,5 +43,5 @@ telemetry:
     endpoint: "default.main.affectionate-rust-3izd4n6.cribl.cloud:4317"
     service_name: elida
     insecure: false
-    capture_content: true
+    capture_content: "flagged"
     max_body_size: 4096

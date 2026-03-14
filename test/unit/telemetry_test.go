@@ -747,12 +747,12 @@ func TestEmitCapturedContentLog_Disabled(t *testing.T) {
 	provider.EmitCapturedContentLog(context.Background(), "session-1", "request body", "response body", "claude-3", "anthropic")
 }
 
-func TestEmitCapturedContentLog_CaptureContentFalse(t *testing.T) {
+func TestEmitCapturedContentLog_CaptureContentNone(t *testing.T) {
 	cfg := telemetry.Config{
 		Enabled:        true,
 		Exporter:       "stdout",
 		ServiceName:    "elida-test",
-		CaptureContent: false, // Explicitly disabled
+		CaptureContent: "none",
 	}
 	provider, err := telemetry.NewProvider(cfg)
 	if err != nil {
@@ -760,16 +760,16 @@ func TestEmitCapturedContentLog_CaptureContentFalse(t *testing.T) {
 	}
 	defer func() { _ = provider.Shutdown(context.Background()) }()
 
-	// Should silently return without emitting (CaptureContent = false)
+	// Should silently return without emitting (CaptureContent = "none")
 	provider.EmitCapturedContentLog(context.Background(), "session-1", "secret request", "secret response", "claude-3", "anthropic")
 }
 
-func TestEmitCapturedContentLog_CaptureContentTrue(t *testing.T) {
+func TestEmitCapturedContentLog_CaptureContentAll(t *testing.T) {
 	cfg := telemetry.Config{
 		Enabled:        true,
 		Exporter:       "stdout",
 		ServiceName:    "elida-test",
-		CaptureContent: true,
+		CaptureContent: "all",
 		MaxBodySize:    4096,
 	}
 	provider, err := telemetry.NewProvider(cfg)
@@ -778,8 +778,28 @@ func TestEmitCapturedContentLog_CaptureContentTrue(t *testing.T) {
 	}
 	defer func() { _ = provider.Shutdown(context.Background()) }()
 
-	// Should emit the log since CaptureContent is true
+	// Should emit the log since CaptureContent is "all"
 	provider.EmitCapturedContentLog(context.Background(), "session-1", "request body here", "response body here", "claude-3", "anthropic")
+}
+
+func TestEmitFlaggedContentLog_CaptureContentFlagged(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:        true,
+		Exporter:       "stdout",
+		ServiceName:    "elida-test",
+		CaptureContent: "flagged",
+		MaxBodySize:    4096,
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	defer func() { _ = provider.Shutdown(context.Background()) }()
+
+	// Should emit for flagged content
+	provider.EmitFlaggedContentLog(context.Background(), "session-1", "flagged request", "flagged response", "claude-3", "anthropic")
+	// Should NOT emit for non-flagged content
+	provider.EmitCapturedContentLog(context.Background(), "session-1", "normal request", "normal response", "claude-3", "anthropic")
 }
 
 // ============================================================
@@ -955,7 +975,7 @@ func TestExportSessionRecord_WithCapturedContent(t *testing.T) {
 		Enabled:        true,
 		Exporter:       "stdout",
 		ServiceName:    "elida-test",
-		CaptureContent: true,
+		CaptureContent: "all",
 		MaxBodySize:    256,
 	}
 	provider, err := telemetry.NewProvider(cfg)
@@ -994,7 +1014,7 @@ func TestExportSessionRecord_CapturedContentGated(t *testing.T) {
 		Enabled:        true,
 		Exporter:       "stdout",
 		ServiceName:    "elida-test",
-		CaptureContent: false, // Gated off
+		CaptureContent: "none", // Gated off
 	}
 	provider, err := telemetry.NewProvider(cfg)
 	if err != nil {
