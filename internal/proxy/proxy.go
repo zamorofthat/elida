@@ -1089,7 +1089,7 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 		case <-sess.KillChan():
 			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
 			// Record tool calls on live session before async goroutine
-			abortContent := strings.Join(chunks, "")
+			abortContent := joinChunks(chunks)
 			if toolCalls := ExtractToolCallsFromResponse([]byte(abortContent)); len(toolCalls) > 0 {
 				for _, tc := range toolCalls {
 					sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
