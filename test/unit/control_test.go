@@ -258,16 +258,54 @@ func TestHandler_Session_Delete(t *testing.T) {
 func TestHandler_CORS(t *testing.T) {
 	handler, _ := newTestHandler()
 
-	req := httptest.NewRequest("OPTIONS", "/control/health", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
+	t.Run("no origin header allows wildcard", func(t *testing.T) {
+		req := httptest.NewRequest("OPTIONS", "/control/health", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
 
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("expected CORS header to be set")
-	}
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status 200 for OPTIONS, got %d", w.Code)
-	}
+		if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+			t.Errorf("expected wildcard CORS for no-origin request, got %q", w.Header().Get("Access-Control-Allow-Origin"))
+		}
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status 200 for OPTIONS, got %d", w.Code)
+		}
+	})
+
+	t.Run("same-origin allowed", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/control/health", nil)
+		req.Host = "localhost:9090"
+		req.Header.Set("Origin", "http://localhost:9090")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:9090" {
+			t.Errorf("expected same-origin CORS, got %q", w.Header().Get("Access-Control-Allow-Origin"))
+		}
+	})
+
+	t.Run("cross-origin blocked", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/control/health", nil)
+		req.Host = "localhost:9090"
+		req.Header.Set("Origin", "http://evil.com")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("expected no CORS header for cross-origin, got %q", w.Header().Get("Access-Control-Allow-Origin"))
+		}
+	})
+
+	t.Run("subdomain trick blocked", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/control/health", nil)
+		req.Host = "api.example.com"
+		req.Header.Set("Origin", "https://evil-api.example.com.attacker.net")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("expected subdomain trick to be blocked, got %q", w.Header().Get("Access-Control-Allow-Origin"))
+		}
+	})
 }
 
 func TestHandler_VoiceSessions_NoWebSocketHandler(t *testing.T) {
