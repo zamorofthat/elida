@@ -154,6 +154,14 @@ func TestSessionSnapshot(t *testing.T) {
 	if sess.Metadata["key"] == "modified" {
 		t.Error("snapshot should be independent of original")
 	}
+
+	// Verify snapshot killChan is non-nil and closed (non-blocking)
+	select {
+	case <-snap.KillChan():
+		// expected — closed channel returns immediately
+	default:
+		t.Error("snapshot KillChan should be closed (non-blocking)")
+	}
 }
 
 func TestStateString(t *testing.T) {
