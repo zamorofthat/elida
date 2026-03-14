@@ -1034,22 +1034,17 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
+	// Reconstruct response once for capture and flagging
+	reconstructed := joinChunks(chunks)
+
 	// Capture response for capture-all mode
 	if p.captureAll && p.captureBuffer != nil {
-		var response strings.Builder
-		for _, chunk := range chunks {
-			response.WriteString(chunk)
-		}
-		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
+		p.captureBuffer.UpdateLastResponse(sess.ID, reconstructed, resp.StatusCode)
 	}
 
 	// Capture response for flagged sessions
 	if p.policy.IsFlagged(sess.ID) {
-		var response strings.Builder
-		for _, chunk := range chunks {
-			response.WriteString(chunk)
-		}
-		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, response.String(), resp.StatusCode)
+		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, reconstructed, resp.StatusCode)
 		// Persist flagged session immediately to survive crashes
 		p.persistFlaggedSession(sess, backend.Name)
 	}
@@ -1150,18 +1145,16 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
+	// Reconstruct response once for capture and tool call extraction
+	responseContent := joinChunks(chunks)
+
 	// Capture response for capture-all mode
 	if p.captureAll && p.captureBuffer != nil {
-		var response strings.Builder
-		for _, chunk := range chunks {
-			response.WriteString(chunk)
-		}
-		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
+		p.captureBuffer.UpdateLastResponse(sess.ID, responseContent, resp.StatusCode)
 	}
 
 	// Record tool calls on the live session before launching the async goroutine
 	// to avoid mutating session state from a detached goroutine
-	responseContent := strings.Join(chunks, "")
 	if toolCalls := ExtractToolCallsFromResponse([]byte(responseContent)); len(toolCalls) > 0 {
 		for _, tc := range toolCalls {
 			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
@@ -1186,13 +1179,7 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 		return
 	}
 
-	// Reconstruct response from chunks
-	var response strings.Builder
-	for _, chunk := range chunks {
-		response.WriteString(chunk)
-	}
-
-	content := response.String()
+	content := joinChunks(chunks)
 	if content == "" {
 		return
 	}
@@ -1258,14 +1245,8 @@ func (p *Proxy) logResponse(sessionID string, body []byte) {
 
 // logStreamingResponse logs an aggregated streaming response
 func (p *Proxy) logStreamingResponse(sessionID string, chunks []string, isSSE bool) {
-	// Reconstruct response from chunks
-	var response strings.Builder
-	for _, chunk := range chunks {
-		response.WriteString(chunk)
-	}
-
 	// For SSE, extract meaningful content; for NDJSON, use raw data
-	content := response.String()
+	content := joinChunks(chunks)
 	if isSSE {
 		content = parseSSEContent(content)
 	}
@@ -1293,6 +1274,15 @@ func parseSSEContent(data string) string {
 		}
 	}
 	return content.String()
+}
+
+// joinChunks reconstructs a full response string from streaming chunks.
+func joinChunks(chunks []string) string {
+	var b strings.Builder
+	for _, c := range chunks {
+		b.WriteString(c)
+	}
+	return b.String()
 }
 
 // truncate truncates a string to maxLen
