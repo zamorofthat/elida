@@ -38,6 +38,8 @@ OPENAI_BASE_URL=http://localhost:8080 your-tool
 
 Open the dashboard at [http://localhost:9090](http://localhost:9090).
 
+![ELIDA Dashboard](docs/images/elidascreenshot.png)
+
 ## How It Works
 
 ```
