@@ -29,16 +29,51 @@ Instead of binary block/allow decisions, the risk ladder accumulates a risk scor
 | `warning` | 3 | PII detected, credential request |
 | `critical` | 10 | Prompt injection, jailbreak attempt |
 
+### Source-Role Weighting
+
+Violations are weighted by where they were found in the request. This reduces false positives from model output echoing safety patterns (e.g., Claude's system prompt mentioning "ignore all previous instructions" as an example of what to refuse).
+
+| Source Role | Weight | Rationale |
+|-------------|--------|-----------|
+| `user` | 1.0 | Untrusted user input — full weight |
+| `tool` | 0.8 | External data from tool results |
+| `assistant` | 0.2 | Model output — likely benign pattern echo |
+| `system` | 0.1 | Provider-controlled prompt — almost always false positive |
+
+### Exponential Decay
+
+Violation contributions decay over time using `e^(-λt)`, preventing one-time false positives from permanently inflating risk scores.
+
+- **λ = 0.002**: contribution halves every ~5.8 minutes
+- After 10 minutes, a violation retains ~30% of its original weight
+- After 30 minutes, a violation retains ~3% of its original weight
+
 ### Risk Score Calculation
 
 ```
-Risk Score = Σ (violation_count × severity_weight)
+Risk Score = Σ (severity_weight × source_role_weight × e^(-λt))
 ```
 
+Where `t` is seconds since the violation occurred.
+
 Example: A session with:
-- 2 critical violations (prompt injection) = 2 × 10 = 20
-- 3 warning violations (PII detected) = 3 × 3 = 9
-- **Total Risk Score: 29**
+- 2 critical violations from user messages = 2 × 10 × 1.0 = 20.0
+- 1 critical violation from assistant echo = 1 × 10 × 0.2 = 2.0
+- 3 warning violations from user messages = 3 × 3 × 1.0 = 9.0
+- **Total Risk Score (at t=0): 31.0**
+- **After 10 minutes: ~19.6** (decayed)
+
+### Effective Severity
+
+Each violation carries both a raw `severity` (from the rule definition) and an `effective_severity` (after source-role weighting). The dashboard and API use effective severity for display and max severity calculation.
+
+| Raw Severity | Source Role | Effective Score | Effective Severity |
+|-------------|-------------|-----------------|-------------------|
+| critical | user | 10.0 | critical |
+| critical | assistant | 2.0 | warning |
+| critical | system | 1.0 | info |
+| warning | user | 3.0 | warning |
+| warning | assistant | 0.6 | info |
 
 ### Configuration
 

@@ -85,17 +85,36 @@ Each captured request/response pair:
 
 ### Violation
 
-Each policy violation:
+Each policy violation includes source attribution and SIEM classification:
 
 ```json
 {
-    "rule_name": "prompt_injection_ignore",
-    "description": "LLM01: Prompt injection - instruction override",
+    "rule_name": "prompt_injection_ignore_request",
+    "description": "LLM01: Prompt injection pattern in request",
     "severity": "critical",
+    "effective_severity": "warning",
     "matched_text": "ignore all previous instructions",
-    "action": "block"
+    "matched_pattern": "ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
+    "action": "flag",
+    "timestamp": "2026-03-14T20:46:08Z",
+    "source_role": "assistant",
+    "message_index": 63,
+    "source_content": "...full message content (truncated to max_capture_size)...",
+    "event_category": "prompt_injection",
+    "framework_ref": "OWASP-LLM01"
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `rule_name` | string | Rule identifier |
+| `severity` | string | Raw rule severity: `info`, `warning`, `critical` |
+| `effective_severity` | string | Severity after source-role weighting |
+| `source_role` | string | Message role that triggered the violation: `user`, `assistant`, `system`, `tool` |
+| `message_index` | int | Position in the messages array (-1 for Anthropic top-level system) |
+| `source_content` | string | Full message content, truncated to `max_capture_size` |
+| `event_category` | string | SIEM category: `prompt_injection`, `data_exfil`, `rate_limit`, `dangerous_command`, `sensitive_data`, `resource_abuse`, `data_volume`, `denial_of_service`, `model_abuse` |
+| `framework_ref` | string | Framework reference: `OWASP-LLM01` through `OWASP-LLM10`, `ELIDA-FIREWALL` |
 
 ## API Endpoints
 
