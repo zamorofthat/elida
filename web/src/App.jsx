@@ -1685,16 +1685,16 @@ function AppShell() {
     }
     setSearchTerm('')
 
-    // Polling intervals
+    // Polling intervals (skip when tab is not visible to reduce load)
     const interval = setInterval(() => {
-      if (controller.signal.aborted) return
+      if (controller.signal.aborted || document.hidden) return
       refreshData()
       if (page === 'flagged') fetchFlagged()
       if (page === 'voice') {
         fetchVoiceSessions()
         fetchVoiceHistory()
       }
-    }, 2000)
+    }, 5000)
 
     const healthInterval = setInterval(checkHealth, 10000)
 
