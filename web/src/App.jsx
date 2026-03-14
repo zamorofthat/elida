@@ -679,10 +679,19 @@ function FlaggedDetails({ flagged, onClose }) {
             {flagged.violations.map((v, i) => (
               <div key={i} class="violation-item">
                 <div class="violation-header">
-                  <SeverityBadge severity={v.severity} />
+                  <SeverityBadge severity={v.effective_severity || v.severity} />
                   <strong>{v.rule_name}</strong>
+                  {v.source_role && (
+                    <span class={'source-role-badge source-role-' + v.source_role}>
+                      {v.source_role}
+                      {v.message_index >= 0 ? ' #' + v.message_index : ''}
+                    </span>
+                  )}
                 </div>
-                <div class="violation-desc">{v.description}</div>
+                <div class="violation-desc">
+                  {v.framework_ref && <span class="framework-ref">{v.framework_ref}</span>}
+                  {v.description}
+                </div>
                 {v.matched_text && (
                   <div class="violation-match">
                     Matched: <code>{v.matched_text}</code>
