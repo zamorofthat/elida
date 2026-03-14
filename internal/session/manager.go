@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -250,6 +252,24 @@ func (m *Manager) generateClientSessionID(clientIP, backendName string) string {
 
 	// Include backend name in session ID for clarity
 	return "client-" + shortHash + "-" + backendName
+}
+
+// RealClientAddr returns the best available client address from the request.
+// Checks X-Forwarded-For and X-Real-IP headers (trusted proxy scenarios)
+// before falling back to RemoteAddr. In NAT/shared-IP environments without
+// these headers, multiple clients behind the same IP will share a session.
+func RealClientAddr(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For can contain multiple IPs; use the first (original client)
+		if idx := strings.Index(xff, ","); idx != -1 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	return r.RemoteAddr
 }
 
 // extractIP extracts the IP address from a client address (host:port)

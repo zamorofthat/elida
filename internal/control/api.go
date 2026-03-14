@@ -38,33 +38,39 @@ type Handler struct {
 	captureMode string
 }
 
-// New creates a new control API handler
-func New(store session.Store, manager *session.Manager) *Handler {
-	return NewWithHistory(store, manager, nil)
+// Option configures a Handler.
+type Option func(*Handler)
+
+// WithHistory enables session history storage.
+func WithHistory(store *storage.SQLiteStore) Option {
+	return func(h *Handler) { h.historyStore = store }
 }
 
-// NewWithHistory creates a new control API handler with history support
-func NewWithHistory(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore) *Handler {
-	return NewWithPolicy(store, manager, historyStore, nil)
+// WithPolicy enables the policy engine.
+func WithPolicy(engine *policy.Engine) Option {
+	return func(h *Handler) { h.policyEngine = engine }
 }
 
-// NewWithPolicy creates a new control API handler with history and policy support
-func NewWithPolicy(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine) *Handler {
-	return NewWithAuth(store, manager, historyStore, policyEngine, false, "")
+// WithAuth enables API key authentication on /control/* endpoints.
+func WithAuth(apiKey string) Option {
+	return func(h *Handler) {
+		h.authEnabled = true
+		h.apiKey = apiKey
+	}
 }
 
-// NewWithAuth creates a new control API handler with all options including authentication
-func NewWithAuth(store session.Store, manager *session.Manager, historyStore *storage.SQLiteStore, policyEngine *policy.Engine, authEnabled bool, apiKey string) *Handler {
+// New creates a new control API handler with the given options.
+func New(store session.Store, manager *session.Manager, opts ...Option) *Handler {
 	h := &Handler{
-		store:        store,
-		manager:      manager,
-		historyStore: historyStore,
-		policyEngine: policyEngine,
-		dashboard:    dashboard.New(),
-		mux:          http.NewServeMux(),
-		authEnabled:  authEnabled,
-		apiKey:       apiKey,
-		captureMode:  "disabled",
+		store:       store,
+		manager:     manager,
+		dashboard:   dashboard.New(),
+		mux:         http.NewServeMux(),
+		captureMode: "disabled",
+	}
+
+	for _, opt := range opts {
+		opt(h)
 	}
 
 	// Dashboard UI (catch-all pattern for Go 1.22+)
@@ -74,27 +80,29 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 	h.mux.HandleFunc("/control/health", h.handleHealth)
 	h.mux.HandleFunc("/control/stats", h.handleStats)
 	h.mux.HandleFunc("/control/sessions", h.handleSessions)
-	h.mux.HandleFunc("/control/sessions/", h.handleSession)
+	h.mux.HandleFunc("/control/sessions/{id}", h.handleSession)
+	h.mux.HandleFunc("/control/sessions/{id}/{action}", h.handleSession)
 
 	// History endpoints (only if history store is available)
 	h.mux.HandleFunc("/control/history", h.handleHistory)
 	h.mux.HandleFunc("/control/history/stats", h.handleHistoryStats)
 	h.mux.HandleFunc("/control/history/timeseries", h.handleTimeSeries)
-	h.mux.HandleFunc("/control/history/", h.handleHistorySession)
+	h.mux.HandleFunc("/control/history/{id}", h.handleHistorySession)
 
 	// Policy/flagged sessions endpoints
 	h.mux.HandleFunc("/control/flagged", h.handleFlagged)
 	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
-	h.mux.HandleFunc("/control/flagged/", h.handleFlaggedSession)
+	h.mux.HandleFunc("/control/flagged/{id}", h.handleFlaggedSession)
 
 	// Voice sessions endpoints (live)
 	h.mux.HandleFunc("/control/voice", h.handleVoiceSessions)
-	h.mux.HandleFunc("/control/voice/", h.handleVoiceSession)
+	h.mux.HandleFunc("/control/voice/{sessionID}", h.handleVoiceSession)
+	h.mux.HandleFunc("/control/voice/{sessionID}/{rest...}", h.handleVoiceSession)
 
 	// Voice session history endpoints (persisted CDRs)
 	h.mux.HandleFunc("/control/voice-history", h.handleVoiceHistory)
 	h.mux.HandleFunc("/control/voice-history/stats", h.handleVoiceHistoryStats)
-	h.mux.HandleFunc("/control/voice-history/", h.handleVoiceHistorySession)
+	h.mux.HandleFunc("/control/voice-history/{id}", h.handleVoiceHistorySession)
 
 	// TTS (Text-to-Speech) tracking endpoints
 	h.mux.HandleFunc("/control/tts", h.handleTTSRequests)
@@ -103,7 +111,7 @@ func NewWithAuth(store session.Store, manager *session.Manager, historyStore *st
 	// Events audit log endpoints
 	h.mux.HandleFunc("/control/events", h.handleEvents)
 	h.mux.HandleFunc("/control/events/stats", h.handleEventStats)
-	h.mux.HandleFunc("/control/events/", h.handleSessionEvents)
+	h.mux.HandleFunc("/control/events/{id}", h.handleSessionEvents)
 
 	// Settings endpoints (layered config)
 	h.mux.HandleFunc("/control/settings", h.handleSettings)
@@ -351,21 +359,15 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-// handleSession handles requests to /control/sessions/{id}
+// handleSession handles requests to /control/sessions/{id}/{action...}
 func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
-	// Extract session ID from path
-	path := strings.TrimPrefix(r.URL.Path, "/control/sessions/")
-	parts := strings.Split(path, "/")
-	if len(parts) == 0 || parts[0] == "" {
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
 		http.Error(w, "Session ID required", http.StatusBadRequest)
 		return
 	}
 
-	sessionID := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
-	}
+	action := r.PathValue("action")
 
 	switch r.Method {
 	case http.MethodGet:
@@ -658,14 +660,11 @@ func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract session ID from path
-	path := strings.TrimPrefix(r.URL.Path, "/control/history/")
-	if path == "" || path == "stats" || path == "timeseries" {
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
 		http.Error(w, "Session ID required", http.StatusBadRequest)
 		return
 	}
-
-	sessionID := strings.Split(path, "/")[0]
 
 	record, err := h.historyStore.GetSession(sessionID)
 	if err != nil {
@@ -738,14 +737,11 @@ func (h *Handler) handleFlaggedSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract session ID from path
-	path := strings.TrimPrefix(r.URL.Path, "/control/flagged/")
-	if path == "" || path == "stats" {
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
 		http.Error(w, "Session ID required", http.StatusBadRequest)
 		return
 	}
-
-	sessionID := strings.Split(path, "/")[0]
 
 	flagged := h.policyEngine.GetFlaggedSession(sessionID)
 	if flagged == nil {
@@ -808,24 +804,19 @@ func (h *Handler) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse path: /control/voice/{sessionID}/{voiceID?}/{action?}
-	path := strings.TrimPrefix(r.URL.Path, "/control/voice/")
-	parts := strings.Split(path, "/")
-
-	if len(parts) == 0 || parts[0] == "" {
+	sessionID := r.PathValue("sessionID")
+	if sessionID == "" {
 		http.Error(w, "Session ID required", http.StatusBadRequest)
 		return
 	}
 
-	sessionID := parts[0]
-	voiceID := ""
+	// rest captures "voiceID/action" from the {rest...} wildcard
+	rest := r.PathValue("rest")
+	parts := strings.SplitN(rest, "/", 2)
+	voiceID := parts[0]
 	action := ""
-
 	if len(parts) > 1 {
-		voiceID = parts[1]
-	}
-	if len(parts) > 2 {
-		action = parts[2]
+		action = parts[1]
 	}
 
 	switch r.Method {
@@ -1057,10 +1048,7 @@ func (h *Handler) handleVoiceHistorySession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Extract voice session ID from path
-	path := strings.TrimPrefix(r.URL.Path, "/control/voice-history/")
-	voiceID := strings.TrimSuffix(path, "/")
-
+	voiceID := r.PathValue("id")
 	if voiceID == "" {
 		http.Error(w, "Voice session ID required", http.StatusBadRequest)
 		return
@@ -1277,14 +1265,11 @@ func (h *Handler) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract session ID from path
-	path := strings.TrimPrefix(r.URL.Path, "/control/events/")
-	if path == "" || path == "stats" {
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
 		http.Error(w, "Session ID required", http.StatusBadRequest)
 		return
 	}
-
-	sessionID := strings.Split(path, "/")[0]
 
 	events, err := h.historyStore.GetSessionEvents(sessionID)
 	if err != nil {

@@ -222,7 +222,7 @@ func (s *Session) RecordToolCall(toolName, toolType, requestID string) {
 	}
 	s.ToolCallCounts[toolName]++
 
-	// Keep history (limited to last 100 calls to avoid memory bloat)
+	// Keep history (limited to avoid memory bloat)
 	record := ToolCallRecord{
 		Timestamp: time.Now(),
 		ToolName:  toolName,
@@ -587,6 +587,9 @@ func (s *Session) Snapshot() Session {
 		TokensOut:    s.TokensOut,
 		ToolCalls:    s.ToolCalls,
 	}
+	// Snapshots are read-only; a closed killChan prevents nil-channel blocks
+	snap.killChan = make(chan struct{})
+	close(snap.killChan)
 	for k, v := range s.Metadata {
 		snap.Metadata[k] = v
 	}

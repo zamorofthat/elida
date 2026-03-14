@@ -114,6 +114,12 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// SQLite supports only one writer at a time. Serialize all access to
+	// prevent "database is locked" errors under concurrent load.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0) // connections don't expire
+
 	// Enable WAL mode for better concurrent performance
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()

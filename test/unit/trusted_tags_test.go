@@ -117,7 +117,7 @@ func TestTrustedTagsSkipScanning(t *testing.T) {
 			manager := session.NewManager(store, cfg.Session.Timeout)
 			pe := policy.NewEngine(convertPolicyConfig(cfg.Policy))
 
-			p, err := proxy.NewWithPolicy(cfg, store, manager, nil, pe)
+			p, err := proxy.New(cfg, store, manager, proxy.WithPolicyEngine(pe))
 			if err != nil {
 				t.Fatalf("failed to create proxy: %v", err)
 			}

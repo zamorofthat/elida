@@ -361,7 +361,7 @@ func TestHandler_VoiceSession_Actions_NoWebSocketHandler(t *testing.T) {
 func newTestHandlerWithAuth(apiKey string) *control.Handler { //nolint:unparam // test helper with constant value
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
-	return control.NewWithAuth(store, manager, nil, nil, true, apiKey)
+	return control.New(store, manager, control.WithAuth(apiKey))
 }
 
 func TestHandler_Auth_Unauthorized(t *testing.T) {
@@ -495,7 +495,7 @@ func TestHandler_History_Pagination(t *testing.T) {
 
 	memStore := session.NewMemoryStore()
 	manager := session.NewManager(memStore, 5*time.Minute)
-	handler := control.NewWithHistory(memStore, manager, sqliteStore)
+	handler := control.New(memStore, manager, control.WithHistory(sqliteStore))
 
 	// Request first page with limit=2
 	req := httptest.NewRequest("GET", "/control/history?limit=2&offset=0", nil)
@@ -539,5 +539,20 @@ func TestHandler_History_Pagination(t *testing.T) {
 	}
 	if len(sessions) != 2 {
 		t.Errorf("expected 2 sessions in page, got %d", len(sessions))
+	}
+}
+
+func TestHandler_WithPolicyOption(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+
+	// WithPolicy should not panic and handler should work
+	handler := control.New(store, manager, control.WithPolicy(nil))
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
 	}
 }

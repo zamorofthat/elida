@@ -280,7 +280,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		sess = h.manager.GetOrCreate(sessionID, backend.URL.String(), r.RemoteAddr)
 	} else {
-		sess = h.manager.GetOrCreateByClient(r.RemoteAddr, backend.Name, backend.URL.String())
+		sess = h.manager.GetOrCreateByClient(session.RealClientAddr(r), backend.Name, backend.URL.String())
 	}
 
 	if sess == nil {

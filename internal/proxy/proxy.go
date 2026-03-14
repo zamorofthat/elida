@@ -32,6 +32,18 @@ const (
 	// maxStreamingChunks is the maximum number of streaming response chunks to store
 	// for logging, async scanning, and capture. Beyond this, chunks are dropped.
 	maxStreamingChunks = 100
+
+	// streamReadBufSize is the buffer size for reading streaming response chunks.
+	streamReadBufSize = 4096
+
+	// logTruncateLen is the max length for truncated log output of response bodies.
+	logTruncateLen = 1000
+
+	// logPreviewLen is the max length for streaming response content previews.
+	logPreviewLen = 500
+
+	// maxFailoverRetries is the maximum number of failover attempts before giving up.
+	maxFailoverRetries = 3
 )
 
 // WebSocketHandler is an interface for the WebSocket handler to avoid import cycle
@@ -55,53 +67,58 @@ type Proxy struct {
 	trustedTagRegexs []*regexp.Regexp     // Pre-compiled regexes for trusted tag stripping
 }
 
-// New creates a new proxy handler
-func New(cfg *config.Config, store session.Store, manager *session.Manager) (*Proxy, error) {
-	return NewWithPolicy(cfg, store, manager, nil, nil)
+// ProxyOption configures a Proxy.
+type ProxyOption func(*Proxy)
+
+// WithTelemetry sets the telemetry provider.
+func WithTelemetry(tp *telemetry.Provider) ProxyOption {
+	return func(p *Proxy) { p.telemetry = tp }
 }
 
-// NewWithTelemetry creates a new proxy handler with telemetry support
-func NewWithTelemetry(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider) (*Proxy, error) {
-	return NewWithPolicy(cfg, store, manager, tp, nil)
+// WithPolicyEngine sets the policy engine.
+func WithPolicyEngine(pe *policy.Engine) ProxyOption {
+	return func(p *Proxy) { p.policy = pe }
 }
 
-// NewWithPolicy creates a new proxy handler with telemetry and policy support
-func NewWithPolicy(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider, pe *policy.Engine) (*Proxy, error) {
-	// Create router based on config
-	var r *router.Router
-	var err error
-
-	if cfg.HasMultiBackend() {
-		// Multi-backend configuration
-		r, err = router.NewRouter(cfg.Backends, cfg.Routing)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// Single backend (backward compatibility)
-		r, err = router.NewSingleBackendRouter(cfg.Backend)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return NewWithRouter(cfg, store, manager, tp, pe, r)
+// WithRouter sets a custom router (overrides config-derived routing).
+func WithRouter(r *router.Router) ProxyOption {
+	return func(p *Proxy) { p.router = r }
 }
 
-// NewWithRouter creates a new proxy handler with a custom router
-func NewWithRouter(cfg *config.Config, store session.Store, manager *session.Manager, tp *telemetry.Provider, pe *policy.Engine, r *router.Router) (*Proxy, error) {
-	// Use noop provider if none provided
-	if tp == nil {
-		tp = telemetry.NoopProvider()
-	}
-
+// New creates a new proxy handler with the given options.
+func New(cfg *config.Config, store session.Store, manager *session.Manager, opts ...ProxyOption) (*Proxy, error) {
 	p := &Proxy{
-		config:    cfg,
-		store:     store,
-		manager:   manager,
-		router:    r,
-		telemetry: tp,
-		policy:    pe,
+		config:  cfg,
+		store:   store,
+		manager: manager,
+	}
+
+	for _, opt := range opts {
+		opt(p)
+	}
+
+	// Default telemetry to noop if not provided
+	if p.telemetry == nil {
+		p.telemetry = telemetry.NoopProvider()
+	}
+
+	// Build router from config if not explicitly provided
+	if p.router == nil {
+		var r *router.Router
+		var err error
+
+		if cfg.HasMultiBackend() {
+			r, err = router.NewRouter(cfg.Backends, cfg.Routing)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			r, err = router.NewSingleBackendRouter(cfg.Backend)
+			if err != nil {
+				return nil, err
+			}
+		}
+		p.router = r
 	}
 
 	// Pre-compile trusted tag regex patterns (avoids re-compilation per request)
@@ -286,7 +303,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if p.config.Session.GenerateIfMissing {
 		// No session ID - use client IP + backend based session tracking
 		// Each (client, backend) pair gets its own session for granular control
-		sess = p.manager.GetOrCreateByClient(r.RemoteAddr, backend.Name, backend.URL.String())
+		sess = p.manager.GetOrCreateByClient(session.RealClientAddr(r), backend.Name, backend.URL.String())
 	}
 
 	if sess == nil {
@@ -559,11 +576,12 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 
 // isStreamingRequest determines if the request expects a streaming response
 func (p *Proxy) isStreamingRequest(r *http.Request, body []byte) bool {
-	// Check for stream parameter in body (common for chat completions)
+	// Parse the stream field from the JSON body (handles any valid JSON whitespace)
 	if len(body) > 0 {
-		// Simple check - look for "stream":true or "stream": true
-		bodyStr := string(body)
-		if strings.Contains(bodyStr, `"stream":true`) || strings.Contains(bodyStr, `"stream": true`) {
+		var req struct {
+			Stream bool `json:"stream"`
+		}
+		if json.Unmarshal(body, &req) == nil && req.Stream {
 			return true
 		}
 	}
@@ -782,7 +800,7 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, req *http.Request, sess *
 func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Response, sess *session.Session, backend *router.Backend, isSSE bool) (int, int64) {
 	// Accumulate entire response before sending
 	var buffer bytes.Buffer
-	buf := make([]byte, 4096)
+	buf := make([]byte, streamReadBufSize)
 
 	for {
 		// Check if session was killed during buffering
@@ -916,7 +934,7 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 
 	var totalBytes int64
 	var chunks []string // For logging and capture
-	buf := make([]byte, 4096)
+	buf := make([]byte, streamReadBufSize)
 
 	for {
 		// Check if session was killed
@@ -1016,22 +1034,17 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
+	// Reconstruct response once for capture and flagging
+	reconstructed := joinChunks(chunks)
+
 	// Capture response for capture-all mode
 	if p.captureAll && p.captureBuffer != nil {
-		var response strings.Builder
-		for _, chunk := range chunks {
-			response.WriteString(chunk)
-		}
-		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
+		p.captureBuffer.UpdateLastResponse(sess.ID, reconstructed, resp.StatusCode)
 	}
 
 	// Capture response for flagged sessions
 	if p.policy.IsFlagged(sess.ID) {
-		var response strings.Builder
-		for _, chunk := range chunks {
-			response.WriteString(chunk)
-		}
-		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, response.String(), resp.StatusCode)
+		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, reconstructed, resp.StatusCode)
 		// Persist flagged session immediately to survive crashes
 		p.persistFlaggedSession(sess, backend.Name)
 	}
@@ -1069,14 +1082,14 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	var totalBytes int64
 
 	// Read and forward chunks
-	buf := make([]byte, 4096)
+	buf := make([]byte, streamReadBufSize)
 	for {
 		// Check if session was killed
 		select {
 		case <-sess.KillChan():
 			slog.Warn("streaming aborted: session killed", "session_id", sess.ID)
 			// Record tool calls on live session before async goroutine
-			abortContent := strings.Join(chunks, "")
+			abortContent := joinChunks(chunks)
 			if toolCalls := ExtractToolCallsFromResponse([]byte(abortContent)); len(toolCalls) > 0 {
 				for _, tc := range toolCalls {
 					sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
@@ -1132,18 +1145,16 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	// Log aggregated streaming response
 	p.logStreamingResponse(sess.ID, chunks, isSSE)
 
+	// Reconstruct response once for capture and tool call extraction
+	responseContent := joinChunks(chunks)
+
 	// Capture response for capture-all mode
 	if p.captureAll && p.captureBuffer != nil {
-		var response strings.Builder
-		for _, chunk := range chunks {
-			response.WriteString(chunk)
-		}
-		p.captureBuffer.UpdateLastResponse(sess.ID, response.String(), resp.StatusCode)
+		p.captureBuffer.UpdateLastResponse(sess.ID, responseContent, resp.StatusCode)
 	}
 
 	// Record tool calls on the live session before launching the async goroutine
 	// to avoid mutating session state from a detached goroutine
-	responseContent := strings.Join(chunks, "")
 	if toolCalls := ExtractToolCallsFromResponse([]byte(responseContent)); len(toolCalls) > 0 {
 		for _, tc := range toolCalls {
 			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
@@ -1168,13 +1179,7 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 		return
 	}
 
-	// Reconstruct response from chunks
-	var response strings.Builder
-	for _, chunk := range chunks {
-		response.WriteString(chunk)
-	}
-
-	content := response.String()
+	content := joinChunks(chunks)
 	if content == "" {
 		return
 	}
@@ -1227,8 +1232,8 @@ func proxyToolCallsToPolicyToolCalls(toolCalls []ToolCallInfo) []policy.ToolCall
 func (p *Proxy) logResponse(sessionID string, body []byte) {
 	// Truncate for logging if too large
 	logBody := string(body)
-	if len(logBody) > 1000 {
-		logBody = logBody[:1000] + "...[truncated]"
+	if len(logBody) > logTruncateLen {
+		logBody = logBody[:logTruncateLen] + "...[truncated]"
 	}
 
 	slog.Debug("response",
@@ -1240,29 +1245,17 @@ func (p *Proxy) logResponse(sessionID string, body []byte) {
 
 // logStreamingResponse logs an aggregated streaming response
 func (p *Proxy) logStreamingResponse(sessionID string, chunks []string, isSSE bool) {
-	// Reconstruct response from chunks
-	var response strings.Builder
-	for _, chunk := range chunks {
-		response.WriteString(chunk)
+	// For SSE, extract meaningful content; for NDJSON, use raw data
+	content := joinChunks(chunks)
+	if isSSE {
+		content = parseSSEContent(content)
 	}
 
-	// For SSE, parse out the actual content
-	if isSSE {
-		content := parseSSEContent(response.String())
-		slog.Debug("streaming response complete",
-			"session_id", sessionID,
-			"chunks", len(chunks),
-			"content_preview", truncate(content, 500),
-		)
-	} else {
-		// NDJSON - parse out content
-		content := parseNDJSONContent(response.String())
-		slog.Debug("streaming response complete",
-			"session_id", sessionID,
-			"chunks", len(chunks),
-			"content_preview", truncate(content, 500),
-		)
-	}
+	slog.Debug("streaming response complete",
+		"session_id", sessionID,
+		"chunks", len(chunks),
+		"content_preview", truncate(content, logPreviewLen),
+	)
 }
 
 // parseSSEContent extracts content from SSE format
@@ -1283,11 +1276,13 @@ func parseSSEContent(data string) string {
 	return content.String()
 }
 
-// parseNDJSONContent extracts content from NDJSON format (Ollama style)
-func parseNDJSONContent(data string) string {
-	// For now, just return the raw data
-	// In future, could parse each JSON line and extract response/message content
-	return data
+// joinChunks reconstructs a full response string from streaming chunks.
+func joinChunks(chunks []string) string {
+	var b strings.Builder
+	for _, c := range chunks {
+		b.WriteString(c)
+	}
+	return b.String()
 }
 
 // truncate truncates a string to maxLen
@@ -1337,8 +1332,6 @@ func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 func (p *Proxy) attemptFailover(w http.ResponseWriter, originalReq *http.Request, sess *session.Session, failedBackend *router.Backend, failureType FailureType) (int, int64, bool) {
 	return p.attemptFailoverWithDepth(w, originalReq, sess, failedBackend, failureType, 0)
 }
-
-const maxFailoverRetries = 3
 
 func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *http.Request, sess *session.Session, failedBackend *router.Backend, failureType FailureType, depth int) (int, int64, bool) {
 	if depth >= maxFailoverRetries {

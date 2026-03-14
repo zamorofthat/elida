@@ -26,7 +26,7 @@ func TestControlAuth_ConstantTime(t *testing.T) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 
-	handler := control.NewWithAuth(store, manager, nil, nil, true, "correct-api-key")
+	handler := control.New(store, manager, control.WithAuth("correct-api-key"))
 
 	tests := []struct {
 		name       string
@@ -320,7 +320,7 @@ func TestRiskLadder_BlocksHighRiskSession(t *testing.T) {
 
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, cfg.Session.Timeout)
-	p, err := proxy.NewWithPolicy(cfg, store, manager, nil, engine)
+	p, err := proxy.New(cfg, store, manager, proxy.WithPolicyEngine(engine))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestRiskLadder_ThrottlesBeforeBlocking(t *testing.T) {
 
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, cfg.Session.Timeout)
-	p, err := proxy.NewWithPolicy(cfg, store, manager, nil, engine)
+	p, err := proxy.New(cfg, store, manager, proxy.WithPolicyEngine(engine))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +485,7 @@ func TestProxy_AsyncScanUsesSnapshot(t *testing.T) {
 
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, cfg.Session.Timeout)
-	p, err := proxy.NewWithPolicy(cfg, store, manager, nil, engine)
+	p, err := proxy.New(cfg, store, manager, proxy.WithPolicyEngine(engine))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func TestProxy_TrustedTagsPreCompiled(t *testing.T) {
 
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, cfg.Session.Timeout)
-	p, err := proxy.NewWithPolicy(cfg, store, manager, nil, engine)
+	p, err := proxy.New(cfg, store, manager, proxy.WithPolicyEngine(engine))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestProxy_RiskBlock_ResponseFormat(t *testing.T) {
 
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, cfg.Session.Timeout)
-	p, err := proxy.NewWithPolicy(cfg, store, manager, nil, engine)
+	p, err := proxy.New(cfg, store, manager, proxy.WithPolicyEngine(engine))
 	if err != nil {
 		t.Fatal(err)
 	}
