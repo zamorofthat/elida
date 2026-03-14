@@ -24,6 +24,16 @@ import (
 	"elida/internal/telemetry"
 )
 
+const (
+	// maxRequestBodySize is the maximum request body size (10MB).
+	// Prevents OOM from malicious payloads.
+	maxRequestBodySize = 10 * 1024 * 1024
+
+	// maxStreamingChunks is the maximum number of streaming response chunks to store
+	// for logging, async scanning, and capture. Beyond this, chunks are dropped.
+	maxStreamingChunks = 100
+)
+
 // WebSocketHandler is an interface for the WebSocket handler to avoid import cycle
 type WebSocketHandler interface {
 	ServeHTTP(w http.ResponseWriter, r *http.Request)
@@ -31,17 +41,18 @@ type WebSocketHandler interface {
 
 // Proxy handles proxying requests to the backend
 type Proxy struct {
-	config        *config.Config
-	store         session.Store
-	manager       *session.Manager
-	router        *router.Router
-	telemetry     *telemetry.Provider
-	policy        *policy.Engine
-	storage       *storage.SQLiteStore // For persisting flagged sessions immediately
-	wsHandler     WebSocketHandler     // WebSocket proxy handler
-	captureBuffer *CaptureBuffer       // For capture-all mode (policy-independent)
-	captureAll    bool                 // True when capture_mode == "all"
-	failover      *FailoverController  // Session-aware failover controller
+	config           *config.Config
+	store            session.Store
+	manager          *session.Manager
+	router           *router.Router
+	telemetry        *telemetry.Provider
+	policy           *policy.Engine
+	storage          *storage.SQLiteStore // For persisting flagged sessions immediately
+	wsHandler        WebSocketHandler     // WebSocket proxy handler
+	captureBuffer    *CaptureBuffer       // For capture-all mode (policy-independent)
+	captureAll       bool                 // True when capture_mode == "all"
+	failover         *FailoverController  // Session-aware failover controller
+	trustedTagRegexs []*regexp.Regexp     // Pre-compiled regexes for trusted tag stripping
 }
 
 // New creates a new proxy handler
@@ -91,6 +102,12 @@ func NewWithRouter(cfg *config.Config, store session.Store, manager *session.Man
 		router:    r,
 		telemetry: tp,
 		policy:    pe,
+	}
+
+	// Pre-compile trusted tag regex patterns (avoids re-compilation per request)
+	for _, tag := range cfg.Policy.Trust.TrustedTags {
+		pattern := fmt.Sprintf(`(?s)<%s>.*?</%s>`, regexp.QuoteMeta(tag), regexp.QuoteMeta(tag))
+		p.trustedTagRegexs = append(p.trustedTagRegexs, regexp.MustCompile(pattern))
 	}
 
 	// Initialize capture-all buffer when storage is enabled with capture_mode="all"
@@ -238,10 +255,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Capture request body first (needed for routing and forwarding)
+	// Limit to 10MB to prevent OOM from malicious payloads
 	var requestBody []byte
 	if r.Body != nil {
 		var err error
-		requestBody, err = io.ReadAll(r.Body)
+		requestBody, err = io.ReadAll(io.LimitReader(r.Body, maxRequestBodySize))
 		if err != nil {
 			slog.Error("failed to read request body", "error", err)
 			http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -303,14 +321,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add session ID to response headers
 	w.Header().Set(p.config.Session.Header, sess.ID)
 
+	// Risk ladder enforcement — check cumulative risk score before processing
+	if p.policy != nil {
+		if p.policy.ShouldBlockByRisk(sess.ID) {
+			slog.Warn("request blocked by risk ladder",
+				"session_id", sess.ID,
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			if _, err := w.Write([]byte(`{"error":"risk_threshold_exceeded","message":"Session risk score too high"}`)); err != nil {
+				slog.Warn("write failed", "session_id", sess.ID, "error", err)
+			}
+			return
+		}
+		if shouldThrottle, delayMs := p.policy.ShouldThrottle(sess.ID); shouldThrottle {
+			slog.Info("request throttled by risk ladder",
+				"session_id", sess.ID,
+				"delay_ms", delayMs,
+			)
+			time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		}
+	}
+
 	// Content inspection - check request body against policy rules BEFORE forwarding
 	// Smart scanning: cache system prompt hash, re-scan only if changed
 	// Always scan: user messages, assistant responses, tool results
 	// Trusted tags (e.g., <system-reminder>) are stripped before scanning
 	if p.policy != nil && len(requestBody) > 0 {
-		trustedTags := p.config.Policy.Trust.TrustedTags
 		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
-		contentToScan := extractScannableContent(requestBody, sess, trustedTags, allowlistedTools)
+		contentToScan := extractScannableContent(requestBody, sess, p.trustedTagRegexs, allowlistedTools)
 		if contentToScan == "" {
 			contentToScan = string(requestBody) // Fallback for non-chat requests
 		}
@@ -929,8 +968,14 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 			}
 
 			// Store chunk for logging (limit stored chunks)
-			if len(chunks) < 100 {
+			if len(chunks) < maxStreamingChunks {
 				chunks = append(chunks, string(chunk))
+			} else if len(chunks) == maxStreamingChunks {
+				slog.Warn("streaming chunk limit reached, further chunks will not be captured",
+					"session_id", sess.ID,
+					"limit", maxStreamingChunks,
+				)
+				chunks = append(chunks, "") // sentinel to prevent repeated warnings
 			}
 
 			// Forward chunk to client
@@ -1044,8 +1089,14 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 			chunk := buf[:n]
 
 			// Store chunk for logging and async scanning (limit stored chunks)
-			if len(chunks) < 100 {
+			if len(chunks) < maxStreamingChunks {
 				chunks = append(chunks, string(chunk))
+			} else if len(chunks) == maxStreamingChunks {
+				slog.Warn("streaming chunk limit reached, further chunks will not be captured",
+					"session_id", sess.ID,
+					"limit", maxStreamingChunks,
+				)
+				chunks = append(chunks, "") // sentinel to prevent repeated warnings
 			}
 
 			// Write to client
@@ -1451,18 +1502,19 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 		return
 	}
 
-	// Build session record
+	// Build session record using Snapshot() for thread-safe field access
+	snap := sess.Snapshot()
 	record := storage.SessionRecord{
-		ID:           sess.ID,
+		ID:           snap.ID,
 		State:        "flagged",
-		StartTime:    sess.StartTime,
+		StartTime:    snap.StartTime,
 		EndTime:      time.Now(),
-		DurationMs:   sess.Duration().Milliseconds(),
-		RequestCount: sess.RequestCount,
-		BytesIn:      sess.BytesIn,
-		BytesOut:     sess.BytesOut,
+		DurationMs:   snap.Duration().Milliseconds(),
+		RequestCount: snap.RequestCount,
+		BytesIn:      snap.BytesIn,
+		BytesOut:     snap.BytesOut,
 		Backend:      backendName,
-		ClientAddr:   sess.ClientAddr,
+		ClientAddr:   snap.ClientAddr,
 	}
 
 	// Add captured content
@@ -1501,7 +1553,7 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 // Always scans: user messages, assistant responses, tool results.
 // Skips: system prompts that match the cached hash.
 // Strips content within trusted tags (e.g., <system-reminder>...</system-reminder>).
-func extractScannableContent(body []byte, sess *session.Session, trustedTags []string, allowlistedTools ...[]string) string {
+func extractScannableContent(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, allowlistedTools ...[]string) string {
 	// Try to parse as chat completion request
 	var req struct {
 		Messages []struct {
@@ -1534,8 +1586,8 @@ func extractScannableContent(body []byte, sess *session.Session, trustedTags []s
 		}
 
 		// Strip content within trusted tags before scanning
-		if len(trustedTags) > 0 {
-			content = stripTrustedTags(content, trustedTags)
+		if len(trustedTagRegexs) > 0 {
+			content = stripTrustedTags(content, trustedTagRegexs)
 		}
 
 		if msg.Role == "system" {
@@ -1649,21 +1701,17 @@ func hashContent(content string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// stripTrustedTags removes content within trusted XML-style tags.
-// For example, with trustedTags=["system-reminder"], it removes:
-// <system-reminder>...any content...</system-reminder>
+// stripTrustedTags removes content within trusted XML-style tags using
+// pre-compiled regex patterns. For example, with trustedTags=["system-reminder"],
+// it removes: <system-reminder>...any content...</system-reminder>
 // This prevents false positives from scanning trusted system content.
-func stripTrustedTags(content string, trustedTags []string) string {
-	if len(trustedTags) == 0 {
+func stripTrustedTags(content string, compiledRegexes []*regexp.Regexp) string {
+	if len(compiledRegexes) == 0 {
 		return content
 	}
 
 	result := content
-	for _, tag := range trustedTags {
-		// Match <tag>...</tag> including multiline content (non-greedy)
-		// Uses (?s) flag for dotall mode (. matches newlines)
-		pattern := fmt.Sprintf(`(?s)<%s>.*?</%s>`, regexp.QuoteMeta(tag), regexp.QuoteMeta(tag))
-		re := regexp.MustCompile(pattern)
+	for _, re := range compiledRegexes {
 		result = re.ReplaceAllString(result, "")
 	}
 
