@@ -73,7 +73,6 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 		opt(h)
 	}
 
-
 	// Dashboard UI (catch-all pattern for Go 1.22+)
 	h.mux.Handle("/{path...}", h.dashboard)
 

@@ -1264,23 +1264,17 @@ func (p *Proxy) logStreamingResponse(sessionID string, chunks []string, isSSE bo
 		response.WriteString(chunk)
 	}
 
-	// For SSE, parse out the actual content
+	// For SSE, extract meaningful content; for NDJSON, use raw data
+	content := response.String()
 	if isSSE {
-		content := parseSSEContent(response.String())
-		slog.Debug("streaming response complete",
-			"session_id", sessionID,
-			"chunks", len(chunks),
-			"content_preview", truncate(content, logPreviewLen),
-		)
-	} else {
-		// NDJSON - parse out content
-		content := parseNDJSONContent(response.String())
-		slog.Debug("streaming response complete",
-			"session_id", sessionID,
-			"chunks", len(chunks),
-			"content_preview", truncate(content, logPreviewLen),
-		)
+		content = parseSSEContent(content)
 	}
+
+	slog.Debug("streaming response complete",
+		"session_id", sessionID,
+		"chunks", len(chunks),
+		"content_preview", truncate(content, logPreviewLen),
+	)
 }
 
 // parseSSEContent extracts content from SSE format
@@ -1299,13 +1293,6 @@ func parseSSEContent(data string) string {
 		}
 	}
 	return content.String()
-}
-
-// parseNDJSONContent extracts content from NDJSON format (Ollama style)
-func parseNDJSONContent(data string) string {
-	// For now, just return the raw data
-	// In future, could parse each JSON line and extract response/message content
-	return data
 }
 
 // truncate truncates a string to maxLen
