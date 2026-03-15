@@ -1,10 +1,16 @@
 package unit
 
 import (
+	"math"
 	"testing"
 
 	"elida/internal/policy"
 )
+
+// approxEqual checks if two floats are within a tolerance (for decay-adjusted scores)
+func approxEqual(a, b, tolerance float64) bool {
+	return math.Abs(a-b) < tolerance
+}
 
 // Helper to create a risk-ladder enabled policy engine
 func newRiskLadderEngine(rules []policy.Rule, thresholds []policy.RiskThreshold) *policy.Engine {
@@ -68,8 +74,8 @@ func TestRiskScore_Accumulation(t *testing.T) {
 	scoreFinal, actionFinal, _ := engine.GetSessionRiskScore(sessionID)
 	t.Logf("Final score: %f, action: %s", scoreFinal, actionFinal)
 
-	if scoreFinal < 15 {
-		t.Errorf("expected score >= 15 after many violations, got %f", scoreFinal)
+	if scoreFinal < 14.9 {
+		t.Errorf("expected score ~15+ after many violations, got %f", scoreFinal)
 	}
 }
 
@@ -118,12 +124,12 @@ func TestRiskScore_SeverityWeights(t *testing.T) {
 		t.Errorf("expected critical score (%f) > info score (%f)", criticalScore, infoScore)
 	}
 
-	// Verify weight ratio (critical=10, info=1)
+	// Verify weight ratio (critical=10, info=1) — use tolerance for decay-adjusted scores
 	expectedRatio := policy.SeverityWeights[policy.SeverityCritical] / policy.SeverityWeights[policy.SeverityInfo]
 	actualRatio := criticalScore / infoScore
 
-	if actualRatio != expectedRatio {
-		t.Errorf("expected weight ratio %f, got %f", expectedRatio, actualRatio)
+	if !approxEqual(actualRatio, expectedRatio, 0.01) {
+		t.Errorf("expected weight ratio ~%f, got %f", expectedRatio, actualRatio)
 	}
 }
 
@@ -154,7 +160,7 @@ func TestRiskLadder_Escalation(t *testing.T) {
 	_, action1, _ := engine.GetSessionRiskScore(sessionID)
 	t.Logf("After 1 violation: action=%s", action1)
 
-	// 2nd violation (score=6) - should be warn
+	// 2nd violation (score~6) - should be warn
 	engine.EvaluateRequestContent(sessionID, "VIOLATION")
 	score2, action2, _ := engine.GetSessionRiskScore(sessionID)
 	t.Logf("After 2 violations: score=%f, action=%s", score2, action2)
@@ -162,35 +168,35 @@ func TestRiskLadder_Escalation(t *testing.T) {
 		t.Errorf("expected warn at score %f, got %s", score2, action2)
 	}
 
-	// 5th violation (score=15) - should be throttle
-	for i := 0; i < 3; i++ {
+	// 6 violations (score~18) - should be throttle (extra violation accounts for decay)
+	for i := 0; i < 4; i++ {
 		engine.EvaluateRequestContent(sessionID, "VIOLATION")
 	}
-	score5, action5, throttleRate := engine.GetSessionRiskScore(sessionID)
-	t.Logf("After 5 violations: score=%f, action=%s, throttle=%d", score5, action5, throttleRate)
-	if action5 != string(policy.ActionThrottle) {
-		t.Errorf("expected throttle at score %f, got %s", score5, action5)
+	score6, action6, throttleRate := engine.GetSessionRiskScore(sessionID)
+	t.Logf("After 6 violations: score=%f, action=%s, throttle=%d", score6, action6, throttleRate)
+	if action6 != string(policy.ActionThrottle) {
+		t.Errorf("expected throttle at score %f, got %s", score6, action6)
 	}
 	if throttleRate != 10 {
 		t.Errorf("expected throttle rate 10, got %d", throttleRate)
 	}
 
-	// 10th violation (score=30) - should be block
+	// 11 violations (score~33) - should be block
 	for i := 0; i < 5; i++ {
 		engine.EvaluateRequestContent(sessionID, "VIOLATION")
 	}
-	score10, action10, _ := engine.GetSessionRiskScore(sessionID)
-	t.Logf("After 10 violations: score=%f, action=%s", score10, action10)
-	if action10 != string(policy.ActionBlock) {
-		t.Errorf("expected block at score %f, got %s", score10, action10)
+	score11, action11, _ := engine.GetSessionRiskScore(sessionID)
+	t.Logf("After 11 violations: score=%f, action=%s", score11, action11)
+	if action11 != string(policy.ActionBlock) {
+		t.Errorf("expected block at score %f, got %s", score11, action11)
 	}
 
-	// 17th violation (score=51) - should be terminate
+	// 18 violations (score~54) - should be terminate
 	for i := 0; i < 7; i++ {
 		engine.EvaluateRequestContent(sessionID, "VIOLATION")
 	}
 	scoreFinal, actionFinal, _ := engine.GetSessionRiskScore(sessionID)
-	t.Logf("After 17 violations: score=%f, action=%s", scoreFinal, actionFinal)
+	t.Logf("After 18 violations: score=%f, action=%s", scoreFinal, actionFinal)
 	if actionFinal != string(policy.ActionTerminate) {
 		t.Errorf("expected terminate at score %f, got %s", scoreFinal, actionFinal)
 	}
@@ -209,7 +215,7 @@ func TestRiskLadder_Throttle(t *testing.T) {
 	}
 
 	thresholds := []policy.RiskThreshold{
-		{Score: 3, Action: policy.ActionThrottle, ThrottleRate: 5},
+		{Score: 2.9, Action: policy.ActionThrottle, ThrottleRate: 5}, // Slightly below 1×3 for decay
 	}
 
 	engine := newRiskLadderEngine(rules, thresholds)
@@ -247,19 +253,19 @@ func TestRiskLadder_ShouldBlock(t *testing.T) {
 	}
 
 	thresholds := []policy.RiskThreshold{
-		{Score: 20, Action: policy.ActionBlock},
+		{Score: 19, Action: policy.ActionBlock}, // Slightly below 2×10 to account for decay
 	}
 
 	engine := newRiskLadderEngine(rules, thresholds)
 	sessionID := "block-test"
 
-	// First violation (score=10) - should not block
+	// First violation (score~10) - should not block
 	engine.EvaluateRequestContent(sessionID, "CRITICAL")
 	if engine.ShouldBlockByRisk(sessionID) {
 		t.Error("should not block after first violation")
 	}
 
-	// Second violation (score=20) - should block
+	// Second violation (score~20) - should block
 	engine.EvaluateRequestContent(sessionID, "CRITICAL")
 	if !engine.ShouldBlockByRisk(sessionID) {
 		t.Error("should block after second violation")
@@ -279,7 +285,7 @@ func TestRiskLadder_ShouldTerminate(t *testing.T) {
 	}
 
 	thresholds := []policy.RiskThreshold{
-		{Score: 50, Action: policy.ActionTerminate},
+		{Score: 49, Action: policy.ActionTerminate}, // Slightly below 5×10 to account for decay
 	}
 
 	engine := newRiskLadderEngine(rules, thresholds)
@@ -293,7 +299,7 @@ func TestRiskLadder_ShouldTerminate(t *testing.T) {
 		t.Error("should not terminate below threshold")
 	}
 
-	// 5th violation (score=50) - should terminate
+	// 5th violation (score~50) - should terminate
 	engine.EvaluateRequestContent(sessionID, "DANGER")
 	if !engine.ShouldTerminateByRisk(sessionID) {
 		t.Error("should terminate at threshold")
@@ -352,17 +358,17 @@ func TestRiskLadder_Stats(t *testing.T) {
 	}
 
 	thresholds := []policy.RiskThreshold{
-		{Score: 10, Action: policy.ActionThrottle, ThrottleRate: 10},
-		{Score: 30, Action: policy.ActionBlock},
+		{Score: 9, Action: policy.ActionThrottle, ThrottleRate: 10}, // Slightly below 1×10 for decay
+		{Score: 29, Action: policy.ActionBlock},                     // Slightly below 3×10 for decay
 	}
 
 	engine := newRiskLadderEngine(rules, thresholds)
 
 	// Create some flagged sessions with different risk levels
-	engine.EvaluateRequestContent("session1", "TRIGGER") // score=10, throttled
+	engine.EvaluateRequestContent("session1", "TRIGGER") // score~10, throttled
 	engine.EvaluateRequestContent("session2", "TRIGGER")
 	engine.EvaluateRequestContent("session2", "TRIGGER")
-	engine.EvaluateRequestContent("session2", "TRIGGER") // score=30, blocked
+	engine.EvaluateRequestContent("session2", "TRIGGER") // score~30, blocked
 
 	stats := engine.Stats()
 

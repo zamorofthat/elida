@@ -406,8 +406,8 @@ func TestRiskLadder_ThrottlesBeforeBlocking(t *testing.T) {
 	sessionID := "throttle-proxy-test"
 
 	// Send enough warnings to reach throttle level but not block
-	// Warning severity = 3 points, throttle threshold is typically 15
-	for i := 0; i < 5; i++ {
+	// Warning severity = 3 points, throttle threshold is 15 (need 6 to clear with decay)
+	for i := 0; i < 6; i++ {
 		req := httptest.NewRequest("POST", "/v1/chat/completions",
 			strings.NewReader(`{"messages":[{"role":"user","content":"SUSPICIOUS"}]}`))
 		req.Header.Set("X-Session-ID", sessionID)

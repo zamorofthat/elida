@@ -113,7 +113,12 @@ redis:
 # OpenTelemetry
 telemetry:
   enabled: false
-  endpoint: ""
+  exporter: "otlp"          # "otlp", "stdout", or "none"
+  endpoint: ""              # OTLP endpoint (e.g., "localhost:4317")
+  service_name: "elida"
+  insecure: true
+  capture_content: "none"   # "none", "flagged", or "all"
+  max_body_size: 4096       # Truncation limit for captured bodies
 ```
 
 ## Environment Variables

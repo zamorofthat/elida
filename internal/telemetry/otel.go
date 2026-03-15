@@ -32,7 +32,7 @@ type Config struct {
 	Endpoint       string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
 	ServiceName    string `yaml:"service_name"`
 	Insecure       bool   `yaml:"insecure"`        // Use insecure connection for OTLP
-	CaptureContent bool   `yaml:"capture_content"` // Log full request/response bodies
+	CaptureContent string `yaml:"capture_content"` // "none" (default), "flagged", or "all"
 	MaxBodySize    int    `yaml:"max_body_size"`   // Truncation limit for bodies (default 4096)
 }
 
@@ -386,21 +386,56 @@ func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matche
 	p.logger.Emit(ctx, rec)
 }
 
-// EmitCapturedContentLog emits captured request/response bodies as a log record (opt-in)
+// EmitCapturedContentLog emits captured request/response bodies as an OTEL log record.
+// Only emits when capture_content mode is "all".
 func (p *Provider) EmitCapturedContentLog(ctx context.Context, sessionID, requestBody, responseBody, model, providerName string) {
-	if p.logger == nil || !p.config.CaptureContent {
+	if p.logger == nil || p.config.CaptureContent != "all" {
 		return
 	}
+	p.emitContentRecord(ctx, sessionID, requestBody, responseBody, model, providerName, false)
+}
 
+// EmitFlaggedContentLog emits captured request/response bodies for policy-flagged sessions.
+// Emits when capture_content mode is "flagged" or "all".
+func (p *Provider) EmitFlaggedContentLog(ctx context.Context, sessionID, requestBody, responseBody, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+	mode := p.config.CaptureContent
+	if mode != "flagged" && mode != "all" {
+		return
+	}
+	p.emitContentRecord(ctx, sessionID, requestBody, responseBody, model, providerName, true)
+}
+
+// ShouldCaptureAll returns true if capture_content mode is "all"
+func (p *Provider) ShouldCaptureAll() bool {
+	return p.config.CaptureContent == "all"
+}
+
+// ShouldCaptureFlagged returns true if capture_content mode is "flagged" or "all"
+func (p *Provider) ShouldCaptureFlagged() bool {
+	mode := p.config.CaptureContent
+	return mode == "flagged" || mode == "all"
+}
+
+func (p *Provider) emitContentRecord(ctx context.Context, sessionID, requestBody, responseBody, model, providerName string, flagged bool) {
 	maxSize := p.config.MaxBodySize
 	if maxSize == 0 {
 		maxSize = 4096
 	}
 
+	severity := otellog.SeverityInfo
+	body := "captured content"
+	if flagged {
+		severity = otellog.SeverityWarn
+		body = "flagged content"
+	}
+
 	var rec otellog.Record
 	rec.SetTimestamp(time.Now())
-	rec.SetSeverity(otellog.SeverityInfo)
-	rec.SetBody(otellog.StringValue("captured content"))
+	rec.SetSeverity(severity)
+	rec.SetBody(otellog.StringValue(body))
 	rec.AddAttributes(
 		otellog.String("gen_ai.conversation.id", sessionID),
 		otellog.String("gen_ai.provider.name", providerName),
@@ -408,6 +443,7 @@ func (p *Provider) EmitCapturedContentLog(ctx context.Context, sessionID, reques
 		otellog.String("gen_ai.request.model", model),
 		otellog.String("elida.capture.request_body", truncateBody(requestBody, maxSize)),
 		otellog.String("elida.capture.response_body", truncateBody(responseBody, maxSize)),
+		otellog.Bool("elida.capture.flagged", flagged),
 	)
 
 	setTraceContext(&rec, ctx)
@@ -711,9 +747,17 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 		p.EmitSessionKilledLog(ctx, record.SessionID, record.State, record.Backend, record.Model, record.DurationMs, record.RequestCount)
 	}
 
-	// Emit captured content logs if opt-in
+	// Emit captured content logs based on capture_content mode:
+	//   "none"    — no content emitted
+	//   "flagged" — only emit content for sessions with violations
+	//   "all"     — emit all captured content
+	isFlagged := len(record.Violations) > 0
 	for _, c := range record.Captures {
-		p.EmitCapturedContentLog(ctx, record.SessionID, c.RequestBody, c.ResponseBody, record.Model, record.Backend)
+		if isFlagged {
+			p.EmitFlaggedContentLog(ctx, record.SessionID, c.RequestBody, c.ResponseBody, record.Model, record.Backend)
+		} else {
+			p.EmitCapturedContentLog(ctx, record.SessionID, c.RequestBody, c.ResponseBody, record.Model, record.Backend)
+		}
 	}
 
 	// Record token usage metrics

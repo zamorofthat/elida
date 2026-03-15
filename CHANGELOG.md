@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-Message Content Scanning**: Policy engine now scans each message individually instead of concatenating all content into a flat string. Each violation carries `source_role` (user/assistant/system/tool), `message_index`, and `source_content` for precise attribution.
+- **Anthropic System Prompt Parsing**: Top-level `system` field from Anthropic API requests is now parsed and hash-cached. Previously only OpenAI-style `role: "system"` messages were handled.
+- **Source-Weighted Risk Scoring**: Risk scores now factor in where the violation was found. User input scores full weight (1.0x), tool results 0.8x, assistant messages 0.2x, system prompts 0.1x. Reduces false positive impact from model output echoing safety patterns.
+- **Exponential Decay on Risk Scores**: Violation contributions decay over time using `e^(-λt)` formula (λ=0.002, half-life ~5.8 minutes). Old violations naturally fade instead of permanently inflating risk scores.
+- **Effective Severity**: Each violation now includes an `effective_severity` field that combines the rule severity with source-role weighting. A critical rule triggered by an assistant echo downgrades to warning or info.
+- **SIEM-Friendly Structured Violations**: Violations include `event_category` (prompt_injection, data_exfil, rate_limit, etc.) and `framework_ref` (OWASP-LLM01, ELIDA-FIREWALL, etc.) for SIEM correlation rules.
+- **OTEL Capture Modes**: `telemetry.capture_content` changed from boolean to three-mode string: `"none"` (default), `"flagged"` (only policy-flagged sessions), `"all"` (full audit). Enables targeted content shipping to SIEM.
+- **Dashboard Source Attribution**: Flagged session details now show source role badges (color-coded by role), message index, framework reference tags, and effective severity instead of raw rule severity.
+- **Tool Enforcement Example**: Added commented-out `tool_blocked` rule example to `elida.yaml` configuration reference.
+
+### Changed
+
+- `telemetry.capture_content` config field changed from `bool` to `string` (`"none"`, `"flagged"`, `"all"`)
+- `calculateMaxSeverity` now uses effective severity (source-weighted) instead of raw rule severity
+- Risk score calculation uses per-event time-series with decay instead of simple count × weight formula
+- Policy violation logs now include `source_role`, `message_index`, `effective_severity`, `event_category`, `framework_ref`, and `source_content` fields
+
+### Fixed
+
+- Fixed Anthropic API system prompt not being parsed — top-level `system` field was completely ignored by the content scanner
+- Fixed false positive storm from Claude Code system prompt — "ignore all previous instructions" in safety text triggered `prompt_injection_ignore_request` on every request
+- System prompt hash caching now works for both Anthropic (top-level field) and OpenAI (role message) formats
+
 ## [0.2.1] - 2026-02-22
 
 ### Added
