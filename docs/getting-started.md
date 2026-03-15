@@ -268,7 +268,7 @@ backends:
 
 ## Next Steps
 
-- [Configuration Guide](CONFIGURATION.md) — All options
-- [Policy Rules Reference](POLICY_RULES_REFERENCE.md) — 40+ security rules
-- [Telco Controls](TELCO_CONTROLS.md) — Risk ladder, token tracking
-- [Enterprise Deployment](ENTERPRISE_DEPLOYMENT.md) — Kubernetes, Helm
+- [Configuration Guide](configuration.md) — All options
+- [Policy Rules Reference](policy-rules-reference.md) — 40+ security rules
+- [Telco Controls](telco-controls.md) — Risk ladder, token tracking
+- [Enterprise Deployment](enterprise-deployment.md) — Kubernetes, Helm

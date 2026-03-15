@@ -273,5 +273,5 @@ open http://localhost:9090/
 
 - [GitHub](https://github.com/zamorofthat/elida)
 - [Docker Hub](https://hub.docker.com/r/zamorofthat/elida)
-- [Architecture](ARCHITECTURE.md)
-- [Security Policy](SECURITY.md)
+- [Architecture](architecture.md)
+- [Security Policy](security.md)

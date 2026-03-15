@@ -583,7 +583,7 @@ diff baseline.txt updated.txt
 
 ## Related Documentation
 
-- [Policy Rules Reference](POLICY_RULES_REFERENCE.md) — All built-in security rules
-- [Security Controls](SECURITY_CONTROLS.md) — Core security features
-- [Session Records](SESSION_RECORDS.md) — Session data model
-- [Architecture](ARCHITECTURE.md) — Technical deep-dive
+- [Policy Rules Reference](policy-rules-reference.md) — All built-in security rules
+- [Security Controls](security-controls.md) — Core security features
+- [Session Records](session-records.md) — Session data model
+- [Architecture](architecture.md) — Technical deep-dive

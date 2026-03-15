@@ -104,7 +104,7 @@ curl -X POST http://localhost:9090/control/sessions/client-abc123/kill
 
 ### Settings (Layered Configuration)
 
-ELIDA supports dynamic settings management with a layered hierarchy. See [CONFIGURATION.md](CONFIGURATION.md#settings-hierarchy-layered-configuration) for details.
+ELIDA supports dynamic settings management with a layered hierarchy. See [configuration.md](configuration.md#settings-hierarchy-layered-configuration) for details.
 
 ```bash
 # Get merged settings (all layers combined)
