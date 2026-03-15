@@ -1,0 +1,81 @@
+site_name: ELIDA
+site_description: Edge Layer for Intelligent Defense of Agents — Session-aware reverse proxy for AI agent governance
+site_url: https://zamorofthat.github.io/elida/
+repo_url: https://github.com/zamorofthat/elida
+repo_name: zamorofthat/elida
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/zamorofthat/elida
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Quick Start: getting-started.md
+    - Configuration: configuration.md
+    - Deployment: deployment.md
+    - Docker: docker.md
+  - Architecture:
+    - Overview: architecture.md
+    - Enterprise Deployment: enterprise-deployment.md
+  - Security:
+    - Policy Engine: security-policies.md
+    - Policy Rules Reference: policy-rules-reference.md
+    - Security Controls: security-controls.md
+    - Telco-Style Controls: telco-controls.md
+    - Security: security.md
+  - Features:
+    - Session Records: session-records.md
+    - Control API: api.md
+    - Voice & WebSocket: voice.md
+  - Integrations: integrations.md

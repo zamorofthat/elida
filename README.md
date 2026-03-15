@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
 [![CI](https://github.com/zamorofthat/elida/actions/workflows/ci.yml/badge.svg)](https://github.com/zamorofthat/elida/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zamorofthat/elida/badge)](https://scorecard.dev/viewer/?uri=github.com/zamorofthat/elida)
-[![codecov](https://codecov.io/gh/zamorofthat/elida/branch/main/graph/badge.svg)](https://codecov.io/gh/zamorofthat/elida)
+[![codecov](https://codecov.io/gh/zamorofthat/elida/branch/main/graph/badge.svg?token=BG6KR8BJ9N)](https://codecov.io/gh/zamorofthat/elida)
 
 Think Session Border Controller (SBC) from telecom — but instead of managing VoIP calls, ELIDA sits between your AI agents and model APIs, giving you visibility and control over every session.
 
