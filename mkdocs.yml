@@ -57,6 +57,7 @@ markdown_extensions:
 
 plugins:
   - search
+  - blog
 
 nav:
   - Home: index.md
@@ -79,3 +80,5 @@ nav:
     - Control API: api.md
     - Voice & WebSocket: voice.md
   - Integrations: integrations.md
+  - Blog:
+    - blog/index.md
