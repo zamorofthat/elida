@@ -61,30 +61,12 @@ Every request flows through session tracking and policy evaluation before reachi
 
 ## Documentation
 
-<div class="grid cards" markdown>
-
--   :material-rocket-launch: **[Getting Started](getting-started.md)**
-
-    Install and configure ELIDA in minutes
-
--   :material-cog: **[Configuration](configuration.md)**
-
-    Full YAML reference and environment variables
-
--   :material-shield-check: **[Security Policies](security-policies.md)**
-
-    40+ rules, presets, and custom rule authoring
-
--   :material-api: **[Control API](api.md)**
-
-    REST API for session management and monitoring
-
--   :material-chart-timeline: **[Telco Controls](telco-controls.md)**
-
-    Risk ladder, token tracking, and session forensics
-
--   :material-archive: **[Session Records](session-records.md)**
-
-    CDR-style audit trail with full capture
-
-</div>
+| | |
+|---|---|
+| :rocket: **[Getting Started](getting-started.md)** | Install and configure ELIDA in minutes |
+| :gear: **[Configuration](configuration.md)** | Full YAML reference and environment variables |
+| :shield: **[Security Policies](security-policies.md)** | 40+ rules, presets, and custom rule authoring |
+| :electric_plug: **[Control API](api.md)** | REST API for session management and monitoring |
+| :chart_with_upwards_trend: **[Telco Controls](telco-controls.md)** | Risk ladder, token tracking, and session forensics |
+| :file_cabinet: **[Session Records](session-records.md)** | CDR-style audit trail with full capture |
+| :link: **[Integrations](integrations.md)** | LiteLLM, Portkey, Aperture, Oso, and SIEM setup |
