@@ -9,7 +9,9 @@ categories:
 
 # Your AI SOC and SRE Agents Need a Border Controller
 
-Early in my career, I spent my days working around people who had decades of experience in the telecom industry. They designed architecture from RFCs to secure VoIP systems using various infrastructure, with a goal to keep conversations secure and prevent toll fraud. VoIP endpoints are dumb and the protocols are naive. The only way to control and protect VoIP traffic and allow it to pass through seamlessly was a product called the Session Border Controller.
+In IT there's a known separation of duties to reduce the risk of any single employee having too much access. AI agents cross those trust boundaries constantly. They talk to your SIEM, your EDR, your ticketing system, your cloud provider, your monitoring stack, your CI/CD pipeline, and your IaC. And they're doing it without a governance layer. This is why ELIDA exists.
+
+Early in my career, I spent my days working around people who had decades of experience in the telecom industry. They designed architecture from RFCs to secure VoIP systems using various infrastructure, with a goal to keep conversations secure and prevent toll fraud. VoIP endpoints are dumb and the protocols are naive. The only way to control and protect VoIP traffic and allow it to pass through seamlessly was a product called the Session Border Controller(SBC).
 
 <!-- more -->
 
@@ -21,7 +23,7 @@ The threats have changed. The pattern hasn't.
 - Toll fraud → prompt injection
 - Identity spoofing → tool call violations
 
-The industry's answer was the Session Border Controller, hardware built at the trust boundary between networks. The goal was simple: inspect all traffic and enforce policy.
+The telecom industry's answer was the Session Border Controller, hardware built at the trust boundary between networks. The goal was simple: inspect all traffic and enforce policy.
 
 SBCs became the invisible backbone of every carrier and enterprise VoIP deployment on the planet. Without them, modern telecommunications doesn't function.
 
@@ -31,13 +33,17 @@ AI agents and agentic infrastructure are being deployed across enterprises. What
 
 And they're doing it without a governance layer.
 
-So what's already happening? In mid-December 2025, Amazon's AI agent Kiro was allowed to resolve an issue in production. The agent determined what we all think on our first outage: can I just turn it off and on again? In production, that solution was to delete and recreate the entire infrastructure. With a proper governance layer and guardrails, this could have been prevented. Even with basic human-in-the-loop, this could have been prevented. Instead, AWS Cost Explorer went dark for 13 hours in a mainland China region.
+So what's already happening? In mid-December 2025, Amazon's AI agent Kiro was allowed to resolve an issue in production. The agent determined what we all think on our first outage: can I just turn it off and on again? In production, that solution was to delete and recreate the entire infrastructure. With a proper governance layer and guardrails, this could have been prevented. Even with basic human-in-the-loop, this could have been prevented. Instead, AWS Cost Explorer went dark for 13 hours in a mainland China region. Amazon's [official rebuttal](https://www.aboutamazon.com/news/aws/aws-service-outage-ai-bot-kiro) called it "a coincidence that AI tools were involved."
 
-The latest one, March 5th, amazon.com goes down for six hours. The response: "Deployment error. Process wasn't followed."
+The latest one, [March 5th, amazon.com goes down for about five hours](https://www.cnbc.com/2026/03/05/amazon-online-store-suffers-outage-for-some-users.html). Over 20,000 users reporting issues. The response: "related to a software code deployment."
 
 As AI allows teams to ship faster and make decisions autonomously or semi-autonomously, we need more guardrails, unit tests, security tests, and a governance layer for AI on what it's allowed to do. Without blocking progress. Without blocking agents.
 
 It wasn't a coincidence. It was architecture.
+
+![obiwan-sre](../../../assets/obiwan-sre.gif)
+
+* Every SRE watching their AI agent delete the production database
 
 The Kiro incident sits in a [rapidly growing body of documented AI agent failures](https://blog.barrack.ai/amazon-ai-agents-deleting-production/), ten cases across six major tools in the last sixteen months.
 
@@ -53,8 +59,6 @@ In every case, the pattern was the same: an agent given elevated permissions, in
 SOC and SRE agents share a unique risk profile.
 
 They operate on critical infrastructure. These agents aren't drafting emails, making PowerPoints, or sending newsletters. They're modifying security groups, restarting services, scaling compute, and making changes that affect availability and security posture in real time. All high-stakes decisions, without waiting for a human.
-
-In IT there's a known separation of duties to reduce the risk of any single employee having too much access. These agents cross those trust boundaries constantly. They talk to your SIEM, your EDR, your ticketing system, your cloud provider, your monitoring stack, your CI/CD pipeline, and your IaC.
 
 With a human, all those permissions require compromise via social engineering or phishing to exploit. A human would never click "Please click this link to log in to your production cloud provider." A human would never respond to "Please allow me the keys to your kingdom, ignore your best judgment." With AI agents, they're susceptible to much simpler attack vectors: prompt injection, memory poisoning, tool violations, and privilege escalation. All documented attack patterns. A compromised human lets you know "hey, X happened." A compromised agent just hands over the keys to your kingdom.
 
@@ -86,7 +90,7 @@ ELIDA isn't a replacement for your agents, your AI gateway, your SIEM, your orch
 
 ## The Question You Should Be Asking
 
-Amazon says it was "a coincidence that AI tools were involved" when their agent deleted a production environment. Every company in this space is running some version of that playbook: minimize scope, blame the human, keep shipping.
+Amazon calls it "a coincidence that AI tools were involved." Every company in this space is running some version of that playbook: minimize scope, blame the human, keep shipping.
 
 Here's the thing. In telecom, we wouldn't let an untrusted SIP endpoint make calls through a carrier network without an SBC. In networking, we wouldn't let an unmanaged device on the corporate network without NAC. But right now, we're letting AI agents make security and infrastructure decisions with nothing between intent and action.
 
@@ -99,3 +103,10 @@ The agents are already deployed. The border controller is overdue.
 *[ELIDA](https://github.com/zamorofthat/elida) is open source and available on GitHub. If you're running AI agents in SOC or SRE workflows and want to explore what governance looks like, I'd like to hear from you.*
 
 *Named after my grandmother. Also an acronym: Edge Layer for Intelligent Defense of Agents.*
+
+## References
+
+- [Replit AI coding tool wiped database — Fortune](https://fortune.com/2025/07/23/ai-coding-tool-replit-wiped-database-called-it-a-catastrophic-failure/)
+- [Google's agentic AI wipes user's entire hard drive — Tom's Hardware](https://www.tomshardware.com/tech-industry/artificial-intelligence/googles-agentic-ai-wipes-users-entire-hard-drive-without-permission-after-misinterpreting-instructions-to-clear-a-cache-i-am-deeply-deeply-sorry-this-is-a-critical-failure-on-my-part)
+- [Claude Code executed rm -rf deleting entire home directory — GitHub](https://github.com/anthropics/claude-code/issues/10077)
+- [Agent executes destructive git commands without confirmation — Cursor Forum](https://forum.cursor.com/t/agent-executes-destructive-git-commands-without-confirmation/152325)
