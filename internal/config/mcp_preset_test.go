@@ -73,7 +73,7 @@ func TestMCPPresetRuleActions(t *testing.T) {
 		if !validActions[rule.Action] {
 			t.Errorf("Rule %q has invalid action %q", rule.Name, rule.Action)
 		}
-		if !validSeverities[string(rule.Severity)] {
+		if !validSeverities[rule.Severity] {
 			t.Errorf("Rule %q has invalid severity %q", rule.Name, rule.Severity)
 		}
 		if rule.Description == "" {
