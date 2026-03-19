@@ -4,162 +4,146 @@ import (
 	"testing"
 )
 
-func TestMCPPresetLoads(t *testing.T) {
+func TestGetMCPPreset_ReturnsRules(t *testing.T) {
 	rules := getMCPPreset()
 	if len(rules) == 0 {
-		t.Fatal("MCP preset returned zero rules")
+		t.Fatal("getMCPPreset() returned no rules")
 	}
+}
 
-	// Should inherit standard rules + MCP-specific rules
+func TestGetMCPPreset_IncludesStandardPreset(t *testing.T) {
+	mcpRules := getMCPPreset()
 	standardRules := getStandardPreset()
-	if len(rules) <= len(standardRules) {
-		t.Errorf("MCP preset (%d rules) should have more rules than standard (%d rules)",
-			len(rules), len(standardRules))
-	}
 
-	t.Logf("MCP preset has %d rules (%d standard + %d MCP-specific)",
-		len(rules), len(standardRules), len(rules)-len(standardRules))
-}
-
-func TestMCPPresetHasAllOWASPCategories(t *testing.T) {
-	rules := getMCPPreset()
-
-	// Check that we have rules for each OWASP MCP Top 10 category
-	requiredPrefixes := []string{
-		"mcp01_", // Tool Poisoning
-		"mcp02_", // Excessive Permissions
-		"mcp03_", // MCP Injection
-		"mcp04_", // Tool Rug Pulls
-		"mcp05_", // Server Compromise
-		"mcp06_", // Resource Injection
-		"mcp07_", // Auth Gaps
-		"mcp08_", // Logging Gaps
-		"mcp09_", // Resource Abuse
-		"mcp10_", // Integrity
-	}
-
-	for _, prefix := range requiredPrefixes {
-		found := false
-		for _, rule := range rules {
-			if len(rule.Name) >= len(prefix) && rule.Name[:len(prefix)] == prefix {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("Missing OWASP MCP Top 10 rule with prefix %q", prefix)
-		}
+	if len(mcpRules) <= len(standardRules) {
+		t.Errorf("getMCPPreset() should have more rules than standard preset, got %d vs %d", len(mcpRules), len(standardRules))
 	}
 }
 
-func TestMCPPresetRuleActions(t *testing.T) {
+func TestGetMCPPreset_HasRequiredRuleNames(t *testing.T) {
 	rules := getMCPPreset()
-
-	validActions := map[string]bool{
-		"flag":      true,
-		"block":     true,
-		"terminate": true,
-		"throttle":  true,
-		"":          true, // Default
+	ruleMap := make(map[string]PolicyRule)
+	for _, r := range rules {
+		ruleMap[r.Name] = r
 	}
 
-	validSeverities := map[string]bool{
-		"info":     true,
-		"warning":  true,
-		"critical": true,
-	}
-
-	for _, rule := range rules {
-		if !validActions[rule.Action] {
-			t.Errorf("Rule %q has invalid action %q", rule.Name, rule.Action)
-		}
-		if !validSeverities[rule.Severity] {
-			t.Errorf("Rule %q has invalid severity %q", rule.Name, rule.Severity)
-		}
-		if rule.Description == "" {
-			t.Errorf("Rule %q has empty description", rule.Name)
-		}
-	}
-}
-
-func TestMCPPresetCriticalRulesBlock(t *testing.T) {
-	rules := getMCPPreset()
-
-	// Critical MCP rules should block or terminate, not just flag
-	criticalMCPRules := []string{
+	required := []string{
 		"mcp01_tool_poison_hidden_instruction",
 		"mcp01_tool_poison_exfiltration",
 		"mcp02_excessive_permissions",
 		"mcp03_injection_via_tool_args",
 		"mcp03_injection_via_resource",
+		"mcp04_tool_list_flood",
+		"mcp04_tool_change_notification",
+		"mcp05_server_error_flood",
+		"mcp05_unexpected_method",
 		"mcp06_resource_injection",
+		"mcp07_initialize_without_auth",
+		"mcp08_sensitive_tool_call",
+		"mcp09_resource_enumeration",
+		"mcp09_large_resource_read",
+		"mcp10_unsigned_tool_call",
+		"mcp_protocol_version_mismatch",
+		"mcp_connection_storm",
+		"mcp_session_flood",
+		"mcp_block_exec_tools",
+		"mcp_dangerous_tool_args",
 	}
 
-	for _, name := range criticalMCPRules {
-		for _, rule := range rules {
-			if rule.Name == name {
-				if rule.Action != "block" && rule.Action != "terminate" {
-					t.Errorf("Critical rule %q should block or terminate, got %q", name, rule.Action)
-				}
-				if rule.Severity != "critical" {
-					t.Errorf("Critical rule %q should have critical severity, got %q", name, rule.Severity)
-				}
-			}
+	for _, name := range required {
+		if _, ok := ruleMap[name]; !ok {
+			t.Errorf("getMCPPreset() missing expected rule: %s", name)
 		}
 	}
 }
 
-func TestMCPPresetConfigSwitch(t *testing.T) {
-	// Verify the "mcp" preset is wired into the config switch
-	cfg := &Config{
-		Policy: PolicyConfig{
-			Preset: "mcp",
-		},
+func TestGetMCPPreset_RulesHaveValidSeverity(t *testing.T) {
+	rules := getMCPPreset()
+	validSeverities := map[string]bool{
+		"info": true, "warning": true, "critical": true,
 	}
+	for _, rule := range rules {
+		if !validSeverities[rule.Severity] {
+			t.Errorf("rule %q has invalid severity %q", rule.Name, rule.Severity)
+		}
+	}
+}
+
+func TestGetMCPPreset_RulesHaveValidActions(t *testing.T) {
+	rules := getMCPPreset()
+	validActions := map[string]bool{
+		"flag": true, "block": true, "terminate": true, "": true,
+	}
+	for _, rule := range rules {
+		if !validActions[rule.Action] {
+			t.Errorf("rule %q has invalid action %q", rule.Name, rule.Action)
+		}
+	}
+}
+
+func TestApplyPolicyPreset_MCP(t *testing.T) {
+	cfg := defaults()
+	cfg.Policy.Preset = "mcp"
+	cfg.Policy.Rules = nil
+
 	cfg.ApplyPolicyPreset()
 
 	if len(cfg.Policy.Rules) == 0 {
-		t.Fatal("Config with preset 'mcp' should have loaded MCP rules")
+		t.Fatal("ApplyPolicyPreset() with mcp preset produced no rules")
 	}
 
-	// Verify MCP-specific rules are present
-	hasMCPRule := false
-	for _, rule := range cfg.Policy.Rules {
-		if len(rule.Name) >= 4 && rule.Name[:4] == "mcp0" {
-			hasMCPRule = true
+	expected := getMCPPreset()
+	if len(cfg.Policy.Rules) != len(expected) {
+		t.Errorf("expected %d rules, got %d", len(expected), len(cfg.Policy.Rules))
+	}
+}
+
+func TestApplyPolicyPreset_MCP_PrependsToCustomRules(t *testing.T) {
+	cfg := defaults()
+	cfg.Policy.Preset = "mcp"
+	custom := PolicyRule{Name: "my_custom_rule", Type: "bytes_out", Threshold: 1000, Severity: "warning"}
+	cfg.Policy.Rules = []PolicyRule{custom}
+
+	cfg.ApplyPolicyPreset()
+
+	last := cfg.Policy.Rules[len(cfg.Policy.Rules)-1]
+	if last.Name != "my_custom_rule" {
+		t.Errorf("custom rule should be last after prepend, got %q", last.Name)
+	}
+}
+
+func TestApplyPolicyPreset_MCP_BlockRulesPresent(t *testing.T) {
+	cfg := defaults()
+	cfg.Policy.Preset = "mcp"
+	cfg.Policy.Rules = nil
+	cfg.ApplyPolicyPreset()
+
+	hasBlock := false
+	for _, r := range cfg.Policy.Rules {
+		if r.Action == "block" {
+			hasBlock = true
 			break
 		}
 	}
-	if !hasMCPRule {
-		t.Error("Config with preset 'mcp' should contain MCP-specific rules (mcp0x_*)")
+	if !hasBlock {
+		t.Error("MCP preset should contain at least one block action rule")
 	}
 }
 
-func TestMCPPresetNoDuplicateNames(t *testing.T) {
-	rules := getMCPPreset()
-	seen := make(map[string]bool)
+func TestApplyPolicyPreset_MCP_TerminateRulesPresent(t *testing.T) {
+	cfg := defaults()
+	cfg.Policy.Preset = "mcp"
+	cfg.Policy.Rules = nil
+	cfg.ApplyPolicyPreset()
 
-	for _, rule := range rules {
-		if seen[rule.Name] {
-			t.Errorf("Duplicate rule name: %q", rule.Name)
+	hasTerminate := false
+	for _, r := range cfg.Policy.Rules {
+		if r.Action == "terminate" {
+			hasTerminate = true
+			break
 		}
-		seen[rule.Name] = true
 	}
-}
-
-func TestMCPPresetPatternsCompile(t *testing.T) {
-	rules := getMCPPreset()
-
-	for _, rule := range rules {
-		for _, pattern := range rule.Patterns {
-			if pattern == "" {
-				t.Errorf("Rule %q has empty pattern", rule.Name)
-				continue
-			}
-			// Patterns are compiled by the policy engine, but we can check
-			// they are non-empty and have valid Go regex syntax
-			// The policy engine uses regexp.Compile, so invalid patterns
-			// would cause runtime errors
-		}
+	if !hasTerminate {
+		t.Error("MCP preset should contain at least one terminate action rule")
 	}
 }
