@@ -1,0 +1,64 @@
+# ELIDA MCP Security Configuration
+# Secures MCP (Model Context Protocol) server communication using
+# OWASP MCP Top 10 policy rules.
+#
+# Usage:
+#   elida --config configs/mcp-secure.yaml
+#
+# This config proxies MCP traffic and applies security rules that detect
+# tool poisoning, rug pulls, prompt injection via tools, resource abuse,
+# and protocol-level attacks.
+
+listen: ":8080"
+backend: "https://mcps-demo-server.fly.dev"
+
+control:
+  listen: ":9090"
+  enabled: true
+
+session:
+  timeout: 15m
+  header: "X-Session-ID"
+  generate_if_missing: true
+  kill_block:
+    mode: "duration"
+    duration: 10m
+
+# Policy: MCP preset -- OWASP MCP Top 10 rules
+policy:
+  enabled: true
+  mode: enforce
+  preset: mcp
+  capture_flagged: true
+
+  # Risk ladder tuned for MCP traffic patterns
+  risk_ladder:
+    enabled: true
+    thresholds:
+      - score: 5
+        action: warn
+      - score: 15
+        action: throttle
+      - score: 30
+        action: block
+      - score: 50
+        action: terminate
+
+# Storage: capture flagged MCP traffic for audit
+storage:
+  enabled: true
+  path: "/var/lib/elida/mcp-secure.db"
+  capture_mode: "flagged"
+  max_capture_size: 10000
+  max_captured_per_session: 100
+
+  events:
+    enabled: true
+    retention_days: 30
+
+  redaction:
+    enabled: true
+
+# Telemetry: optional
+telemetry:
+  enabled: false
