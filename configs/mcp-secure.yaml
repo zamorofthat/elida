@@ -10,6 +10,9 @@
 # and protocol-level attacks.
 
 listen: ":8080"
+# MCPS demo server included for ease of testing (5 tools: server_status,
+# sign_message, verify_hash, get_audit, simulate_attack).
+# You can point this at any MCP server.
 backend: "https://mcps-demo-server.fly.dev"
 
 control:
