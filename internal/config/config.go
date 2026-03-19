@@ -768,6 +768,8 @@ func (c *Config) ApplyPolicyPreset() {
 		presetRules = getStandardPreset()
 	case "strict":
 		presetRules = getStrictPreset()
+	case "mcp":
+		presetRules = getMCPPreset()
 	default:
 		return // Unknown preset, use rules as-is
 	}
@@ -1039,6 +1041,119 @@ func getStrictPreset() []PolicyRule {
 	rules = append(rules, PolicyRule{
 		Name: "excessive_data_transfer", Type: "bytes_total", Threshold: 52428800, Severity: "critical", Action: "block", Description: "FIREWALL: Excessive data transfer (>50MB)",
 	})
+
+	return rules
+}
+
+// getMCPPreset returns MCP-specific security rules mapped to OWASP MCP Top 10.
+// These rules detect attacks against Model Context Protocol server communication
+// including tool poisoning, rug pulls, prompt injection via tools, and protocol abuse.
+func getMCPPreset() []PolicyRule {
+	rules := getStandardPreset()
+
+	rules = append(rules, []PolicyRule{
+		// ── OWASP MCP-01: Tool Poisoning ──
+		// Detect tool definitions that contain hidden instructions or malicious descriptions
+		{Name: "mcp01_tool_poison_hidden_instruction", Type: "content_match", Target: "response", Patterns: []string{
+			"\"description\"\\s*:\\s*\"[^\"]*(?:ignore|disregard|override)\\s+(?:all\\s+)?(?:previous|prior|system)\\s+(?:instructions|rules|prompts)[^\"]*\"",
+			"\"description\"\\s*:\\s*\"[^\"]*(?:you\\s+must|always|never\\s+tell)[^\"]*\"",
+		}, Severity: "critical", Action: "block", Description: "MCP-01: Tool definition contains hidden instructions (tool poisoning)"},
+		{Name: "mcp01_tool_poison_exfiltration", Type: "content_match", Target: "response", Patterns: []string{
+			"\"description\"\\s*:\\s*\"[^\"]*(?:send|post|exfiltrate|upload)\\s+(?:to|data|all)[^\"]*\"",
+			"\"description\"\\s*:\\s*\"[^\"]*(?:fetch|curl|wget|http)\\s*\\([^\"]*\"",
+		}, Severity: "critical", Action: "block", Description: "MCP-01: Tool definition contains exfiltration instructions"},
+
+		// ── OWASP MCP-02: Excessive MCP Permissions ──
+		// Flag tool calls that request broad or dangerous permissions
+		{Name: "mcp02_excessive_permissions", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"tools/call\"[^}]*\"(admin|root|sudo|superuser)\"",
+			"\"method\"\\s*:\\s*\"resources/read\"[^}]*\"uri\"\\s*:\\s*\"file:///etc/",
+			"\"method\"\\s*:\\s*\"resources/read\"[^}]*\"uri\"\\s*:\\s*\"file:///root/",
+		}, Severity: "critical", Action: "block", Description: "MCP-02: Tool call requests excessive permissions"},
+
+		// ── OWASP MCP-03: MCP Injection ──
+		// Detect prompt injection patterns within MCP JSON-RPC messages
+		{Name: "mcp03_injection_via_tool_args", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"tools/call\"[^}]*\"arguments\"[^}]*(?:ignore|disregard|forget)\\s+(?:all\\s+)?(?:previous|prior|your)\\s+(?:instructions|rules)",
+			"\"method\"\\s*:\\s*\"tools/call\"[^}]*\"arguments\"[^}]*(?:you\\s+are\\s+now|enable\\s+DAN|jailbreak)",
+		}, Severity: "critical", Action: "block", Description: "MCP-03: Prompt injection via MCP tool arguments"},
+		{Name: "mcp03_injection_via_resource", Type: "content_match", Target: "response", Patterns: []string{
+			"\"contents\"[^}]*\"text\"\\s*:\\s*\"[^\"]*(?:ignore\\s+previous|system\\s+prompt|you\\s+are\\s+now)[^\"]*\"",
+		}, Severity: "critical", Action: "block", Description: "MCP-03: Prompt injection via MCP resource content"},
+
+		// ── OWASP MCP-04: Tool Rug Pulls ──
+		// Detect tool definition changes mid-session (tool mutations)
+		{Name: "mcp04_tool_list_flood", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"tools/list\"",
+		}, Severity: "info", Action: "flag", Description: "MCP-04: Tool list request (track for mutation detection)"},
+		{Name: "mcp04_tool_change_notification", Type: "content_match", Target: "response", Patterns: []string{
+			"\"method\"\\s*:\\s*\"notifications/tools/list_changed\"",
+		}, Severity: "warning", Action: "flag", Description: "MCP-04: Server notified tool definitions changed (potential rug pull)"},
+
+		// ── OWASP MCP-05: MCP Server Compromise ──
+		// Detect indicators of compromised MCP servers
+		{Name: "mcp05_server_error_flood", Type: "content_match", Target: "response", Patterns: []string{
+			"\"error\"\\s*:\\s*\\{[^}]*\"code\"\\s*:\\s*-32[0-9]{3}",
+		}, Severity: "warning", Action: "flag", Description: "MCP-05: MCP server returning JSON-RPC error codes"},
+		{Name: "mcp05_unexpected_method", Type: "content_match", Target: "response", Patterns: []string{
+			"\"method\"\\s*:\\s*\"(sampling|roots|elicitation)/",
+		}, Severity: "warning", Action: "flag", Description: "MCP-05: Unexpected server-initiated method (potential compromise)"},
+
+		// ── OWASP MCP-06: Indirect Prompt Injection via MCP Resources ──
+		// Detect malicious content returned via resources/read
+		{Name: "mcp06_resource_injection", Type: "content_match", Target: "response", Patterns: []string{
+			"\"contents\"[^}]*(?:<script|javascript:|on(?:click|load|error)\\s*=)",
+			"\"contents\"[^}]*(?:eval\\s*\\(|exec\\s*\\(|__import__|subprocess)",
+		}, Severity: "critical", Action: "block", Description: "MCP-06: Malicious content in MCP resource response"},
+
+		// ── OWASP MCP-07: Authentication/Authorization Gaps ──
+		// Detect missing or weak authentication patterns
+		{Name: "mcp07_initialize_without_auth", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"initialize\"",
+		}, Severity: "info", Action: "flag", Description: "MCP-07: MCP session initialization (verify auth is present)"},
+
+		// ── OWASP MCP-08: Logging/Monitoring Gaps ──
+		// Flag high-risk operations for audit trail
+		{Name: "mcp08_sensitive_tool_call", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"tools/call\"[^}]*\"name\"\\s*:\\s*\"(?:delete|drop|remove|destroy|purge|wipe|truncate)",
+		}, Severity: "warning", Action: "flag", Description: "MCP-08: Destructive tool call (ensure audit trail)"},
+
+		// ── OWASP MCP-09: Resource Abuse ──
+		// Detect resource enumeration and abuse patterns
+		{Name: "mcp09_resource_enumeration", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"resources/list\"",
+		}, Severity: "info", Action: "flag", Description: "MCP-09: Resource enumeration request"},
+		{Name: "mcp09_large_resource_read", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"resources/read\"[^}]*\"uri\"\\s*:\\s*\"[^\"]*\\*",
+		}, Severity: "warning", Action: "flag", Description: "MCP-09: Wildcard resource read (potential abuse)"},
+
+		// ── OWASP MCP-10: Lack of Integrity Verification ──
+		// Detect unsigned or unverified MCP traffic
+		{Name: "mcp10_unsigned_tool_call", Type: "content_match", Target: "request", Patterns: []string{
+			"\"method\"\\s*:\\s*\"tools/call\"",
+		}, Severity: "info", Action: "flag", Description: "MCP-10: Tool call detected (verify message integrity)"},
+
+		// ── MCP Protocol Abuse ──
+		// Detect protocol-level attacks and anomalies
+		{Name: "mcp_protocol_version_mismatch", Type: "content_match", Target: "both", Patterns: []string{
+			"\"jsonrpc\"\\s*:\\s*\"[^2]",
+		}, Severity: "warning", Action: "flag", Description: "MCP: Non-standard JSON-RPC protocol version"},
+		{Name: "mcp_connection_storm", Type: "requests_per_minute", Threshold: 120, Severity: "critical", Action: "block", Description: "MCP: Connection rate exceeds 120/min (potential DDoS)"},
+		{Name: "mcp_session_flood", Type: "request_count", Threshold: 1000, Severity: "critical", Action: "terminate", Description: "MCP: Session exceeded 1000 requests (potential abuse)"},
+
+		// ── MCP Dangerous Tool Patterns ──
+		// Block known dangerous tool name patterns in MCP
+		{Name: "mcp_block_exec_tools", Type: "tool_blocked", Target: "response", Patterns: []string{
+			"execute_*", "eval_*", "run_command*", "shell_*", "system_*", "os_*",
+		}, Severity: "critical", Action: "block", Description: "MCP: Block dangerous tool calls (exec/eval/shell)"},
+		{Name: "mcp_dangerous_tool_args", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
+			"rm\\s+-rf",
+			"chmod\\s+777",
+			"curl.*\\|.*sh",
+			"DROP\\s+TABLE",
+			";\\.*(rm|del|format|shutdown)",
+		}, Severity: "critical", Action: "terminate", Description: "MCP: Dangerous patterns in tool call arguments"},
+	}...)
 
 	return rules
 }
