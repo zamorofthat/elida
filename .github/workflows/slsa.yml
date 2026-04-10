@@ -5,7 +5,7 @@ on:
     types: [created]
   workflow_dispatch:  # Manual trigger for testing
 
-permissions: read-all
+permissions: {}
 
 jobs:
   build:
