@@ -1,9 +1,7 @@
 name: SLSA Provenance
 
 on:
-  release:
-    types: [created]
-  workflow_dispatch:  # Manual trigger for testing
+  workflow_dispatch:  # Manual trigger only — replaced by release.yml (GoReleaser + SLSA)
 
 permissions: {}
 
