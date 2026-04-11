@@ -55,9 +55,9 @@ nfpms:
   - package_name: elida
     vendor: zamorofthat
     homepage: https://github.com/zamorofthat/elida
-    maintainer: Aaron Zamora <aaron@zamorofthat.com>
+    maintainer: Aaron Zamora <aaron@elida.com>
     description: AI proxy with session tracking, policy engine, and observability
-    license: MIT
+    license: apache-2.0
     formats:
       - deb
       - rpm
@@ -73,7 +73,7 @@ nfpms:
 #       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
 #     homepage: https://github.com/zamorofthat/elida
 #     description: AI proxy with session tracking, policy engine, and observability
-#     license: MIT
+#     license: apeche-2.0
 #     install: |
 #       bin.install "elida"
 #     test: |
