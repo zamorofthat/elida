@@ -31,6 +31,16 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum || (echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit." && exit 1)
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44e0a462d63b6a7b5a0e7 # v2.0.2
+        with:
+          bun-version-file: web/package.json
+
+      - name: Check bun.lock is up to date
+        run: |
+          cd web
+          bun install --frozen-lockfile || (echo "::error::bun.lock is out of sync with package.json. Run 'bun install' and commit the updated lockfile." && exit 1)
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
