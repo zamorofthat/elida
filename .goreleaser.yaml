@@ -66,18 +66,18 @@ nfpms:
         dst: /etc/elida/elida.yaml
         type: config
 
-brews:
-  - repository:
-      owner: zamorofthat
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: https://github.com/zamorofthat/elida
-    description: AI proxy with session tracking, policy engine, and observability
-    license: MIT
-    install: |
-      bin.install "elida"
-    test: |
-      system "#{bin}/elida", "-version"
+# brews:
+#   - repository:
+#       owner: zamorofthat
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+#     homepage: https://github.com/zamorofthat/elida
+#     description: AI proxy with session tracking, policy engine, and observability
+#     license: MIT
+#     install: |
+#       bin.install "elida"
+#     test: |
+#       system "#{bin}/elida", "-version"
 
 release:
   github:
