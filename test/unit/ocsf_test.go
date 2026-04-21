@@ -956,3 +956,616 @@ func TestSyslogTLSEndToEnd(t *testing.T) {
 		t.Fatal("timed out waiting for syslog message")
 	}
 }
+
+// --- Config OCSF env overrides & validation tests ---
+
+func TestOCSFConfigDefaults(t *testing.T) {
+	cfg, err := config.Load("nonexistent-file-that-triggers-defaults.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OCSF.Enabled {
+		t.Error("expected OCSF disabled by default")
+	}
+	if cfg.OCSF.Webhook.Timeout != 10*time.Second {
+		t.Errorf("expected webhook timeout 10s, got %v", cfg.OCSF.Webhook.Timeout)
+	}
+	if cfg.OCSF.Webhook.RetryCount != 2 {
+		t.Errorf("expected webhook retry_count 2, got %d", cfg.OCSF.Webhook.RetryCount)
+	}
+	if cfg.OCSF.Syslog.Facility != "local0" {
+		t.Errorf("expected syslog facility local0, got %s", cfg.OCSF.Syslog.Facility)
+	}
+	if cfg.OCSF.Syslog.Tag != "elida" {
+		t.Errorf("expected syslog tag elida, got %s", cfg.OCSF.Syslog.Tag)
+	}
+}
+
+func TestOCSFEnvOverrides(t *testing.T) {
+	t.Setenv("ELIDA_OCSF_ENABLED", "true")
+	t.Setenv("ELIDA_OCSF_STDOUT_ENABLED", "true")
+	t.Setenv("ELIDA_OCSF_WEBHOOK_ENABLED", "true")
+	t.Setenv("ELIDA_OCSF_WEBHOOK_URL", "https://siem.test/ocsf")
+	t.Setenv("ELIDA_OCSF_SYSLOG_ENABLED", "true")
+	t.Setenv("ELIDA_OCSF_SYSLOG_ADDR", "syslog.test:514")
+	t.Setenv("ELIDA_OCSF_SYSLOG_PROTOCOL", "tcp")
+
+	cfg, err := config.Load("../../configs/elida.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OCSF.Enabled {
+		t.Error("expected OCSF enabled via env")
+	}
+	if !cfg.OCSF.Stdout.Enabled {
+		t.Error("expected stdout enabled via env")
+	}
+	if !cfg.OCSF.Webhook.Enabled {
+		t.Error("expected webhook enabled via env")
+	}
+	if cfg.OCSF.Webhook.URL != "https://siem.test/ocsf" {
+		t.Errorf("expected webhook URL from env, got %s", cfg.OCSF.Webhook.URL)
+	}
+	if !cfg.OCSF.Syslog.Enabled {
+		t.Error("expected syslog enabled via env")
+	}
+	if cfg.OCSF.Syslog.Addr != "syslog.test:514" {
+		t.Errorf("expected syslog addr from env, got %s", cfg.OCSF.Syslog.Addr)
+	}
+	if cfg.OCSF.Syslog.Protocol != "tcp" {
+		t.Errorf("expected syslog protocol tcp from env, got %s", cfg.OCSF.Syslog.Protocol)
+	}
+}
+
+func TestOCSFTLSEnvOverrides(t *testing.T) {
+	caPath, certPath, keyPath := generateTestCert(t)
+
+	t.Setenv("ELIDA_OCSF_WEBHOOK_CA_FILE", caPath)
+	t.Setenv("ELIDA_OCSF_WEBHOOK_CERT_FILE", certPath)
+	t.Setenv("ELIDA_OCSF_WEBHOOK_KEY_FILE", keyPath)
+	t.Setenv("ELIDA_OCSF_WEBHOOK_INSECURE", "true")
+	t.Setenv("ELIDA_OCSF_SYSLOG_CA_FILE", caPath)
+	t.Setenv("ELIDA_OCSF_SYSLOG_CERT_FILE", certPath)
+	t.Setenv("ELIDA_OCSF_SYSLOG_KEY_FILE", keyPath)
+	t.Setenv("ELIDA_OCSF_SYSLOG_INSECURE", "true")
+
+	cfg, err := config.Load("../../configs/elida.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Webhook TLS
+	if cfg.OCSF.Webhook.TLS.CAFile != caPath {
+		t.Errorf("webhook CA file: got %s", cfg.OCSF.Webhook.TLS.CAFile)
+	}
+	if cfg.OCSF.Webhook.TLS.CertFile != certPath {
+		t.Errorf("webhook cert file: got %s", cfg.OCSF.Webhook.TLS.CertFile)
+	}
+	if cfg.OCSF.Webhook.TLS.KeyFile != keyPath {
+		t.Errorf("webhook key file: got %s", cfg.OCSF.Webhook.TLS.KeyFile)
+	}
+	if !cfg.OCSF.Webhook.TLS.InsecureSkipVerify {
+		t.Error("expected webhook insecure_skip_verify true")
+	}
+	// Syslog TLS
+	if cfg.OCSF.Syslog.TLS.CAFile != caPath {
+		t.Errorf("syslog CA file: got %s", cfg.OCSF.Syslog.TLS.CAFile)
+	}
+	if cfg.OCSF.Syslog.TLS.CertFile != certPath {
+		t.Errorf("syslog cert file: got %s", cfg.OCSF.Syslog.TLS.CertFile)
+	}
+	if cfg.OCSF.Syslog.TLS.KeyFile != keyPath {
+		t.Errorf("syslog key file: got %s", cfg.OCSF.Syslog.TLS.KeyFile)
+	}
+	if !cfg.OCSF.Syslog.TLS.InsecureSkipVerify {
+		t.Error("expected syslog insecure_skip_verify true")
+	}
+}
+
+func TestOCSFValidation_WebhookHTTPRejected(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.Enabled = true
+	cfg.OCSF.Webhook.URL = "http://plain.example.com"
+	result := cfg.Validate()
+	if result.Valid {
+		t.Error("expected validation failure for plain HTTP webhook")
+	}
+	found := false
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.webhook.url" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected validation error on ocsf.webhook.url field")
+	}
+}
+
+func TestOCSFValidation_WebhookHTTPAllowedWithInsecure(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.Enabled = true
+	cfg.OCSF.Webhook.URL = "http://plain.example.com"
+	cfg.OCSF.Webhook.TLS.InsecureSkipVerify = true
+	result := cfg.Validate()
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.webhook.url" {
+			t.Errorf("unexpected validation error: %s", e.Message)
+		}
+	}
+}
+
+func TestOCSFValidation_WebhookInvalidURL(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.Enabled = true
+	cfg.OCSF.Webhook.URL = "://bad"
+	result := cfg.Validate()
+	found := false
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.webhook.url" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected validation error for invalid URL")
+	}
+}
+
+func TestOCSFValidation_CertWithoutKey(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.TLS.CertFile = "/some/cert.pem"
+	// KeyFile intentionally empty
+	result := cfg.Validate()
+	found := false
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.webhook.tls" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected validation error for cert without key")
+	}
+}
+
+func TestOCSFValidation_KeyWithoutCert(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Syslog.TLS.KeyFile = "/some/key.pem"
+	// CertFile intentionally empty
+	result := cfg.Validate()
+	found := false
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.syslog.tls" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected validation error for key without cert")
+	}
+}
+
+func TestOCSFValidation_CAFileNotFound(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.TLS.CAFile = "/nonexistent/ca.pem"
+	result := cfg.Validate()
+	found := false
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.webhook.tls.ca_file" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected validation error for missing CA file")
+	}
+}
+
+func TestOCSFValidation_SyslogCAFileNotFound(t *testing.T) {
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Syslog.TLS.CAFile = "/nonexistent/ca.pem"
+	result := cfg.Validate()
+	found := false
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.syslog.tls.ca_file" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected validation error for missing syslog CA file")
+	}
+}
+
+func TestOCSFValidation_ValidCertKeyPair(t *testing.T) {
+	_, certPath, keyPath := generateTestCert(t)
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.TLS.CertFile = certPath
+	cfg.OCSF.Webhook.TLS.KeyFile = keyPath
+	result := cfg.Validate()
+	for _, e := range result.Errors {
+		if strings.Contains(e.Field, "ocsf.webhook.tls") {
+			t.Errorf("unexpected TLS validation error: %s: %s", e.Field, e.Message)
+		}
+	}
+}
+
+func TestOCSFValidation_ValidCAFile(t *testing.T) {
+	caPath, _, _ := generateTestCert(t)
+	cfg, _ := config.Load("nonexistent.yaml")
+	cfg.OCSF.Webhook.TLS.CAFile = caPath
+	result := cfg.Validate()
+	for _, e := range result.Errors {
+		if e.Field == "ocsf.webhook.tls.ca_file" {
+			t.Errorf("unexpected CA file validation error: %s", e.Message)
+		}
+	}
+}
+
+// --- Emitter error path tests ---
+
+func TestWebhookEmptyURL(t *testing.T) {
+	_, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Webhook: config.OCSFWebhookConfig{Enabled: true, URL: ""},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty webhook URL")
+	}
+}
+
+func TestWebhookInvalidURL(t *testing.T) {
+	_, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Webhook: config.OCSFWebhookConfig{Enabled: true, URL: "://bad"},
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid webhook URL")
+	}
+}
+
+func TestWebhookServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	emitter, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Webhook: config.OCSFWebhookConfig{
+			Enabled:    true,
+			URL:        srv.URL,
+			RetryCount: 0,
+			TLS:        config.OCSFTLSConfig{InsecureSkipVerify: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emitter.Close()
+
+	nozzle := emitter.Nozzles()[0]
+	err = nozzle.Emit(context.Background(), []byte(`{"test":true}`))
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected error to mention 500, got: %s", err)
+	}
+}
+
+func TestWebhookRetrySuccess(t *testing.T) {
+	var mu sync.Mutex
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		a := attempts
+		mu.Unlock()
+		if a == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	emitter, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Webhook: config.OCSFWebhookConfig{
+			Enabled:    true,
+			URL:        srv.URL,
+			RetryCount: 2,
+			TLS:        config.OCSFTLSConfig{InsecureSkipVerify: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emitter.Close()
+
+	nozzle := emitter.Nozzles()[0]
+	err = nozzle.Emit(context.Background(), []byte(`{"test":true}`))
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got: %v", err)
+	}
+	mu.Lock()
+	if attempts != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempts)
+	}
+	mu.Unlock()
+}
+
+func TestSyslogEmptyAddr(t *testing.T) {
+	_, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Syslog:  config.OCSFSyslogConfig{Enabled: true, Addr: ""},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty syslog addr")
+	}
+}
+
+func TestSyslogUDPNozzle(t *testing.T) {
+	// Start a UDP listener
+	pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+
+	emitter, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Syslog: config.OCSFSyslogConfig{
+			Enabled:  true,
+			Addr:     pc.LocalAddr().String(),
+			Protocol: "udp",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emitter.Close()
+
+	finding := telemetry.BuildBlockDetection("sess-udp", "test", "bad", "openai", "gpt-4")
+	emitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+
+	buf := make([]byte, 8192)
+	if err := pc.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _, readErr := pc.ReadFrom(buf)
+	if readErr != nil {
+		t.Fatalf("no UDP message received: %v", readErr)
+	}
+	msg := string(buf[:n])
+	if !strings.Contains(msg, `"class_uid":2004`) {
+		t.Errorf("UDP syslog missing OCSF payload: %s", msg)
+	}
+}
+
+func TestSyslogTCPNozzle(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	received := make(chan string, 1)
+	go func() {
+		c, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer c.Close() //nolint:errcheck
+		scanner := bufio.NewScanner(c)
+		if scanner.Scan() {
+			received <- scanner.Text()
+		}
+	}()
+
+	emitter, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Syslog: config.OCSFSyslogConfig{
+			Enabled:  true,
+			Addr:     ln.Addr().String(),
+			Protocol: "tcp",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emitter.Close()
+
+	finding := telemetry.BuildBlockDetection("sess-tcp", "test", "bad", "openai", "gpt-4")
+	emitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+
+	select {
+	case msg := <-received:
+		if !strings.Contains(msg, `"class_uid":2004`) {
+			t.Errorf("TCP syslog missing OCSF payload: %s", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for TCP syslog message")
+	}
+}
+
+func TestSyslogDefaultProtocol(t *testing.T) {
+	// Start a UDP listener — default protocol should be udp
+	pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+
+	emitter, err := telemetry.NewOCSFEmitter(config.OCSFConfig{
+		Enabled: true,
+		Syslog: config.OCSFSyslogConfig{
+			Enabled:  true,
+			Addr:     pc.LocalAddr().String(),
+			Protocol: "", // empty → should default to udp
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emitter.Close()
+
+	finding := telemetry.BuildBlockDetection("sess-def", "test", "bad", "openai", "gpt-4")
+	emitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+
+	buf := make([]byte, 8192)
+	if err := pc.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _, readErr := pc.ReadFrom(buf)
+	if readErr != nil {
+		t.Fatalf("no UDP message received with default protocol: %v", readErr)
+	}
+	if !strings.Contains(string(buf[:n]), `"class_uid":2004`) {
+		t.Error("default protocol syslog missing OCSF payload")
+	}
+}
+
+func TestBuildTLSConfigInvalidCAPEM(t *testing.T) {
+	dir := t.TempDir()
+	badCA := filepath.Join(dir, "bad-ca.pem")
+	err := os.WriteFile(badCA, []byte("not a valid PEM"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = telemetry.BuildTLSConfigForTest(config.OCSFTLSConfig{CAFile: badCA})
+	if err == nil {
+		t.Fatal("expected error for invalid CA PEM content")
+	}
+}
+
+func TestBuildTLSConfigBadCertKeyPair(t *testing.T) {
+	dir := t.TempDir()
+	// Write a valid-looking PEM cert but mismatched key
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	err := os.WriteFile(certPath, []byte("-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = os.WriteFile(keyPath, []byte("-----BEGIN EC PRIVATE KEY-----\naGVsbG8=\n-----END EC PRIVATE KEY-----\n"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = telemetry.BuildTLSConfigForTest(config.OCSFTLSConfig{CertFile: certPath, KeyFile: keyPath})
+	if err == nil {
+		t.Fatal("expected error for bad cert/key pair")
+	}
+}
+
+// --- OTEL OCSF wiring tests ---
+
+func TestProviderSetOCSFEmitter(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     false,
+		Exporter:    "none",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Shutdown(context.Background()) //nolint:errcheck
+
+	nozzle := &mockNozzle{}
+	emitter := telemetry.NewOCSFEmitterForTest([]telemetry.OCSFNozzle{nozzle})
+	provider.SetOCSFEmitter(emitter)
+
+	// EmitBlockLog should emit to OCSF even with telemetry disabled
+	provider.EmitBlockLog(context.Background(), "sess-1", "test_rule", "bad text", "openai", "gpt-4")
+
+	events := nozzle.getEvents()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 OCSF event from EmitBlockLog, got %d", len(events))
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(events[0], &parsed); err != nil {
+		t.Fatalf("invalid JSON from OCSF block detection: %v", err)
+	}
+	classUID, ok := parsed["class_uid"].(float64)
+	if !ok || int(classUID) != 2004 {
+		t.Errorf("unexpected class_uid: %v", parsed["class_uid"])
+	}
+}
+
+func TestProviderExportSessionRecordWithOCSF(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     false,
+		Exporter:    "none",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Shutdown(context.Background()) //nolint:errcheck
+
+	nozzle := &mockNozzle{}
+	emitter := telemetry.NewOCSFEmitterForTest([]telemetry.OCSFNozzle{nozzle})
+	provider.SetOCSFEmitter(emitter)
+
+	record := telemetry.SessionRecord{
+		SessionID:    "sess-export",
+		Backend:      "openai",
+		Model:        "gpt-4",
+		DurationMs:   1500,
+		RequestCount: 3,
+		TokensIn:     100,
+		TokensOut:    200,
+		Violations: []telemetry.Violation{
+			{
+				RuleName:      "prompt_injection",
+				Description:   "Prompt injection detected",
+				Severity:      "critical",
+				Action:        "block",
+				EventCategory: "prompt_injection",
+				FrameworkRef:  "OWASP-LLM01",
+			},
+			{
+				RuleName:    "data_exfil",
+				Description: "Data exfiltration",
+				Severity:    "warning",
+				Action:      "flag",
+			},
+		},
+	}
+
+	provider.ExportSessionRecord(context.Background(), record)
+
+	events := nozzle.getEvents()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 OCSF events (one per violation), got %d", len(events))
+	}
+
+	// Verify first event
+	var first map[string]any
+	if err := json.Unmarshal(events[0], &first); err != nil {
+		t.Fatal(err)
+	}
+	classUID, ok := first["class_uid"].(float64)
+	if !ok || int(classUID) != 2004 {
+		t.Errorf("event 0: unexpected class_uid: %v", first["class_uid"])
+	}
+}
+
+func TestProviderExportSessionRecordNoOCSFNoTelemetry(t *testing.T) {
+	cfg := telemetry.Config{
+		Enabled:     false,
+		Exporter:    "none",
+		ServiceName: "elida-test",
+	}
+	provider, err := telemetry.NewProvider(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Shutdown(context.Background()) //nolint:errcheck
+
+	// No OCSF emitter set, telemetry disabled — should be a no-op (no panic)
+	record := telemetry.SessionRecord{
+		SessionID: "sess-noop",
+		Violations: []telemetry.Violation{
+			{RuleName: "test", Severity: "info"},
+		},
+	}
+	provider.ExportSessionRecord(context.Background(), record)
+}
