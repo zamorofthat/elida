@@ -34,11 +34,14 @@ type CapturedRequest struct {
 
 // Violation records a policy violation for session records
 type Violation struct {
-	RuleName    string `json:"rule_name"`
-	Description string `json:"description"`
-	Severity    string `json:"severity"`
-	MatchedText string `json:"matched_text,omitempty"`
-	Action      string `json:"action"`
+	RuleName      string `json:"rule_name"`
+	Description   string `json:"description"`
+	Severity      string `json:"severity"`
+	MatchedText   string `json:"matched_text,omitempty"`
+	Action        string `json:"action"`
+	EventCategory string `json:"event_category,omitempty"`
+	FrameworkRef  string `json:"framework_ref,omitempty"`
+	SourceRole    string `json:"source_role,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
