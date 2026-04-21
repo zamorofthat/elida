@@ -127,7 +127,7 @@ func (e *OCSFEmitter) Close() error {
 }
 
 // BuildTLSConfigForTest exposes buildTLSConfig for black-box tests.
-func BuildTLSConfigForTest(cfg config.OCSFTLSConfig) (any, error) {
+func BuildTLSConfigForTest(cfg config.OCSFTLSConfig) (*tls.Config, error) {
 	return buildTLSConfig(cfg)
 }
 
@@ -196,12 +196,13 @@ func newWebhookNozzle(cfg config.OCSFWebhookConfig) (*webhookNozzle, error) {
 		retries = 0
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
 	tlsCfg, err := buildTLSConfig(cfg.TLS)
 	if err != nil {
 		return nil, fmt.Errorf("webhook TLS config: %w", err)
 	}
-	transport.TLSClientConfig = tlsCfg
+	transport := &http.Transport{
+		TLSClientConfig: tlsCfg,
+	}
 
 	return &webhookNozzle{
 		url:     cfg.URL,
@@ -241,7 +242,7 @@ func (n *webhookNozzle) doPost(ctx context.Context, event []byte) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close()        //nolint:errcheck
 	io.Copy(io.Discard, resp.Body) //nolint:errcheck
 
 	if resp.StatusCode >= 400 {
@@ -332,21 +333,27 @@ func newSyslogNozzle(cfg config.OCSFSyslogConfig) (*syslogNozzle, error) {
 }
 
 func (n *syslogNozzle) connect() error {
-	netProto := n.protocol
 	switch n.protocol {
 	case "tcp+tls":
-		conn, err := tls.Dial("tcp", n.addr, n.tlsConfig)
+		d := &tls.Dialer{Config: n.tlsConfig}
+		conn, err := d.DialContext(context.Background(), "tcp", n.addr)
 		if err != nil {
 			return err
 		}
 		n.conn = conn
 		return nil
 	case "tcp", "udp":
-		netProto = n.protocol
+		// use as-is
 	default:
+		// fall back to udp below
+	}
+
+	netProto := n.protocol
+	if netProto != "tcp" && netProto != "udp" {
 		netProto = "udp"
 	}
-	conn, err := net.DialTimeout(netProto, n.addr, 5*time.Second)
+	d := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := d.DialContext(context.Background(), netProto, n.addr)
 	if err != nil {
 		return err
 	}

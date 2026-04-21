@@ -313,13 +313,16 @@ func TestMarshalOCSFEventRoundtrip(t *testing.T) {
 	if !ok {
 		t.Fatal("message_context missing from roundtrip")
 	}
-	if int64(msgCtx["prompt_tokens"].(float64)) != 100 {
+	promptTokens, ok := msgCtx["prompt_tokens"].(float64)
+	if !ok || int64(promptTokens) != 100 {
 		t.Errorf("unexpected prompt_tokens: %v", msgCtx["prompt_tokens"])
 	}
-	if int64(msgCtx["completion_tokens"].(float64)) != 50 {
+	completionTokens, ok := msgCtx["completion_tokens"].(float64)
+	if !ok || int64(completionTokens) != 50 {
 		t.Errorf("unexpected completion_tokens: %v", msgCtx["completion_tokens"])
 	}
-	if int64(msgCtx["total_tokens"].(float64)) != 150 {
+	totalTokens, ok := msgCtx["total_tokens"].(float64)
+	if !ok || int64(totalTokens) != 150 {
 		t.Errorf("unexpected total_tokens: %v", msgCtx["total_tokens"])
 	}
 }
@@ -448,7 +451,10 @@ func TestOCSFEmitterFanOut(t *testing.T) {
 	// Both nozzles should receive the event
 	nozzles := emitter.Nozzles()
 	for i, n := range nozzles {
-		mn := n.(*mockNozzle)
+		mn, ok := n.(*mockNozzle)
+		if !ok {
+			t.Fatalf("nozzle %d: unexpected type %T", i, n)
+		}
 		events := mn.getEvents()
 		if len(events) != 1 {
 			t.Errorf("nozzle %d: expected 1 event, got %d", i, len(events))
@@ -459,7 +465,8 @@ func TestOCSFEmitterFanOut(t *testing.T) {
 			t.Errorf("nozzle %d: invalid JSON: %v", i, err)
 			continue
 		}
-		if int(parsed["class_uid"].(float64)) != 2004 {
+		classUID, ok := parsed["class_uid"].(float64)
+		if !ok || int(classUID) != 2004 {
 			t.Errorf("nozzle %d: unexpected class_uid", i)
 		}
 	}
@@ -541,7 +548,8 @@ func generateTestCert(t *testing.T) (string, string, string) {
 		t.Fatal(err)
 	}
 	caPath := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0600); err != nil {
+	err = os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0600)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -567,7 +575,8 @@ func generateTestCert(t *testing.T) (string, string, string) {
 		t.Fatal(err)
 	}
 	certPath := filepath.Join(dir, "client.pem")
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}), 0600); err != nil {
+	err = os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}), 0600)
+	if err != nil {
 		t.Fatal(err)
 	}
 	keyBytes, err := x509.MarshalECPrivateKey(clientKey)
@@ -575,7 +584,8 @@ func generateTestCert(t *testing.T) (string, string, string) {
 		t.Fatal(err)
 	}
 	keyPath := filepath.Join(dir, "client-key.pem")
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}), 0600); err != nil {
+	err = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}), 0600)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return caPath, certPath, keyPath
@@ -586,7 +596,7 @@ func TestBuildTLSConfigEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	tlsCfg := result.(*tls.Config)
+	tlsCfg := result
 	if tlsCfg.MinVersion != tls.VersionTLS12 {
 		t.Errorf("expected MinVersion TLS 1.2, got %d", tlsCfg.MinVersion)
 	}
@@ -602,7 +612,7 @@ func TestBuildTLSConfigCAFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	tlsCfg := result.(*tls.Config)
+	tlsCfg := result
 	if tlsCfg.RootCAs == nil {
 		t.Fatal("expected RootCAs to be set")
 	}
@@ -618,7 +628,7 @@ func TestBuildTLSConfigClientCert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	tlsCfg := result.(*tls.Config)
+	tlsCfg := result
 	if len(tlsCfg.Certificates) != 1 {
 		t.Fatalf("expected 1 client certificate, got %d", len(tlsCfg.Certificates))
 	}
@@ -629,7 +639,7 @@ func TestBuildTLSConfigInsecure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	tlsCfg := result.(*tls.Config)
+	tlsCfg := result
 	if !tlsCfg.InsecureSkipVerify {
 		t.Error("expected InsecureSkipVerify true")
 	}
@@ -714,22 +724,43 @@ func generateTestPKI(t *testing.T) (string, string, string, string, string, *x50
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign,
 	}
-	caDER, _ := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
-	caCert, _ := x509.ParseCertificate(caDER)
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
 	caPath := filepath.Join(dir, "ca.pem")
-	os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0600)
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	pool := x509.NewCertPool()
 	pool.AddCert(caCert)
 
 	writeCert := func(name string, tmpl *x509.Certificate) (string, string) {
-		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		der, _ := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+		key, kerr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if kerr != nil {
+			t.Fatal(kerr)
+		}
+		der, cerr := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+		if cerr != nil {
+			t.Fatal(cerr)
+		}
 		certPath := filepath.Join(dir, name+".pem")
-		os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600)
-		keyBytes, _ := x509.MarshalECPrivateKey(key)
+		if werr := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); werr != nil {
+			t.Fatal(werr)
+		}
+		keyBytes, merr := x509.MarshalECPrivateKey(key)
+		if merr != nil {
+			t.Fatal(merr)
+		}
 		keyPath := filepath.Join(dir, name+"-key.pem")
-		os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}), 0600)
+		if werr := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}), 0600); werr != nil {
+			t.Fatal(werr)
+		}
 		return certPath, keyPath
 	}
 
@@ -808,7 +839,8 @@ func TestWebhookMTLSEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(received, &parsed); err != nil {
 		t.Fatalf("server received invalid JSON: %v", err)
 	}
-	if int(parsed["class_uid"].(float64)) != 2004 {
+	classUID, ok := parsed["class_uid"].(float64)
+	if !ok || int(classUID) != 2004 {
 		t.Errorf("unexpected class_uid: %v", parsed["class_uid"])
 	}
 }
@@ -876,12 +908,12 @@ func TestSyslogTLSEndToEnd(t *testing.T) {
 	// Read one line from the accepted connection
 	received := make(chan string, 1)
 	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
+		c, acceptErr := ln.Accept()
+		if acceptErr != nil {
 			return
 		}
-		defer conn.Close()
-		scanner := bufio.NewScanner(conn)
+		defer c.Close() //nolint:errcheck
+		scanner := bufio.NewScanner(c)
 		if scanner.Scan() {
 			received <- scanner.Text()
 		}

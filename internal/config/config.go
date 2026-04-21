@@ -264,10 +264,10 @@ type TelemetryConfig struct {
 
 // OCSFConfig holds OCSF native transport configuration
 type OCSFConfig struct {
-	Enabled bool             `yaml:"enabled"`
-	Stdout  OCSFStdoutConfig `yaml:"stdout"`
+	Enabled bool              `yaml:"enabled"`
+	Stdout  OCSFStdoutConfig  `yaml:"stdout"`
 	Webhook OCSFWebhookConfig `yaml:"webhook"`
-	Syslog  OCSFSyslogConfig `yaml:"syslog"`
+	Syslog  OCSFSyslogConfig  `yaml:"syslog"`
 }
 
 // OCSFStdoutConfig configures JSONL output to stdout

@@ -287,4 +287,3 @@ func BuildAnomalyDetection(sessionID string, score float64, bucket, class string
 func MarshalOCSFEvent(event any) ([]byte, error) {
 	return json.Marshal(event)
 }
-
