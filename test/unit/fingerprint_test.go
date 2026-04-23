@@ -70,6 +70,40 @@ func TestP2Quantile_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestP2Quantile_JSONRoundTrip_PartialInit(t *testing.T) {
+	// Regression test: serializing a P2Quantile with count < 5 (before
+	// initialization completes) then deserializing and adding more values
+	// used to panic with "index out of range" because the initial buffer
+	// was lost during JSON round-trip.
+	for n := 1; n <= 4; n++ {
+		pq := fingerprint.NewP2Quantile(0.50)
+		for i := 0; i < n; i++ {
+			pq.Add(float64(i + 1))
+		}
+
+		data, err := json.Marshal(pq)
+		if err != nil {
+			t.Fatalf("count=%d: marshal: %v", n, err)
+		}
+
+		var restored fingerprint.P2Quantile
+		if err := json.Unmarshal(data, &restored); err != nil {
+			t.Fatalf("count=%d: unmarshal: %v", n, err)
+		}
+
+		// This used to panic — adding enough values to trigger initialize()
+		// on a restored instance that lost its initial buffer.
+		for i := n; i < 10; i++ {
+			restored.Add(float64(i + 1))
+		}
+
+		est := restored.Estimate()
+		if est <= 0 {
+			t.Errorf("count=%d: expected positive estimate, got %f", n, est)
+		}
+	}
+}
+
 // --- Cholesky & Mahalanobis Tests ---
 
 func TestCholesky7_Identity(t *testing.T) {

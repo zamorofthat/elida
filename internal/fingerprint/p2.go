@@ -150,23 +150,25 @@ func (pq *P2Quantile) linear(i, sign int) float64 {
 
 // p2JSON is the serialization format for P2Quantile.
 type p2JSON struct {
-	P      float64    `json:"p"`
-	Q      [5]float64 `json:"q"`
-	N      [5]int     `json:"n"`
-	NPrime [5]float64 `json:"n_prime"`
-	DN     [5]float64 `json:"dn"`
-	Count  int        `json:"count"`
+	P       float64    `json:"p"`
+	Q       [5]float64 `json:"q"`
+	N       [5]int     `json:"n"`
+	NPrime  [5]float64 `json:"n_prime"`
+	DN      [5]float64 `json:"dn"`
+	Count   int        `json:"count"`
+	Initial []float64  `json:"initial,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler.
 func (pq *P2Quantile) MarshalJSON() ([]byte, error) {
 	return json.Marshal(p2JSON{
-		P:      pq.p,
-		Q:      pq.q,
-		N:      pq.n,
-		NPrime: pq.nPrime,
-		DN:     pq.dn,
-		Count:  pq.count,
+		P:       pq.p,
+		Q:       pq.q,
+		N:       pq.n,
+		NPrime:  pq.nPrime,
+		DN:      pq.dn,
+		Count:   pq.count,
+		Initial: pq.initial,
 	})
 }
 
@@ -182,6 +184,6 @@ func (pq *P2Quantile) UnmarshalJSON(data []byte) error {
 	pq.nPrime = v.NPrime
 	pq.dn = v.DN
 	pq.count = v.Count
-	pq.initial = nil
+	pq.initial = v.Initial
 	return nil
 }
