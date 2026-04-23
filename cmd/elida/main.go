@@ -48,6 +48,7 @@ type app struct {
 
 	policyEngine    *policy.Engine
 	tp              *telemetry.Provider
+	ocsfEmitter     *telemetry.OCSFEmitter
 	proxyCaptureBuf *proxy.CaptureBuffer
 
 	proxyHandler   *proxy.Proxy
@@ -101,6 +102,7 @@ func main() {
 	a.initSessionStore()
 	a.initSQLiteStorage()
 	a.initSessionEndCallback()
+	a.initOCSF()
 	a.initTelemetry()
 	a.initPolicyEngine()
 
@@ -193,7 +195,7 @@ func (a *app) initSQLiteStorage() {
 }
 
 func (a *app) initSessionEndCallback() {
-	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled {
 		return
 	}
 
@@ -247,11 +249,14 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 	}
 	for _, v := range flagged.Violations {
 		record.Violations = append(record.Violations, storage.Violation{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    string(v.Severity),
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      string(v.Severity),
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EventCategory: v.EventCategory,
+			FrameworkRef:  v.FrameworkRef,
+			SourceRole:    v.SourceRole,
 		})
 	}
 }
@@ -332,8 +337,11 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 }
 
 func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Session, endTime time.Time) {
-	slog.Debug("checking telemetry export", "tp_nil", a.tp == nil, "tp_enabled", a.tp != nil && a.tp.Enabled())
-	if a.tp == nil || !a.tp.Enabled() {
+	if a.tp == nil {
+		return
+	}
+	// Export if OTEL is enabled or OCSF emitter is attached
+	if !a.tp.Enabled() && a.ocsfEmitter == nil {
 		return
 	}
 
@@ -352,11 +360,14 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	}
 	for _, v := range record.Violations {
 		telemRecord.Violations = append(telemRecord.Violations, telemetry.Violation{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    v.Severity,
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      v.Severity,
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EventCategory: v.EventCategory,
+			FrameworkRef:  v.FrameworkRef,
+			SourceRole:    v.SourceRole,
 		})
 	}
 	for _, c := range record.CapturedContent {
@@ -372,29 +383,58 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	a.tp.ExportSessionRecord(context.Background(), telemRecord)
 }
 
-func (a *app) initTelemetry() {
-	if !a.cfg.Telemetry.Enabled {
+func (a *app) initOCSF() {
+	if !a.cfg.OCSF.Enabled {
 		return
 	}
 	var err error
-	a.tp, err = telemetry.NewProvider(telemetry.Config{
-		Enabled:        a.cfg.Telemetry.Enabled,
-		Exporter:       a.cfg.Telemetry.Exporter,
-		Endpoint:       a.cfg.Telemetry.Endpoint,
-		ServiceName:    a.cfg.Telemetry.ServiceName,
-		Insecure:       a.cfg.Telemetry.Insecure,
-		CaptureContent: a.cfg.Telemetry.CaptureContent,
-		MaxBodySize:    a.cfg.Telemetry.MaxBodySize,
-	})
+	a.ocsfEmitter, err = telemetry.NewOCSFEmitter(a.cfg.OCSF)
 	if err != nil {
-		slog.Warn("telemetry initialization failed, continuing without tracing", "error", err)
-		a.tp = nil
+		slog.Warn("OCSF emitter initialization failed", "error", err)
 		return
 	}
-	slog.Info("telemetry enabled",
-		"exporter", a.cfg.Telemetry.Exporter,
-		"endpoint", a.cfg.Telemetry.Endpoint,
-	)
+	if a.ocsfEmitter != nil {
+		slog.Info("OCSF native transport enabled")
+	}
+}
+
+func (a *app) initTelemetry() {
+	// Create provider if OTEL is enabled OR if we need it to host the OCSF emitter
+	if !a.cfg.Telemetry.Enabled && a.ocsfEmitter == nil {
+		return
+	}
+
+	if a.cfg.Telemetry.Enabled {
+		var err error
+		a.tp, err = telemetry.NewProvider(telemetry.Config{
+			Enabled:        a.cfg.Telemetry.Enabled,
+			Exporter:       a.cfg.Telemetry.Exporter,
+			Endpoint:       a.cfg.Telemetry.Endpoint,
+			ServiceName:    a.cfg.Telemetry.ServiceName,
+			Insecure:       a.cfg.Telemetry.Insecure,
+			CaptureContent: a.cfg.Telemetry.CaptureContent,
+			MaxBodySize:    a.cfg.Telemetry.MaxBodySize,
+		})
+		if err != nil {
+			slog.Warn("telemetry initialization failed, continuing without tracing", "error", err)
+			a.tp = nil
+		} else {
+			slog.Info("telemetry enabled",
+				"exporter", a.cfg.Telemetry.Exporter,
+				"endpoint", a.cfg.Telemetry.Endpoint,
+			)
+		}
+	}
+
+	// If OTEL is disabled but OCSF is enabled, create a noop provider to host the emitter
+	if a.tp == nil && a.ocsfEmitter != nil {
+		a.tp = telemetry.NoopProvider()
+	}
+
+	// Wire OCSF emitter into provider
+	if a.tp != nil && a.ocsfEmitter != nil {
+		a.tp.SetOCSFEmitter(a.ocsfEmitter)
+	}
 }
 
 func (a *app) initPolicyEngine() {
@@ -654,14 +694,21 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 		slog.Info("drained sessions on shutdown", "count", drained)
 	}
 
-	// Step 4: Flush telemetry AFTER draining (drain creates new OTEL spans)
+	// Step 4: Close OCSF emitter (flush nozzle connections)
+	if a.ocsfEmitter != nil {
+		if err := a.ocsfEmitter.Close(); err != nil {
+			slog.Error("OCSF emitter close error", "error", err)
+		}
+	}
+
+	// Step 5: Flush telemetry AFTER draining (drain creates new OTEL spans)
 	if a.tp != nil {
 		if err := a.tp.Shutdown(shutdownCtx); err != nil {
 			slog.Error("telemetry shutdown error", "error", err)
 		}
 	}
 
-	// Step 5: Close storage backends
+	// Step 6: Close storage backends
 	if a.redisStore != nil {
 		if err := a.redisStore.Close(); err != nil {
 			slog.Error("Redis close error", "error", err)

@@ -110,6 +110,36 @@ telemetry:
   # Max bytes of request/response body to include in OTEL exports (default 4096)
   max_body_size: 4096
 
+# OCSF native transport configuration
+# Emits OCSF Detection Finding events via independent transports (not OTEL)
+# ocsf:
+#   enabled: false
+#   stdout:
+#     enabled: false          # Write OCSF JSONL to stdout (for log shippers)
+#   webhook:
+#     enabled: false
+#     url: "https://siem.example.com/api/ocsf"
+#     headers:
+#       Authorization: "Bearer xxx"
+#     timeout: 10s            # HTTP timeout per request (default 10s)
+#     retry_count: 2          # Retries on failure (default 2)
+#     tls:
+#       ca_file: ""             # Path to CA bundle PEM (custom/private CAs)
+#       cert_file: ""           # Client cert PEM (for mTLS)
+#       key_file: ""            # Client key PEM (for mTLS)
+#       insecure_skip_verify: false  # Allow plain HTTP or skip server cert check (dev only)
+#   syslog:
+#     enabled: false
+#     addr: "localhost:514"
+#     protocol: "udp"         # "udp", "tcp", "tcp+tls"
+#     facility: "local0"      # syslog facility (default local0)
+#     tag: "elida"            # syslog tag (default elida)
+#     tls:
+#       ca_file: ""             # Path to CA bundle PEM (custom/private CAs)
+#       cert_file: ""           # Client cert PEM (for mTLS)
+#       key_file: ""            # Client key PEM (for mTLS)
+#       insecure_skip_verify: false  # Skip server cert verification (dev only)
+
 # Storage configuration (for dashboard history)
 storage:
   # Enable SQLite storage for session history
