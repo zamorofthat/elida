@@ -18,7 +18,6 @@ coverage.html
 # Dependency directories
 vendor/
 node_modules/
-package-lock.json
 
 # Go workspace file
 go.work
