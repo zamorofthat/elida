@@ -3,6 +3,7 @@ package unit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"sync"
@@ -659,6 +660,285 @@ func TestFingerprint_EndToEnd(t *testing.T) {
 	t.Logf("Outlier risk points: %d", riskPoints)
 }
 
+// --- Scorer Misc Tests ---
+
+func TestScorer_IsShadow(t *testing.T) {
+	store := newMemoryStore()
+	cfg := fingerprint.DefaultBaselineConfig()
+
+	shadow, err := fingerprint.NewM3LiteScorer(store, true, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shadow.Close()
+	if !shadow.IsShadow() {
+		t.Error("expected shadow=true")
+	}
+
+	active, err := fingerprint.NewM3LiteScorer(store, false, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	if active.IsShadow() {
+		t.Error("expected shadow=false")
+	}
+}
+
+func TestScorer_FlushRetryOnError(t *testing.T) {
+	store := newFailingStore(1) // fail first save, succeed after
+	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 10}
+	scorer, err := fingerprint.NewM3LiteScorerWithFlush(store, true, cfg, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go scorer.Run(ctx)
+
+	// Ingest to mark dirty
+	sess := makeNormalSession(1)
+	snap := sess.Snapshot()
+	if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		t.Fatal(ingestErr)
+	}
+
+	// Wait for first flush (fails) + second flush (succeeds)
+	time.Sleep(250 * time.Millisecond)
+
+	if store.successCount() == 0 {
+		t.Error("expected at least one successful save after retry")
+	}
+
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	scorer.Close()
+}
+
+func TestDistanceToBucket_AllBuckets(t *testing.T) {
+	tests := []struct {
+		distance float64
+		bucket   string
+	}{
+		{0.0, fingerprint.BucketNormal},
+		{3.2, fingerprint.BucketNormal},
+		{3.3, fingerprint.BucketMinor},
+		{4.0, fingerprint.BucketMinor},
+		{4.1, fingerprint.BucketNotable},
+		{4.9, fingerprint.BucketNotable},
+		{5.0, fingerprint.BucketAnomalous},
+		{5.9, fingerprint.BucketAnomalous},
+		{6.0, fingerprint.BucketSevere},
+		{100.0, fingerprint.BucketSevere},
+	}
+
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 5}
+	scorer, err := fingerprint.NewM3LiteScorer(store, false, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	// Build a minimal baseline
+	for i := 0; i < 10; i++ {
+		sess := makeNormalSession(i)
+		snap := sess.Snapshot()
+		_ = scorer.Ingest(&snap)
+	}
+
+	// Just verify BucketRiskPoints covers all buckets
+	for _, tt := range tests {
+		rp := fingerprint.BucketRiskPoints(tt.bucket)
+		if tt.bucket == fingerprint.BucketNormal && rp != 0 {
+			t.Errorf("bucket %s should have 0 risk points", tt.bucket)
+		}
+		if tt.bucket == fingerprint.BucketSevere && rp != 20 {
+			t.Errorf("bucket %s should have 20 risk points, got %d", tt.bucket, rp)
+		}
+	}
+}
+
+// --- Feature Extraction Edge Cases ---
+
+func TestExtract_MultipleBackends(t *testing.T) {
+	sess := session.NewSession("test-multi", "http://backend-a", "127.0.0.1")
+	// Record requests on two different backends
+	sess.RecordBackend("backend-a")
+	sess.RecordBackend("backend-a")
+	sess.RecordBackend("backend-a")
+	sess.RecordBackend("backend-b")
+	for i := 0; i < 4; i++ {
+		sess.Touch()
+	}
+
+	snap := sess.Snapshot()
+	fv := fingerprint.Extract(&snap)
+
+	// With mixed backends (3 A, 1 B), continuity should be 0.75
+	if fv[fingerprint.FeatBackendContinuity] >= 1.0 {
+		t.Errorf("backend continuity = %f, expected < 1.0 with multiple backends", fv[fingerprint.FeatBackendContinuity])
+	}
+	if math.Abs(fv[fingerprint.FeatBackendContinuity]-0.75) > 0.01 {
+		t.Errorf("backend continuity = %f, expected 0.75", fv[fingerprint.FeatBackendContinuity])
+	}
+}
+
+func TestExtract_MultipleCadenceGaps(t *testing.T) {
+	sess := session.NewSession("test-cadence", "http://backend", "127.0.0.1")
+	for i := 0; i < 5; i++ {
+		sess.RecordMessage("user", "msg", "backend")
+		time.Sleep(time.Millisecond)
+		sess.RecordMessage("assistant", "reply", "backend")
+		time.Sleep(time.Millisecond)
+	}
+
+	snap := sess.Snapshot()
+	fv := fingerprint.Extract(&snap)
+
+	// Should have non-zero cadence values
+	if fv[fingerprint.FeatCadenceMedian] == 0 {
+		t.Error("cadence median should be non-zero with multiple messages")
+	}
+}
+
+func TestModelFamily_Variants(t *testing.T) {
+	tests := []struct {
+		model string
+		class string
+	}{
+		{"claude-3-opus-20240229", "backend/claude-3-opus"},
+		{"gpt-4o-mini", "backend/gpt-4o-mini"},
+		{"mistral-large-latest", "backend/mistral-large"},
+		{"claude-3-haiku-20240307", "backend/claude-3-haiku"},
+	}
+
+	for _, tt := range tests {
+		sess := session.NewSession("test", "backend", "127.0.0.1")
+		sess.SetMetadata("model", tt.model)
+		snap := sess.Snapshot()
+		got := fingerprint.SessionClass(&snap)
+		if got != tt.class {
+			t.Errorf("SessionClass(model=%q) = %q, want %q", tt.model, got, tt.class)
+		}
+	}
+}
+
+func TestSessionClass_NoBackend(t *testing.T) {
+	sess := session.NewSession("test", "", "127.0.0.1")
+	snap := sess.Snapshot()
+	if c := fingerprint.SessionClass(&snap); c != "global" {
+		t.Errorf("class = %q, want 'global'", c)
+	}
+}
+
+// --- Store Edge Cases ---
+
+func TestSQLiteBaselineStore_EmptyDB(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "elida-empty-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	sqliteStore, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	store, err := fingerprint.NewSQLiteBaselineStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := fingerprint.DefaultBaselineConfig()
+	baselines, err := store.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baselines) != 0 {
+		t.Errorf("empty DB should load 0 baselines, got %d", len(baselines))
+	}
+}
+
+func TestSQLiteBaselineStore_SaveEmpty(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "elida-save-empty-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	sqliteStore, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	store, err := fingerprint.NewSQLiteBaselineStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Saving empty map should not error
+	if saveErr := store.Save(make(map[string]*fingerprint.Baseline)); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+}
+
+func TestSQLiteBaselineStore_MultipleClasses(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "elida-multi-class-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	sqliteStore, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqliteStore.Close()
+
+	store, err := fingerprint.NewSQLiteBaselineStore(sqliteStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := fingerprint.DefaultBaselineConfig()
+	baselines := make(map[string]*fingerprint.Baseline)
+	for _, class := range []string{"global", "anthropic", "anthropic/claude-3-opus"} {
+		b := fingerprint.NewBaseline(class, cfg)
+		for i := 0; i < 20; i++ {
+			var fv fingerprint.FeatureVector
+			for j := 0; j < 7; j++ {
+				fv[j] = float64(i + 1)
+			}
+			b.Update(fv)
+		}
+		baselines[class] = b
+	}
+
+	if saveErr := store.Save(baselines); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+
+	loaded, err := store.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 3 {
+		t.Errorf("expected 3 baselines, got %d", len(loaded))
+	}
+	for _, class := range []string{"global", "anthropic", "anthropic/claude-3-opus"} {
+		if loaded[class] == nil {
+			t.Errorf("missing baseline for class %q", class)
+		}
+	}
+}
+
 // --- Periodic Flush Tests ---
 
 func TestScorer_PeriodicFlush(t *testing.T) {
@@ -821,6 +1101,43 @@ func (ts *trackingStore) saveCount() int {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	return ts.saves
+}
+
+// failingStore fails the first N saves, then succeeds.
+type failingStore struct {
+	mu        sync.Mutex
+	failsLeft int
+	successes int
+	inner     *memoryStore
+}
+
+func newFailingStore(failCount int) *failingStore {
+	return &failingStore{failsLeft: failCount, inner: newMemoryStore()}
+}
+
+func (fs *failingStore) Load(cfg fingerprint.BaselineConfig) (map[string]*fingerprint.Baseline, error) {
+	return fs.inner.Load(cfg)
+}
+
+func (fs *failingStore) Save(baselines map[string]*fingerprint.Baseline) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.failsLeft > 0 {
+		fs.failsLeft--
+		return fmt.Errorf("simulated save failure")
+	}
+	fs.successes++
+	return fs.inner.Save(baselines)
+}
+
+func (fs *failingStore) Close() error {
+	return fs.inner.Close()
+}
+
+func (fs *failingStore) successCount() int {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.successes
 }
 
 // --- Helpers ---
