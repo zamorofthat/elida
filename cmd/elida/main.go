@@ -23,6 +23,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/fingerprint"
 	"elida/internal/policy"
 	"elida/internal/proxy"
 	"elida/internal/session"
@@ -47,6 +48,7 @@ type app struct {
 	sqliteStore *storage.SQLiteStore
 
 	policyEngine    *policy.Engine
+	fingerprinter   *fingerprint.M3LiteScorer
 	tp              *telemetry.Provider
 	ocsfEmitter     *telemetry.OCSFEmitter
 	proxyCaptureBuf *proxy.CaptureBuffer
@@ -101,6 +103,7 @@ func main() {
 
 	a.initSessionStore()
 	a.initSQLiteStorage()
+	a.initFingerprint()
 	a.initSessionEndCallback()
 	a.initOCSF()
 	a.initTelemetry()
@@ -110,6 +113,11 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go a.manager.Run(ctx)
+
+	// Start fingerprint periodic flush (crash-resilient baseline persistence)
+	if a.fingerprinter != nil {
+		go a.fingerprinter.Run(ctx)
+	}
 
 	a.initProxy()
 	a.initWebSocket()
@@ -194,8 +202,39 @@ func (a *app) initSQLiteStorage() {
 	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
 }
 
+func (a *app) initFingerprint() {
+	if !a.cfg.Fingerprint.Enabled || a.sqliteStore == nil {
+		return
+	}
+
+	cfg := fingerprint.BaselineConfig{
+		NEff:        a.cfg.Fingerprint.NEff,
+		RidgeLambda: a.cfg.Fingerprint.RidgeLambda,
+		WarmUp:      a.cfg.Fingerprint.WarmUp,
+	}
+
+	store, err := fingerprint.NewSQLiteBaselineStore(a.sqliteStore.DB())
+	if err != nil {
+		slog.Error("failed to initialize fingerprint store", "error", err)
+		return
+	}
+
+	scorer, err := fingerprint.NewM3LiteScorerWithFlush(store, a.cfg.Fingerprint.Shadow, cfg, a.cfg.Fingerprint.FlushInterval)
+	if err != nil {
+		slog.Error("failed to initialize fingerprint scorer", "error", err)
+		return
+	}
+
+	a.fingerprinter = scorer
+	slog.Info("behavioral fingerprinting enabled",
+		"shadow", a.cfg.Fingerprint.Shadow,
+		"warm_up", cfg.WarmUp,
+		"flush_interval", a.cfg.Fingerprint.FlushInterval,
+	)
+}
+
 func (a *app) initSessionEndCallback() {
-	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil {
 		return
 	}
 
@@ -223,6 +262,7 @@ func (a *app) initSessionEndCallback() {
 
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
+		a.scoreFingerprint(&snap)
 		a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime)
 	})
@@ -279,6 +319,53 @@ func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessi
 			ResponseBody: c.ResponseBody,
 			StatusCode:   c.StatusCode,
 		})
+	}
+}
+
+func (a *app) scoreFingerprint(snap *session.Session) {
+	if a.fingerprinter == nil {
+		return
+	}
+
+	// Always ingest to update baselines
+	if err := a.fingerprinter.Ingest(snap); err != nil {
+		slog.Error("fingerprint ingest failed", "session_id", snap.ID, "error", err)
+	}
+
+	// Score (returns immediately in shadow mode)
+	distance, bucket, features, err := a.fingerprinter.Score(snap)
+	if err != nil {
+		slog.Error("fingerprint scoring failed", "session_id", snap.ID, "error", err)
+		return
+	}
+
+	if bucket == fingerprint.BucketWarmUp {
+		return // not enough data or shadow mode
+	}
+
+	class := fingerprint.SessionClass(snap)
+
+	slog.Info("fingerprint score",
+		"session_id", snap.ID,
+		"class", class,
+		"distance", distance,
+		"bucket", bucket,
+	)
+
+	// Add risk points for notable+ scores
+	riskPoints := fingerprint.BucketRiskPoints(bucket)
+	if riskPoints > 0 && a.policyEngine != nil {
+		a.policyEngine.AddExternalRiskPoints(snap.ID, riskPoints, "m3-lite")
+	}
+
+	// Emit OCSF 2004 for notable+ scores
+	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor {
+		if a.ocsfEmitter != nil {
+			finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
+			finding.Unmapped.Backend = snap.Backend
+			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+		}
+		_ = features // available for future dashboard integration
 	}
 }
 
@@ -708,7 +795,14 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 		}
 	}
 
-	// Step 6: Close storage backends
+	// Step 6: Persist fingerprint baselines
+	if a.fingerprinter != nil {
+		if err := a.fingerprinter.Close(); err != nil {
+			slog.Error("fingerprint close error", "error", err)
+		}
+	}
+
+	// Step 7: Close storage backends
 	if a.redisStore != nil {
 		if err := a.redisStore.Close(); err != nil {
 			slog.Error("Redis close error", "error", err)

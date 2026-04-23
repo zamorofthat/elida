@@ -250,12 +250,13 @@ func BuildBlockDetection(sessionID, ruleName, matchedText, backend, model string
 }
 
 // BuildAnomalyDetection builds a Detection Finding (class 2004) for M3-lite anomaly scores.
-// Replaces the former BuildDetectionFinding.
+// The score parameter is a Mahalanobis distance (typically 0-10+).
+// Severity mapping: >=5.0 critical, >=4.1 warning, <4.1 info.
 func BuildAnomalyDetection(sessionID string, score float64, bucket, class string) OCSFDetectionFinding {
 	severityID := OCSFSeverityInfo
-	if score >= 0.8 {
+	if score >= 5.0 {
 		severityID = OCSFSeverityCritical
-	} else if score >= 0.5 {
+	} else if score >= 4.1 {
 		severityID = OCSFSeverityWarning
 	}
 
@@ -266,12 +267,12 @@ func BuildAnomalyDetection(sessionID string, score float64, bucket, class string
 		ActivityID:  OCSFActivityCreate,
 		SeverityID:  severityID,
 		Time:        nowMillis(),
-		Message:     "Anomaly detected: " + class,
+		Message:     "Behavioral anomaly: " + class,
 		Metadata:    newMetadata(),
 		FindingInfo: OCSFFinding{
 			Title: class,
 			Desc:  bucket,
-			Types: []string{"anomaly"},
+			Types: []string{"behavioral_anomaly"},
 		},
 		Analytic: OCSFAnalytic{
 			Name: "M3-lite",
