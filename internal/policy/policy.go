@@ -1079,6 +1079,43 @@ func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
 	return 0, string(ActionObserve), 0
 }
 
+// AddExternalRiskPoints adds risk points from an external source (e.g., M3-lite behavioral fingerprinting).
+// Unlike policy violations, these are one-time additions (no decay, no violation events).
+func (e *Engine) AddExternalRiskPoints(sessionID string, points int, source string) {
+	if points <= 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	flagged, exists := e.flaggedSessions[sessionID]
+	if !exists {
+		flagged = &FlaggedSession{
+			SessionID:       sessionID,
+			FirstFlagged:    time.Now(),
+			ViolationCounts: make(map[string]int),
+		}
+		e.flaggedSessions[sessionID] = flagged
+	}
+	flagged.LastFlagged = time.Now()
+	flagged.RiskScore += float64(points)
+	if flagged.RiskScore > MaxRiskScore {
+		flagged.RiskScore = MaxRiskScore
+	}
+
+	if e.riskLadderEnabled {
+		flagged.CurrentAction, flagged.ThrottleRate = e.determineRiskAction(flagged.RiskScore)
+	}
+
+	slog.Info("external risk points added",
+		"session_id", sessionID,
+		"points", points,
+		"source", source,
+		"risk_score", flagged.RiskScore,
+		"action", flagged.CurrentAction,
+	)
+}
+
 // ShouldThrottle returns true if the session should be rate limited
 func (e *Engine) ShouldThrottle(sessionID string) (bool, int) {
 	e.mu.RLock()
