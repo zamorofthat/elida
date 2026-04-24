@@ -26,6 +26,8 @@ type Config struct {
 	Storage         StorageConfig            `yaml:"storage"`
 	Policy          PolicyConfig             `yaml:"policy"`
 	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
+	OCSF            OCSFConfig               `yaml:"ocsf"`             // OCSF native transport configuration
+	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
 
@@ -261,6 +263,57 @@ type TelemetryConfig struct {
 	MaxBodySize    int    `yaml:"max_body_size"`   // Truncation limit for bodies (default 4096)
 }
 
+// OCSFConfig holds OCSF native transport configuration
+type OCSFConfig struct {
+	Enabled bool              `yaml:"enabled"`
+	Stdout  OCSFStdoutConfig  `yaml:"stdout"`
+	Webhook OCSFWebhookConfig `yaml:"webhook"`
+	Syslog  OCSFSyslogConfig  `yaml:"syslog"`
+}
+
+// OCSFStdoutConfig configures JSONL output to stdout
+type OCSFStdoutConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// OCSFTLSConfig holds TLS settings shared by webhook and syslog nozzles.
+type OCSFTLSConfig struct {
+	CAFile             string `yaml:"ca_file"`              // Path to CA bundle PEM
+	CertFile           string `yaml:"cert_file"`            // Client cert PEM (mTLS)
+	KeyFile            string `yaml:"key_file"`             // Client key PEM (mTLS)
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"` // Skip server cert verification (dev only)
+}
+
+// OCSFWebhookConfig configures HTTP webhook delivery
+type OCSFWebhookConfig struct {
+	Enabled    bool              `yaml:"enabled"`
+	URL        string            `yaml:"url"`
+	Headers    map[string]string `yaml:"headers"`
+	Timeout    time.Duration     `yaml:"timeout"`
+	RetryCount int               `yaml:"retry_count"`
+	TLS        OCSFTLSConfig     `yaml:"tls"`
+}
+
+// OCSFSyslogConfig configures syslog delivery
+type OCSFSyslogConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Addr     string        `yaml:"addr"`
+	Protocol string        `yaml:"protocol"` // "udp", "tcp", "tcp+tls"
+	Facility string        `yaml:"facility"` // syslog facility (default local0)
+	Tag      string        `yaml:"tag"`      // syslog tag (default elida)
+	TLS      OCSFTLSConfig `yaml:"tls"`
+}
+
+// FingerprintConfig holds behavioral fingerprint configuration
+type FingerprintConfig struct {
+	Enabled       bool          `yaml:"enabled"`        // Enable behavioral fingerprinting (default: false)
+	Shadow        bool          `yaml:"shadow"`         // Shadow mode: ingest only, no scoring (default: true)
+	NEff          int           `yaml:"n_eff"`          // EWMA effective window size (default: 900)
+	RidgeLambda   float64       `yaml:"ridge_lambda"`   // Ridge regularization parameter (default: 1e-6)
+	WarmUp        int           `yaml:"warm_up"`        // Min sessions before scoring (default: 100)
+	FlushInterval time.Duration `yaml:"flush_interval"` // How often to persist dirty baselines (default: 5m)
+}
+
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
@@ -333,6 +386,25 @@ func defaults() *Config {
 			CaptureMode:           "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
 			MaxCaptureSize:        10000,          // 10KB per body
 			MaxCapturedPerSession: 100,            // Max 100 request/response pairs per session
+		},
+		OCSF: OCSFConfig{
+			Enabled: false,
+			Webhook: OCSFWebhookConfig{
+				Timeout:    10 * time.Second,
+				RetryCount: 2,
+			},
+			Syslog: OCSFSyslogConfig{
+				Facility: "local0",
+				Tag:      "elida",
+			},
+		},
+		Fingerprint: FingerprintConfig{
+			Enabled:       false,
+			Shadow:        true,
+			NEff:          900,
+			RidgeLambda:   1e-6,
+			WarmUp:        100,
+			FlushInterval: 5 * time.Minute,
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -453,6 +525,56 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true" {
 		c.Telemetry.Insecure = true
+	}
+
+	// OCSF overrides
+	if os.Getenv("ELIDA_OCSF_ENABLED") == "true" {
+		c.OCSF.Enabled = true
+	}
+	if os.Getenv("ELIDA_OCSF_STDOUT_ENABLED") == "true" {
+		c.OCSF.Stdout.Enabled = true
+	}
+	if os.Getenv("ELIDA_OCSF_WEBHOOK_ENABLED") == "true" {
+		c.OCSF.Webhook.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_OCSF_WEBHOOK_URL"); v != "" {
+		c.OCSF.Webhook.URL = v
+	}
+	if os.Getenv("ELIDA_OCSF_SYSLOG_ENABLED") == "true" {
+		c.OCSF.Syslog.Enabled = true
+	}
+	if v := os.Getenv("ELIDA_OCSF_SYSLOG_ADDR"); v != "" {
+		c.OCSF.Syslog.Addr = v
+	}
+	if v := os.Getenv("ELIDA_OCSF_SYSLOG_PROTOCOL"); v != "" {
+		c.OCSF.Syslog.Protocol = v
+	}
+
+	// OCSF TLS overrides — webhook
+	if v := os.Getenv("ELIDA_OCSF_WEBHOOK_CA_FILE"); v != "" {
+		c.OCSF.Webhook.TLS.CAFile = v
+	}
+	if v := os.Getenv("ELIDA_OCSF_WEBHOOK_CERT_FILE"); v != "" {
+		c.OCSF.Webhook.TLS.CertFile = v
+	}
+	if v := os.Getenv("ELIDA_OCSF_WEBHOOK_KEY_FILE"); v != "" {
+		c.OCSF.Webhook.TLS.KeyFile = v
+	}
+	if os.Getenv("ELIDA_OCSF_WEBHOOK_INSECURE") == "true" {
+		c.OCSF.Webhook.TLS.InsecureSkipVerify = true
+	}
+	// OCSF TLS overrides — syslog
+	if v := os.Getenv("ELIDA_OCSF_SYSLOG_CA_FILE"); v != "" {
+		c.OCSF.Syslog.TLS.CAFile = v
+	}
+	if v := os.Getenv("ELIDA_OCSF_SYSLOG_CERT_FILE"); v != "" {
+		c.OCSF.Syslog.TLS.CertFile = v
+	}
+	if v := os.Getenv("ELIDA_OCSF_SYSLOG_KEY_FILE"); v != "" {
+		c.OCSF.Syslog.TLS.KeyFile = v
+	}
+	if os.Getenv("ELIDA_OCSF_SYSLOG_INSECURE") == "true" {
+		c.OCSF.Syslog.TLS.InsecureSkipVerify = true
 	}
 
 	// Storage overrides
@@ -714,6 +836,52 @@ func (c *Config) Validate() *ValidationResult {
 			Message: "API key required when proxy auth is enabled",
 			Hint:    "set ELIDA_PROXY_API_KEY env var",
 		})
+	}
+
+	// OCSF webhook validation
+	if c.OCSF.Webhook.Enabled && c.OCSF.Webhook.URL != "" {
+		if u, err := url.Parse(c.OCSF.Webhook.URL); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   "ocsf.webhook.url",
+				Message: fmt.Sprintf("invalid URL %q", c.OCSF.Webhook.URL),
+			})
+		} else if u.Scheme == "http" && !c.OCSF.Webhook.TLS.InsecureSkipVerify {
+			errors = append(errors, ValidationError{
+				Field:   "ocsf.webhook.url",
+				Message: "plain HTTP webhook URL is insecure",
+				Hint:    "use https:// or set ocsf.webhook.tls.insecure_skip_verify: true",
+			})
+		}
+	}
+	// OCSF TLS cert/key pairing (webhook)
+	if (c.OCSF.Webhook.TLS.CertFile != "") != (c.OCSF.Webhook.TLS.KeyFile != "") {
+		errors = append(errors, ValidationError{
+			Field:   "ocsf.webhook.tls",
+			Message: "cert_file and key_file must both be set for mTLS",
+		})
+	}
+	if c.OCSF.Webhook.TLS.CAFile != "" {
+		if _, err := os.Stat(c.OCSF.Webhook.TLS.CAFile); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   "ocsf.webhook.tls.ca_file",
+				Message: fmt.Sprintf("CA file not found: %s", c.OCSF.Webhook.TLS.CAFile),
+			})
+		}
+	}
+	// OCSF TLS cert/key pairing (syslog)
+	if (c.OCSF.Syslog.TLS.CertFile != "") != (c.OCSF.Syslog.TLS.KeyFile != "") {
+		errors = append(errors, ValidationError{
+			Field:   "ocsf.syslog.tls",
+			Message: "cert_file and key_file must both be set for mTLS",
+		})
+	}
+	if c.OCSF.Syslog.TLS.CAFile != "" {
+		if _, err := os.Stat(c.OCSF.Syslog.TLS.CAFile); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   "ocsf.syslog.tls.ca_file",
+				Message: fmt.Sprintf("CA file not found: %s", c.OCSF.Syslog.TLS.CAFile),
+			})
+		}
 	}
 
 	// Build result

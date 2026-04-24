@@ -1003,6 +1003,89 @@ func TestReloadConfig_Concurrent(t *testing.T) {
 	}
 }
 
+// ============================================================
+// External Risk Points Tests (M3-lite fingerprint integration)
+// ============================================================
+
+func TestAddExternalRiskPoints_CreatesSession(t *testing.T) {
+	engine := newTestPolicyEngine(nil)
+
+	engine.AddExternalRiskPoints("sess-1", 10, "m3-lite")
+
+	flagged := engine.GetFlaggedSession("sess-1")
+	if flagged == nil {
+		t.Fatal("expected flagged session to be created")
+	}
+	if flagged.RiskScore != 10 {
+		t.Errorf("risk score = %f, want 10", flagged.RiskScore)
+	}
+}
+
+func TestAddExternalRiskPoints_Accumulates(t *testing.T) {
+	engine := newTestPolicyEngine(nil)
+
+	engine.AddExternalRiskPoints("sess-1", 5, "m3-lite")
+	engine.AddExternalRiskPoints("sess-1", 10, "m3-lite")
+
+	flagged := engine.GetFlaggedSession("sess-1")
+	if flagged == nil {
+		t.Fatal("expected flagged session")
+	}
+	if flagged.RiskScore != 15 {
+		t.Errorf("risk score = %f, want 15", flagged.RiskScore)
+	}
+}
+
+func TestAddExternalRiskPoints_CapsAtMax(t *testing.T) {
+	engine := newTestPolicyEngine(nil)
+
+	engine.AddExternalRiskPoints("sess-1", 200, "m3-lite")
+
+	flagged := engine.GetFlaggedSession("sess-1")
+	if flagged == nil {
+		t.Fatal("expected flagged session")
+	}
+	if flagged.RiskScore != policy.MaxRiskScore {
+		t.Errorf("risk score = %f, want %f (max)", flagged.RiskScore, policy.MaxRiskScore)
+	}
+}
+
+func TestAddExternalRiskPoints_ZeroIgnored(t *testing.T) {
+	engine := newTestPolicyEngine(nil)
+
+	engine.AddExternalRiskPoints("sess-1", 0, "m3-lite")
+	engine.AddExternalRiskPoints("sess-1", -5, "m3-lite")
+
+	flagged := engine.GetFlaggedSession("sess-1")
+	if flagged != nil {
+		t.Error("zero/negative points should not create a flagged session")
+	}
+}
+
+func TestAddExternalRiskPoints_WithRiskLadder(t *testing.T) {
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		RiskLadder: policy.RiskLadderConfig{
+			Enabled: true,
+			Thresholds: []policy.RiskThreshold{
+				{Score: 5, Action: policy.ActionWarn},
+				{Score: 15, Action: policy.ActionBlock},
+			},
+		},
+	})
+
+	engine.AddExternalRiskPoints("sess-1", 20, "m3-lite")
+
+	flagged := engine.GetFlaggedSession("sess-1")
+	if flagged == nil {
+		t.Fatal("expected flagged session")
+	}
+	if flagged.CurrentAction != string(policy.ActionBlock) {
+		t.Errorf("action = %s, want block (risk=%f exceeds threshold 15)", flagged.CurrentAction, flagged.RiskScore)
+	}
+}
+
 func TestGetConfig_ReturnsCurrentState(t *testing.T) {
 	engine := policy.NewEngine(policy.Config{
 		Enabled:        true,

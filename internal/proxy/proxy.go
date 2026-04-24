@@ -1545,11 +1545,14 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 	// Add violations
 	for _, v := range flaggedData.Violations {
 		record.Violations = append(record.Violations, storage.Violation{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    string(v.Severity),
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      string(v.Severity),
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EventCategory: v.EventCategory,
+			FrameworkRef:  v.FrameworkRef,
+			SourceRole:    v.SourceRole,
 		})
 	}
 

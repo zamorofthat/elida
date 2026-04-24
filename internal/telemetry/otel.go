@@ -45,6 +45,7 @@ type Provider struct {
 	logger        otellog.Logger
 	meterProvider *sdkmetric.MeterProvider
 	meter         metric.Meter
+	ocsfEmitter   *OCSFEmitter
 	// GenAI metrics instruments
 	tokenUsage        metric.Int64Histogram
 	operationDuration metric.Float64Histogram
@@ -246,6 +247,11 @@ func noopWithConfig(cfg Config) *Provider {
 	}
 }
 
+// SetOCSFEmitter attaches an OCSF emitter to the provider.
+func (p *Provider) SetOCSFEmitter(e *OCSFEmitter) {
+	p.ocsfEmitter = e
+}
+
 // Tracer returns the tracer for creating spans
 func (p *Provider) Tracer() trace.Tracer {
 	return p.tracer
@@ -364,26 +370,30 @@ func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, 
 
 // EmitBlockLog emits a real-time block event OTEL log record
 func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matchedText, backend, model string) {
-	if p.logger == nil {
-		return
+	if p.logger != nil {
+		var rec otellog.Record
+		rec.SetTimestamp(time.Now())
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetBody(otellog.StringValue("request blocked: " + ruleName))
+		rec.AddAttributes(
+			otellog.String("gen_ai.conversation.id", sessionID),
+			otellog.String("gen_ai.provider.name", backend),
+			otellog.String("gen_ai.operation.name", "chat"),
+			otellog.String("gen_ai.request.model", model),
+			otellog.String("elida.violation.rule", ruleName),
+			otellog.String("elida.violation.matched_text", truncateBody(matchedText, 200)),
+			otellog.String("elida.violation.action", "block"),
+		)
+
+		setTraceContext(&rec, ctx)
+		p.logger.Emit(ctx, rec)
 	}
 
-	var rec otellog.Record
-	rec.SetTimestamp(time.Now())
-	rec.SetSeverity(otellog.SeverityWarn)
-	rec.SetBody(otellog.StringValue("request blocked: " + ruleName))
-	rec.AddAttributes(
-		otellog.String("gen_ai.conversation.id", sessionID),
-		otellog.String("gen_ai.provider.name", backend),
-		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", model),
-		otellog.String("elida.violation.rule", ruleName),
-		otellog.String("elida.violation.matched_text", truncateBody(matchedText, 200)),
-		otellog.String("elida.violation.action", "block"),
-	)
-
-	setTraceContext(&rec, ctx)
-	p.logger.Emit(ctx, rec)
+	// Emit OCSF Detection Finding for block event
+	if p.ocsfEmitter != nil {
+		bd := BuildBlockDetection(sessionID, ruleName, matchedText, backend, model)
+		p.ocsfEmitter.Emit(ctx, OCSFClassDetectionFinding, bd.SeverityID, bd)
+	}
 }
 
 // EmitCapturedContentLog emits captured request/response bodies as an OTEL log record.
@@ -545,11 +555,14 @@ const (
 
 // Violation represents a policy violation for telemetry export
 type Violation struct {
-	RuleName    string
-	Description string
-	Severity    string
-	MatchedText string
-	Action      string
+	RuleName      string
+	Description   string
+	Severity      string
+	MatchedText   string
+	Action        string
+	EventCategory string
+	FrameworkRef  string
+	SourceRole    string
 }
 
 // CapturedRequest represents a captured request/response for telemetry export
@@ -656,7 +669,7 @@ func (p *Provider) RecordSessionEnded(ctx context.Context, sessionID, state, bac
 
 // ExportSessionRecord exports a complete session record with violations to telemetry
 func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord) {
-	if !p.Enabled() {
+	if !p.Enabled() && p.ocsfEmitter == nil {
 		return
 	}
 
@@ -740,6 +753,14 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	// Emit OTEL logs for each violation
 	for _, v := range record.Violations {
 		p.EmitViolationLog(ctx, record.SessionID, v, record.Model, record.Backend)
+	}
+
+	// Emit OCSF Detection Finding events for policy violations
+	if p.ocsfEmitter != nil {
+		for _, v := range record.Violations {
+			finding := BuildPolicyDetection(record.SessionID, v, record)
+			p.ocsfEmitter.Emit(ctx, OCSFClassDetectionFinding, finding.SeverityID, finding)
+		}
 	}
 
 	// Emit session killed log if applicable

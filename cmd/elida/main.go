@@ -23,6 +23,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/fingerprint"
 	"elida/internal/policy"
 	"elida/internal/proxy"
 	"elida/internal/session"
@@ -47,7 +48,9 @@ type app struct {
 	sqliteStore *storage.SQLiteStore
 
 	policyEngine    *policy.Engine
+	fingerprinter   *fingerprint.M3LiteScorer
 	tp              *telemetry.Provider
+	ocsfEmitter     *telemetry.OCSFEmitter
 	proxyCaptureBuf *proxy.CaptureBuffer
 
 	proxyHandler   *proxy.Proxy
@@ -100,7 +103,9 @@ func main() {
 
 	a.initSessionStore()
 	a.initSQLiteStorage()
+	a.initFingerprint()
 	a.initSessionEndCallback()
+	a.initOCSF()
 	a.initTelemetry()
 	a.initPolicyEngine()
 
@@ -108,6 +113,11 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go a.manager.Run(ctx)
+
+	// Start fingerprint periodic flush (crash-resilient baseline persistence)
+	if a.fingerprinter != nil {
+		go a.fingerprinter.Run(ctx)
+	}
 
 	a.initProxy()
 	a.initWebSocket()
@@ -192,8 +202,39 @@ func (a *app) initSQLiteStorage() {
 	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
 }
 
+func (a *app) initFingerprint() {
+	if !a.cfg.Fingerprint.Enabled || a.sqliteStore == nil {
+		return
+	}
+
+	cfg := fingerprint.BaselineConfig{
+		NEff:        a.cfg.Fingerprint.NEff,
+		RidgeLambda: a.cfg.Fingerprint.RidgeLambda,
+		WarmUp:      a.cfg.Fingerprint.WarmUp,
+	}
+
+	store, err := fingerprint.NewSQLiteBaselineStore(a.sqliteStore.DB())
+	if err != nil {
+		slog.Error("failed to initialize fingerprint store", "error", err)
+		return
+	}
+
+	scorer, err := fingerprint.NewM3LiteScorerWithFlush(store, a.cfg.Fingerprint.Shadow, cfg, a.cfg.Fingerprint.FlushInterval)
+	if err != nil {
+		slog.Error("failed to initialize fingerprint scorer", "error", err)
+		return
+	}
+
+	a.fingerprinter = scorer
+	slog.Info("behavioral fingerprinting enabled",
+		"shadow", a.cfg.Fingerprint.Shadow,
+		"warm_up", cfg.WarmUp,
+		"flush_interval", a.cfg.Fingerprint.FlushInterval,
+	)
+}
+
 func (a *app) initSessionEndCallback() {
-	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil {
 		return
 	}
 
@@ -221,6 +262,7 @@ func (a *app) initSessionEndCallback() {
 
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
+		a.scoreFingerprint(&snap)
 		a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime)
 	})
@@ -247,11 +289,14 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 	}
 	for _, v := range flagged.Violations {
 		record.Violations = append(record.Violations, storage.Violation{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    string(v.Severity),
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      string(v.Severity),
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EventCategory: v.EventCategory,
+			FrameworkRef:  v.FrameworkRef,
+			SourceRole:    v.SourceRole,
 		})
 	}
 }
@@ -274,6 +319,53 @@ func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessi
 			ResponseBody: c.ResponseBody,
 			StatusCode:   c.StatusCode,
 		})
+	}
+}
+
+func (a *app) scoreFingerprint(snap *session.Session) {
+	if a.fingerprinter == nil {
+		return
+	}
+
+	// Always ingest to update baselines
+	if err := a.fingerprinter.Ingest(snap); err != nil {
+		slog.Error("fingerprint ingest failed", "session_id", snap.ID, "error", err)
+	}
+
+	// Score (returns immediately in shadow mode)
+	distance, bucket, features, err := a.fingerprinter.Score(snap)
+	if err != nil {
+		slog.Error("fingerprint scoring failed", "session_id", snap.ID, "error", err)
+		return
+	}
+
+	if bucket == fingerprint.BucketWarmUp {
+		return // not enough data or shadow mode
+	}
+
+	class := fingerprint.SessionClass(snap)
+
+	slog.Info("fingerprint score",
+		"session_id", snap.ID,
+		"class", class,
+		"distance", distance,
+		"bucket", bucket,
+	)
+
+	// Add risk points for notable+ scores
+	riskPoints := fingerprint.BucketRiskPoints(bucket)
+	if riskPoints > 0 && a.policyEngine != nil {
+		a.policyEngine.AddExternalRiskPoints(snap.ID, riskPoints, "m3-lite")
+	}
+
+	// Emit OCSF 2004 for notable+ scores
+	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor {
+		if a.ocsfEmitter != nil {
+			finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
+			finding.Unmapped.Backend = snap.Backend
+			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+		}
+		_ = features // available for future dashboard integration
 	}
 }
 
@@ -332,8 +424,11 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 }
 
 func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Session, endTime time.Time) {
-	slog.Debug("checking telemetry export", "tp_nil", a.tp == nil, "tp_enabled", a.tp != nil && a.tp.Enabled())
-	if a.tp == nil || !a.tp.Enabled() {
+	if a.tp == nil {
+		return
+	}
+	// Export if OTEL is enabled or OCSF emitter is attached
+	if !a.tp.Enabled() && a.ocsfEmitter == nil {
 		return
 	}
 
@@ -352,11 +447,14 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	}
 	for _, v := range record.Violations {
 		telemRecord.Violations = append(telemRecord.Violations, telemetry.Violation{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    v.Severity,
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      v.Severity,
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EventCategory: v.EventCategory,
+			FrameworkRef:  v.FrameworkRef,
+			SourceRole:    v.SourceRole,
 		})
 	}
 	for _, c := range record.CapturedContent {
@@ -372,29 +470,58 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	a.tp.ExportSessionRecord(context.Background(), telemRecord)
 }
 
-func (a *app) initTelemetry() {
-	if !a.cfg.Telemetry.Enabled {
+func (a *app) initOCSF() {
+	if !a.cfg.OCSF.Enabled {
 		return
 	}
 	var err error
-	a.tp, err = telemetry.NewProvider(telemetry.Config{
-		Enabled:        a.cfg.Telemetry.Enabled,
-		Exporter:       a.cfg.Telemetry.Exporter,
-		Endpoint:       a.cfg.Telemetry.Endpoint,
-		ServiceName:    a.cfg.Telemetry.ServiceName,
-		Insecure:       a.cfg.Telemetry.Insecure,
-		CaptureContent: a.cfg.Telemetry.CaptureContent,
-		MaxBodySize:    a.cfg.Telemetry.MaxBodySize,
-	})
+	a.ocsfEmitter, err = telemetry.NewOCSFEmitter(a.cfg.OCSF)
 	if err != nil {
-		slog.Warn("telemetry initialization failed, continuing without tracing", "error", err)
-		a.tp = nil
+		slog.Warn("OCSF emitter initialization failed", "error", err)
 		return
 	}
-	slog.Info("telemetry enabled",
-		"exporter", a.cfg.Telemetry.Exporter,
-		"endpoint", a.cfg.Telemetry.Endpoint,
-	)
+	if a.ocsfEmitter != nil {
+		slog.Info("OCSF native transport enabled")
+	}
+}
+
+func (a *app) initTelemetry() {
+	// Create provider if OTEL is enabled OR if we need it to host the OCSF emitter
+	if !a.cfg.Telemetry.Enabled && a.ocsfEmitter == nil {
+		return
+	}
+
+	if a.cfg.Telemetry.Enabled {
+		var err error
+		a.tp, err = telemetry.NewProvider(telemetry.Config{
+			Enabled:        a.cfg.Telemetry.Enabled,
+			Exporter:       a.cfg.Telemetry.Exporter,
+			Endpoint:       a.cfg.Telemetry.Endpoint,
+			ServiceName:    a.cfg.Telemetry.ServiceName,
+			Insecure:       a.cfg.Telemetry.Insecure,
+			CaptureContent: a.cfg.Telemetry.CaptureContent,
+			MaxBodySize:    a.cfg.Telemetry.MaxBodySize,
+		})
+		if err != nil {
+			slog.Warn("telemetry initialization failed, continuing without tracing", "error", err)
+			a.tp = nil
+		} else {
+			slog.Info("telemetry enabled",
+				"exporter", a.cfg.Telemetry.Exporter,
+				"endpoint", a.cfg.Telemetry.Endpoint,
+			)
+		}
+	}
+
+	// If OTEL is disabled but OCSF is enabled, create a noop provider to host the emitter
+	if a.tp == nil && a.ocsfEmitter != nil {
+		a.tp = telemetry.NoopProvider()
+	}
+
+	// Wire OCSF emitter into provider
+	if a.tp != nil && a.ocsfEmitter != nil {
+		a.tp.SetOCSFEmitter(a.ocsfEmitter)
+	}
 }
 
 func (a *app) initPolicyEngine() {
@@ -654,14 +781,28 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 		slog.Info("drained sessions on shutdown", "count", drained)
 	}
 
-	// Step 4: Flush telemetry AFTER draining (drain creates new OTEL spans)
+	// Step 4: Close OCSF emitter (flush nozzle connections)
+	if a.ocsfEmitter != nil {
+		if err := a.ocsfEmitter.Close(); err != nil {
+			slog.Error("OCSF emitter close error", "error", err)
+		}
+	}
+
+	// Step 5: Flush telemetry AFTER draining (drain creates new OTEL spans)
 	if a.tp != nil {
 		if err := a.tp.Shutdown(shutdownCtx); err != nil {
 			slog.Error("telemetry shutdown error", "error", err)
 		}
 	}
 
-	// Step 5: Close storage backends
+	// Step 6: Persist fingerprint baselines
+	if a.fingerprinter != nil {
+		if err := a.fingerprinter.Close(); err != nil {
+			slog.Error("fingerprint close error", "error", err)
+		}
+	}
+
+	// Step 7: Close storage backends
 	if a.redisStore != nil {
 		if err := a.redisStore.Close(); err != nil {
 			slog.Error("Redis close error", "error", err)

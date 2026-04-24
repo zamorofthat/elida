@@ -34,11 +34,14 @@ type CapturedRequest struct {
 
 // Violation records a policy violation for session records
 type Violation struct {
-	RuleName    string `json:"rule_name"`
-	Description string `json:"description"`
-	Severity    string `json:"severity"`
-	MatchedText string `json:"matched_text,omitempty"`
-	Action      string `json:"action"`
+	RuleName      string `json:"rule_name"`
+	Description   string `json:"description"`
+	Severity      string `json:"severity"`
+	MatchedText   string `json:"matched_text,omitempty"`
+	Action        string `json:"action"`
+	EventCategory string `json:"event_category,omitempty"`
+	FrameworkRef  string `json:"framework_ref,omitempty"`
+	SourceRole    string `json:"source_role,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
@@ -595,6 +598,11 @@ func (s *SQLiteStore) Cleanup(retentionDays int) (int64, error) {
 		slog.Info("cleaned up old sessions", "deleted", deleted, "retention_days", retentionDays)
 	}
 	return deleted, nil
+}
+
+// DB returns the underlying database handle for shared use by subsystems.
+func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
 }
 
 // Close closes the database connection
