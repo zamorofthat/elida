@@ -237,20 +237,20 @@ type Engine struct {
 
 // Config for the policy engine
 type Config struct {
-	Enabled        bool   `yaml:"enabled"`
-	Mode           string `yaml:"mode"` // "enforce" (default) or "audit"
-	CaptureContent bool   `yaml:"capture_flagged"`
-	MaxCaptureSize int    `yaml:"max_capture_size"`
-	Rules          []Rule `yaml:"rules"`
+	Enabled        bool   `yaml:"enabled" json:"enabled"`
+	Mode           string `yaml:"mode" json:"mode"` // "enforce" (default) or "audit"
+	CaptureContent bool   `yaml:"capture_flagged" json:"capture_content"`
+	MaxCaptureSize int    `yaml:"max_capture_size" json:"max_capture_size"`
+	Rules          []Rule `yaml:"rules" json:"rules"`
 
 	// Risk ladder configuration
-	RiskLadder RiskLadderConfig `yaml:"risk_ladder"`
+	RiskLadder RiskLadderConfig `yaml:"risk_ladder" json:"risk_ladder"`
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
 type RiskLadderConfig struct {
-	Enabled    bool            `yaml:"enabled"`
-	Thresholds []RiskThreshold `yaml:"thresholds"`
+	Enabled    bool            `yaml:"enabled" json:"enabled"`
+	Thresholds []RiskThreshold `yaml:"thresholds" json:"thresholds"`
 }
 
 // NewEngine creates a new policy engine

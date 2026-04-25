@@ -1847,6 +1847,17 @@ body {
   color: var(--text-dim);
 }
 
+.kpi-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.kpi-sparkline {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
 .kpi-accent .kpi-value { color: var(--color-success); }
 .kpi-danger .kpi-value { color: var(--color-error); }
 

@@ -85,13 +85,40 @@ function RequestsChart({ points }) {
 }
 
 // ---------------------------------------------------------------------------
+// Sparkline — tiny inline SVG trend
+// ---------------------------------------------------------------------------
+
+function Sparkline({ data, color = '#6366f1' }) {
+  if (!data || data.length < 2) return null
+  const W = 80, H = 28
+  const max = Math.max(...data)
+  const min = Math.min(...data)
+  const range = max - min || 1
+
+  const pts = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * W
+    const y = H - ((v - min) / range) * (H - 4) - 2
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+
+  return (
+    <svg width={W} height={H} class="kpi-sparkline">
+      <polyline points={pts} fill="none" stroke={color} stroke-width="1.5" stroke-linejoin="round" />
+    </svg>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // KPI Card
 // ---------------------------------------------------------------------------
 
-function KPICard({ label, value, sub, className }) {
+function KPICard({ label, value, sub, className, sparkline, sparkColor }) {
   return (
     <div class={'kpi-card' + (className ? ' ' + className : '')}>
-      <div class="kpi-value">{value}</div>
+      <div class="kpi-top">
+        <div class="kpi-value">{value}</div>
+        {sparkline && <Sparkline data={sparkline} color={sparkColor} />}
+      </div>
       <div class="kpi-label">{label}</div>
       {sub && <div class="kpi-sub">{sub}</div>}
     </div>
@@ -109,6 +136,13 @@ export function DashboardPage() {
   const [sessions, setSessions] = useState([])
   const [detailSession, setDetailSession] = useState(null)
   const timerRef = useRef(null)
+  const sparklines = useRef({ active: [], requests: [], flagged: [] })
+
+  const pushSparkline = (key, value) => {
+    const arr = sparklines.current[key]
+    arr.push(value)
+    if (arr.length > 20) arr.shift()
+  }
 
   const fetchAll = async () => {
     try {
@@ -119,8 +153,17 @@ export function DashboardPage() {
         apiFetch('/control/sessions'),
       ])
 
-      if (statsRes.ok) setStats(await statsRes.json())
-      if (flaggedRes.ok) setFlaggedStats(await flaggedRes.json())
+      if (statsRes.ok) {
+        const data = await statsRes.json()
+        setStats(data)
+        pushSparkline('active', data.active || 0)
+        pushSparkline('requests', data.total_requests || 0)
+      }
+      if (flaggedRes.ok) {
+        const data = await flaggedRes.json()
+        setFlaggedStats(data)
+        pushSparkline('flagged', data.total_flagged || 0)
+      }
       if (tsRes.ok) {
         const data = await tsRes.json()
         setTimeseries(data.points || [])
@@ -171,7 +214,7 @@ export function DashboardPage() {
   })
   const backendRows = Object.entries(backendMap).sort((a, b) => b[1].requests - a[1].requests)
 
-  const totalRequests24h = timeseries.reduce((sum, p) => sum + (p.request_count || 0), 0)
+  const totalRequests = stats.total_requests || 0
   const flaggedKilled = (flaggedStats.total_flagged || 0) + (stats.killed || 0)
 
   return (
@@ -183,16 +226,22 @@ export function DashboardPage() {
           label="Active Sessions"
           value={stats.active || 0}
           className="kpi-accent"
+          sparkline={sparklines.current.active}
+          sparkColor="#10b981"
         />
         <KPICard
-          label="Requests (24h)"
-          value={totalRequests24h.toLocaleString()}
+          label="Total Requests"
+          value={totalRequests.toLocaleString()}
+          sparkline={sparklines.current.requests}
+          sparkColor="#6366f1"
         />
         <KPICard
           label="Flagged / Killed"
           value={flaggedKilled}
           sub={`${flaggedStats.total_flagged || 0} flagged \u00B7 ${stats.killed || 0} killed`}
           className={flaggedStats.critical > 0 ? 'kpi-danger' : ''}
+          sparkline={sparklines.current.flagged}
+          sparkColor="#ef4444"
         />
         <KPICard
           label="Total Sessions"
