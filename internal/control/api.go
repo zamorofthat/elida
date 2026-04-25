@@ -91,6 +91,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	h.mux.HandleFunc("/control/history/{id}", h.handleHistorySession)
 
 	// Policy/flagged sessions endpoints
+	h.mux.HandleFunc("/control/policy", h.handlePolicy)
 	h.mux.HandleFunc("/control/flagged", h.handleFlagged)
 	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
 	h.mux.HandleFunc("/control/flagged/{id}", h.handleFlaggedSession)
@@ -809,6 +810,22 @@ func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, record)
+}
+
+// handlePolicy handles GET /control/policy — returns policy config including rules
+func (h *Handler) handlePolicy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	cfg := h.policyEngine.GetConfig()
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // handleFlagged handles GET /control/flagged

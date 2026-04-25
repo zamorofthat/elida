@@ -12,6 +12,7 @@ import { TopNav } from './components/TopNav'
 import { SessionsPage } from './components/SessionsPage'
 import { DashboardPage } from './components/DashboardPage'
 import { ToolUsePage } from './components/ToolUsePage'
+import { PolicyPage } from './components/PolicyPage'
 
 const API_BASE = ''
 
@@ -1441,34 +1442,7 @@ function AppShell() {
 
         {page === 'tooluse' && <ToolUsePage />}
 
-        {page === 'flagged' && (
-          <div class="panel">
-            <div class="panel-header">
-              <h2 class="panel-title">Flagged Sessions</h2>
-              <div class="panel-actions">
-                <SearchInput
-                  value={searchTerm}
-                  onChange={setSearchTerm}
-                  placeholder="Search flagged..."
-                />
-              </div>
-            </div>
-            <div class="panel-body">
-              <div class="flagged-summary">
-                <span class="flagged-stat critical">{flaggedStats.critical || 0} Critical</span>
-                <span class="flagged-stat warning">{flaggedStats.warning || 0} Warning</span>
-                <span class="flagged-stat info">{flaggedStats.info || 0} Info</span>
-              </div>
-            </div>
-            <div class="panel-body no-padding">
-              <FlaggedTable
-                flagged={flagged}
-                onViewDetails={setSelectedFlagged}
-                searchTerm={searchTerm}
-              />
-            </div>
-          </div>
-        )}
+        {page === 'flagged' && <PolicyPage />}
 
         {page === 'voice' && (
           <div class="panel">

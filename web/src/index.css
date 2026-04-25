@@ -2133,3 +2133,231 @@ body {
   color: var(--text-dim);
   padding: 0.0625rem 0.25rem;
 }
+
+/* ============================================================================
+   Policy Page
+   ============================================================================ */
+
+.policy-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* Preset cards */
+.policy-preset-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+  .policy-preset-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+.policy-preset-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+}
+
+.policy-preset-label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.policy-preset-value {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: capitalize;
+}
+
+.policy-preset-value.enforce { color: var(--color-success); }
+.policy-preset-value.audit { color: var(--color-warning); }
+
+.policy-critical-count {
+  font-size: 0.75rem;
+  color: var(--color-error);
+  font-weight: 500;
+}
+
+/* Policy panels */
+.policy-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.policy-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.policy-panel-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.policy-panel-count {
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+}
+
+.policy-empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.8125rem;
+}
+
+/* Rules table */
+.policy-rules-table-wrap {
+  overflow-x: auto;
+}
+
+.policy-rules-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.policy-rules-table th {
+  text-align: left;
+  padding: 0.5rem 1rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-color);
+  white-space: nowrap;
+}
+
+.policy-rules-table td {
+  padding: 0.5rem 1rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  vertical-align: top;
+}
+
+.policy-rules-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.policy-rule-matched td {
+  background: rgba(239, 68, 68, 0.03);
+}
+
+.policy-rule-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+}
+
+.policy-rule-desc {
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+  margin-top: 0.125rem;
+}
+
+.policy-action-badge {
+  display: inline-block;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 3px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.action-flag {
+  background: rgba(234, 179, 8, 0.15);
+  color: #fde68a;
+}
+
+.action-block {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+
+.action-terminate {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+
+.policy-match-count {
+  display: inline-block;
+  min-width: 1.25rem;
+  text-align: center;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 3px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+}
+
+.policy-no-matches {
+  color: var(--text-dim);
+}
+
+/* Recent violations list */
+.policy-violations-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.policy-violation-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.375rem 1.25rem;
+  font-size: 0.8125rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.policy-violation-row:last-child {
+  border-bottom: none;
+}
+
+.policy-violation-time {
+  flex-shrink: 0;
+  width: 5rem;
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.policy-violation-session {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.policy-violation-rule {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.policy-violation-snippet {
+  font-size: 0.6875rem;
+  background: rgba(239, 68, 68, 0.08);
+  padding: 0.0625rem 0.375rem;
+  border-radius: 3px;
+  color: #fca5a5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
