@@ -1,12 +1,13 @@
 import {
   IconDashboard, IconSessions, IconShield, IconMic, IconClock,
-  IconSettings, IconLogo, IconRefresh,
+  IconSettings, IconLogo, IconRefresh, IconTool,
 } from './shared/Icons'
 
 export function TopNav({ activePage, onNavigate, activeCount, status, lastUpdated, isRefreshing }) {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: IconDashboard },
     { id: 'sessions', label: 'Sessions', icon: IconSessions },
+    { id: 'tooluse', label: 'Tool Use', icon: IconTool },
     { id: 'flagged', label: 'Flagged', icon: IconShield },
     { id: 'voice', label: 'Voice', icon: IconMic },
     { id: 'history', label: 'History', icon: IconClock },

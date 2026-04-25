@@ -1960,3 +1960,176 @@ body {
   padding: 0.125rem 0.375rem;
   font-size: 0.625rem;
 }
+
+/* ============================================================================
+   Tool Use Page
+   ============================================================================ */
+
+.tooluse-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* Scorecard row */
+.scorecard-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+  .scorecard-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+.scorecard {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+}
+
+.scorecard-label {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.scorecard-value {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.scorecard-sub {
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+  margin-top: 0.125rem;
+}
+
+.scorecard-warn .scorecard-value {
+  color: var(--color-warning);
+}
+
+/* Tool bar chart */
+.tooluse-chart-panel,
+.tooluse-table-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.tooluse-chart-header,
+.tooluse-table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tooluse-chart-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.tooluse-legend {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.tooluse-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+}
+
+.tooluse-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.tooluse-empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.8125rem;
+}
+
+/* Horizontal bar chart */
+.tool-bar-chart {
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.tool-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.tool-bar-name {
+  flex-shrink: 0;
+  width: 7rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.tool-bar-track {
+  flex: 1;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.tool-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+  min-width: 2px;
+}
+
+.tool-bar-count {
+  flex-shrink: 0;
+  width: 3rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tool pills in table */
+.tool-pills-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.tool-pill {
+  display: inline-block;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 3px;
+  border: 1px solid;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tool-pill-more {
+  font-size: 0.6875rem;
+  color: var(--text-dim);
+  padding: 0.0625rem 0.25rem;
+}

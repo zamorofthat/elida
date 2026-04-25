@@ -11,6 +11,7 @@ import {
 import { TopNav } from './components/TopNav'
 import { SessionsPage } from './components/SessionsPage'
 import { DashboardPage } from './components/DashboardPage'
+import { ToolUsePage } from './components/ToolUsePage'
 
 const API_BASE = ''
 
@@ -1437,6 +1438,8 @@ function AppShell() {
         {page === 'dashboard' && <DashboardPage />}
 
         {page === 'sessions' && <SessionsPage />}
+
+        {page === 'tooluse' && <ToolUsePage />}
 
         {page === 'flagged' && (
           <div class="panel">
