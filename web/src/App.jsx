@@ -10,6 +10,7 @@ import {
 } from './components/shared/Icons'
 import { TopNav } from './components/TopNav'
 import { SessionsPage } from './components/SessionsPage'
+import { DashboardPage } from './components/DashboardPage'
 
 const API_BASE = ''
 
@@ -69,54 +70,6 @@ export function Login({ onLogin }) {
           </button>
         </form>
       </div>
-    </div>
-  )
-}
-
-// ============================================================================
-// Sparkline Component
-// ============================================================================
-
-function Sparkline({ data, width = 80, height = 32, color = '#6366f1' }) {
-  if (!data || data.length < 2) return null
-
-  const max = Math.max(...data)
-  const min = Math.min(...data)
-  const range = max - min || 1
-
-  const points = data.map((value, index) => {
-    const x = (index / (data.length - 1)) * width
-    const y = height - ((value - min) / range) * (height - 4) - 2
-    return `${x},${y}`
-  }).join(' ')
-
-  return (
-    <svg width={width} height={height} class="metric-sparkline">
-      <defs>
-        <linearGradient id="sparkline-gradient" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color={color} stop-opacity="0.3" />
-          <stop offset="100%" stop-color={color} stop-opacity="0" />
-        </linearGradient>
-      </defs>
-      <polyline points={points} class="sparkline" style={{ stroke: color }} />
-    </svg>
-  )
-}
-
-// ============================================================================
-// Metric Card Component
-// ============================================================================
-
-function MetricCard({ label, value, className, sparklineData }) {
-  return (
-    <div class="metric-card">
-      <div class="metric-content">
-        <div class="metric-label">{label}</div>
-        <div class={'metric-value ' + (className || '')}>{value}</div>
-      </div>
-      {sparklineData && sparklineData.length > 1 && (
-        <Sparkline data={sparklineData} />
-      )}
     </div>
   )
 }
@@ -1260,48 +1213,6 @@ function SettingsPage() {
 // Dashboard Page
 // ============================================================================
 
-function DashboardPage({ stats, flaggedStats, sparklineData }) {
-  const flaggedClass = flaggedStats.critical > 0 ? 'error' : flaggedStats.warning > 0 ? 'warning' : ''
-
-  return (
-    <>
-      <div class="metrics-row">
-        <MetricCard
-          label="Active Sessions"
-          value={stats.active || 0}
-          className="success"
-          sparklineData={sparklineData.active}
-        />
-        <MetricCard
-          label="Total Requests"
-          value={stats.total_requests || 0}
-          sparklineData={sparklineData.requests}
-        />
-        <MetricCard
-          label="Bytes In"
-          value={formatBytes(stats.total_bytes_in || 0)}
-          sparklineData={sparklineData.bytesIn}
-        />
-        <MetricCard
-          label="Bytes Out"
-          value={formatBytes(stats.total_bytes_out || 0)}
-          sparklineData={sparklineData.bytesOut}
-        />
-        <MetricCard
-          label="Killed"
-          value={stats.killed || 0}
-          className="error"
-        />
-        <MetricCard
-          label="Flagged"
-          value={flaggedStats.total_flagged || 0}
-          className={flaggedClass}
-        />
-      </div>
-    </>
-  )
-}
-
 // ============================================================================
 // Main App Component
 // ============================================================================
@@ -1354,28 +1265,11 @@ function AppShell() {
   const historyPageSize = 50
 
   // Sparkline data (last 20 values)
-  const sparklineData = useRef({
-    active: [],
-    requests: [],
-    bytesIn: [],
-    bytesOut: [],
-  })
-
-  const updateSparkline = (key, value) => {
-    const data = sparklineData.current[key]
-    data.push(value)
-    if (data.length > 20) data.shift()
-  }
-
   const fetchStats = async () => {
     try {
       const res = await apiFetch(API_BASE + '/control/stats')
       const data = await res.json()
       setStats(data)
-      updateSparkline('active', data.active || 0)
-      updateSparkline('requests', data.total_requests || 0)
-      updateSparkline('bytesIn', data.total_bytes_in || 0)
-      updateSparkline('bytesOut', data.total_bytes_out || 0)
     } catch (err) {
       console.error('Failed to fetch stats:', err)
     }
@@ -1540,36 +1434,7 @@ function AppShell() {
       />
 
       <main class="main-content">
-        {page === 'dashboard' && (
-          <DashboardPage
-            stats={stats}
-            flaggedStats={flaggedStats}
-            sparklineData={sparklineData.current}
-          />
-        )}
-
-        {page === 'dashboard' && (
-          <div class="panel">
-            <div class="panel-header">
-              <h2 class="panel-title">Recent Sessions</h2>
-              <div class="panel-actions">
-                <SearchInput
-                  value={searchTerm}
-                  onChange={setSearchTerm}
-                  placeholder="Search sessions..."
-                />
-              </div>
-            </div>
-            <div class="panel-body no-padding">
-              <SessionTable
-                sessions={sessions}
-                showActions={true}
-                onKill={killSession}
-                searchTerm={searchTerm}
-              />
-            </div>
-          </div>
-        )}
+        {page === 'dashboard' && <DashboardPage />}
 
         {page === 'sessions' && <SessionsPage />}
 
