@@ -1601,6 +1601,12 @@ body {
   font-size: 0.8125rem;
 }
 
+.risk-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
 /* Collapsible Sections */
 .detail-section {
   border-bottom: 1px solid var(--border-color);

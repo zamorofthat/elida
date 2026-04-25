@@ -359,6 +359,8 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		switch action {
 		case "turns":
 			h.getSessionTurns(w, r, sessionID)
+		case "risk-curve":
+			h.getSessionRiskCurve(w, sessionID)
 		default:
 			h.getSession(w, sessionID)
 		}
@@ -638,6 +640,24 @@ func (h *Handler) getSessionTurns(w http.ResponseWriter, r *http.Request, id str
 func sortTurns(turns []TurnEntry) {
 	sort.Slice(turns, func(i, j int) bool {
 		return turns[i].Timestamp.Before(turns[j].Timestamp)
+	})
+}
+
+// getSessionRiskCurve handles GET /control/sessions/{id}/risk-curve
+func (h *Handler) getSessionRiskCurve(w http.ResponseWriter, id string) {
+	if h.policyEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"points": []struct{}{}})
+		return
+	}
+
+	points := h.policyEngine.ComputeRiskCurve(id)
+	if points == nil {
+		points = []policy.RiskScorePoint{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": id,
+		"points":     points,
 	})
 }
 
