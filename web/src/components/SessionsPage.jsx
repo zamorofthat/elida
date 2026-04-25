@@ -3,11 +3,13 @@ import { apiFetch } from '../apiFetch'
 import { SearchInput } from './shared/SearchInput'
 import { IconEmpty } from './shared/Icons'
 import { SessionRow } from './SessionRow'
+import { SessionDetailModal } from './SessionDetailModal'
 
 export function SessionsPage() {
   const [sessions, setSessions] = useState([])
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all') // all | live | flagged
+  const [detailSession, setDetailSession] = useState(null)
   const timerRef = useRef(null)
 
   const fetchSessions = async () => {
@@ -97,10 +99,18 @@ export function SessionsPage() {
           </div>
         ) : (
           sorted.map(s => (
-            <SessionRow key={s.id} session={s} onKill={killSession} />
+            <SessionRow key={s.id} session={s} onKill={killSession} onViewDetail={setDetailSession} />
           ))
         )}
       </div>
+
+      {detailSession && (
+        <SessionDetailModal
+          session={detailSession}
+          onClose={() => setDetailSession(null)}
+          onKill={(id) => { killSession(id); setDetailSession(null); }}
+        />
+      )}
     </div>
   )
 }

@@ -102,11 +102,12 @@ function TreeLine({ isLast }) {
   )
 }
 
-export function SessionTurns({ sessionId }) {
-  const [turns, setTurns] = useState(null)
+export function SessionTurns({ sessionId, preloadedTurns }) {
+  const [turns, setTurns] = useState(preloadedTurns || null)
   const [error, setError] = useState(false)
 
   useEffect(() => {
+    if (preloadedTurns) { setTurns(preloadedTurns); return }
     if (!sessionId) return
     const controller = new AbortController()
 
@@ -120,7 +121,7 @@ export function SessionTurns({ sessionId }) {
       })
 
     return () => controller.abort()
-  }, [sessionId])
+  }, [sessionId, preloadedTurns])
 
   if (error) return <div class="session-turns-empty">Could not load turns</div>
   if (turns === null) return <div class="session-turns-empty">Loading turns\u2026</div>

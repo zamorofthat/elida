@@ -25,7 +25,7 @@ function DurationTicker({ startTime, durationMs, duration, state }) {
   return <span class="mono duration">{formatDurationStr(duration)}</span>
 }
 
-export function SessionRow({ session, onKill }) {
+export function SessionRow({ session, onKill, onViewDetail }) {
   const [expanded, setExpanded] = useState(false)
 
   const formatBackends = (s) => {
@@ -77,6 +77,12 @@ export function SessionRow({ session, onKill }) {
               {riskScore}
             </span>
           )}
+          <button
+            class="btn btn-secondary btn-sm"
+            onClick={(e) => { e.stopPropagation(); onViewDetail(session); }}
+          >
+            View
+          </button>
           {session.state === 'active' && (
             <button
               class="btn btn-danger btn-sm"
