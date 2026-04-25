@@ -136,7 +136,7 @@ export function PolicyPage() {
                         {matches > 0 ? (
                           <span class="policy-match-count">{matches}</span>
                         ) : (
-                          <span class="policy-no-matches">\u2014</span>
+                          <span class="policy-no-matches">{'\u2014'}</span>
                         )}
                       </td>
                     </tr>
