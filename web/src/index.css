@@ -1607,6 +1607,48 @@ body {
   display: block;
 }
 
+/* Behavior Radar */
+.behavior-container {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.5rem;
+}
+
+.behavior-radar {
+  width: 200px;
+  height: 200px;
+  flex-shrink: 0;
+}
+
+.behavior-features {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.behavior-feature-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0;
+  font-size: 0.8125rem;
+}
+
+.behavior-feature-name {
+  color: var(--text-muted);
+}
+
+.behavior-feature-value {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .behavior-container { flex-direction: column; align-items: center; }
+  .behavior-radar { width: 180px; height: 180px; }
+}
+
 /* Collapsible Sections */
 .detail-section {
   border-bottom: 1px solid var(--border-color);

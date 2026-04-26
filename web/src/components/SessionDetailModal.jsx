@@ -6,6 +6,96 @@ import { IconX } from './shared/Icons'
 import { SessionTurns } from './SessionTurns'
 
 // ---------------------------------------------------------------------------
+// Behavior Radar — 7-axis radar chart of behavioral features
+// ---------------------------------------------------------------------------
+
+const FEATURE_LABELS = {
+  turn_count: 'Turns',
+  tool_call_ratio: 'Tool Ratio',
+  tool_call_entropy: 'Tool Diversity',
+  cadence_median: 'Cadence',
+  cadence_cv: 'Irregularity',
+  token_ratio: 'Token Balance',
+  backend_continuity: 'Backend Stability',
+}
+
+function BehaviorRadar({ features }) {
+  if (!features || features.length === 0) return null
+
+  const CX = 100, CY = 100, R = 70
+  const n = features.length
+
+  // Normalize values to 0-1 range for display
+  // Use log scaling for large values, cap at reasonable max
+  const maxVals = [5, 1, 3, 10, 3, 3, 1] // reasonable max per feature
+  const normalized = features.map((f, i) => {
+    const max = maxVals[i] || 1
+    return Math.min(f.value / max, 1)
+  })
+
+  const angle = (i) => (Math.PI * 2 * i) / n - Math.PI / 2
+  const px = (i, r) => CX + Math.cos(angle(i)) * r
+  const py = (i, r) => CY + Math.sin(angle(i)) * r
+
+  // Grid rings
+  const rings = [0.25, 0.5, 0.75, 1.0]
+
+  // Data polygon
+  const dataPoints = normalized.map((v, i) => `${px(i, v * R).toFixed(1)},${py(i, v * R).toFixed(1)}`).join(' ')
+
+  // Axis lines
+  const axes = features.map((_, i) => ({
+    x2: px(i, R),
+    y2: py(i, R),
+    labelX: px(i, R + 14),
+    labelY: py(i, R + 14),
+    label: FEATURE_LABELS[features[i].name] || features[i].name,
+  }))
+
+  return (
+    <svg viewBox="0 0 200 200" class="behavior-radar">
+      {/* Grid rings */}
+      {rings.map((r, i) => (
+        <polygon
+          key={i}
+          points={features.map((_, j) => `${px(j, r * R).toFixed(1)},${py(j, r * R).toFixed(1)}`).join(' ')}
+          fill="none" stroke="var(--border-color)" stroke-width="0.5"
+        />
+      ))}
+
+      {/* Axis lines */}
+      {axes.map((a, i) => (
+        <line key={i} x1={CX} y1={CY} x2={a.x2} y2={a.y2}
+          stroke="var(--border-color)" stroke-width="0.5" />
+      ))}
+
+      {/* Data polygon */}
+      <polygon
+        points={dataPoints}
+        fill="rgba(99, 102, 241, 0.2)"
+        stroke="#6366f1"
+        stroke-width="1.5"
+      />
+
+      {/* Data points */}
+      {normalized.map((v, i) => (
+        <circle key={i} cx={px(i, v * R)} cy={py(i, v * R)} r="2.5"
+          fill="#6366f1" />
+      ))}
+
+      {/* Labels */}
+      {axes.map((a, i) => (
+        <text key={i} x={a.labelX} y={a.labelY + 3}
+          text-anchor="middle" fill="var(--text-dim)" font-size="7"
+          font-family="'SF Mono', monospace">
+          {a.label}
+        </text>
+      ))}
+    </svg>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Risk Score Chart — SVG area chart with threshold lines
 // ---------------------------------------------------------------------------
 
@@ -146,6 +236,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
   const [turns, setTurns] = useState(null)
   const [flagged, setFlagged] = useState(null)
   const [riskCurve, setRiskCurve] = useState(null)
+  const [behavior, setBehavior] = useState(null)
   const [liveSession, setLiveSession] = useState(session)
   const modalRef = useRef(null)
 
@@ -183,6 +274,19 @@ export function SessionDetailModal({ session, onClose, onKill }) {
     apiFetch('/control/sessions/' + session.id + '/risk-curve', { signal: controller.signal })
       .then(res => res.ok ? res.json() : null)
       .then(data => { if (!controller.signal.aborted) setRiskCurve(data?.points || []) })
+      .catch(() => {})
+
+    return () => controller.abort()
+  }, [session?.id])
+
+  // Fetch behavioral features
+  useEffect(() => {
+    if (!session?.id) return
+    const controller = new AbortController()
+
+    apiFetch('/control/sessions/' + session.id + '/behavior', { signal: controller.signal })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (!controller.signal.aborted) setBehavior(data) })
       .catch(() => {})
 
     return () => controller.abort()
@@ -384,6 +488,27 @@ export function SessionDetailModal({ session, onClose, onKill }) {
                   Failover occurred: {failedBackends.join(', ')} \u2192 {s.backend}
                 </div>
               )}
+            </Section>
+          )}
+
+          {/* Behavioral Fingerprint */}
+          {behavior && behavior.features && behavior.features.length > 0 && (
+            <Section title="Behavior" defaultOpen={false} badge={behavior.class}>
+              <div class="behavior-container">
+                <BehaviorRadar features={behavior.features} />
+                <div class="behavior-features">
+                  {behavior.features.map((f, i) => (
+                    <div key={i} class="behavior-feature-row">
+                      <span class="behavior-feature-name">
+                        {FEATURE_LABELS[f.name] || f.name}
+                      </span>
+                      <span class="behavior-feature-value mono">
+                        {typeof f.value === 'number' ? f.value.toFixed(2) : f.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </Section>
           )}
 

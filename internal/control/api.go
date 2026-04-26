@@ -14,6 +14,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/dashboard"
+	"elida/internal/fingerprint"
 	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
@@ -361,6 +362,8 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 			h.getSessionTurns(w, r, sessionID)
 		case "risk-curve":
 			h.getSessionRiskCurve(w, sessionID)
+		case "behavior":
+			h.getSessionBehavior(w, sessionID)
 		default:
 			h.getSession(w, sessionID)
 		}
@@ -640,6 +643,33 @@ func (h *Handler) getSessionTurns(w http.ResponseWriter, r *http.Request, id str
 func sortTurns(turns []TurnEntry) {
 	sort.Slice(turns, func(i, j int) bool {
 		return turns[i].Timestamp.Before(turns[j].Timestamp)
+	})
+}
+
+// getSessionBehavior handles GET /control/sessions/{id}/behavior
+// Returns the 7 behavioral fingerprint features computed from live session data.
+func (h *Handler) getSessionBehavior(w http.ResponseWriter, id string) {
+	sess, ok := h.manager.Get(id)
+	if !ok {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	snap := sess.Snapshot()
+	fv := fingerprint.Extract(&snap)
+
+	features := make([]map[string]interface{}, fingerprint.NumFeatures)
+	for i := 0; i < fingerprint.NumFeatures; i++ {
+		features[i] = map[string]interface{}{
+			"name":  fingerprint.FeatureNames[i],
+			"value": fv[i],
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": id,
+		"class":      fingerprint.SessionClass(&snap),
+		"features":   features,
 	})
 }
 
