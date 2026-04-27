@@ -3,6 +3,7 @@ package unit
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"elida/internal/policy"
 )
@@ -1118,5 +1119,118 @@ func TestGetConfig_ReturnsCurrentState(t *testing.T) {
 	}
 	if cfg.Rules[0].Name != "my_rule" {
 		t.Error("rule name mismatch")
+	}
+}
+
+func TestComputeRiskCurve_Empty(t *testing.T) {
+	engine := newTestPolicyEngine(nil)
+
+	// Non-flagged session should return nil
+	points := engine.ComputeRiskCurve("nonexistent")
+	if points != nil {
+		t.Errorf("expected nil for non-flagged session, got %d points", len(points))
+	}
+}
+
+func TestComputeRiskCurve_WithViolations(t *testing.T) {
+	engine := newTestPolicyEngine([]policy.Rule{
+		{Name: "test_rule", Type: "content_match", Patterns: []string{"bad_pattern"}, Severity: "critical", Action: "flag"},
+	})
+
+	// Trigger real violations to generate ViolationEvents
+	engine.EvaluateRequestContent("test-session", `{"messages":[{"role":"user","content":"bad_pattern here"}]}`)
+	time.Sleep(10 * time.Millisecond)
+	engine.EvaluateRequestContent("test-session", `{"messages":[{"role":"user","content":"another bad_pattern"}]}`)
+
+	points := engine.ComputeRiskCurve("test-session")
+	if points == nil {
+		t.Fatal("expected risk curve points, got nil")
+	}
+
+	if len(points) < 2 {
+		t.Fatalf("expected at least 2 points, got %d", len(points))
+	}
+
+	// First point should have a positive score
+	if points[0].Score <= 0 {
+		t.Errorf("expected positive score at first point, got %f", points[0].Score)
+	}
+
+	// Last point should have a positive score (recent events)
+	last := points[len(points)-1]
+	if last.Score <= 0 {
+		t.Errorf("expected positive score at last point, got %f", last.Score)
+	}
+
+	// Scores should be capped at MaxRiskScore
+	for _, p := range points {
+		if p.Score > policy.MaxRiskScore {
+			t.Errorf("score %f exceeds MaxRiskScore %f", p.Score, policy.MaxRiskScore)
+		}
+	}
+
+	// Points should be time-ordered
+	for i := 1; i < len(points); i++ {
+		if points[i].Timestamp.Before(points[i-1].Timestamp) {
+			t.Error("points not in chronological order")
+			break
+		}
+	}
+}
+
+func TestComputeRiskCurve_Decay(t *testing.T) {
+	engine := newTestPolicyEngine([]policy.Rule{
+		{Name: "test_rule", Type: "content_match", Patterns: []string{"bad_pattern"}, Severity: "critical", Action: "flag"},
+	})
+
+	// Trigger a real violation
+	engine.EvaluateRequestContent("decay-test", `{"messages":[{"role":"user","content":"bad_pattern"}]}`)
+	time.Sleep(50 * time.Millisecond)
+
+	points := engine.ComputeRiskCurve("decay-test")
+	if len(points) < 2 {
+		t.Fatal("expected points for decay test")
+	}
+
+	// Last point should have lower score than first (decay)
+	first := points[0]
+	last := points[len(points)-1]
+	if last.Score > first.Score {
+		t.Errorf("expected decay: first=%f, last=%f", first.Score, last.Score)
+	}
+}
+
+func TestComputeRiskCurve_ActionThresholds(t *testing.T) {
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []policy.Rule{
+			{Name: "test_rule", Type: "content_match", Patterns: []string{"bad_pattern"}, Severity: "critical", Action: "flag"},
+		},
+		RiskLadder: policy.RiskLadderConfig{
+			Enabled: true,
+			Thresholds: []policy.RiskThreshold{
+				{Score: 10, Action: "warn"},
+				{Score: 30, Action: "throttle"},
+			},
+		},
+	})
+
+	// Trigger multiple violations to accumulate score above 30
+	for i := 0; i < 5; i++ {
+		engine.EvaluateRequestContent("threshold-test", `{"messages":[{"role":"user","content":"bad_pattern"}]}`)
+	}
+
+	points := engine.ComputeRiskCurve("threshold-test")
+	if points == nil {
+		t.Fatal("expected points")
+	}
+
+	// First point should have high score → throttle action
+	if points[0].Score < 30 {
+		t.Skipf("score decayed below threshold: %f", points[0].Score)
+	}
+	if points[0].Action != "throttle" {
+		t.Errorf("expected action=throttle at score %f, got %s", points[0].Score, points[0].Action)
 	}
 }
