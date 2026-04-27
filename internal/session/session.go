@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -211,7 +212,7 @@ func (s *Session) GetTokens() (in, out int64) {
 }
 
 // RecordToolCall records a tool/function call
-func (s *Session) RecordToolCall(toolName, toolType, requestID string) {
+func (s *Session) RecordToolCall(toolName, toolType, requestID, argsJSON string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -222,12 +223,19 @@ func (s *Session) RecordToolCall(toolName, toolType, requestID string) {
 	}
 	s.ToolCallCounts[toolName]++
 
+	// Parse arguments JSON into map for structured access
+	var args map[string]any
+	if argsJSON != "" {
+		_ = json.Unmarshal([]byte(argsJSON), &args)
+	}
+
 	// Keep history (limited to avoid memory bloat)
 	record := ToolCallRecord{
 		Timestamp: time.Now(),
 		ToolName:  toolName,
 		ToolType:  toolType,
 		RequestID: requestID,
+		Arguments: args,
 	}
 	s.ToolCallHistory = append(s.ToolCallHistory, record)
 	if len(s.ToolCallHistory) > 100 {

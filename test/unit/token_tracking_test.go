@@ -30,9 +30,9 @@ func TestSession_RecordToolCall(t *testing.T) {
 	sess := session.NewSession("test-2", "http://backend", "127.0.0.1")
 
 	// Record tool calls
-	sess.RecordToolCall("get_weather", "function", "req-1")
-	sess.RecordToolCall("search_web", "function", "req-2")
-	sess.RecordToolCall("get_weather", "function", "req-3") // Duplicate
+	sess.RecordToolCall("get_weather", "function", "req-1", "")
+	sess.RecordToolCall("search_web", "function", "req-2", "")
+	sess.RecordToolCall("get_weather", "function", "req-3", "") // Duplicate
 
 	// Check total count
 	if sess.GetToolCalls() != 3 {
@@ -57,9 +57,9 @@ func TestSession_RecordToolCall(t *testing.T) {
 func TestSession_ToolCallHistory(t *testing.T) {
 	sess := session.NewSession("test-3", "http://backend", "127.0.0.1")
 
-	sess.RecordToolCall("tool_a", "function", "req-1")
+	sess.RecordToolCall("tool_a", "function", "req-1", "")
 	time.Sleep(10 * time.Millisecond) // Ensure different timestamps
-	sess.RecordToolCall("tool_b", "code_interpreter", "req-2")
+	sess.RecordToolCall("tool_b", "code_interpreter", "req-2", "")
 
 	history := sess.GetToolCallHistory()
 	if len(history) != 2 {
@@ -84,7 +84,7 @@ func TestSession_ToolCallHistoryLimit(t *testing.T) {
 
 	// Record 150 tool calls (should keep only last 100)
 	for i := 0; i < 150; i++ {
-		sess.RecordToolCall("tool", "function", "")
+		sess.RecordToolCall("tool", "function", "", "")
 	}
 
 	history := sess.GetToolCallHistory()
@@ -325,8 +325,8 @@ func TestSession_Snapshot_IncludesTokensAndTools(t *testing.T) {
 	sess := session.NewSession("test-snapshot", "http://backend", "127.0.0.1")
 
 	sess.AddTokens(500, 200)
-	sess.RecordToolCall("tool1", "function", "req-1")
-	sess.RecordToolCall("tool2", "function", "req-2")
+	sess.RecordToolCall("tool1", "function", "req-1", "")
+	sess.RecordToolCall("tool2", "function", "req-2", "")
 
 	snap := sess.Snapshot()
 

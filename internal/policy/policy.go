@@ -237,20 +237,20 @@ type Engine struct {
 
 // Config for the policy engine
 type Config struct {
-	Enabled        bool   `yaml:"enabled"`
-	Mode           string `yaml:"mode"` // "enforce" (default) or "audit"
-	CaptureContent bool   `yaml:"capture_flagged"`
-	MaxCaptureSize int    `yaml:"max_capture_size"`
-	Rules          []Rule `yaml:"rules"`
+	Enabled        bool   `yaml:"enabled" json:"enabled"`
+	Mode           string `yaml:"mode" json:"mode"` // "enforce" (default) or "audit"
+	CaptureContent bool   `yaml:"capture_flagged" json:"capture_content"`
+	MaxCaptureSize int    `yaml:"max_capture_size" json:"max_capture_size"`
+	Rules          []Rule `yaml:"rules" json:"rules"`
 
 	// Risk ladder configuration
-	RiskLadder RiskLadderConfig `yaml:"risk_ladder"`
+	RiskLadder RiskLadderConfig `yaml:"risk_ladder" json:"risk_ladder"`
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
 type RiskLadderConfig struct {
-	Enabled    bool            `yaml:"enabled"`
-	Thresholds []RiskThreshold `yaml:"thresholds"`
+	Enabled    bool            `yaml:"enabled" json:"enabled"`
+	Thresholds []RiskThreshold `yaml:"thresholds" json:"thresholds"`
 }
 
 // NewEngine creates a new policy engine
@@ -851,6 +851,84 @@ func (e *Engine) calculateRiskScore(fs *FlaggedSession) float64 {
 		score += severityWeight * sourceWeight * decay
 	}
 
+	if score > MaxRiskScore {
+		score = MaxRiskScore
+	}
+	return score
+}
+
+// RiskScorePoint is a single point in the risk score time series.
+type RiskScorePoint struct {
+	Timestamp time.Time `json:"timestamp"`
+	Score     float64   `json:"score"`
+	Action    string    `json:"action"`
+}
+
+// ComputeRiskCurve reconstructs the risk score over time from violation events.
+// It returns a point at each violation event plus regular interval samples.
+func (e *Engine) ComputeRiskCurve(sessionID string) []RiskScorePoint {
+	e.mu.RLock()
+	fs := e.flaggedSessions[sessionID]
+	e.mu.RUnlock()
+
+	if fs == nil || len(fs.ViolationEvents) == 0 {
+		return nil
+	}
+
+	events := fs.ViolationEvents
+	start := events[0].Timestamp
+	now := time.Now()
+	duration := now.Sub(start)
+
+	// Choose interval: ~50 points max
+	interval := duration / 50
+	if interval < time.Second {
+		interval = time.Second
+	}
+
+	var points []RiskScorePoint
+
+	for t := start; t.Before(now) || t.Equal(now); t = t.Add(interval) {
+		score := e.scoreAt(events, t)
+		action, _ := e.determineRiskAction(score)
+		points = append(points, RiskScorePoint{
+			Timestamp: t,
+			Score:     math.Round(score*100) / 100,
+			Action:    action,
+		})
+	}
+
+	// Always include current point
+	score := e.scoreAt(events, now)
+	action, _ := e.determineRiskAction(score)
+	points = append(points, RiskScorePoint{
+		Timestamp: now,
+		Score:     math.Round(score*100) / 100,
+		Action:    action,
+	})
+
+	return points
+}
+
+// scoreAt computes the risk score at a specific moment in time.
+func (e *Engine) scoreAt(events []ViolationEvent, at time.Time) float64 {
+	var score float64
+	for _, event := range events {
+		if event.Timestamp.After(at) {
+			continue // Event hasn't happened yet at this time
+		}
+		severityWeight := SeverityWeights[event.Severity]
+		if severityWeight == 0 {
+			severityWeight = 1.0
+		}
+		sourceWeight := SourceRoleWeights[event.SourceRole]
+		if sourceWeight == 0 {
+			sourceWeight = 1.0
+		}
+		elapsed := at.Sub(event.Timestamp).Seconds()
+		decay := math.Exp(-DefaultDecayLambda * elapsed)
+		score += severityWeight * sourceWeight * decay
+	}
 	if score > MaxRiskScore {
 		score = MaxRiskScore
 	}
