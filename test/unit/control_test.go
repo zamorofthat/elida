@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"elida/internal/control"
+	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
 )
@@ -554,5 +555,352 @@ func TestHandler_WithPolicyOption(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func newTestHandlerWithPolicy() (*control.Handler, *session.Manager, *policy.Engine) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	engine := policy.NewEngine(policy.Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []policy.Rule{
+			{
+				Name:        "test_rule",
+				Type:        "content_match",
+				Target:      "request",
+				Patterns:    []string{"bad_pattern"},
+				Severity:    "critical",
+				Description: "Test rule",
+				Action:      "flag",
+			},
+		},
+	})
+	handler := control.New(store, manager, control.WithPolicy(engine))
+	return handler, manager, engine
+}
+
+func TestHandler_SessionTurns(t *testing.T) {
+	handler, manager, _ := newTestHandlerWithPolicy()
+
+	sess := manager.GetOrCreate("test-sess", "http://backend", "127.0.0.1")
+	sess.RecordMessage("user", "hello world", "backend-a")
+	sess.RecordMessage("assistant", "hi there", "backend-a")
+	sess.RecordToolCall("Read", "function", "req-1", "")
+
+	req := httptest.NewRequest("GET", "/control/sessions/"+sess.ID+"/turns", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		SessionID string `json:"session_id"`
+		Total     int    `json:"total"`
+		Turns     []struct {
+			Type     string `json:"type"`
+			Role     string `json:"role,omitempty"`
+			ToolName string `json:"tool_name,omitempty"`
+		} `json:"turns"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Total != 3 {
+		t.Errorf("expected 3 turns, got %d", resp.Total)
+	}
+
+	// Verify turn types
+	typeCount := map[string]int{}
+	for _, turn := range resp.Turns {
+		typeCount[turn.Type]++
+	}
+	if typeCount["message"] != 2 {
+		t.Errorf("expected 2 message turns, got %d", typeCount["message"])
+	}
+	if typeCount["tool_call"] != 1 {
+		t.Errorf("expected 1 tool_call turn, got %d", typeCount["tool_call"])
+	}
+}
+
+func TestHandler_SessionTurns_NotFound(t *testing.T) {
+	handler, _, _ := newTestHandlerWithPolicy()
+
+	req := httptest.NewRequest("GET", "/control/sessions/nonexistent/turns", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_SessionTurns_Truncation(t *testing.T) {
+	handler, manager, _ := newTestHandlerWithPolicy()
+
+	sess := manager.GetOrCreate("test-sess", "http://backend", "127.0.0.1")
+	for i := 0; i < 100; i++ {
+		sess.RecordMessage("user", "message", "backend")
+	}
+	sess.RecordToolCall("Read", "function", "req", "")
+
+	// Without full=true, should truncate
+	req := httptest.NewRequest("GET", "/control/sessions/"+sess.ID+"/turns", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	var resp struct {
+		Total     int  `json:"total"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if resp.Total != 101 {
+		t.Errorf("expected total 101, got %d", resp.Total)
+	}
+	if !resp.Truncated {
+		t.Error("expected truncated=true for 101 turns")
+	}
+
+	// With full=true, should return all
+	req2 := httptest.NewRequest("GET", "/control/sessions/"+sess.ID+"/turns?full=true", nil)
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+
+	var resp2 struct {
+		Turns []json.RawMessage `json:"turns"`
+	}
+	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if len(resp2.Turns) != 101 {
+		t.Errorf("expected 101 turns with full=true, got %d", len(resp2.Turns))
+	}
+}
+
+func TestHandler_SessionBehavior(t *testing.T) {
+	handler, manager, _ := newTestHandlerWithPolicy()
+
+	sess := manager.GetOrCreate("test-sess", "http://backend", "127.0.0.1")
+	sess.Touch()
+	sess.AddTokens(1000, 2000)
+	sess.RecordToolCall("Read", "function", "req-1", "")
+	sess.RecordToolCall("Bash", "function", "req-2", "")
+	sess.RecordMessage("user", "hello", "backend")
+
+	req := httptest.NewRequest("GET", "/control/sessions/"+sess.ID+"/behavior", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		SessionID string `json:"session_id"`
+		Class     string `json:"class"`
+		Features  []struct {
+			Name  string  `json:"name"`
+			Value float64 `json:"value"`
+		} `json:"features"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Features) != 7 {
+		t.Errorf("expected 7 features, got %d", len(resp.Features))
+	}
+
+	// Verify feature names
+	expectedNames := map[string]bool{
+		"turn_count": true, "tool_call_ratio": true, "tool_call_entropy": true,
+		"cadence_median": true, "cadence_cv": true, "token_ratio": true,
+		"backend_continuity": true,
+	}
+	for _, f := range resp.Features {
+		if !expectedNames[f.Name] {
+			t.Errorf("unexpected feature name: %s", f.Name)
+		}
+	}
+}
+
+func TestHandler_SessionBehavior_NotFound(t *testing.T) {
+	handler, _, _ := newTestHandlerWithPolicy()
+
+	req := httptest.NewRequest("GET", "/control/sessions/nonexistent/behavior", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandler_RiskCurve(t *testing.T) {
+	handler, manager, engine := newTestHandlerWithPolicy()
+
+	sess := manager.GetOrCreate("test-sess", "http://backend", "127.0.0.1")
+
+	// Trigger real violations to generate ViolationEvents
+	engine.EvaluateRequestContent(sess.ID, `{"messages":[{"role":"user","content":"bad_pattern here"}]}`)
+	time.Sleep(10 * time.Millisecond)
+	engine.EvaluateRequestContent(sess.ID, `{"messages":[{"role":"user","content":"another bad_pattern"}]}`)
+
+	req := httptest.NewRequest("GET", "/control/sessions/"+sess.ID+"/risk-curve", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		SessionID string `json:"session_id"`
+		Points    []struct {
+			Timestamp string  `json:"timestamp"`
+			Score     float64 `json:"score"`
+			Action    string  `json:"action"`
+		} `json:"points"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(resp.Points) == 0 {
+		t.Error("expected risk curve points, got empty")
+	}
+
+	// Last point should have a positive score
+	if len(resp.Points) > 0 {
+		last := resp.Points[len(resp.Points)-1]
+		if last.Score <= 0 {
+			t.Errorf("expected positive score at last point, got %f", last.Score)
+		}
+	}
+}
+
+func TestHandler_RiskCurve_NoViolations(t *testing.T) {
+	handler, manager, _ := newTestHandlerWithPolicy()
+
+	sess := manager.GetOrCreate("test-sess", "http://backend", "127.0.0.1")
+	_ = sess
+
+	req := httptest.NewRequest("GET", "/control/sessions/"+sess.ID+"/risk-curve", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Points []json.RawMessage `json:"points"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if len(resp.Points) != 0 {
+		t.Errorf("expected empty points for session without violations, got %d", len(resp.Points))
+	}
+}
+
+func TestHandler_Policy(t *testing.T) {
+	handler, _, _ := newTestHandlerWithPolicy()
+
+	req := httptest.NewRequest("GET", "/control/policy", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Enabled bool   `json:"enabled"`
+		Mode    string `json:"mode"`
+		Rules   []struct {
+			Name     string `json:"name"`
+			Severity string `json:"severity"`
+		} `json:"rules"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if !resp.Enabled {
+		t.Error("expected policy enabled=true")
+	}
+	if resp.Mode != "enforce" {
+		t.Errorf("expected mode=enforce, got %s", resp.Mode)
+	}
+	if len(resp.Rules) != 1 {
+		t.Errorf("expected 1 rule, got %d", len(resp.Rules))
+	}
+	if resp.Rules[0].Name != "test_rule" {
+		t.Errorf("expected rule name=test_rule, got %s", resp.Rules[0].Name)
+	}
+}
+
+func TestHandler_Policy_NoPolicyEngine(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	req := httptest.NewRequest("GET", "/control/policy", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 without policy engine, got %d", w.Code)
+	}
+}
+
+func TestHandler_BuildSessionInfo_WithPolicy(t *testing.T) {
+	handler, manager, engine := newTestHandlerWithPolicy()
+
+	sess := manager.GetOrCreate("test-sess", "http://backend", "127.0.0.1")
+	sess.Touch()
+	sess.RecordToolCall("Read", "function", "req-1", "")
+	sess.AddTokens(500, 1000)
+
+	// Add external risk points to generate risk score
+	engine.AddExternalRiskPoints(sess.ID, 10, "test_risk")
+
+	req := httptest.NewRequest("GET", "/control/sessions/"+sess.ID, nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var info struct {
+		ToolCalls    int     `json:"tool_calls"`
+		TokensIn     int64   `json:"tokens_in"`
+		TokensOut    int64   `json:"tokens_out"`
+		RiskScore    float64 `json:"risk_score"`
+		MessageCount int     `json:"message_count"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&info); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if info.ToolCalls != 1 {
+		t.Errorf("expected tool_calls=1, got %d", info.ToolCalls)
+	}
+	if info.TokensIn != 500 {
+		t.Errorf("expected tokens_in=500, got %d", info.TokensIn)
+	}
+	if info.TokensOut != 1000 {
+		t.Errorf("expected tokens_out=1000, got %d", info.TokensOut)
+	}
+	if info.RiskScore <= 0 {
+		t.Error("expected positive risk_score from policy engine")
 	}
 }

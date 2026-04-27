@@ -204,9 +204,9 @@ func TestExtract_BasicSession(t *testing.T) {
 		sess.Touch()
 	}
 	sess.AddTokens(1000, 5000)
-	sess.RecordToolCall("bash", "function", "req-1")
-	sess.RecordToolCall("bash", "function", "req-2")
-	sess.RecordToolCall("read", "function", "req-3")
+	sess.RecordToolCall("bash", "function", "req-1", "")
+	sess.RecordToolCall("bash", "function", "req-2", "")
+	sess.RecordToolCall("read", "function", "req-3", "")
 	sess.RecordMessage("user", "hello", "anthropic")
 	sess.RecordMessage("assistant", "hi there", "anthropic")
 	sess.RecordMessage("user", "do something", "anthropic")
@@ -1194,8 +1194,8 @@ func makeNormalSession(seed int) *session.Session {
 		time.Sleep(time.Microsecond) // small gap for cadence
 	}
 	sess.AddTokens(1000, 2000)
-	sess.RecordToolCall("read", "function", "req-1")
-	sess.RecordToolCall("write", "function", "req-2")
+	sess.RecordToolCall("read", "function", "req-1", "")
+	sess.RecordToolCall("write", "function", "req-2", "")
 	sess.RecordMessage("user", "hello", "backend-a")
 	sess.RecordMessage("assistant", "hi", "backend-a")
 	sess.RecordMessage("user", "do thing", "backend-a")
@@ -1213,7 +1213,7 @@ func makeAnomalousSession() *session.Session {
 	sess.AddTokens(50000, 100) // inverted ratio
 	// Many distinct tools
 	for i := 0; i < 50; i++ {
-		sess.RecordToolCall("tool-"+string(rune('a'+i%26)), "function", "req")
+		sess.RecordToolCall("tool-"+string(rune('a'+i%26)), "function", "req", "")
 	}
 	sess.RecordMessage("user", "x", "backend-a")
 	return sess

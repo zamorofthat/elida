@@ -190,7 +190,7 @@ func TestFingerprintIntegration_MultiClass(t *testing.T) {
 		}
 		sess.AddTokens(5000, 500) // inverted ratio vs class A
 		for j := 0; j < 20; j++ {
-			sess.RecordToolCall("tool-"+string(rune('a'+j%10)), "function", "req")
+			sess.RecordToolCall("tool-"+string(rune('a'+j%10)), "function", "req", "")
 		}
 		sess.RecordMessage("user", "go", "backend-b")
 		snap := sess.Snapshot()
@@ -215,7 +215,7 @@ func TestFingerprintIntegration_MultiClass(t *testing.T) {
 	}
 	oddSess.AddTokens(5000, 500) // class B's token pattern
 	for j := 0; j < 20; j++ {
-		oddSess.RecordToolCall("tool-"+string(rune('a'+j%10)), "function", "req")
+		oddSess.RecordToolCall("tool-"+string(rune('a'+j%10)), "function", "req", "")
 	}
 	oddSnap := oddSess.Snapshot()
 	distOdd, bucketOdd, _, err := scorer.Score(&oddSnap)
@@ -245,7 +245,7 @@ func buildRealisticSession(t *testing.T, backend, model string, seed int, anomal
 		}
 		sess.AddTokens(30000, 200) // huge input, tiny output
 		for j := 0; j < 40; j++ {
-			sess.RecordToolCall("unusual-tool-"+string(rune('a'+j%26)), "function", "req")
+			sess.RecordToolCall("unusual-tool-"+string(rune('a'+j%26)), "function", "req", "")
 		}
 		sess.RecordMessage("user", "execute attack plan", backend)
 		snap := sess.Snapshot()
@@ -258,10 +258,10 @@ func buildRealisticSession(t *testing.T, backend, model string, seed int, anomal
 		time.Sleep(time.Microsecond) // small gap for cadence variance
 	}
 	sess.AddTokens(1000+int64(seed%200), 2000+int64(seed%400))
-	sess.RecordToolCall("read_file", "function", "req-1")
-	sess.RecordToolCall("write_file", "function", "req-2")
+	sess.RecordToolCall("read_file", "function", "req-1", "")
+	sess.RecordToolCall("write_file", "function", "req-2", "")
 	if seed%3 == 0 {
-		sess.RecordToolCall("search", "function", "req-3")
+		sess.RecordToolCall("search", "function", "req-3", "")
 	}
 	sess.RecordMessage("user", "help me with code", backend)
 	sess.RecordMessage("assistant", "sure, here's the code", backend)
