@@ -600,6 +600,11 @@ func (s *SQLiteStore) Cleanup(retentionDays int) (int64, error) {
 	return deleted, nil
 }
 
+// DB returns the underlying database handle for shared use by subsystems.
+func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
+}
+
 // Close closes the database connection
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()

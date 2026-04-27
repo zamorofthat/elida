@@ -140,6 +140,24 @@ telemetry:
 #       key_file: ""            # Client key PEM (for mTLS)
 #       insecure_skip_verify: false  # Skip server cert verification (dev only)
 
+# Behavioral fingerprinting (M3-lite)
+# Detects session-level behavioral anomalies via Mahalanobis distance
+# over 7 structural features. Requires storage to be enabled.
+fingerprint:
+  enabled: true
+  # Shadow mode: ingest baselines without scoring (calibration period)
+  # Start in shadow mode to build baselines before scoring
+  shadow: true
+  # EWMA effective window size (default 900 ≈ 90 days × 10 sessions/day)
+  n_eff: 900
+  # Ridge regularization for covariance matrix (default 1e-6)
+  ridge_lambda: 0.000001
+  # Min sessions per class before producing real scores (default 100)
+  warm_up: 100
+  # How often to persist dirty baselines to SQLite (default 5m)
+  # Protects against data loss on crash — at most flush_interval of updates lost
+  flush_interval: 5m
+
 # Storage configuration (for dashboard history)
 storage:
   # Enable SQLite storage for session history

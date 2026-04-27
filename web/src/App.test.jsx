@@ -29,7 +29,7 @@ describe('App auth gating', () => {
     const { container } = render(<App />)
 
     await waitFor(() => {
-      expect(container.querySelector('.sidebar')).toBeTruthy()
+      expect(container.querySelector('.topnav')).toBeTruthy()
     })
     expect(container.querySelector('.login-container')).toBeNull()
   })
@@ -42,7 +42,7 @@ describe('App auth gating', () => {
     await waitFor(() => {
       expect(container.querySelector('.login-container')).toBeTruthy()
     })
-    expect(container.querySelector('.sidebar')).toBeNull()
+    expect(container.querySelector('.topnav')).toBeNull()
   })
 
   it('skips probe and renders dashboard when key exists in localStorage', async () => {
@@ -52,7 +52,7 @@ describe('App auth gating', () => {
     const { container } = render(<App />)
 
     await waitFor(() => {
-      expect(container.querySelector('.sidebar')).toBeTruthy()
+      expect(container.querySelector('.topnav')).toBeTruthy()
     })
     // Should not have probed health without credentials
     const healthCalls = mockFetch.mock.calls.filter(

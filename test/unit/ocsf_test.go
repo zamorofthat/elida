@@ -180,7 +180,7 @@ func TestBuildBlockDetection(t *testing.T) {
 }
 
 func TestBuildAnomalyDetection(t *testing.T) {
-	df := telemetry.BuildAnomalyDetection("sess-789", 0.85, "high-risk", "anomaly_behavioral")
+	df := telemetry.BuildAnomalyDetection("sess-789", 5.5, "anomalous", "anomaly_behavioral")
 
 	if df.ClassUID != 2004 {
 		t.Errorf("expected class_uid 2004, got %d", df.ClassUID)
@@ -195,7 +195,7 @@ func TestBuildAnomalyDetection(t *testing.T) {
 		t.Errorf("expected activity_id 1, got %d", df.ActivityID)
 	}
 	if df.SeverityID != 5 {
-		t.Errorf("expected severity_id 5 for score >= 0.8, got %d", df.SeverityID)
+		t.Errorf("expected severity_id 5 (critical) for score >= 5.0, got %d", df.SeverityID)
 	}
 	if df.Analytic.Name != "M3-lite" {
 		t.Errorf("unexpected analytic name: %s", df.Analytic.Name)
@@ -342,22 +342,22 @@ func TestOCSFEventCategoryDefault(t *testing.T) {
 }
 
 func TestAnomalyDetectionSeverityThresholds(t *testing.T) {
-	// score < 0.5 → info (1)
-	df := telemetry.BuildAnomalyDetection("s", 0.3, "", "")
+	// score < 4.1 → info (1)
+	df := telemetry.BuildAnomalyDetection("s", 3.0, "", "")
 	if df.SeverityID != 1 {
-		t.Errorf("score 0.3: expected severity 1, got %d", df.SeverityID)
+		t.Errorf("score 3.0: expected severity 1 (info), got %d", df.SeverityID)
 	}
 
-	// score 0.5-0.79 → warning (3)
-	df = telemetry.BuildAnomalyDetection("s", 0.6, "", "")
+	// score 4.1-4.99 → warning (3)
+	df = telemetry.BuildAnomalyDetection("s", 4.5, "", "")
 	if df.SeverityID != 3 {
-		t.Errorf("score 0.6: expected severity 3, got %d", df.SeverityID)
+		t.Errorf("score 4.5: expected severity 3 (warning), got %d", df.SeverityID)
 	}
 
-	// score >= 0.8 → critical (5)
-	df = telemetry.BuildAnomalyDetection("s", 0.9, "", "")
+	// score >= 5.0 → critical (5)
+	df = telemetry.BuildAnomalyDetection("s", 6.0, "", "")
 	if df.SeverityID != 5 {
-		t.Errorf("score 0.9: expected severity 5, got %d", df.SeverityID)
+		t.Errorf("score 6.0: expected severity 5 (critical), got %d", df.SeverityID)
 	}
 }
 

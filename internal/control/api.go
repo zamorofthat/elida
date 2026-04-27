@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"elida/internal/config"
 	"elida/internal/dashboard"
+	"elida/internal/fingerprint"
 	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
@@ -90,6 +92,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	h.mux.HandleFunc("/control/history/{id}", h.handleHistorySession)
 
 	// Policy/flagged sessions endpoints
+	h.mux.HandleFunc("/control/policy", h.handlePolicy)
 	h.mux.HandleFunc("/control/flagged", h.handleFlagged)
 	h.mux.HandleFunc("/control/flagged/stats", h.handleFlaggedStats)
 	h.mux.HandleFunc("/control/flagged/{id}", h.handleFlaggedSession)
@@ -333,24 +336,7 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	for _, s := range sessions {
 		snap := s.Snapshot()
-		info := SessionInfo{
-			ID:           snap.ID,
-			State:        snap.State.String(),
-			StartTime:    snap.StartTime,
-			LastActivity: snap.LastActivity,
-			Duration:     s.Duration().String(),
-			IdleTime:     s.IdleTime().String(),
-			RequestCount: snap.RequestCount,
-			BytesIn:      snap.BytesIn,
-			BytesOut:     snap.BytesOut,
-			Backend:      snap.Backend,
-			BackendsUsed: snap.BackendsUsed,
-			ClientAddr:   snap.ClientAddr,
-			Metadata:     snap.Metadata,
-		}
-		if snap.EndTime != nil {
-			info.EndTime = snap.EndTime
-		}
+		info := h.buildSessionInfo(&snap, s)
 		response.Sessions = append(response.Sessions, info)
 	}
 
@@ -371,7 +357,16 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		h.getSession(w, sessionID)
+		switch action {
+		case "turns":
+			h.getSessionTurns(w, r, sessionID)
+		case "risk-curve":
+			h.getSessionRiskCurve(w, sessionID)
+		case "behavior":
+			h.getSessionBehavior(w, sessionID)
+		default:
+			h.getSession(w, sessionID)
+		}
 	case http.MethodPost:
 		switch action {
 		case "kill":
@@ -399,24 +394,7 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	}
 
 	snap := sess.Snapshot()
-	info := SessionInfo{
-		ID:           snap.ID,
-		State:        snap.State.String(),
-		StartTime:    snap.StartTime,
-		LastActivity: snap.LastActivity,
-		Duration:     sess.Duration().String(),
-		IdleTime:     sess.IdleTime().String(),
-		RequestCount: snap.RequestCount,
-		BytesIn:      snap.BytesIn,
-		BytesOut:     snap.BytesOut,
-		Backend:      snap.Backend,
-		BackendsUsed: snap.BackendsUsed,
-		ClientAddr:   snap.ClientAddr,
-		Metadata:     snap.Metadata,
-	}
-	if snap.EndTime != nil {
-		info.EndTime = snap.EndTime
-	}
+	info := h.buildSessionInfo(&snap, sess)
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -508,6 +486,209 @@ type SessionInfo struct {
 	BackendsUsed map[string]int    `json:"backends_used,omitempty"`
 	ClientAddr   string            `json:"client_addr"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+
+	// Extended fields for dashboard
+	ToolCalls      int            `json:"tool_calls"`
+	ToolCallCounts map[string]int `json:"tool_call_counts,omitempty"`
+	TokensIn       int64          `json:"tokens_in"`
+	TokensOut      int64          `json:"tokens_out"`
+	RiskScore      float64        `json:"risk_score,omitempty"`
+	CurrentAction  string         `json:"current_action,omitempty"`
+	FailedBackends []string       `json:"failed_backends,omitempty"`
+	Terminated     bool           `json:"terminated,omitempty"`
+	MessageCount   int            `json:"message_count"`
+}
+
+// buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
+func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session) SessionInfo {
+	info := SessionInfo{
+		ID:             snap.ID,
+		State:          snap.State.String(),
+		StartTime:      snap.StartTime,
+		LastActivity:   snap.LastActivity,
+		Duration:       sess.Duration().String(),
+		IdleTime:       sess.IdleTime().String(),
+		RequestCount:   snap.RequestCount,
+		BytesIn:        snap.BytesIn,
+		BytesOut:       snap.BytesOut,
+		Backend:        snap.Backend,
+		BackendsUsed:   snap.BackendsUsed,
+		ClientAddr:     snap.ClientAddr,
+		Metadata:       snap.Metadata,
+		ToolCalls:      snap.ToolCalls,
+		ToolCallCounts: snap.ToolCallCounts,
+		TokensIn:       snap.TokensIn,
+		TokensOut:      snap.TokensOut,
+		FailedBackends: snap.FailedBackends,
+		Terminated:     snap.Terminated,
+		MessageCount:   len(snap.Messages),
+	}
+	if snap.EndTime != nil {
+		info.EndTime = snap.EndTime
+	}
+
+	// Enrich with policy engine data
+	if h.policyEngine != nil {
+		if flagged := h.policyEngine.GetFlaggedSession(snap.ID); flagged != nil {
+			info.RiskScore = flagged.RiskScore
+			info.CurrentAction = flagged.CurrentAction
+		}
+	}
+
+	return info
+}
+
+// TurnEntry represents a single event in the session timeline.
+type TurnEntry struct {
+	Timestamp time.Time      `json:"timestamp"`
+	Type      string         `json:"type"` // "message", "tool_call", "violation"
+	Role      string         `json:"role,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	ToolName  string         `json:"tool_name,omitempty"`
+	ToolType  string         `json:"tool_type,omitempty"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+	Result    string         `json:"result,omitempty"`
+	RuleName  string         `json:"rule_name,omitempty"`
+	Severity  string         `json:"severity,omitempty"`
+	Action    string         `json:"action,omitempty"`
+	Backend   string         `json:"backend,omitempty"`
+}
+
+// TurnsResponse is the response for GET /control/sessions/{id}/turns.
+type TurnsResponse struct {
+	SessionID  string      `json:"session_id"`
+	Turns      []TurnEntry `json:"turns"`
+	Total      int         `json:"total"`
+	Truncated  bool        `json:"truncated"`
+	OmittedMid int         `json:"omitted_mid,omitempty"` // Number of turns omitted in the middle
+}
+
+// getSessionTurns handles GET /control/sessions/{id}/turns
+func (h *Handler) getSessionTurns(w http.ResponseWriter, r *http.Request, id string) {
+	sess, ok := h.manager.Get(id)
+	if !ok {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	snap := sess.Snapshot()
+	full := r.URL.Query().Get("full") == "true"
+
+	// Build turns from messages
+	turns := make([]TurnEntry, 0, len(snap.Messages)+len(snap.ToolCallHistory))
+	for _, msg := range snap.Messages {
+		turns = append(turns, TurnEntry{
+			Timestamp: msg.Timestamp,
+			Type:      "message",
+			Role:      msg.Role,
+			Content:   msg.Content,
+			Backend:   msg.Backend,
+		})
+	}
+
+	// Add tool calls
+	for _, tc := range snap.ToolCallHistory {
+		turns = append(turns, TurnEntry{
+			Timestamp: tc.Timestamp,
+			Type:      "tool_call",
+			ToolName:  tc.ToolName,
+			ToolType:  tc.ToolType,
+			Arguments: tc.Arguments,
+			Result:    tc.Result,
+		})
+	}
+
+	// Add policy violations
+	if h.policyEngine != nil {
+		if flagged := h.policyEngine.GetFlaggedSession(id); flagged != nil {
+			for _, v := range flagged.Violations {
+				turns = append(turns, TurnEntry{
+					Timestamp: v.Timestamp,
+					Type:      "violation",
+					RuleName:  v.RuleName,
+					Content:   v.Description,
+					Severity:  string(v.Severity),
+					Action:    v.Action,
+				})
+			}
+		}
+	}
+
+	// Sort by timestamp
+	sortTurns(turns)
+
+	total := len(turns)
+	resp := TurnsResponse{
+		SessionID: id,
+		Total:     total,
+	}
+
+	// Truncate if 100+ turns and not requesting full
+	if !full && total > 100 {
+		first := turns[:3]
+		last := turns[total-3:]
+		resp.Turns = make([]TurnEntry, 0, 6)
+		resp.Turns = append(resp.Turns, first...)
+		resp.Turns = append(resp.Turns, last...)
+		resp.Truncated = true
+		resp.OmittedMid = total - 6
+	} else {
+		resp.Turns = turns
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// sortTurns sorts turn entries by timestamp (ascending).
+func sortTurns(turns []TurnEntry) {
+	sort.Slice(turns, func(i, j int) bool {
+		return turns[i].Timestamp.Before(turns[j].Timestamp)
+	})
+}
+
+// getSessionBehavior handles GET /control/sessions/{id}/behavior
+// Returns the 7 behavioral fingerprint features computed from live session data.
+func (h *Handler) getSessionBehavior(w http.ResponseWriter, id string) {
+	sess, ok := h.manager.Get(id)
+	if !ok {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+
+	snap := sess.Snapshot()
+	fv := fingerprint.Extract(&snap)
+
+	features := make([]map[string]interface{}, fingerprint.NumFeatures)
+	for i := 0; i < fingerprint.NumFeatures; i++ {
+		features[i] = map[string]interface{}{
+			"name":  fingerprint.FeatureNames[i],
+			"value": fv[i],
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": id,
+		"class":      fingerprint.SessionClass(&snap),
+		"features":   features,
+	})
+}
+
+// getSessionRiskCurve handles GET /control/sessions/{id}/risk-curve
+func (h *Handler) getSessionRiskCurve(w http.ResponseWriter, id string) {
+	if h.policyEngine == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"points": []struct{}{}})
+		return
+	}
+
+	points := h.policyEngine.ComputeRiskCurve(id)
+	if points == nil {
+		points = []policy.RiskScorePoint{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": id,
+		"points":     points,
+	})
 }
 
 // handleHistory handles GET /control/history
@@ -679,6 +860,22 @@ func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, record)
+}
+
+// handlePolicy handles GET /control/policy — returns policy config including rules
+func (h *Handler) handlePolicy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.policyEngine == nil {
+		http.Error(w, "Policy engine not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	cfg := h.policyEngine.GetConfig()
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // handleFlagged handles GET /control/flagged

@@ -27,6 +27,7 @@ type Config struct {
 	Policy          PolicyConfig             `yaml:"policy"`
 	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
 	OCSF            OCSFConfig               `yaml:"ocsf"`             // OCSF native transport configuration
+	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
 
@@ -303,6 +304,16 @@ type OCSFSyslogConfig struct {
 	TLS      OCSFTLSConfig `yaml:"tls"`
 }
 
+// FingerprintConfig holds behavioral fingerprint configuration
+type FingerprintConfig struct {
+	Enabled       bool          `yaml:"enabled"`        // Enable behavioral fingerprinting (default: false)
+	Shadow        bool          `yaml:"shadow"`         // Shadow mode: ingest only, no scoring (default: true)
+	NEff          int           `yaml:"n_eff"`          // EWMA effective window size (default: 900)
+	RidgeLambda   float64       `yaml:"ridge_lambda"`   // Ridge regularization parameter (default: 1e-6)
+	WarmUp        int           `yaml:"warm_up"`        // Min sessions before scoring (default: 100)
+	FlushInterval time.Duration `yaml:"flush_interval"` // How often to persist dirty baselines (default: 5m)
+}
+
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
@@ -386,6 +397,14 @@ func defaults() *Config {
 				Facility: "local0",
 				Tag:      "elida",
 			},
+		},
+		Fingerprint: FingerprintConfig{
+			Enabled:       false,
+			Shadow:        true,
+			NEff:          900,
+			RidgeLambda:   1e-6,
+			WarmUp:        100,
+			FlushInterval: 5 * time.Minute,
 		},
 		TLS: TLSConfig{
 			Enabled:  false,

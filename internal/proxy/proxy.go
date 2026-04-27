@@ -432,7 +432,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(requestBody) > 0 {
 		if toolCalls := ExtractToolCalls(requestBody); len(toolCalls) > 0 {
 			for _, tc := range toolCalls {
-				sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+				sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 			}
 		}
 	}
@@ -720,7 +720,7 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 	// Extract tool calls from response (when model decides to call tools)
 	if toolCalls := ExtractToolCallsFromResponse(responseBody); len(toolCalls) > 0 {
 		for _, tc := range toolCalls {
-			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+			sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 		}
 		// Evaluate tool calls against tool call policy rules
 		if p.policy != nil {
@@ -863,7 +863,7 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 	if p.policy != nil && len(responseBody) > 0 {
 		if toolCalls := ExtractToolCallsFromResponse([]byte(responseBody)); len(toolCalls) > 0 {
 			for _, tc := range toolCalls {
-				sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+				sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 			}
 			policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
 			if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
@@ -1096,7 +1096,7 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 			abortContent := joinChunks(chunks)
 			if toolCalls := ExtractToolCallsFromResponse([]byte(abortContent)); len(toolCalls) > 0 {
 				for _, tc := range toolCalls {
-					sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+					sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 				}
 			}
 			abortSnap := sess.Snapshot()
@@ -1161,7 +1161,7 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	// to avoid mutating session state from a detached goroutine
 	if toolCalls := ExtractToolCallsFromResponse([]byte(responseContent)); len(toolCalls) > 0 {
 		for _, tc := range toolCalls {
-			sess.RecordToolCall(tc.Name, tc.Type, tc.ID)
+			sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 		}
 	}
 
