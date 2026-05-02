@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -1233,4 +1234,356 @@ func TestComputeRiskCurve_ActionThresholds(t *testing.T) {
 	if points[0].Action != "throttle" {
 		t.Errorf("expected action=throttle at score %f, got %s", points[0].Score, points[0].Action)
 	}
+}
+
+// ============================================================
+// Rate Anomaly Tests (Poisson-based)
+// ============================================================
+
+func TestRateAnomaly_NormalRate(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "rate_anomaly",
+			Type:           "rate_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.01,
+			MinSamples:     10,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Generate a steady stream of requests: 1 per second for 20 seconds
+	now := time.Now()
+	times := make([]time.Time, 20)
+	for i := range times {
+		times[i] = now.Add(time.Duration(i) * time.Second)
+	}
+
+	metrics := policy.SessionMetrics{
+		SessionID:    "steady-session",
+		RequestCount: 20,
+		RequestTimes: times,
+		Duration:     20 * time.Second,
+	}
+
+	result := engine.Evaluate(metrics)
+	for _, v := range result {
+		if v.RuleName == "rate_anomaly" {
+			t.Error("expected no rate anomaly violation for steady rate")
+		}
+	}
+}
+
+func TestRateAnomaly_Burst(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "rate_anomaly",
+			Type:           "rate_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.01,
+			MinSamples:     10,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	now := time.Now()
+	var times []time.Time
+	// Baseline: 10 requests spread over 10 seconds (1/sec)
+	for i := 0; i < 10; i++ {
+		times = append(times, now.Add(time.Duration(i)*time.Second))
+	}
+	// Burst: 10 requests in 0.5 seconds (20/sec)
+	burstStart := now.Add(10 * time.Second)
+	for i := 0; i < 10; i++ {
+		times = append(times, burstStart.Add(time.Duration(i)*50*time.Millisecond))
+	}
+
+	metrics := policy.SessionMetrics{
+		SessionID:    "burst-session",
+		RequestCount: 20,
+		RequestTimes: times,
+		Duration:     11 * time.Second,
+	}
+
+	result := engine.Evaluate(metrics)
+	found := false
+	for _, v := range result {
+		if v.RuleName == "rate_anomaly" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected rate anomaly violation for burst traffic")
+	}
+}
+
+func TestRateAnomaly_InsufficientData(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "rate_anomaly",
+			Type:           "rate_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.01,
+			MinSamples:     10,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Only 5 requests — below MinSamples of 10
+	now := time.Now()
+	times := make([]time.Time, 5)
+	for i := range times {
+		times[i] = now.Add(time.Duration(i) * time.Second)
+	}
+
+	metrics := policy.SessionMetrics{
+		SessionID:    "small-session",
+		RequestCount: 5,
+		RequestTimes: times,
+		Duration:     5 * time.Second,
+	}
+
+	result := engine.Evaluate(metrics)
+	for _, v := range result {
+		if v.RuleName == "rate_anomaly" {
+			t.Error("expected no rate anomaly violation with insufficient data")
+		}
+	}
+}
+
+// ============================================================
+// Content Entropy Tests (Shannon-based)
+// ============================================================
+
+func TestContentEntropy_NaturalLanguage(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "entropy_check",
+			Type:           "content_entropy",
+			Target:         "request",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Natural English text — entropy should be ~4.0-4.5
+	content := `{"messages":[{"role":"user","content":"The quick brown fox jumps over the lazy dog. This is a fairly normal request with typical English text that should not trigger any entropy alarms at all."}]}`
+	result := engine.EvaluateRequestContent("entropy-session", content)
+	if result != nil {
+		for _, v := range result.Violations {
+			if v.RuleName == "entropy_check" {
+				t.Error("expected no entropy violation for natural language")
+			}
+		}
+	}
+}
+
+func TestContentEntropy_Base64(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "entropy_check",
+			Type:           "content_entropy",
+			Target:         "request",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Generate base64 from pseudo-random bytes — entropy ~5.8
+	raw := make([]byte, 300)
+	for i := range raw {
+		raw[i] = byte((i*7 + 13*i*i + 37) % 256)
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	result := engine.EvaluateRequestContent("entropy-session", encoded)
+	if result == nil {
+		t.Fatal("expected entropy violation for base64 content")
+	}
+	found := false
+	for _, v := range result.Violations {
+		if v.RuleName == "entropy_check" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected entropy_check violation in results")
+	}
+}
+
+func TestContentEntropy_ShortContent(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "entropy_check",
+			Type:           "content_entropy",
+			Target:         "request",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Very short content — below MinSamples threshold
+	result := engine.EvaluateRequestContent("entropy-session", "short")
+	if result != nil {
+		for _, v := range result.Violations {
+			if v.RuleName == "entropy_check" {
+				t.Error("expected no entropy violation for short content")
+			}
+		}
+	}
+}
+
+// ============================================================
+// Compound Anomaly Tests (Adaptive CUSUM + Entropy)
+// ============================================================
+
+func TestCompoundAnomaly_SteadyLowEntropy_NoViolation(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "compound_test",
+			Type:           "compound_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.15,
+			MinSamples:     5,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Steady rate with low entropy — should not trigger
+	now := time.Now()
+	for i := 0; i < 20; i++ {
+		metrics := policy.SessionMetrics{
+			SessionID:    "steady-session",
+			RequestCount: i + 1,
+			RequestTimes: generateTimes(now, i+1, 500*time.Millisecond),
+			Duration:     time.Duration(i) * 500 * time.Millisecond,
+		}
+		result := engine.Evaluate(metrics)
+		for _, v := range result {
+			if v.RuleName == "compound_test" {
+				t.Errorf("steady low-entropy traffic should not trigger compound anomaly at request %d", i)
+			}
+		}
+	}
+}
+
+func TestCompoundAnomaly_InsufficientData_NoViolation(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "compound_test",
+			Type:           "compound_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.15,
+			MinSamples:     5,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// Only 3 requests — below MinSamples
+	now := time.Now()
+	metrics := policy.SessionMetrics{
+		SessionID:    "small-session",
+		RequestCount: 3,
+		RequestTimes: generateTimes(now, 3, time.Second),
+		Duration:     3 * time.Second,
+	}
+	result := engine.Evaluate(metrics)
+	for _, v := range result {
+		if v.RuleName == "compound_test" {
+			t.Error("insufficient data should not trigger compound anomaly")
+		}
+	}
+}
+
+func TestCompoundAnomaly_DetectorCleanup(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "compound_test",
+			Type:           "compound_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.15,
+			MinSamples:     5,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	now := time.Now()
+	metrics := policy.SessionMetrics{
+		SessionID:    "cleanup-test",
+		RequestCount: 10,
+		RequestTimes: generateTimes(now, 10, 500*time.Millisecond),
+		Duration:     5 * time.Second,
+	}
+	engine.Evaluate(metrics)
+
+	// Detector should exist
+	if det := engine.GetDetector("cleanup-test"); det == nil {
+		t.Fatal("expected detector to exist after evaluation")
+	}
+
+	// Cleanup
+	engine.CleanupDetector("cleanup-test")
+	if det := engine.GetDetector("cleanup-test"); det != nil {
+		t.Error("expected detector to be cleaned up")
+	}
+}
+
+func TestCompoundAnomaly_ContentFeedsDetector(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "compound_test",
+			Type:           "compound_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.15,
+			MinSamples:     5,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// First create the detector via Evaluate
+	now := time.Now()
+	metrics := policy.SessionMetrics{
+		SessionID:    "content-feed-test",
+		RequestCount: 10,
+		RequestTimes: generateTimes(now, 10, 500*time.Millisecond),
+		Duration:     5 * time.Second,
+	}
+	engine.Evaluate(metrics)
+
+	// Feed content via UpdateDetectorContent
+	engine.UpdateDetectorContent("content-feed-test", []byte("test content"))
+
+	det := engine.GetDetector("content-feed-test")
+	if det == nil {
+		t.Fatal("expected detector to exist")
+	}
+	if det.Entropy() == 0 {
+		t.Error("expected non-zero entropy after feeding content")
+	}
+}
+
+// generateTimes creates n evenly-spaced timestamps starting from start.
+func generateTimes(start time.Time, n int, interval time.Duration) []time.Time {
+	times := make([]time.Time, n)
+	for i := range times {
+		times[i] = start.Add(time.Duration(i) * interval)
+	}
+	return times
 }
