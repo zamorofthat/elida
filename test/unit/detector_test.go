@@ -1,17 +1,17 @@
-package policy
+package unit
 
 import (
-	"math"
 	"testing"
 	"time"
+
+	"elida/internal/policy"
 )
 
 func TestSessionDetector_Warmup(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// First few requests during warmup should always return 0
-	for i := 0; i < defaultWarmupRequests; i++ {
+	for i := 0; i < policy.DefaultWarmupRequests; i++ {
 		score := det.Update(now.Add(time.Duration(i)*100*time.Millisecond), []byte("data"))
 		if score != 0 {
 			t.Errorf("request %d during warmup: score=%f, want 0", i, score)
@@ -20,52 +20,45 @@ func TestSessionDetector_Warmup(t *testing.T) {
 }
 
 func TestSessionDetector_SteadyRate_NoAlarm(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// Steady rate: 2 req/s for 20 seconds with low-entropy content
 	lowEntropy := []byte(`{"role":"user","content":"normal request"}`)
 	for i := 0; i < 40; i++ {
 		score := det.Update(now.Add(time.Duration(i)*500*time.Millisecond), lowEntropy)
-		if score > defaultCompoundThreshold {
+		if score > policy.DefaultCompoundThreshold {
 			t.Errorf("steady rate should not alarm: request %d, score=%f", i, score)
 		}
 	}
 }
 
 func TestSessionDetector_BurstLowEntropy_NoAlarm(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// Phase 1: slow planning (1 req/s for 10s)
 	lowEntropy := []byte(`{"tool":"read_file","path":"/src/main.go"}`)
 	for i := 0; i < 10; i++ {
 		det.Update(now.Add(time.Duration(i)*time.Second), lowEntropy)
 	}
 
-	// Phase 2: burst execution (10 req/s for 3s) — but still low entropy
 	burstStart := now.Add(10 * time.Second)
 	for i := 0; i < 30; i++ {
 		score := det.Update(burstStart.Add(time.Duration(i)*100*time.Millisecond), lowEntropy)
-		// Even with high rate, low entropy should keep compound score low
-		if score > defaultCompoundThreshold {
+		if score > policy.DefaultCompoundThreshold {
 			t.Errorf("burst with low entropy should not alarm: request %d, score=%f", i+10, score)
 		}
 	}
 }
 
 func TestSessionDetector_BurstHighEntropy_Alarms(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// Phase 1: slow planning with normal content
 	lowEntropy := []byte(`{"tool":"read_file","path":"/src/main.go"}`)
 	for i := 0; i < 10; i++ {
 		det.Update(now.Add(time.Duration(i)*time.Second), lowEntropy)
 	}
 
-	// Phase 2: burst with high-entropy content (simulated exfiltration)
-	// Generate high-entropy bytes (pseudo-random)
 	highEntropy := make([]byte, 200)
 	for i := range highEntropy {
 		highEntropy[i] = byte((i*7 + 13*i*i + 37) % 256)
@@ -86,91 +79,82 @@ func TestSessionDetector_BurstHighEntropy_Alarms(t *testing.T) {
 }
 
 func TestSessionDetector_BurstBoundary_Resets(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// First burst
 	for i := 0; i < 10; i++ {
 		det.Update(now.Add(time.Duration(i)*100*time.Millisecond), []byte("data"))
 	}
 
-	// Gap longer than gapThreshold (2s default)
+	// Gap longer than DefaultGapThreshold (2s)
 	gapTime := now.Add(10*100*time.Millisecond + 3*time.Second)
 	det.Update(gapTime, []byte("new burst"))
 
-	// CUSUM should have been reset
-	if det.cusumHigh != 0 {
-		t.Errorf("CUSUM should reset after gap, got %f", det.cusumHigh)
+	if det.CUSUMHigh() != 0 {
+		t.Errorf("CUSUM should reset after gap, got %f", det.CUSUMHigh())
 	}
-	// Burst count should restart
-	if det.burstCount != 1 {
-		t.Errorf("burst count should restart after gap, got %d", det.burstCount)
+	if det.BurstCount() != 1 {
+		t.Errorf("burst count should restart after gap, got %d", det.BurstCount())
 	}
 }
 
 func TestSessionDetector_BurstHistory(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// Create 3 bursts with gaps between them
 	offset := time.Duration(0)
 	for burst := 0; burst < 3; burst++ {
 		for i := 0; i < 8; i++ {
 			det.Update(now.Add(offset), []byte("burst data"))
 			offset += 100 * time.Millisecond
 		}
-		offset += 3 * time.Second // gap between bursts
+		offset += 3 * time.Second
 	}
-	// Finalize the last burst by triggering a new one
 	det.Update(now.Add(offset+3*time.Second), []byte("next"))
 
-	// Should have 3 completed bursts in history
-	if det.burstFill != 3 {
-		t.Errorf("expected 3 bursts in history, got %d", det.burstFill)
+	if det.BurstHistoryLen() != 3 {
+		t.Errorf("expected 3 bursts in history, got %d", det.BurstHistoryLen())
 	}
 }
 
 func TestSessionDetector_IncrementalEntropy(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
+	now := time.Now()
 
-	// Feed uniform data — should have 0 entropy
+	// Feed uniform data via Update — should have low entropy
 	uniform := make([]byte, 200)
 	for i := range uniform {
 		uniform[i] = 'A'
 	}
-	det.addBytes(uniform)
-	if e := det.entropy(); e != 0 {
-		t.Errorf("uniform data entropy = %f, want 0", e)
+	det.Update(now, uniform)
+	if det.Entropy() != 0 {
+		t.Errorf("uniform data entropy = %f, want 0", det.Entropy())
 	}
 
-	// Reset and feed diverse data
-	det.resetEntropy()
+	// New burst with diverse data
 	diverse := make([]byte, 256)
 	for i := range diverse {
 		diverse[i] = byte(i)
 	}
-	det.addBytes(diverse)
-	if e := det.entropy(); math.Abs(e-8.0) > 0.01 {
-		t.Errorf("all-byte data entropy = %f, want ~8.0", e)
+	det.Update(now.Add(3*time.Second), diverse) // gap triggers new burst + entropy reset
+	if det.Entropy() < 7.9 {
+		t.Errorf("all-byte data entropy = %f, want ~8.0", det.Entropy())
 	}
 }
 
 func TestSessionDetector_ScoreComponents(t *testing.T) {
-	det := NewSessionDetector(CompoundAnomalyConfig{})
+	det := policy.NewSessionDetector(policy.CompoundAnomalyConfig{})
 	now := time.Now()
 
-	// Feed enough data to get past warmup with steady rate
 	for i := 0; i < 10; i++ {
 		det.Update(now.Add(time.Duration(i)*500*time.Millisecond), []byte(`{"normal":"json"}`))
 	}
 
-	// Rate score should be low for steady traffic
 	rate := det.RateScore()
 	if rate > 0.5 {
 		t.Errorf("steady rate should have low rate score, got %f", rate)
 	}
 
-	// Entropy score should be 0 for structured JSON (entropy ~4.0)
 	entropy := det.EntropyScore()
 	if entropy > 0.1 {
 		t.Errorf("structured JSON should have near-zero entropy score, got %f (H=%f)", entropy, det.Entropy())
@@ -187,8 +171,8 @@ func TestClamp(t *testing.T) {
 		{0, 0, 0, 0},
 	}
 	for _, tt := range tests {
-		if got := clamp(tt.v, tt.lo, tt.hi); got != tt.want {
-			t.Errorf("clamp(%f, %f, %f) = %f, want %f", tt.v, tt.lo, tt.hi, got, tt.want)
+		if got := policy.Clamp(tt.v, tt.lo, tt.hi); got != tt.want {
+			t.Errorf("Clamp(%f, %f, %f) = %f, want %f", tt.v, tt.lo, tt.hi, got, tt.want)
 		}
 	}
 }

@@ -8,15 +8,15 @@ import (
 // Default parameters for compound anomaly detection.
 // Tuned for agentic traffic (bursty, phased execution patterns).
 const (
-	defaultHalfLife          = 5.0  // seconds — EMA tracks within-burst rate changes
-	defaultCUSUMSlack        = 3.0  // tolerates 3 req/s above baseline before accumulating
-	defaultCUSUMThreshold    = 10.0 // ~4 seconds of sustained anomaly to alarm
-	defaultGapThreshold      = 2.0  // seconds — gap longer than this = new burst
-	defaultWarmupRequests    = 5    // skip first N requests per burst
-	defaultCompoundThreshold = 0.15 // alarm when rate*entropy score exceeds this
-	defaultEntropyBaseline   = 4.5  // below this = normal structured content
-	defaultEntropyRange      = 3.5  // entropy scale: (H - baseline) / range
-	maxBurstHistory          = 8    // ring buffer size for burst summaries
+	DefaultHalfLife          = 5.0  // seconds — EMA tracks within-burst rate changes
+	DefaultCUSUMSlack        = 3.0  // tolerates 3 req/s above baseline before accumulating
+	DefaultCUSUMThreshold    = 10.0 // ~4 seconds of sustained anomaly to alarm
+	DefaultGapThreshold      = 2.0  // seconds — gap longer than this = new burst
+	DefaultWarmupRequests    = 5    // skip first N requests per burst
+	DefaultCompoundThreshold = 0.15 // alarm when rate*entropy score exceeds this
+	DefaultEntropyBaseline   = 4.5  // below this = normal structured content
+	DefaultEntropyRange      = 3.5  // entropy scale: (H - baseline) / range
+	MaxBurstHistory          = 8    // ring buffer size for burst summaries
 )
 
 // CompoundAnomalyConfig holds tunable parameters for the detector.
@@ -54,7 +54,7 @@ type SessionDetector struct {
 	byteTotal int64
 
 	// Burst history (ring buffer)
-	bursts    [maxBurstHistory]BurstSummary
+	bursts    [MaxBurstHistory]BurstSummary
 	burstIdx  int
 	burstFill int
 
@@ -71,49 +71,49 @@ func (d *SessionDetector) halfLife() float64 {
 	if d.cfg.HalfLife > 0 {
 		return d.cfg.HalfLife
 	}
-	return defaultHalfLife
+	return DefaultHalfLife
 }
 
 func (d *SessionDetector) cusumSlack() float64 {
 	if d.cfg.CUSUMSlack > 0 {
 		return d.cfg.CUSUMSlack
 	}
-	return defaultCUSUMSlack
+	return DefaultCUSUMSlack
 }
 
 func (d *SessionDetector) cusumThreshold() float64 {
 	if d.cfg.CUSUMThreshold > 0 {
 		return d.cfg.CUSUMThreshold
 	}
-	return defaultCUSUMThreshold
+	return DefaultCUSUMThreshold
 }
 
 func (d *SessionDetector) gapThreshold() float64 {
 	if d.cfg.GapThreshold > 0 {
 		return d.cfg.GapThreshold
 	}
-	return defaultGapThreshold
+	return DefaultGapThreshold
 }
 
 func (d *SessionDetector) warmupRequests() int {
 	if d.cfg.WarmupRequests > 0 {
 		return d.cfg.WarmupRequests
 	}
-	return defaultWarmupRequests
+	return DefaultWarmupRequests
 }
 
 func (d *SessionDetector) compoundThreshold() float64 {
 	if d.cfg.CompoundThreshold > 0 {
 		return d.cfg.CompoundThreshold
 	}
-	return defaultCompoundThreshold
+	return DefaultCompoundThreshold
 }
 
 func (d *SessionDetector) entropyBaseline() float64 {
 	if d.cfg.EntropyBaseline > 0 {
 		return d.cfg.EntropyBaseline
 	}
-	return defaultEntropyBaseline
+	return DefaultEntropyBaseline
 }
 
 // Update processes a new request and returns the compound anomaly score.
@@ -168,12 +168,12 @@ func (d *SessionDetector) Update(now time.Time, contentBytes []byte) float64 {
 
 // compoundScore returns the multiplicative fusion of rate and entropy signals.
 func (d *SessionDetector) compoundScore() float64 {
-	rateScore := clamp(d.cusumHigh/d.cusumThreshold(), 0, 1)
+	rateScore := Clamp(d.cusumHigh/d.cusumThreshold(), 0, 1)
 
 	entropyScore := 0.0
 	if d.byteTotal > 0 {
 		h := d.entropy()
-		entropyScore = clamp((h-d.entropyBaseline())/defaultEntropyRange, 0, 1)
+		entropyScore = Clamp((h-d.entropyBaseline())/DefaultEntropyRange, 0, 1)
 	}
 
 	return rateScore * entropyScore
@@ -181,7 +181,7 @@ func (d *SessionDetector) compoundScore() float64 {
 
 // RateScore returns the current normalized CUSUM score (0-1).
 func (d *SessionDetector) RateScore() float64 {
-	return clamp(d.cusumHigh/d.cusumThreshold(), 0, 1)
+	return Clamp(d.cusumHigh/d.cusumThreshold(), 0, 1)
 }
 
 // EntropyScore returns the current normalized entropy score (0-1).
@@ -190,7 +190,7 @@ func (d *SessionDetector) EntropyScore() float64 {
 		return 0
 	}
 	h := d.entropy()
-	return clamp((h-d.entropyBaseline())/defaultEntropyRange, 0, 1)
+	return Clamp((h-d.entropyBaseline())/DefaultEntropyRange, 0, 1)
 }
 
 // Entropy returns the current burst entropy in bits per byte.
@@ -201,6 +201,16 @@ func (d *SessionDetector) Entropy() float64 {
 // BurstCount returns the number of requests in the current burst.
 func (d *SessionDetector) BurstCount() int {
 	return d.burstCount
+}
+
+// CUSUMHigh returns the current upper CUSUM statistic.
+func (d *SessionDetector) CUSUMHigh() float64 {
+	return d.cusumHigh
+}
+
+// BurstHistoryLen returns the number of completed bursts in the ring buffer.
+func (d *SessionDetector) BurstHistoryLen() int {
+	return d.burstFill
 }
 
 // addBytes updates the incremental byte frequency table.
@@ -245,14 +255,14 @@ func (d *SessionDetector) finalizeBurst() {
 		MeanEntropy: d.entropy(),
 	}
 	d.bursts[d.burstIdx] = summary
-	d.burstIdx = (d.burstIdx + 1) % maxBurstHistory
-	if d.burstFill < maxBurstHistory {
+	d.burstIdx = (d.burstIdx + 1) % MaxBurstHistory
+	if d.burstFill < MaxBurstHistory {
 		d.burstFill++
 	}
 }
 
-// clamp restricts v to [lo, hi].
-func clamp(v, lo, hi float64) float64 {
+// Clamp restricts v to [lo, hi].
+func Clamp(v, lo, hi float64) float64 {
 	if v < lo {
 		return lo
 	}

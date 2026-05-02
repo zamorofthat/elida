@@ -588,7 +588,7 @@ func (e *Engine) evaluateRateAnomaly(rule Rule, metrics SessionMetrics) *Violati
 		threshold = 0.01
 	}
 
-	p := poissonSurvival(lambda, k)
+	p := PoissonSurvival(lambda, k)
 	if p < threshold {
 		return &Violation{
 			RuleName:      rule.Name,
@@ -615,7 +615,7 @@ func (e *Engine) evaluateCompoundAnomaly(rule Rule, metrics SessionMetrics) *Vio
 
 	minSamples := rule.MinSamples
 	if minSamples <= 0 {
-		minSamples = defaultWarmupRequests
+		minSamples = DefaultWarmupRequests
 	}
 	if len(metrics.RequestTimes) < minSamples {
 		return nil
@@ -640,7 +640,7 @@ func (e *Engine) evaluateCompoundAnomaly(rule Rule, metrics SessionMetrics) *Vio
 
 	threshold := rule.ThresholdFloat
 	if threshold <= 0 {
-		threshold = defaultCompoundThreshold
+		threshold = DefaultCompoundThreshold
 	}
 
 	if score > threshold {
@@ -918,7 +918,7 @@ func (e *Engine) evaluateContentEntropy(sessionID, content string, rule Rule, so
 		threshold = 5.5
 	}
 
-	entropy := shannonEntropy([]byte(content))
+	entropy := ShannonEntropy([]byte(content))
 	if entropy <= threshold {
 		return nil
 	}

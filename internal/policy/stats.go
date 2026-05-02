@@ -4,9 +4,9 @@ import (
 	"math"
 )
 
-// poissonSurvival returns P(X >= k) for Poisson(lambda).
+// PoissonSurvival returns P(X >= k) for Poisson(lambda).
 // Computes 1 - CDF(k-1) via log-space summation to avoid overflow for large k.
-func poissonSurvival(lambda float64, k int) float64 {
+func PoissonSurvival(lambda float64, k int) float64 {
 	if lambda <= 0 {
 		if k <= 0 {
 			return 1.0
@@ -38,10 +38,10 @@ func lgammaInt(n int) float64 {
 	return v
 }
 
-// shannonEntropy returns bits-per-byte entropy of data.
+// ShannonEntropy returns bits-per-byte entropy of data.
 // Natural language ~4.0-4.5, base64 ~5.9-6.0, random ~7.9-8.0.
 // Returns 0 for empty input.
-func shannonEntropy(data []byte) float64 {
+func ShannonEntropy(data []byte) float64 {
 	if len(data) == 0 {
 		return 0.0
 	}
