@@ -183,14 +183,14 @@ type StreamingConfig struct {
 type PolicyRule struct {
 	Name           string   `yaml:"name"`
 	Type           string   `yaml:"type"`            // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match, tool_blocked, tool_argument_pattern, rate_anomaly, content_entropy
-	Target         string   `yaml:"target"`           // request, response, both (default: both)
-	Threshold      int64    `yaml:"threshold"`        // For metric rules
-	ThresholdFloat float64  `yaml:"threshold_float"`  // For probability thresholds (0-1) or entropy thresholds
-	MinSamples     int      `yaml:"min_samples"`      // Minimum data points before evaluating
-	Patterns       []string `yaml:"patterns"`         // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
-	Severity       string   `yaml:"severity"`         // info, warning, critical
+	Target         string   `yaml:"target"`          // request, response, both (default: both)
+	Threshold      int64    `yaml:"threshold"`       // For metric rules
+	ThresholdFloat float64  `yaml:"threshold_float"` // For probability thresholds (0-1) or entropy thresholds
+	MinSamples     int      `yaml:"min_samples"`     // Minimum data points before evaluating
+	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
+	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
-	Action         string   `yaml:"action"`           // flag, block, terminate (for content/tool rules)
+	Action         string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
 }
 
 // BackendConfig defines a single backend configuration

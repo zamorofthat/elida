@@ -42,11 +42,11 @@ type BurstSummary struct {
 // All updates are O(1) time. Total state is ~2KB per session.
 type SessionDetector struct {
 	// Rate tracking (adaptive CUSUM)
-	emaRate    float64
-	cusumHigh  float64
-	lastTime   time.Time
-	burstCount int
-	burstStart time.Time
+	emaRate     float64
+	cusumHigh   float64
+	lastTime    time.Time
+	burstCount  int
+	burstStart  time.Time
 	initialized bool
 
 	// Incremental entropy for current burst
@@ -100,13 +100,6 @@ func (d *SessionDetector) warmupRequests() int {
 		return d.cfg.WarmupRequests
 	}
 	return DefaultWarmupRequests
-}
-
-func (d *SessionDetector) compoundThreshold() float64 {
-	if d.cfg.CompoundThreshold > 0 {
-		return d.cfg.CompoundThreshold
-	}
-	return DefaultCompoundThreshold
 }
 
 func (d *SessionDetector) entropyBaseline() float64 {

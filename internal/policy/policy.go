@@ -68,11 +68,11 @@ const (
 type Rule struct {
 	Name           string     `yaml:"name" json:"name"`
 	Type           RuleType   `yaml:"type" json:"type"`
-	Target         RuleTarget `yaml:"target" json:"target"`               // request, response, both (default: both)
-	Threshold      int64      `yaml:"threshold" json:"threshold"`         // For metric rules
+	Target         RuleTarget `yaml:"target" json:"target"`                             // request, response, both (default: both)
+	Threshold      int64      `yaml:"threshold" json:"threshold"`                       // For metric rules
 	ThresholdFloat float64    `yaml:"threshold_float" json:"threshold_float,omitempty"` // For probability thresholds (0-1) or entropy thresholds
 	MinSamples     int        `yaml:"min_samples" json:"min_samples,omitempty"`         // Minimum data points before evaluating
-	Patterns       []string   `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
+	Patterns       []string   `yaml:"patterns" json:"patterns,omitempty"`               // For content_match rules (regex)
 	Severity       Severity   `yaml:"severity" json:"severity"`
 	Description    string     `yaml:"description" json:"description"`
 	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
@@ -881,7 +881,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 		if !ruleAppliesToTarget(rule.Target, target) {
 			continue
 		}
-		if v := e.evaluateContentEntropy(sessionID, content, rule, source); v != nil {
+		if v := e.evaluateContentEntropy(content, rule, source); v != nil {
 			result.Violations = append(result.Violations, *v)
 			if !auditMode {
 				switch rule.Action {
@@ -904,7 +904,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 // evaluateContentEntropy checks if content has anomalously high Shannon entropy,
 // which indicates obfuscated/encoded content (base64, hex) evading regex patterns.
-func (e *Engine) evaluateContentEntropy(sessionID, content string, rule Rule, source *ContentSource) *Violation {
+func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *ContentSource) *Violation {
 	minSamples := rule.MinSamples
 	if minSamples <= 0 {
 		minSamples = 50
@@ -1731,7 +1731,7 @@ func (s *StreamingScanner) evaluateEntropy() *ContentCheckResult {
 		if !ruleAppliesToTarget(rule.Target, RuleTargetResponse) {
 			continue
 		}
-		if v := s.engine.evaluateContentEntropy(s.sessionID, content, rule, nil); v != nil {
+		if v := s.engine.evaluateContentEntropy(content, rule, nil); v != nil {
 			if result == nil {
 				result = &ContentCheckResult{}
 			}
