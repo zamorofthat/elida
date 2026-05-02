@@ -15,7 +15,7 @@ Think Session Border Controller (SBC) from telecom — but instead of managing V
 - **Kill runaway agents mid-session** — one API call terminates a session instantly
 - **40+ OWASP LLM Top 10 rules** — prompt injection, PII leaks, tool abuse, all caught in-line
 - **Session-aware failover** — route across providers (OpenAI, Anthropic, Ollama, Mistral) with sticky sessions
-- **Complete audit trail** — every session logged with request/response capture and PII redaction
+- **AI Session Detail Records** — reconstruct full human/agent session timelines, not just isolated tool calls
 - **Real-time dashboard** — watch every request, token burn, and policy violation as it happens
 
 ## 30-Second Quickstart
@@ -84,7 +84,7 @@ Every request flows through session tracking and policy evaluation before reachi
 ### Observability
 - **OpenTelemetry** — traces, metrics, and logs via OTLP
 - **Real-time dashboard** — Preact UI on the control port
-- **Session history** — SQLite-backed audit log with full request/response capture
+- **AI Session Detail Records** — SQLite-backed session timelines with lifecycle, routing, token usage, policy decisions, kill events, and request/response capture
 - **Event stream** — immutable audit trail with PII redaction
 
 ### Enterprise
