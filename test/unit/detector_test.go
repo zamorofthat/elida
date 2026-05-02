@@ -161,6 +161,37 @@ func TestSessionDetector_ScoreComponents(t *testing.T) {
 	}
 }
 
+func TestSessionDetector_CustomConfig(t *testing.T) {
+	cfg := policy.CompoundAnomalyConfig{
+		HalfLife:          10.0,
+		CUSUMSlack:        5.0,
+		CUSUMThreshold:    20.0,
+		GapThreshold:      4.0,
+		WarmupRequests:    3,
+		CompoundThreshold: 0.25,
+		EntropyBaseline:   5.0,
+	}
+	det := policy.NewSessionDetector(cfg)
+	now := time.Now()
+
+	// With warmup=3, should start scoring after 3 requests (not the default 5)
+	for i := 0; i < 3; i++ {
+		det.Update(now.Add(time.Duration(i)*500*time.Millisecond), []byte("data"))
+	}
+	// 4th request should produce a score (even if 0)
+	score := det.Update(now.Add(1500*time.Millisecond), []byte("data"))
+	// Steady rate with low entropy — score should be 0
+	if score != 0 {
+		t.Errorf("steady low-entropy with custom config should score 0, got %f", score)
+	}
+
+	// Gap of 5s (> custom gapThreshold=4) should reset burst
+	det.Update(now.Add(7*time.Second), []byte("after gap"))
+	if det.BurstCount() != 1 {
+		t.Errorf("expected burst reset with custom gap threshold, got count=%d", det.BurstCount())
+	}
+}
+
 func TestClamp(t *testing.T) {
 	tests := []struct {
 		v, lo, hi, want float64
