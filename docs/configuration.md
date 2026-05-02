@@ -121,6 +121,17 @@ telemetry:
   max_body_size: 4096       # Truncation limit for captured bodies
 ```
 
+## CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-config` | `configs/elida.yaml` | Path to config file |
+| `-listen` | — | Override listen address (e.g. `:8082`) |
+| `-validate` | `false` | Validate config and exit |
+| `-version` | `false` | Print version and exit |
+
+Priority: CLI flag > environment variable > config file.
+
 ## Environment Variables
 
 All configuration can be overridden with environment variables:

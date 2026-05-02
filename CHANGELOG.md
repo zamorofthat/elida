@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Statistical Anomaly Detection**: Three new rule types for detecting session anomalies that evade static thresholds:
+  - `rate_anomaly` — Poisson-based end-of-session retrospective check. Splits request timestamps into baseline/test windows, flags when observed rate is statistically abnormal (p-value threshold).
+  - `content_entropy` — Shannon entropy of request/response content. Detects base64-encoded, compressed, or encrypted payloads that evade regex pattern matching. Strict preset only (code content can naturally reach 5.0-5.5).
+  - `compound_anomaly` — Agent-first real-time detection using adaptive CUSUM + Shannon entropy compound scoring. Only alarms when both rate and entropy are elevated simultaneously, eliminating false positives from normal agent execution bursts. Uses time-weighted EMA for phase-tolerant rate tracking, CUSUM for evidence accumulation, and incremental byte-frequency entropy (O(1) per request, ~2KB per session).
+- **Math Primitives** (`internal/policy/stats.go`): `poissonSurvival()` (log-space Poisson CDF) and `shannonEntropy()` (bits-per-byte) as standalone functions.
+- **Per-Session Compound Detector** (`internal/policy/detector.go`): `SessionDetector` with adaptive CUSUM, incremental entropy, burst boundary detection, and ring buffer burst history. All operations O(1) per request.
+- **CLI `-listen` Flag**: Override listen address from the command line (e.g. `elida -listen :8082`). Priority: CLI flag > `ELIDA_LISTEN` env > config file.
+- **`ThresholdFloat` and `MinSamples` Rule Fields**: New optional fields on policy rules for probability thresholds (0-1), entropy thresholds (bits/byte), and minimum data points before evaluation.
+
+### Changed
+
+- Standard preset now includes `rate_anomaly` (p<0.01, warning) and `compound_anomaly` (threshold 0.15, flag) rules
+- Strict preset tightens `rate_anomaly` to p<0.001/critical, `compound_anomaly` to threshold 0.10/block, and adds `content_entropy` at 5.5 bits/byte
+- `StreamingScanner` accumulates full content for entropy evaluation on `Finalize()`, with burst-level reset on `Reset()`
+- Content evaluation path feeds bytes to compound anomaly detectors for incremental entropy tracking
+- Policy rule mapping in `cmd/elida/main.go` and `internal/control/api.go` now propagates `ThresholdFloat` and `MinSamples` fields
+
 - ** Behavioral Fingerprinting**: Session-level anomaly detection using Mahalanobis distance over 7 structural features (turn count, tool call ratio/entropy, token ratio, cadence median/CV, backend continuity). Baselines per session class (backend/model) with EWMA streaming updates.
 - **Crash-Resilient Baseline Persistence**: Periodic flush via background ticker persists dirty baselines to SQLite every `flush_interval` (default 5m). Protects against data loss on hard crashes — at most one interval of baseline updates lost.
 - **External Risk Points**: `AddExternalRiskPoints()` method on policy engine allows external scorers (M3-lite) to contribute risk points to the session risk ladder without creating violation events.
