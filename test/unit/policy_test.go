@@ -1856,6 +1856,90 @@ func TestCompoundAnomaly_EmptyRequestTimes(t *testing.T) {
 	}
 }
 
+func TestAnomalyCallback_FiresOnRateAnomaly(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "rate_anomaly",
+			Type:           "rate_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.01,
+			MinSamples:     10,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	var callbackFired bool
+	var callbackSessionID string
+	var callbackViolation policy.Violation
+	engine.SetAnomalyCallback(func(sessionID string, v policy.Violation, det *policy.SessionDetector) {
+		callbackFired = true
+		callbackSessionID = sessionID
+		callbackViolation = v
+	})
+
+	// Create a burst that triggers rate anomaly
+	now := time.Now()
+	var times []time.Time
+	for i := 0; i < 10; i++ {
+		times = append(times, now.Add(time.Duration(i)*time.Second))
+	}
+	burstStart := now.Add(10 * time.Second)
+	for i := 0; i < 10; i++ {
+		times = append(times, burstStart.Add(time.Duration(i)*50*time.Millisecond))
+	}
+
+	engine.Evaluate(policy.SessionMetrics{
+		SessionID:    "callback-test",
+		RequestCount: 20,
+		RequestTimes: times,
+		Duration:     11 * time.Second,
+	})
+
+	if !callbackFired {
+		t.Fatal("anomaly callback should have fired for rate anomaly burst")
+	}
+	if callbackSessionID != "callback-test" {
+		t.Errorf("expected sessionID callback-test, got %s", callbackSessionID)
+	}
+	if callbackViolation.EventCategory != "rate_anomaly" {
+		t.Errorf("expected event category rate_anomaly, got %s", callbackViolation.EventCategory)
+	}
+}
+
+func TestAnomalyCallback_NotFiredWhenNoAnomaly(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "rate_anomaly",
+			Type:           "rate_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.01,
+			MinSamples:     10,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	callbackFired := false
+	engine.SetAnomalyCallback(func(sessionID string, v policy.Violation, det *policy.SessionDetector) {
+		callbackFired = true
+	})
+
+	// Steady rate — should not fire
+	now := time.Now()
+	times := generateTimes(now, 20, time.Second)
+	engine.Evaluate(policy.SessionMetrics{
+		SessionID:    "no-anomaly",
+		RequestCount: 20,
+		RequestTimes: times,
+		Duration:     20 * time.Second,
+	})
+
+	if callbackFired {
+		t.Error("anomaly callback should not fire for steady rate")
+	}
+}
+
 // generateTimes creates n evenly-spaced timestamps starting from start.
 func generateTimes(start time.Time, n int, interval time.Duration) []time.Time {
 	times := make([]time.Time, n)

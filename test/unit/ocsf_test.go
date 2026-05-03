@@ -1569,3 +1569,49 @@ func TestProviderExportSessionRecordNoOCSFNoTelemetry(t *testing.T) {
 	}
 	provider.ExportSessionRecord(context.Background(), record)
 }
+
+func TestBuildCompoundAnomalyDetection(t *testing.T) {
+	finding := telemetry.BuildCompoundAnomalyDetection("sess-compound", 0.35, 0.7, 0.5, "compound_anomaly")
+
+	if finding.ClassUID != 2004 {
+		t.Errorf("expected class_uid 2004, got %d", finding.ClassUID)
+	}
+	if finding.Analytic.Name != "M3-CUSUM" {
+		t.Errorf("expected analytic name M3-CUSUM, got %s", finding.Analytic.Name)
+	}
+	if finding.Actor.Session.UID != "sess-compound" {
+		t.Errorf("expected session UID sess-compound, got %s", finding.Actor.Session.UID)
+	}
+	if len(finding.FindingInfo.Types) != 1 || finding.FindingInfo.Types[0] != "compound_anomaly" {
+		t.Errorf("expected finding type compound_anomaly, got %v", finding.FindingInfo.Types)
+	}
+	if finding.Unmapped.CompoundScore != 0.35 {
+		t.Errorf("expected compound_score 0.35, got %f", finding.Unmapped.CompoundScore)
+	}
+	if finding.Unmapped.RateScore != 0.7 {
+		t.Errorf("expected rate_score 0.7, got %f", finding.Unmapped.RateScore)
+	}
+	if finding.Unmapped.EntropyScore != 0.5 {
+		t.Errorf("expected entropy_score 0.5, got %f", finding.Unmapped.EntropyScore)
+	}
+}
+
+func TestCompoundAnomalyDetectionSeverity(t *testing.T) {
+	// Low score → info
+	f := telemetry.BuildCompoundAnomalyDetection("s", 0.10, 0.5, 0.2, "test")
+	if f.SeverityID != 1 {
+		t.Errorf("score 0.10: expected severity 1 (info), got %d", f.SeverityID)
+	}
+
+	// Medium score → warning
+	f = telemetry.BuildCompoundAnomalyDetection("s", 0.20, 0.6, 0.33, "test")
+	if f.SeverityID != 3 {
+		t.Errorf("score 0.20: expected severity 3 (warning), got %d", f.SeverityID)
+	}
+
+	// High score → critical
+	f = telemetry.BuildCompoundAnomalyDetection("s", 0.60, 0.9, 0.67, "test")
+	if f.SeverityID != 5 {
+		t.Errorf("score 0.60: expected severity 5 (critical), got %d", f.SeverityID)
+	}
+}

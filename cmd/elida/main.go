@@ -557,6 +557,22 @@ func (a *app) initPolicyEngine() {
 		MaxCaptureSize: a.cfg.Policy.MaxCaptureSize,
 		Rules:          policyRules,
 	})
+
+	// Wire anomaly callback for real-time OCSF 2004 emission
+	a.policyEngine.SetAnomalyCallback(func(sessionID string, v policy.Violation, det *policy.SessionDetector) {
+		if a.ocsfEmitter == nil {
+			return
+		}
+		var compoundScore, rateScore, entropyScore float64
+		if det != nil {
+			rateScore = det.RateScore()
+			entropyScore = det.EntropyScore()
+			compoundScore = rateScore * entropyScore
+		}
+		finding := telemetry.BuildCompoundAnomalyDetection(sessionID, compoundScore, rateScore, entropyScore, v.RuleName)
+		a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+	})
+
 	slog.Info("policy engine enabled", "rules", len(policyRules))
 }
 
