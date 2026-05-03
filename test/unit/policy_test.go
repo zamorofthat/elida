@@ -1579,6 +1579,283 @@ func TestCompoundAnomaly_ContentFeedsDetector(t *testing.T) {
 	}
 }
 
+func TestCompoundAnomaly_ReusesExistingDetector(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "compound_test",
+			Type:           "compound_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.15,
+			MinSamples:     5,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	now := time.Now()
+	// First evaluation creates detector
+	engine.Evaluate(policy.SessionMetrics{
+		SessionID:    "reuse-test",
+		RequestCount: 10,
+		RequestTimes: generateTimes(now, 10, 500*time.Millisecond),
+		Duration:     5 * time.Second,
+	})
+	det1 := engine.GetDetector("reuse-test")
+
+	// Second evaluation reuses same detector
+	engine.Evaluate(policy.SessionMetrics{
+		SessionID:    "reuse-test",
+		RequestCount: 15,
+		RequestTimes: generateTimes(now, 15, 500*time.Millisecond),
+		Duration:     7 * time.Second,
+	})
+	det2 := engine.GetDetector("reuse-test")
+
+	if det1 != det2 {
+		t.Error("expected same detector instance to be reused")
+	}
+}
+
+func TestContentEntropy_WithSourceAttribution(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "entropy_source",
+			Type:           "content_entropy",
+			Target:         "request",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// High entropy content with source attribution
+	raw := make([]byte, 300)
+	for i := range raw {
+		raw[i] = byte((i*7 + 13*i*i + 37) % 256)
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+
+	source := &policy.ContentSource{
+		Role:         "user",
+		MessageIndex: 0,
+		Content:      encoded,
+	}
+	result := engine.EvaluateContentWithSource("entropy-source-test", encoded, "request", source)
+	if result == nil {
+		t.Fatal("expected entropy violation with source attribution")
+	}
+	found := false
+	for _, v := range result.Violations {
+		if v.RuleName == "entropy_source" {
+			found = true
+			if v.SourceRole != "user" {
+				t.Errorf("expected source_role=user, got %s", v.SourceRole)
+			}
+			if v.EffectiveSeverity == "" {
+				t.Error("expected effective severity to be set")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected entropy_source violation")
+	}
+}
+
+func TestContentEntropy_BlockAction(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "entropy_block",
+			Type:           "content_entropy",
+			Target:         "request",
+			Severity:       "critical",
+			Action:         "block",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	raw := make([]byte, 300)
+	for i := range raw {
+		raw[i] = byte((i*7 + 13*i*i + 37) % 256)
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+
+	result := engine.EvaluateRequestContent("entropy-block-test", encoded)
+	if result == nil {
+		t.Fatal("expected entropy violation")
+	}
+	if !result.ShouldBlock {
+		t.Error("expected ShouldBlock=true for block action entropy rule")
+	}
+}
+
+func TestContentEntropy_TerminateAction(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "entropy_terminate",
+			Type:           "content_entropy",
+			Target:         "request",
+			Severity:       "critical",
+			Action:         "terminate",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	raw := make([]byte, 300)
+	for i := range raw {
+		raw[i] = byte((i*7 + 13*i*i + 37) % 256)
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+
+	result := engine.EvaluateRequestContent("entropy-term-test", encoded)
+	if result == nil {
+		t.Fatal("expected entropy violation")
+	}
+	if !result.ShouldTerminate {
+		t.Error("expected ShouldTerminate=true for terminate action entropy rule")
+	}
+}
+
+func TestStreamingScanner_EntropyOnFinalize(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "stream_entropy",
+			Type:           "content_entropy",
+			Target:         "response",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+	scanner := engine.NewStreamingScanner("stream-entropy-test", 1024)
+
+	// Stream high-entropy content across multiple chunks
+	for i := 0; i < 5; i++ {
+		chunk := make([]byte, 100)
+		for j := range chunk {
+			chunk[j] = byte(((i*100+j)*7 + 13*(i*100+j)*(i*100+j) + 37) % 256)
+		}
+		scanner.ScanChunk(chunk)
+	}
+
+	// Finalize should run entropy check on accumulated content
+	result := scanner.Finalize()
+	if result == nil {
+		t.Fatal("expected entropy violation from streaming finalize")
+	}
+	found := false
+	for _, v := range result.Violations {
+		if v.RuleName == "stream_entropy" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected stream_entropy violation in finalize results")
+	}
+}
+
+func TestStreamingScanner_EntropyLowContent_NoViolation(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "stream_entropy",
+			Type:           "content_entropy",
+			Target:         "response",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 5.5,
+			MinSamples:     50,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+	scanner := engine.NewStreamingScanner("stream-low-entropy", 1024)
+
+	// Stream low-entropy JSON content
+	for i := 0; i < 5; i++ {
+		scanner.ScanChunk([]byte(`{"role":"assistant","content":"This is normal text response."}`))
+	}
+
+	result := scanner.Finalize()
+	if result != nil {
+		for _, v := range result.Violations {
+			if v.RuleName == "stream_entropy" {
+				t.Error("expected no entropy violation for low-entropy streaming content")
+			}
+		}
+	}
+}
+
+func TestRateAnomaly_ZeroDurationBaseline(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "rate_anomaly",
+			Type:           "rate_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.01,
+			MinSamples:     10,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	// All baseline requests at the same instant — can't establish rate
+	now := time.Now()
+	times := make([]time.Time, 20)
+	for i := 0; i < 10; i++ {
+		times[i] = now // all at same time
+	}
+	for i := 10; i < 20; i++ {
+		times[i] = now.Add(time.Duration(i-10) * time.Second)
+	}
+
+	metrics := policy.SessionMetrics{
+		SessionID:    "zero-baseline",
+		RequestCount: 20,
+		RequestTimes: times,
+		Duration:     10 * time.Second,
+	}
+	result := engine.Evaluate(metrics)
+	for _, v := range result {
+		if v.RuleName == "rate_anomaly" {
+			t.Error("expected no violation when baseline duration is zero")
+		}
+	}
+}
+
+func TestCompoundAnomaly_EmptyRequestTimes(t *testing.T) {
+	rules := []policy.Rule{
+		{
+			Name:           "compound_test",
+			Type:           "compound_anomaly",
+			Severity:       "warning",
+			Action:         "flag",
+			ThresholdFloat: 0.15,
+			MinSamples:     5,
+		},
+	}
+	engine := newTestPolicyEngine(rules)
+
+	metrics := policy.SessionMetrics{
+		SessionID:    "empty-times",
+		RequestCount: 0,
+		RequestTimes: nil,
+	}
+	result := engine.Evaluate(metrics)
+	for _, v := range result {
+		if v.RuleName == "compound_test" {
+			t.Error("expected no violation with empty request times")
+		}
+	}
+}
+
 // generateTimes creates n evenly-spaced timestamps starting from start.
 func generateTimes(start time.Time, n int, interval time.Duration) []time.Time {
 	times := make([]time.Time, n)
