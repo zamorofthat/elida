@@ -32,6 +32,7 @@ func TestEvaluateToolCalls_BlockedToolExactMatch(t *testing.T) {
 	result := engine.EvaluateToolCalls("test-session", toolCalls)
 	if result == nil {
 		t.Fatal("expected violation for blocked tool")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("expected ShouldBlock to be true")
@@ -104,6 +105,7 @@ func TestEvaluateToolCalls_BlockedToolTerminate(t *testing.T) {
 	result := engine.EvaluateToolCalls("test-session", toolCalls)
 	if result == nil {
 		t.Fatal("expected violation")
+		return
 	}
 	if !result.ShouldTerminate {
 		t.Error("expected ShouldTerminate to be true")
@@ -216,6 +218,7 @@ func TestEvaluateToolCalls_AuditMode(t *testing.T) {
 	result := engine.EvaluateToolCalls("test-session", toolCalls)
 	if result == nil {
 		t.Fatal("expected violations to be reported in audit mode")
+		return
 	}
 	if result.ShouldBlock {
 		t.Error("ShouldBlock must be false in audit mode")
@@ -378,6 +381,7 @@ func TestEvaluateToolCalls_ReloadConfig(t *testing.T) {
 	result = engine.EvaluateToolCalls("test-session-2", toolCalls)
 	if result == nil {
 		t.Fatal("expected violation after reload")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("expected ShouldBlock after reload")
@@ -415,6 +419,7 @@ func TestEvaluateToolCalls_MultipleRules(t *testing.T) {
 	result := engine.EvaluateToolCalls("test-session", toolCalls)
 	if result == nil {
 		t.Fatal("expected violations")
+		return
 	}
 	if len(result.Violations) < 2 {
 		t.Errorf("expected at least 2 violations (name + args), got %d", len(result.Violations))
