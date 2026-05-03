@@ -269,8 +269,8 @@ func (a *app) initSessionEndCallback() {
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.scoreFingerprint(&snap)
-		a.persistToSQLite(&record, sess, endTime)
-		a.exportToTelemetry(&record, &snap, endTime)
+		integrity := a.persistToSQLite(&record, sess, endTime)
+		a.exportToTelemetry(&record, &snap, endTime, integrity)
 	})
 }
 
@@ -375,9 +375,9 @@ func (a *app) scoreFingerprint(snap *session.Session) {
 	}
 }
 
-func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) {
+func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) *storage.SDRIntegrity {
 	if a.sqliteStore == nil {
-		return
+		return nil
 	}
 	snap := sess.Snapshot()
 
@@ -427,9 +427,26 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 			slog.Error("failed to record tool_called event", "session_id", snap.ID, "error", eventErr)
 		}
 	}
+
+	integrity, err := a.sqliteStore.ComputeAndStoreSDRIntegrity(eventCtx, snap.ID)
+	if err != nil {
+		slog.Error("failed to compute SDR integrity metadata", "session_id", snap.ID, "error", err)
+		return nil
+	}
+	if integrity == nil {
+		slog.Debug("no events available for SDR integrity metadata", "session_id", snap.ID)
+		return nil
+	}
+	record.Integrity = integrity
+	slog.Debug("SDR integrity metadata stored",
+		"session_id", snap.ID,
+		"event_count", integrity.EventCount,
+		"root_hash", integrity.RootHash,
+	)
+	return integrity
 }
 
-func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Session, endTime time.Time) {
+func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Session, endTime time.Time, integrity *storage.SDRIntegrity) {
 	if a.tp == nil {
 		return
 	}
@@ -450,6 +467,12 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 		CaptureCount: len(record.CapturedContent),
 		TokensIn:     snap.TokensIn,
 		TokensOut:    snap.TokensOut,
+	}
+	if integrity != nil {
+		telemRecord.SDRRootHash = integrity.RootHash
+		telemRecord.SDRAlgorithm = integrity.Algorithm
+		telemRecord.SDRCanonicalizationVersion = integrity.CanonicalizationVersion
+		telemRecord.SDREventCount = integrity.EventCount
 	}
 	for _, v := range record.Violations {
 		telemRecord.Violations = append(telemRecord.Violations, telemetry.Violation{
