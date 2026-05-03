@@ -110,6 +110,78 @@ These rules protect against resource exhaustion and runaway agents.
 
 ---
 
+## Statistical Anomaly Detection
+
+These rules use statistical methods to detect abnormal session behavior that evades static thresholds. Designed for agentic traffic where legitimate bursts are common.
+
+### Rate Anomaly (Poisson)
+
+End-of-session retrospective check. Splits request timestamps into baseline and test windows, uses Poisson survival to detect statistically abnormal rate spikes.
+
+```yaml
+- name: "rate_anomaly"
+  type: "rate_anomaly"
+  threshold_float: 0.01   # p-value threshold (lower = more sensitive)
+  min_samples: 10          # Minimum requests before evaluating
+  severity: "warning"
+  action: "flag"
+  description: "ANOMALY: Request rate statistically abnormal (p<0.01)"
+```
+
+**Presets**: `standard` (p<0.01, warning), `strict` (p<0.001, critical)
+
+### Compound Anomaly (Adaptive CUSUM + Entropy)
+
+Real-time, agent-first detection. Uses adaptive CUSUM for rate tracking and Shannon entropy for content analysis. Only alarms when **both** rate and entropy are elevated simultaneously -- eliminating false positives from normal agent execution bursts (high rate, low entropy).
+
+```yaml
+- name: "compound_anomaly"
+  type: "compound_anomaly"
+  threshold_float: 0.15    # Compound score threshold (rate_score * entropy_score)
+  min_samples: 5           # Warmup requests per burst before evaluating
+  severity: "warning"
+  action: "flag"
+  description: "ANOMALY: Sustained high-rate + high-entropy burst"
+```
+
+**How it works**:
+- **EMA rate tracking** (half-life 5s) adapts to phase transitions (plan/execute/review)
+- **CUSUM accumulation** (slack 3.0, threshold 10.0) builds evidence of sustained deviation
+- **Incremental Shannon entropy** tracks content character (structured JSON ~4.0 vs base64 ~6.0)
+- **Multiplicative scoring**: `score = rate_score * entropy_score` -- any normal signal zeroes the score
+
+**Presets**: `standard` (threshold 0.15, flag), `strict` (threshold 0.10, block)
+
+### Content Entropy (Shannon)
+
+Standalone entropy check for detecting obfuscated/encoded content. Strict preset only -- code content can naturally reach 5.0-5.5 and cause false positives.
+
+```yaml
+- name: "content_entropy_high"
+  type: "content_entropy"
+  target: "request"
+  threshold_float: 5.5     # Bits per byte (base64 ~6.0, English ~4.0)
+  min_samples: 50           # Minimum content bytes before evaluating
+  severity: "warning"
+  action: "flag"
+  description: "ANOMALY: High entropy content detected"
+```
+
+**Entropy reference values**:
+
+| Content Type | Entropy (bits/byte) | Detected? |
+|-------------|-------------------|-----------|
+| Structured JSON | 4.0-4.5 | No |
+| Natural English | 4.0-4.5 | No |
+| Hex-encoded | 3.9-4.0 | No (use `encoding_evasion` regex) |
+| URL-encoded | 4.5-5.2 | Borderline |
+| Base64-encoded | 5.8-6.0 | Yes |
+| Compressed/encrypted | 7.5-8.0 | Yes |
+
+**Presets**: `strict` only
+
+---
+
 ## OWASP LLM01 - Prompt Injection (REQUEST-SIDE)
 
 Detects attempts to override system prompts or manipulate model behavior.
@@ -634,16 +706,19 @@ Custom rules are **appended** to preset rules, so you get both.
 
 ## Rule Type Reference
 
-| Type | Description | Patterns | Target |
-|------|-------------|----------|--------|
-| `content_match` | Regex match on request/response body | Regex | request, response, both |
-| `tool_blocked` | Deny list by tool name | Glob (`filepath.Match`) | response |
-| `tool_argument_pattern` | Regex match on tool arguments | Regex | response |
-| `bytes_in` / `bytes_out` / `bytes_total` | Byte threshold | — | — |
-| `request_count` | Request count threshold | — | — |
-| `requests_per_minute` | Rate limit | — | — |
-| `duration` | Session duration (seconds) | — | — |
-| `tokens_in` / `tokens_out` / `tokens_total` | Token threshold | — | — |
-| `tokens_per_minute` | Token rate limit | — | — |
-| `tool_call_count` | Total tool calls threshold | — | — |
-| `tool_fanout` | Distinct tools used threshold | — | — |
+| Type | Description | Key Field | Target |
+|------|-------------|-----------|--------|
+| `content_match` | Regex match on request/response body | `patterns` (regex) | request, response, both |
+| `content_entropy` | Shannon entropy of content | `threshold_float` (bits/byte) | request, response, both |
+| `tool_blocked` | Deny list by tool name | `patterns` (glob) | response |
+| `tool_argument_pattern` | Regex match on tool arguments | `patterns` (regex) | response |
+| `bytes_in` / `bytes_out` / `bytes_total` | Byte threshold | `threshold` | — |
+| `request_count` | Request count threshold | `threshold` | — |
+| `requests_per_minute` | Rate limit | `threshold` | — |
+| `duration` | Session duration (seconds) | `threshold` | — |
+| `tokens_in` / `tokens_out` / `tokens_total` | Token threshold | `threshold` | — |
+| `tokens_per_minute` | Token rate limit | `threshold` | — |
+| `tool_call_count` | Total tool calls threshold | `threshold` | — |
+| `tool_fanout` | Distinct tools used threshold | `threshold` | — |
+| `rate_anomaly` | Poisson rate anomaly (end-of-session) | `threshold_float` (p-value) | — |
+| `compound_anomaly` | Adaptive CUSUM + entropy (real-time) | `threshold_float` (compound score) | — |

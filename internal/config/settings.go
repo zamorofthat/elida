@@ -37,14 +37,16 @@ type PolicySettings struct {
 
 // CustomRule represents a user-defined policy rule
 type CustomRule struct {
-	Name        string   `json:"name" yaml:"name"`
-	Type        string   `json:"type" yaml:"type"`               // content_match, bytes_out, bytes_in, request_count, duration, requests_per_minute
-	Target      string   `json:"target,omitempty" yaml:"target"` // request, response, both (default: both)
-	Patterns    []string `json:"patterns,omitempty" yaml:"patterns,omitempty"`
-	Threshold   int64    `json:"threshold,omitempty" yaml:"threshold,omitempty"`
-	Severity    string   `json:"severity" yaml:"severity"`       // info, warning, critical
-	Action      string   `json:"action,omitempty" yaml:"action"` // flag, block, terminate
-	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
+	Name           string   `json:"name" yaml:"name"`
+	Type           string   `json:"type" yaml:"type"`               // content_match, bytes_out, bytes_in, request_count, duration, requests_per_minute, rate_anomaly, content_entropy
+	Target         string   `json:"target,omitempty" yaml:"target"` // request, response, both (default: both)
+	Patterns       []string `json:"patterns,omitempty" yaml:"patterns,omitempty"`
+	Threshold      int64    `json:"threshold,omitempty" yaml:"threshold,omitempty"`
+	ThresholdFloat float64  `json:"threshold_float,omitempty" yaml:"threshold_float,omitempty"`
+	MinSamples     int      `json:"min_samples,omitempty" yaml:"min_samples,omitempty"`
+	Severity       string   `json:"severity" yaml:"severity"`       // info, warning, critical
+	Action         string   `json:"action,omitempty" yaml:"action"` // flag, block, terminate
+	Description    string   `json:"description,omitempty" yaml:"description,omitempty"`
 }
 
 // RiskLadderSettings holds risk ladder thresholds

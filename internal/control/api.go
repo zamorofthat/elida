@@ -198,14 +198,16 @@ func (h *Handler) reloadPolicyEngine() {
 	// Convert custom rules from Settings to policy Rules
 	for _, cr := range merged.Policy.CustomRules {
 		rule := policy.Rule{
-			Name:        cr.Name,
-			Type:        policy.RuleType(cr.Type),
-			Target:      policy.RuleTarget(cr.Target),
-			Patterns:    cr.Patterns,
-			Threshold:   cr.Threshold,
-			Severity:    policy.Severity(cr.Severity),
-			Description: cr.Description,
-			Action:      cr.Action,
+			Name:           cr.Name,
+			Type:           policy.RuleType(cr.Type),
+			Target:         policy.RuleTarget(cr.Target),
+			Patterns:       cr.Patterns,
+			Threshold:      cr.Threshold,
+			ThresholdFloat: cr.ThresholdFloat,
+			MinSamples:     cr.MinSamples,
+			Severity:       policy.Severity(cr.Severity),
+			Description:    cr.Description,
+			Action:         cr.Action,
 		}
 		cfg.Rules = append(cfg.Rules, rule)
 	}

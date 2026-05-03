@@ -64,6 +64,7 @@ type app struct {
 
 func main() {
 	configPath := flag.String("config", "configs/elida.yaml", "path to config file")
+	listenAddr := flag.String("listen", "", "override listen address (e.g. :8082)")
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -78,6 +79,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "✗ Failed to load config: %s\n  %v\n", *configPath, err)
 		os.Exit(1)
+	}
+
+	// CLI flag overrides config file and env var
+	if *listenAddr != "" {
+		cfg.Listen = *listenAddr
 	}
 
 	// Validate-only mode
@@ -531,14 +537,16 @@ func (a *app) initPolicyEngine() {
 	policyRules := make([]policy.Rule, len(a.cfg.Policy.Rules))
 	for i, r := range a.cfg.Policy.Rules {
 		policyRules[i] = policy.Rule{
-			Name:        r.Name,
-			Type:        policy.RuleType(r.Type),
-			Target:      policy.RuleTarget(r.Target),
-			Threshold:   r.Threshold,
-			Patterns:    r.Patterns,
-			Severity:    policy.Severity(r.Severity),
-			Description: r.Description,
-			Action:      r.Action,
+			Name:           r.Name,
+			Type:           policy.RuleType(r.Type),
+			Target:         policy.RuleTarget(r.Target),
+			Threshold:      r.Threshold,
+			ThresholdFloat: r.ThresholdFloat,
+			MinSamples:     r.MinSamples,
+			Patterns:       r.Patterns,
+			Severity:       policy.Severity(r.Severity),
+			Description:    r.Description,
+			Action:         r.Action,
 		}
 	}
 

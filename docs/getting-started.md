@@ -61,6 +61,16 @@ ollama serve
 ./bin/elida --backend https://api.openai.com
 ```
 
+### Custom Listen Port
+
+By default ELIDA listens on `:8080`. Override with `-listen`:
+
+```bash
+./bin/elida -listen :8082
+```
+
+You can also use the `ELIDA_LISTEN` environment variable or the `listen` field in `elida.yaml`.
+
 You should see:
 ```
 {"time":"...","level":"INFO","msg":"starting ELIDA proxy","listen":":8080","backend":"http://localhost:11434"}

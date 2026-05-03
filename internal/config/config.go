@@ -181,14 +181,16 @@ type StreamingConfig struct {
 
 // PolicyRule defines a single policy rule
 type PolicyRule struct {
-	Name        string   `yaml:"name"`
-	Type        string   `yaml:"type"`      // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match, tool_blocked, tool_argument_pattern
-	Target      string   `yaml:"target"`    // request, response, both (default: both)
-	Threshold   int64    `yaml:"threshold"` // For metric rules
-	Patterns    []string `yaml:"patterns"`  // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
-	Severity    string   `yaml:"severity"`  // info, warning, critical
-	Description string   `yaml:"description"`
-	Action      string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
+	Name           string   `yaml:"name"`
+	Type           string   `yaml:"type"`            // bytes_out, bytes_in, request_count, duration, requests_per_minute, content_match, tool_blocked, tool_argument_pattern, rate_anomaly, content_entropy
+	Target         string   `yaml:"target"`          // request, response, both (default: both)
+	Threshold      int64    `yaml:"threshold"`       // For metric rules
+	ThresholdFloat float64  `yaml:"threshold_float"` // For probability thresholds (0-1) or entropy thresholds
+	MinSamples     int      `yaml:"min_samples"`     // Minimum data points before evaluating
+	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
+	Severity       string   `yaml:"severity"`        // info, warning, critical
+	Description    string   `yaml:"description"`
+	Action         string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
 }
 
 // BackendConfig defines a single backend configuration
@@ -967,6 +969,10 @@ func getStandardPreset() []PolicyRule {
 		{Name: "excessive_session_duration", Type: "duration", Threshold: 3600, Severity: "critical", Action: "block", Description: "FIREWALL: Session exceeded 1 hour"},
 		{Name: "large_response", Type: "bytes_out", Threshold: 10485760, Severity: "warning", Action: "flag", Description: "FIREWALL: Large data transfer (>10MB)"},
 
+		// Statistical anomaly detection
+		{Name: "rate_anomaly", Type: "rate_anomaly", Severity: "warning", Description: "ANOMALY: Request rate statistically abnormal (p<0.01)", Action: "flag", ThresholdFloat: 0.01, MinSamples: 10},
+		{Name: "compound_anomaly", Type: "compound_anomaly", Severity: "warning", Description: "ANOMALY: Sustained high-rate + high-entropy burst (agent exfiltration pattern)", Action: "flag", ThresholdFloat: 0.15, MinSamples: 5},
+
 		// OWASP LLM01 - Prompt Injection (REQUEST-SIDE)
 		{Name: "prompt_injection_ignore", Type: "content_match", Target: "response", Patterns: []string{
 			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
@@ -1208,6 +1214,32 @@ func getStrictPreset() []PolicyRule {
 	// Stricter limits
 	rules = append(rules, PolicyRule{
 		Name: "excessive_data_transfer", Type: "bytes_total", Threshold: 52428800, Severity: "critical", Action: "block", Description: "FIREWALL: Excessive data transfer (>50MB)",
+	})
+
+	// Statistical anomaly detection (stricter thresholds)
+	// Override the standard rate_anomaly with a stricter p-value threshold
+	for i := range rules {
+		if rules[i].Name == "rate_anomaly" {
+			rules[i].ThresholdFloat = 0.001
+			rules[i].Severity = "critical"
+			rules[i].Description = "ANOMALY: Request rate statistically abnormal (p<0.001)"
+			break
+		}
+	}
+	// Tighten compound anomaly threshold in strict mode
+	for i := range rules {
+		if rules[i].Name == "compound_anomaly" {
+			rules[i].ThresholdFloat = 0.10
+			rules[i].Severity = "critical"
+			rules[i].Action = "block"
+			rules[i].Description = "ANOMALY: Sustained high-rate + high-entropy burst detected (p<0.10)"
+			break
+		}
+	}
+	rules = append(rules, PolicyRule{
+		Name: "content_entropy_high", Type: "content_entropy", Target: "request",
+		Severity: "warning", Description: "ANOMALY: High entropy content detected (possible encoding/obfuscation)",
+		Action: "flag", ThresholdFloat: 5.5, MinSamples: 50,
 	})
 
 	return rules

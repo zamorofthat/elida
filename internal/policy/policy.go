@@ -43,7 +43,12 @@ const (
 	RuleTypeToolFanout    RuleType = "tool_fanout" // Distinct tools used
 
 	// Content inspection rules
-	RuleTypeContentMatch RuleType = "content_match" // Match patterns in request/response body
+	RuleTypeContentMatch   RuleType = "content_match"   // Match patterns in request/response body
+	RuleTypeContentEntropy RuleType = "content_entropy" // Shannon entropy of message content
+
+	// Statistical anomaly rules
+	RuleTypeRateAnomaly     RuleType = "rate_anomaly"     // Poisson-based request rate anomaly (end-of-session)
+	RuleTypeCompoundAnomaly RuleType = "compound_anomaly" // Adaptive CUSUM + entropy (real-time, agent-first)
 
 	// Tool call policy rules
 	RuleTypeToolBlocked         RuleType = "tool_blocked"          // Deny list by tool name (glob patterns)
@@ -61,14 +66,16 @@ const (
 
 // Rule defines a policy rule
 type Rule struct {
-	Name        string     `yaml:"name" json:"name"`
-	Type        RuleType   `yaml:"type" json:"type"`
-	Target      RuleTarget `yaml:"target" json:"target"`               // request, response, both (default: both)
-	Threshold   int64      `yaml:"threshold" json:"threshold"`         // For metric rules
-	Patterns    []string   `yaml:"patterns" json:"patterns,omitempty"` // For content_match rules (regex)
-	Severity    Severity   `yaml:"severity" json:"severity"`
-	Description string     `yaml:"description" json:"description"`
-	Action      string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
+	Name           string     `yaml:"name" json:"name"`
+	Type           RuleType   `yaml:"type" json:"type"`
+	Target         RuleTarget `yaml:"target" json:"target"`                             // request, response, both (default: both)
+	Threshold      int64      `yaml:"threshold" json:"threshold"`                       // For metric rules
+	ThresholdFloat float64    `yaml:"threshold_float" json:"threshold_float,omitempty"` // For probability thresholds (0-1) or entropy thresholds
+	MinSamples     int        `yaml:"min_samples" json:"min_samples,omitempty"`         // Minimum data points before evaluating
+	Patterns       []string   `yaml:"patterns" json:"patterns,omitempty"`               // For content_match rules (regex)
+	Severity       Severity   `yaml:"severity" json:"severity"`
+	Description    string     `yaml:"description" json:"description"`
+	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
 }
 
 // Violation represents a policy violation
@@ -233,6 +240,9 @@ type Engine struct {
 	// Risk ladder configuration
 	riskLadderEnabled bool
 	riskThresholds    []RiskThreshold
+
+	// Compound anomaly detectors (per-session state)
+	detectors map[string]*SessionDetector
 }
 
 // Config for the policy engine
@@ -282,6 +292,7 @@ func NewEngine(cfg Config) *Engine {
 		auditMode:         auditMode,
 		riskLadderEnabled: cfg.RiskLadder.Enabled,
 		riskThresholds:    thresholds,
+		detectors:         make(map[string]*SessionDetector),
 	}
 
 	// Compile regex patterns for content rules
@@ -485,6 +496,12 @@ func (e *Engine) evaluateRule(rule Rule, metrics SessionMetrics) *Violation {
 		actualValue = int64(metrics.ToolFanout)
 		exceeded = actualValue > rule.Threshold
 
+	case RuleTypeRateAnomaly:
+		return e.evaluateRateAnomaly(rule, metrics)
+
+	case RuleTypeCompoundAnomaly:
+		return e.evaluateCompoundAnomaly(rule, metrics)
+
 	default:
 		return nil
 	}
@@ -528,6 +545,144 @@ func (e *Engine) calculateRequestsPerMinute(metrics SessionMetrics) int64 {
 	}
 
 	return int64(count)
+}
+
+// evaluateRateAnomaly uses Poisson statistics to detect abnormal request rate spikes.
+// It splits RequestTimes into a baseline and test window, computing whether the
+// observed rate in the test window is statistically anomalous relative to the baseline.
+func (e *Engine) evaluateRateAnomaly(rule Rule, metrics SessionMetrics) *Violation {
+	minSamples := rule.MinSamples
+	if minSamples <= 0 {
+		minSamples = 10
+	}
+
+	times := metrics.RequestTimes
+	if len(times) < minSamples {
+		return nil
+	}
+
+	// Split into two halves: older = baseline, recent = test
+	mid := len(times) / 2
+	baseline := times[:mid]
+	test := times[mid:]
+
+	// Compute baseline rate (requests per second) and scale to test window duration
+	baselineDuration := baseline[len(baseline)-1].Sub(baseline[0]).Seconds()
+	if baselineDuration <= 0 {
+		return nil // All baseline requests at same instant — can't establish rate
+	}
+	baselineRate := float64(len(baseline)) / baselineDuration // requests/sec
+
+	testDuration := test[len(test)-1].Sub(test[0]).Seconds()
+	if testDuration <= 0 {
+		// All test requests at same instant — use a small window (1 second)
+		testDuration = 1.0
+	}
+
+	// Expected count in the test window based on baseline rate
+	lambda := baselineRate * testDuration
+	k := len(test)
+
+	threshold := rule.ThresholdFloat
+	if threshold <= 0 {
+		threshold = 0.01
+	}
+
+	p := PoissonSurvival(lambda, k)
+	if p < threshold {
+		return &Violation{
+			RuleName:      rule.Name,
+			Description:   rule.Description,
+			Severity:      rule.Severity,
+			Action:        rule.Action,
+			Timestamp:     time.Now(),
+			EventCategory: "rate_anomaly",
+			FrameworkRef:  "M3-POISSON",
+		}
+	}
+
+	return nil
+}
+
+// evaluateCompoundAnomaly uses adaptive CUSUM + Shannon entropy compound scoring
+// to detect anomalous bursts in real-time. Designed for agentic traffic where
+// legitimate execution bursts are high-rate but low-entropy, while exfiltration
+// bursts are high-rate AND high-entropy.
+func (e *Engine) evaluateCompoundAnomaly(rule Rule, metrics SessionMetrics) *Violation {
+	if len(metrics.RequestTimes) == 0 {
+		return nil
+	}
+
+	minSamples := rule.MinSamples
+	if minSamples <= 0 {
+		minSamples = DefaultWarmupRequests
+	}
+	if len(metrics.RequestTimes) < minSamples {
+		return nil
+	}
+
+	// Get or create per-session detector
+	e.mu.Lock()
+	det, ok := e.detectors[metrics.SessionID]
+	if !ok {
+		cfg := CompoundAnomalyConfig{}
+		if rule.ThresholdFloat > 0 {
+			cfg.CompoundThreshold = rule.ThresholdFloat
+		}
+		det = NewSessionDetector(cfg)
+		e.detectors[metrics.SessionID] = det
+	}
+	e.mu.Unlock()
+
+	// Feed the latest request time (content bytes handled separately via content path)
+	latest := metrics.RequestTimes[len(metrics.RequestTimes)-1]
+	score := det.Update(latest, nil)
+
+	threshold := rule.ThresholdFloat
+	if threshold <= 0 {
+		threshold = DefaultCompoundThreshold
+	}
+
+	if score > threshold {
+		return &Violation{
+			RuleName:      rule.Name,
+			Description:   rule.Description,
+			Severity:      rule.Severity,
+			Action:        rule.Action,
+			Timestamp:     time.Now(),
+			EventCategory: "compound_anomaly",
+			FrameworkRef:  "M3-CUSUM",
+		}
+	}
+
+	return nil
+}
+
+// UpdateDetectorContent feeds content bytes to a session's compound anomaly detector
+// for incremental entropy tracking. Call this from the content evaluation path.
+func (e *Engine) UpdateDetectorContent(sessionID string, content []byte) {
+	e.mu.RLock()
+	det, ok := e.detectors[sessionID]
+	e.mu.RUnlock()
+	if !ok || len(content) == 0 {
+		return
+	}
+	det.addBytes(content)
+}
+
+// GetDetector returns the compound anomaly detector for a session, if one exists.
+func (e *Engine) GetDetector(sessionID string) *SessionDetector {
+	e.mu.RLock()
+	det := e.detectors[sessionID]
+	e.mu.RUnlock()
+	return det
+}
+
+// CleanupDetector removes a session's detector state (call on session end).
+func (e *Engine) CleanupDetector(sessionID string) {
+	e.mu.Lock()
+	delete(e.detectors, sessionID)
+	e.mu.Unlock()
 }
 
 // ContentCheckResult contains the result of content inspection
@@ -607,7 +762,22 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 	auditMode := e.auditMode
 	e.mu.RUnlock()
 
-	if len(compiledRules) == 0 || content == "" {
+	if content == "" {
+		return nil
+	}
+
+	// Check if we have any entropy rules
+	e.mu.RLock()
+	hasEntropyRules := false
+	for _, r := range e.rules {
+		if r.Type == RuleTypeContentEntropy {
+			hasEntropyRules = true
+			break
+		}
+	}
+	e.mu.RUnlock()
+
+	if len(compiledRules) == 0 && !hasEntropyRules {
 		return nil
 	}
 
@@ -697,10 +867,80 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 		}
 	}
 
+	// Feed content to compound anomaly detector for incremental entropy
+	e.UpdateDetectorContent(sessionID, []byte(content))
+
+	// Check entropy rules (separate from regex matching)
+	e.mu.RLock()
+	rules := e.rules
+	e.mu.RUnlock()
+	for _, rule := range rules {
+		if rule.Type != RuleTypeContentEntropy {
+			continue
+		}
+		if !ruleAppliesToTarget(rule.Target, target) {
+			continue
+		}
+		if v := e.evaluateContentEntropy(content, rule, source); v != nil {
+			result.Violations = append(result.Violations, *v)
+			if !auditMode {
+				switch rule.Action {
+				case "block":
+					result.ShouldBlock = true
+				case "terminate":
+					result.ShouldTerminate = true
+					result.ShouldBlock = true
+				}
+			}
+			e.recordViolations(sessionID, []Violation{*v})
+		}
+	}
+
 	if len(result.Violations) > 0 {
 		return result
 	}
 	return nil
+}
+
+// evaluateContentEntropy checks if content has anomalously high Shannon entropy,
+// which indicates obfuscated/encoded content (base64, hex) evading regex patterns.
+func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *ContentSource) *Violation {
+	minSamples := rule.MinSamples
+	if minSamples <= 0 {
+		minSamples = 50
+	}
+	if len(content) < minSamples {
+		return nil
+	}
+
+	threshold := rule.ThresholdFloat
+	if threshold <= 0 {
+		threshold = 5.5
+	}
+
+	entropy := ShannonEntropy([]byte(content))
+	if entropy <= threshold {
+		return nil
+	}
+
+	v := &Violation{
+		RuleName:      rule.Name,
+		Description:   rule.Description,
+		Severity:      rule.Severity,
+		Action:        rule.Action,
+		Timestamp:     time.Now(),
+		EventCategory: "content_entropy",
+		FrameworkRef:  "M3-SHANNON",
+	}
+	if source != nil {
+		v.SourceRole = source.Role
+		v.MessageIndex = source.MessageIndex
+		v.SourceContent = truncateMatch(source.Content, e.maxCaptureSize)
+		v.EffectiveSeverity = effectiveSeverity(rule.Severity, source.Role)
+	} else {
+		v.EffectiveSeverity = rule.Severity
+	}
+	return v
 }
 
 // ruleAppliesToTarget checks if a rule should be evaluated for the given target
@@ -1400,6 +1640,7 @@ type StreamingScanner struct {
 	overlapBuf   []byte
 	overlapSize  int
 	totalScanned int64
+	fullContent  []byte // Accumulated content for entropy evaluation on Finalize
 }
 
 // NewStreamingScanner creates a scanner for chunked response scanning
@@ -1449,18 +1690,81 @@ func (s *StreamingScanner) ScanChunk(chunk []byte) *ContentCheckResult {
 		}
 	}
 
+	// Accumulate full content for entropy evaluation on Finalize
+	s.fullContent = append(s.fullContent, chunk...)
+
 	s.totalScanned += int64(len(chunk))
 	return result
 }
 
-// Finalize performs a final scan on any remaining overlap buffer
-// Call this when the stream ends to catch patterns at the very end
+// Finalize performs a final scan on any remaining overlap buffer and runs
+// entropy evaluation on the full accumulated content.
 func (s *StreamingScanner) Finalize() *ContentCheckResult {
-	if len(s.overlapBuf) == 0 {
-		return nil
+	// Run entropy evaluation on the full accumulated content
+	var entropyResult *ContentCheckResult
+	if len(s.fullContent) > 0 {
+		entropyResult = s.evaluateEntropy()
 	}
-	// Final scan of overlap buffer (in case pattern is at the very end)
-	return s.engine.EvaluateResponseContent(s.sessionID, string(s.overlapBuf))
+
+	var overlapResult *ContentCheckResult
+	if len(s.overlapBuf) > 0 {
+		// Final scan of overlap buffer (in case pattern is at the very end)
+		overlapResult = s.engine.EvaluateResponseContent(s.sessionID, string(s.overlapBuf))
+	}
+
+	return mergeContentResults(overlapResult, entropyResult)
+}
+
+// evaluateEntropy runs entropy rules against the full accumulated stream content
+func (s *StreamingScanner) evaluateEntropy() *ContentCheckResult {
+	s.engine.mu.RLock()
+	rules := s.engine.rules
+	auditMode := s.engine.auditMode
+	s.engine.mu.RUnlock()
+
+	var result *ContentCheckResult
+	content := string(s.fullContent)
+	for _, rule := range rules {
+		if rule.Type != RuleTypeContentEntropy {
+			continue
+		}
+		if !ruleAppliesToTarget(rule.Target, RuleTargetResponse) {
+			continue
+		}
+		if v := s.engine.evaluateContentEntropy(content, rule, nil); v != nil {
+			if result == nil {
+				result = &ContentCheckResult{}
+			}
+			result.Violations = append(result.Violations, *v)
+			if !auditMode {
+				switch rule.Action {
+				case "block":
+					result.ShouldBlock = true
+				case "terminate":
+					result.ShouldTerminate = true
+					result.ShouldBlock = true
+				}
+			}
+			s.engine.recordViolations(s.sessionID, []Violation{*v})
+		}
+	}
+	return result
+}
+
+// mergeContentResults combines two ContentCheckResults
+func mergeContentResults(a, b *ContentCheckResult) *ContentCheckResult {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	merged := &ContentCheckResult{
+		Violations:      append(a.Violations, b.Violations...),
+		ShouldBlock:     a.ShouldBlock || b.ShouldBlock,
+		ShouldTerminate: a.ShouldTerminate || b.ShouldTerminate,
+	}
+	return merged
 }
 
 // TotalScanned returns total bytes scanned so far
@@ -1471,6 +1775,7 @@ func (s *StreamingScanner) TotalScanned() int64 {
 // Reset clears the scanner state for reuse
 func (s *StreamingScanner) Reset() {
 	s.overlapBuf = s.overlapBuf[:0]
+	s.fullContent = s.fullContent[:0]
 	s.totalScanned = 0
 }
 
