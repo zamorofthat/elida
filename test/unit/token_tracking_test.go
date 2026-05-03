@@ -107,6 +107,7 @@ func TestExtractTokenUsage_OpenAI(t *testing.T) {
 	usage := proxy.ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatal("expected token usage, got nil")
+		return
 	}
 	if usage.PromptTokens != 100 {
 		t.Errorf("expected prompt_tokens=100, got %d", usage.PromptTokens)
@@ -132,6 +133,7 @@ func TestExtractTokenUsage_Anthropic(t *testing.T) {
 	usage := proxy.ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatal("expected token usage, got nil")
+		return
 	}
 	if usage.PromptTokens != 200 {
 		t.Errorf("expected prompt_tokens=200, got %d", usage.PromptTokens)
@@ -154,6 +156,7 @@ func TestExtractTokenUsage_Ollama(t *testing.T) {
 	usage := proxy.ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatal("expected token usage, got nil")
+		return
 	}
 	if usage.PromptTokens != 50 {
 		t.Errorf("expected prompt_tokens=50, got %d", usage.PromptTokens)

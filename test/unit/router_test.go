@@ -37,6 +37,7 @@ func TestRouter_NewRouter(t *testing.T) {
 	defaultBackend := r.GetDefaultBackend()
 	if defaultBackend == nil {
 		t.Fatal("expected default backend to be set")
+		return
 	}
 	if defaultBackend.Name != "ollama" {
 		t.Errorf("expected default backend 'ollama', got %q", defaultBackend.Name)
@@ -67,6 +68,7 @@ func TestRouter_NewSingleBackendRouter(t *testing.T) {
 	backend := r.GetDefaultBackend()
 	if backend == nil {
 		t.Fatal("expected default backend to be set")
+		return
 	}
 	if backend.URL.String() != "http://localhost:11434" {
 		t.Errorf("expected URL 'http://localhost:11434', got %q", backend.URL.String())
