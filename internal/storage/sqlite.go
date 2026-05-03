@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -103,6 +104,7 @@ type SessionRecord struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
 	Violations      []Violation       `json:"violations,omitempty"`
+	Integrity       *SDRIntegrity     `json:"integrity,omitempty"`
 }
 
 // SQLiteStore provides persistent storage for session history
@@ -226,6 +228,19 @@ func (s *SQLiteStore) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 	CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);
+
+	-- SDR integrity table (Merkle root for finalized AI Session Detail Records)
+	CREATE TABLE IF NOT EXISTS sdr_integrity (
+		session_id TEXT PRIMARY KEY,
+		algorithm TEXT NOT NULL,
+		canonicalization_version TEXT NOT NULL,
+		event_count INTEGER NOT NULL,
+		root_hash TEXT NOT NULL,
+		leaf_hashes_json TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_sdr_integrity_created_at ON sdr_integrity(created_at);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -282,7 +297,12 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 
 // GetSession retrieves a session by ID
 func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
-	row := s.db.QueryRow(`
+	return s.GetSessionCtx(context.Background(), id)
+}
+
+// GetSessionCtx retrieves a session by ID using the provided context.
+func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
+	row := s.db.QueryRowContext(ctx, `
 		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations
 		FROM sessions WHERE id = ?`, id)
 
@@ -313,6 +333,13 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 	unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
 	unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
 	unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
+
+	integrity, integrityErr := s.GetSDRIntegrity(ctx, record.ID)
+	if integrityErr != nil {
+		slog.Debug("failed to load SDR integrity metadata", "session_id", record.ID, "error", integrityErr)
+	} else {
+		record.Integrity = integrity
+	}
 
 	return &record, nil
 }

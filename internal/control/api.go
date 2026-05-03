@@ -89,6 +89,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	h.mux.HandleFunc("/control/history", h.handleHistory)
 	h.mux.HandleFunc("/control/history/stats", h.handleHistoryStats)
 	h.mux.HandleFunc("/control/history/timeseries", h.handleTimeSeries)
+	h.mux.HandleFunc("/control/history/{id}/integrity", h.handleHistoryIntegrity)
 	h.mux.HandleFunc("/control/history/{id}", h.handleHistorySession)
 
 	// Policy/flagged sessions endpoints
@@ -114,6 +115,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	// Events audit log endpoints
 	h.mux.HandleFunc("/control/events", h.handleEvents)
 	h.mux.HandleFunc("/control/events/stats", h.handleEventStats)
+	h.mux.HandleFunc("/control/events/{sessionID}/{eventID}/proof", h.handleEventProof)
 	h.mux.HandleFunc("/control/events/{id}", h.handleSessionEvents)
 
 	// Settings endpoints (layered config)
@@ -849,7 +851,7 @@ func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := h.historyStore.GetSession(sessionID)
+	record, err := h.historyStore.GetSessionCtx(r.Context(), sessionID)
 	if err != nil {
 		slog.Error("failed to get session from history", "session_id", sessionID, "error", err)
 		http.Error(w, "Failed to retrieve session", http.StatusInternalServerError)
@@ -862,6 +864,38 @@ func (h *Handler) handleHistorySession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, record)
+}
+
+// handleHistoryIntegrity handles GET /control/history/{id}/integrity
+func (h *Handler) handleHistoryIntegrity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "History storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	integrity, err := h.historyStore.GetSDRIntegrity(r.Context(), sessionID)
+	if err != nil {
+		slog.Error("failed to get SDR integrity metadata", "session_id", sessionID, "error", err)
+		http.Error(w, "Failed to retrieve SDR integrity metadata", http.StatusInternalServerError)
+		return
+	}
+	if integrity == nil {
+		http.Error(w, "SDR integrity metadata not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, integrity)
 }
 
 // handlePolicy handles GET /control/policy — returns policy config including rules
@@ -1482,6 +1516,45 @@ func (h *Handler) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		"count":      len(events),
 		"events":     events,
 	})
+}
+
+// handleEventProof handles GET /control/events/{sessionID}/{eventID}/proof
+func (h *Handler) handleEventProof(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "Storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	sessionID := r.PathValue("sessionID")
+	if sessionID == "" {
+		http.Error(w, "Session ID required", http.StatusBadRequest)
+		return
+	}
+
+	eventIDStr := r.PathValue("eventID")
+	eventID, err := strconv.ParseInt(eventIDStr, 10, 64)
+	if err != nil || eventID <= 0 {
+		http.Error(w, "Valid event ID required", http.StatusBadRequest)
+		return
+	}
+
+	proof, err := h.historyStore.GetSDRProof(r.Context(), sessionID, eventID)
+	if err != nil {
+		slog.Error("failed to get SDR event proof", "session_id", sessionID, "event_id", eventID, "error", err)
+		http.Error(w, "Failed to retrieve SDR event proof", http.StatusInternalServerError)
+		return
+	}
+	if proof == nil {
+		http.Error(w, "SDR event proof not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, proof)
 }
 
 // =============================================================================

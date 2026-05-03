@@ -96,6 +96,10 @@ type OCSFUnmapped struct {
 	CompoundScore float64 `json:"elida.compound_score,omitempty"`
 	RateScore     float64 `json:"elida.rate_score,omitempty"`
 	EntropyScore  float64 `json:"elida.entropy_score,omitempty"`
+	SDRRootHash   string  `json:"elida.sdr_root_hash,omitempty"`
+	SDREventHash  string  `json:"elida.sdr_event_hash,omitempty"`
+	SDREventIndex *int    `json:"elida.sdr_event_index,omitempty"`
+	SDRProof      any     `json:"elida.sdr_proof,omitempty"`
 }
 
 // OCSFDetectionFinding represents OCSF class 2004 — Detection Finding
@@ -186,6 +190,7 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 			MatchedText: v.MatchedText,
 			SourceRole:  v.SourceRole,
 			Model:       record.Model,
+			SDRRootHash: record.SDRRootHash,
 		},
 	}
 
