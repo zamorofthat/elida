@@ -243,6 +243,10 @@ type Engine struct {
 
 	// Compound anomaly detectors (per-session state)
 	detectors map[string]*SessionDetector
+
+	// Anomaly callback — invoked when compound/rate anomaly violations fire.
+	// Allows real-time OCSF emission without coupling policy to telemetry.
+	anomalyCallback func(sessionID string, violation Violation, detector *SessionDetector)
 }
 
 // Config for the policy engine
@@ -590,7 +594,7 @@ func (e *Engine) evaluateRateAnomaly(rule Rule, metrics SessionMetrics) *Violati
 
 	p := PoissonSurvival(lambda, k)
 	if p < threshold {
-		return &Violation{
+		v := &Violation{
 			RuleName:      rule.Name,
 			Description:   rule.Description,
 			Severity:      rule.Severity,
@@ -599,6 +603,16 @@ func (e *Engine) evaluateRateAnomaly(rule Rule, metrics SessionMetrics) *Violati
 			EventCategory: "rate_anomaly",
 			FrameworkRef:  "M3-POISSON",
 		}
+
+		// Fire anomaly callback for real-time OCSF emission
+		e.mu.RLock()
+		cb := e.anomalyCallback
+		e.mu.RUnlock()
+		if cb != nil {
+			cb(metrics.SessionID, *v, nil)
+		}
+
+		return v
 	}
 
 	return nil
@@ -644,7 +658,7 @@ func (e *Engine) evaluateCompoundAnomaly(rule Rule, metrics SessionMetrics) *Vio
 	}
 
 	if score > threshold {
-		return &Violation{
+		v := &Violation{
 			RuleName:      rule.Name,
 			Description:   rule.Description,
 			Severity:      rule.Severity,
@@ -653,6 +667,16 @@ func (e *Engine) evaluateCompoundAnomaly(rule Rule, metrics SessionMetrics) *Vio
 			EventCategory: "compound_anomaly",
 			FrameworkRef:  "M3-CUSUM",
 		}
+
+		// Fire anomaly callback for real-time OCSF emission
+		e.mu.RLock()
+		cb := e.anomalyCallback
+		e.mu.RUnlock()
+		if cb != nil {
+			cb(metrics.SessionID, *v, det)
+		}
+
+		return v
 	}
 
 	return nil
@@ -682,6 +706,15 @@ func (e *Engine) GetDetector(sessionID string) *SessionDetector {
 func (e *Engine) CleanupDetector(sessionID string) {
 	e.mu.Lock()
 	delete(e.detectors, sessionID)
+	e.mu.Unlock()
+}
+
+// SetAnomalyCallback registers a callback invoked when compound or rate anomaly
+// violations fire. This enables real-time OCSF 2004 emission from the app layer
+// without coupling the policy engine to the telemetry package.
+func (e *Engine) SetAnomalyCallback(cb func(sessionID string, violation Violation, detector *SessionDetector)) {
+	e.mu.Lock()
+	e.anomalyCallback = cb
 	e.mu.Unlock()
 }
 

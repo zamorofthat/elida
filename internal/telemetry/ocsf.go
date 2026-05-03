@@ -88,11 +88,14 @@ type OCSFMessageContext struct {
 
 // OCSFUnmapped holds ELIDA-specific fields not in OCSF schema
 type OCSFUnmapped struct {
-	Backend     string `json:"elida.backend,omitempty"`
-	Action      string `json:"elida.action,omitempty"`
-	MatchedText string `json:"elida.matched_text,omitempty"`
-	SourceRole  string `json:"elida.source_role,omitempty"`
-	Model       string `json:"elida.model,omitempty"`
+	Backend       string  `json:"elida.backend,omitempty"`
+	Action        string  `json:"elida.action,omitempty"`
+	MatchedText   string  `json:"elida.matched_text,omitempty"`
+	SourceRole    string  `json:"elida.source_role,omitempty"`
+	Model         string  `json:"elida.model,omitempty"`
+	CompoundScore float64 `json:"elida.compound_score,omitempty"`
+	RateScore     float64 `json:"elida.rate_score,omitempty"`
+	EntropyScore  float64 `json:"elida.entropy_score,omitempty"`
 }
 
 // OCSFDetectionFinding represents OCSF class 2004 — Detection Finding
@@ -280,6 +283,47 @@ func BuildAnomalyDetection(sessionID string, score float64, bucket, class string
 		},
 		Actor: OCSFActor{
 			Session: OCSFSession{UID: sessionID},
+		},
+	}
+}
+
+// BuildCompoundAnomalyDetection builds a Detection Finding (class 2004) for compound
+// anomaly detections (adaptive CUSUM + Shannon entropy). Emitted in real-time when the
+// compound detector fires, not just at session end.
+func BuildCompoundAnomalyDetection(sessionID string, compoundScore, rateScore, entropyScore float64, ruleName string) OCSFDetectionFinding {
+	severityID := OCSFSeverityInfo
+	if compoundScore >= 0.5 {
+		severityID = OCSFSeverityCritical
+	} else if compoundScore >= 0.15 {
+		severityID = OCSFSeverityWarning
+	}
+
+	return OCSFDetectionFinding{
+		ClassUID:    OCSFClassDetectionFinding,
+		CategoryUID: OCSFCategoryFindings,
+		TypeUID:     200401, // Detection Finding: Create
+		ActivityID:  OCSFActivityCreate,
+		SeverityID:  severityID,
+		Time:        nowMillis(),
+		Message:     "Compound anomaly: sustained high-rate + high-entropy burst",
+		Metadata:    newMetadata(),
+		FindingInfo: OCSFFinding{
+			Title: ruleName,
+			Desc:  "Adaptive CUSUM rate anomaly combined with elevated Shannon entropy",
+			Types: []string{"compound_anomaly"},
+		},
+		Analytic: OCSFAnalytic{
+			Name: "M3-CUSUM",
+			Type: "Statistical",
+		},
+		Actor: OCSFActor{
+			Session: OCSFSession{UID: sessionID},
+		},
+		Unmapped: OCSFUnmapped{
+			Action:        "flag",
+			CompoundScore: compoundScore,
+			RateScore:     rateScore,
+			EntropyScore:  entropyScore,
 		},
 	}
 }
