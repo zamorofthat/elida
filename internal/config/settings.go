@@ -412,6 +412,9 @@ func mergeSettings(defaults, local Settings) Settings {
 	if len(local.Policy.DisabledRules) > 0 {
 		merged.Policy.DisabledRules = local.Policy.DisabledRules
 	}
+	if len(local.Policy.CustomRules) > 0 {
+		merged.Policy.CustomRules = local.Policy.CustomRules
+	}
 
 	// Merge risk ladder
 	if local.Policy.RiskLadder != nil {
