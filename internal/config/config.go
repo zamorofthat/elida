@@ -28,7 +28,42 @@ type Config struct {
 	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
 	OCSF            OCSFConfig               `yaml:"ocsf"`             // OCSF native transport configuration
 	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
+	MCP             MCPConfig                `yaml:"mcp"`              // MCP tool server configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
+}
+
+// MCPConfig holds MCP tool server configuration
+type MCPConfig struct {
+	Enabled      bool              `yaml:"enabled"`
+	Auth         MCPAuthConfig     `yaml:"auth"`
+	AntiSelfKill bool              `yaml:"anti_self_kill"`
+	RateLimit    MCPRateLimitConfig `yaml:"rate_limit"`
+	Approval     MCPApprovalConfig `yaml:"approval"`
+	Format       string            `yaml:"format"` // "ascii" (default) or "json"
+	Audit        bool              `yaml:"audit"`
+}
+
+// MCPAuthConfig holds MCP authentication configuration
+type MCPAuthConfig struct {
+	Tokens []MCPTokenConfig `yaml:"tokens"`
+}
+
+// MCPTokenConfig defines a single MCP auth token
+type MCPTokenConfig struct {
+	Name  string `yaml:"name"`
+	Key   string `yaml:"key"`
+	Scope string `yaml:"scope"` // "read", "write", "admin"
+}
+
+// MCPRateLimitConfig holds MCP rate limiting configuration
+type MCPRateLimitConfig struct {
+	RequestsPerMinute int `yaml:"requests_per_minute"`
+}
+
+// MCPApprovalConfig holds MCP approval configuration
+type MCPApprovalConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	RequireFor []string `yaml:"require_for"` // Actions requiring approval, e.g. ["terminate"]
 }
 
 // ProxyConfig holds proxy-level configuration
@@ -478,6 +513,14 @@ func defaults() *Config {
 				Protocols:        []string{"openai_realtime", "deepgram", "elevenlabs", "livekit"},
 			},
 		},
+		MCP: MCPConfig{
+			Enabled:      false,
+			AntiSelfKill: true,
+			RateLimit:    MCPRateLimitConfig{RequestsPerMinute: 60},
+			Approval:     MCPApprovalConfig{Enabled: false},
+			Format:       "ascii",
+			Audit:        true,
+		},
 		ShutdownTimeout: 30 * time.Second,
 	}
 }
@@ -655,6 +698,11 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_PROXY_API_KEY"); v != "" {
 		c.Proxy.Auth.APIKey = v
 		c.Proxy.Auth.Enabled = true // Auto-enable if key is set
+	}
+
+	// MCP overrides
+	if os.Getenv("ELIDA_MCP_ENABLED") == "true" {
+		c.MCP.Enabled = true
 	}
 
 	// Shutdown timeout override
@@ -838,6 +886,30 @@ func (c *Config) Validate() *ValidationResult {
 			Message: "API key required when proxy auth is enabled",
 			Hint:    "set ELIDA_PROXY_API_KEY env var",
 		})
+	}
+
+	// MCP config
+	if c.MCP.Enabled && len(c.MCP.Auth.Tokens) == 0 {
+		errors = append(errors, ValidationError{
+			Field:   "mcp.auth.tokens",
+			Message: "at least one token is required when MCP is enabled",
+			Hint:    "configure mcp.auth.tokens with name, key, and scope",
+		})
+	}
+	for i, t := range c.MCP.Auth.Tokens {
+		if t.Key == "" {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("mcp.auth.tokens[%d].key", i),
+				Message: "token key is required",
+			})
+		}
+		if t.Scope != "read" && t.Scope != "write" && t.Scope != "admin" {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("mcp.auth.tokens[%d].scope", i),
+				Message: fmt.Sprintf("%q is invalid", t.Scope),
+				Hint:    "must be \"read\", \"write\", or \"admin\"",
+			})
+		}
 	}
 
 	// OCSF webhook validation

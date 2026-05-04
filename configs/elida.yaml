@@ -314,6 +314,30 @@ policy:
     #   action: "block"
     #   description: "Block execution of dangerous tools"
 
+# MCP Tool Server
+# Exposes ELIDA's session monitoring, anomaly detection, and kill switch
+# as MCP tools accessible via JSON-RPC 2.0 on the control API port
+mcp:
+  enabled: true
+  anti_self_kill: true
+  format: ascii
+  audit: true
+  rate_limit:
+    requests_per_minute: 60
+  approval:
+    enabled: false
+  auth:
+    tokens:
+      - name: "dev-read"
+        key: "mcp-read-dev-token"
+        scope: "read"
+      - name: "dev-write"
+        key: "mcp-write-dev-token"
+        scope: "write"
+      - name: "dev-admin"
+        key: "mcp-admin-dev-token"
+        scope: "admin"
+
 # WebSocket proxy configuration
 # Enables proxying of WebSocket connections for real-time AI agents
 # (e.g., OpenAI Realtime API, voice assistants, STT/TTS services)

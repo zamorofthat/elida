@@ -140,6 +140,18 @@ func (h *Handler) SetSettingsStore(store *config.SettingsStore) {
 	h.settingsStore = store
 }
 
+// SetMCPHandler registers an MCP server handler on /mcp.
+func (h *Handler) SetMCPHandler(handler http.Handler) {
+	h.mux.Handle("/mcp", handler)
+}
+
+// SetMCPApprovalHandler registers approval endpoints for MCP.
+func (h *Handler) SetMCPApprovalHandler(listHandler, approveHandler, denyHandler http.HandlerFunc) {
+	h.mux.HandleFunc("/control/mcp/approvals", listHandler)
+	h.mux.HandleFunc("/control/mcp/approvals/{id}/approve", approveHandler)
+	h.mux.HandleFunc("/control/mcp/approvals/{id}/deny", denyHandler)
+}
+
 // reloadPolicyEngine applies current settings to the policy engine without restart
 func (h *Handler) reloadPolicyEngine() {
 	if h.policyEngine == nil || h.settingsStore == nil {

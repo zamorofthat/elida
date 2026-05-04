@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"elida/internal/config"
 	"elida/internal/control"
 	"elida/internal/fingerprint"
+	"elida/internal/mcp"
 	"elida/internal/policy"
 	"elida/internal/proxy"
 	"elida/internal/session"
@@ -57,6 +59,7 @@ type app struct {
 	wsHandler      *websocket.Handler
 	settingsStore  *config.SettingsStore
 	controlHandler *control.Handler
+	mcpServer      *mcp.Server
 
 	proxyServer   *http.Server
 	controlServer *http.Server
@@ -129,6 +132,7 @@ func main() {
 	a.initWebSocket()
 	a.initSettings()
 	a.initControlAPI()
+	a.initMCP()
 
 	errChan := a.startServers()
 
@@ -720,6 +724,61 @@ func (a *app) initControlAPI() {
 	} else {
 		slog.Warn("control API authentication is DISABLED — all endpoints are unauthenticated. Set control.auth.enabled=true in production.")
 	}
+}
+
+func (a *app) initMCP() {
+	if !a.cfg.MCP.Enabled {
+		return
+	}
+
+	a.mcpServer = mcp.New(a.cfg.MCP, a.store, a.manager)
+	if a.policyEngine != nil {
+		a.mcpServer.SetPolicyEngine(a.policyEngine)
+	}
+	if a.sqliteStore != nil {
+		a.mcpServer.SetHistoryStore(a.sqliteStore)
+	}
+	if a.settingsStore != nil {
+		a.mcpServer.SetSettingsStore(a.settingsStore)
+	}
+
+	// Register on control API mux
+	a.controlHandler.SetMCPHandler(a.mcpServer)
+
+	// Register approval endpoints if approval is enabled
+	if aq := a.mcpServer.GetApprovalQueue(); aq != nil {
+		a.controlHandler.SetMCPApprovalHandler(
+			func(w http.ResponseWriter, r *http.Request) {
+				pending := aq.ListPending()
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(pending)
+			},
+			func(w http.ResponseWriter, r *http.Request) {
+				id := r.PathValue("id")
+				if aq.Approve(id) {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]string{"status": "approved", "id": id})
+				} else {
+					http.Error(w, "approval not found or not pending", http.StatusNotFound)
+				}
+			},
+			func(w http.ResponseWriter, r *http.Request) {
+				id := r.PathValue("id")
+				if aq.Deny(id) {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]string{"status": "denied", "id": id})
+				} else {
+					http.Error(w, "approval not found or not pending", http.StatusNotFound)
+				}
+			},
+		)
+	}
+
+	slog.Info("MCP tool server enabled",
+		"tokens", len(a.cfg.MCP.Auth.Tokens),
+		"anti_self_kill", a.cfg.MCP.AntiSelfKill,
+		"approval", a.cfg.MCP.Approval.Enabled,
+	)
 }
 
 func (a *app) startServers() chan error {
