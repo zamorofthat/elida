@@ -78,6 +78,78 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	return nil
 }
 
+// ExtractStreamingTokenUsage extracts token usage from SSE streaming chunks.
+// Anthropic sends usage in message_start (input_tokens) and message_delta (output_tokens).
+// OpenAI sends usage in the final chunk with a usage field.
+func ExtractStreamingTokenUsage(chunks []string) *TokenUsage {
+	var inputTokens, outputTokens int64
+
+	for _, chunk := range chunks {
+		// Scan each SSE line in the chunk
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				continue
+			}
+
+			// Try Anthropic message_start: {"type":"message_start","message":{"usage":{"input_tokens":N,"output_tokens":0}}}
+			var anthropicEvent struct {
+				Type    string `json:"type"`
+				Message struct {
+					Usage struct {
+						InputTokens  int64 `json:"input_tokens"`
+						OutputTokens int64 `json:"output_tokens"`
+					} `json:"usage"`
+				} `json:"message"`
+				Usage struct {
+					OutputTokens int64 `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal([]byte(data), &anthropicEvent) == nil {
+				switch anthropicEvent.Type {
+				case "message_start":
+					if anthropicEvent.Message.Usage.InputTokens > 0 {
+						inputTokens = anthropicEvent.Message.Usage.InputTokens
+					}
+				case "message_delta":
+					if anthropicEvent.Usage.OutputTokens > 0 {
+						outputTokens = anthropicEvent.Usage.OutputTokens
+					}
+				}
+			}
+
+			// Try OpenAI streaming final chunk with usage
+			var openaiChunk struct {
+				Usage struct {
+					PromptTokens     int64 `json:"prompt_tokens"`
+					CompletionTokens int64 `json:"completion_tokens"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal([]byte(data), &openaiChunk) == nil {
+				if openaiChunk.Usage.PromptTokens > 0 {
+					inputTokens = openaiChunk.Usage.PromptTokens
+				}
+				if openaiChunk.Usage.CompletionTokens > 0 {
+					outputTokens = openaiChunk.Usage.CompletionTokens
+				}
+			}
+		}
+	}
+
+	if inputTokens > 0 || outputTokens > 0 {
+		return &TokenUsage{
+			PromptTokens:     inputTokens,
+			CompletionTokens: outputTokens,
+			TotalTokens:      inputTokens + outputTokens,
+		}
+	}
+	return nil
+}
+
 // ExtractToolCalls extracts tool/function calls from a request body.
 // Supports OpenAI function calling and tool_calls format.
 func ExtractToolCalls(body []byte) []ToolCallInfo {

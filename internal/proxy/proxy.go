@@ -1046,6 +1046,11 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 		p.captureBuffer.UpdateLastResponse(sess.ID, reconstructed, resp.StatusCode)
 	}
 
+	// Extract token usage from streaming SSE events
+	if tokenUsage := ExtractStreamingTokenUsage(chunks); tokenUsage != nil {
+		sess.AddTokens(tokenUsage.PromptTokens, tokenUsage.CompletionTokens)
+	}
+
 	// Capture response for flagged sessions
 	if p.policy.IsFlagged(sess.ID) {
 		p.policy.UpdateLastCaptureWithResponseAndStatus(sess.ID, reconstructed, resp.StatusCode)
@@ -1155,6 +1160,11 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	// Capture response for capture-all mode
 	if p.captureAll && p.captureBuffer != nil {
 		p.captureBuffer.UpdateLastResponse(sess.ID, responseContent, resp.StatusCode)
+	}
+
+	// Extract token usage from streaming SSE events
+	if tokenUsage := ExtractStreamingTokenUsage(chunks); tokenUsage != nil {
+		sess.AddTokens(tokenUsage.PromptTokens, tokenUsage.CompletionTokens)
 	}
 
 	// Record tool calls on the live session before launching the async goroutine
