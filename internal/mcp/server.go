@@ -304,6 +304,9 @@ func (s *Server) formatResult(toolName string, result any, args json.RawMessage)
 
 func writeJSONRPC(w http.ResponseWriter, id any, rpcErr *jsonRPCError) {
 	w.Header().Set("Content-Type", "application/json")
+	if id == nil {
+		id = 0
+	}
 	resp := jsonRPCResponse{JSONRPC: "2.0", ID: id, Error: rpcErr}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("mcp: failed to write response", "error", err)

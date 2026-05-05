@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,6 +14,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -71,6 +74,9 @@ func main() {
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	genMCPTokens := flag.Bool("generate-mcp-tokens", false, "generate MCP auth tokens and print config")
+	mcpStdio := flag.Bool("mcp-stdio", false, "run as MCP stdio server (for Claude Desktop integration)")
+	mcpEndpoint := flag.String("mcp-endpoint", "http://localhost:9091/mcp", "MCP HTTP endpoint to proxy in stdio mode")
+	mcpToken := flag.String("mcp-token", "", "MCP auth token for stdio mode")
 	flag.Parse()
 
 	if *showVersion {
@@ -80,6 +86,11 @@ func main() {
 
 	if *genMCPTokens {
 		printMCPTokens()
+		return
+	}
+
+	if *mcpStdio {
+		runMCPStdio(*mcpEndpoint, *mcpToken)
 		return
 	}
 
@@ -972,6 +983,75 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
 
 	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// runMCPStdio bridges stdin/stdout JSON-RPC to the ELIDA MCP HTTP endpoint.
+// This allows Claude Desktop (which only supports stdio transport) to connect.
+func runMCPStdio(endpoint, token string) {
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB max message
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		// Extract request ID so we can always return a valid id
+		var envelope struct {
+			ID any `json:"id"`
+		}
+		json.Unmarshal(line, &envelope)
+		reqID := envelope.ID
+		if reqID == nil {
+			reqID = 0
+		}
+
+		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(line))
+		if err != nil {
+			writeStdioError(reqID, -32603, "failed to create request")
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			writeStdioError(reqID, -32603, "MCP server unreachable: "+err.Error())
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// Ensure the response has a valid id (never null)
+		var rpcResp map[string]any
+		if json.Unmarshal(body, &rpcResp) == nil {
+			if rpcResp["id"] == nil {
+				rpcResp["id"] = reqID
+				body, _ = json.Marshal(rpcResp)
+			}
+		}
+
+		os.Stdout.Write(body)
+		if len(body) == 0 || body[len(body)-1] != '\n' {
+			os.Stdout.Write([]byte("\n"))
+		}
+	}
+}
+
+func writeStdioError(id any, code int, msg string) {
+	resp := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   map[string]any{"code": code, "message": msg},
+	}
+	b, _ := json.Marshal(resp)
+	os.Stdout.Write(b)
+	os.Stdout.Write([]byte("\n"))
 }
 
 func printMCPTokens() {
