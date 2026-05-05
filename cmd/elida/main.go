@@ -70,10 +70,16 @@ func main() {
 	listenAddr := flag.String("listen", "", "override listen address (e.g. :8082)")
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	genMCPTokens := flag.Bool("generate-mcp-tokens", false, "generate MCP auth tokens and print config")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("elida " + Version)
+		return
+	}
+
+	if *genMCPTokens {
+		printMCPTokens()
 		return
 	}
 
@@ -966,6 +972,36 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
 
 	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+func printMCPTokens() {
+	readToken := generateToken()
+	writeToken := generateToken()
+	adminToken := generateToken()
+
+	fmt.Println("# Add to your elida.yaml")
+	fmt.Println("mcp:")
+	fmt.Println("  enabled: true")
+	fmt.Println("  auth:")
+	fmt.Println("    tokens:")
+	fmt.Printf("      - name: \"read\"\n        key: \"%s\"\n        scope: \"read\"\n", readToken)
+	fmt.Printf("      - name: \"write\"\n        key: \"%s\"\n        scope: \"write\"\n", writeToken)
+	fmt.Printf("      - name: \"admin\"\n        key: \"%s\"\n        scope: \"admin\"\n", adminToken)
+
+	fmt.Println("")
+	fmt.Println("# Claude Desktop config (~/.claude/claude_desktop_config.json)")
+	fmt.Println("# Use the scope that matches your desired access level")
+	fmt.Printf("# Read:  %s\n", readToken)
+	fmt.Printf("# Write: %s\n", writeToken)
+	fmt.Printf("# Admin: %s\n", adminToken)
+}
+
+func generateToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("failed to generate random token: " + err.Error())
+	}
+	return fmt.Sprintf("elida_%x", b)
 }
 
 // printValidationResult prints a human-readable validation result
