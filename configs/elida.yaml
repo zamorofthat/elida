@@ -316,9 +316,12 @@ policy:
 
 # MCP Tool Server
 # Exposes ELIDA's session monitoring, anomaly detection, and kill switch
-# as MCP tools accessible via JSON-RPC 2.0 on the control API port
+# as MCP tools accessible via JSON-RPC 2.0 on the control API port (/mcp)
+#
+# Generate secure tokens: elida --generate-mcp-tokens
+# Claude Desktop setup:   elida --mcp-stdio --mcp-endpoint http://localhost:9090/mcp --mcp-token <token>
 mcp:
-  enabled: true
+  enabled: false
   anti_self_kill: true
   format: ascii
   audit: true
@@ -326,17 +329,17 @@ mcp:
     requests_per_minute: 60
   approval:
     enabled: false
-  auth:
-    tokens:
-      - name: "dev-read"
-        key: "mcp-read-dev-token"
-        scope: "read"
-      - name: "dev-write"
-        key: "mcp-write-dev-token"
-        scope: "write"
-      - name: "dev-admin"
-        key: "mcp-admin-dev-token"
-        scope: "admin"
+  # auth:
+  #   tokens:
+  #     - name: "read"
+  #       key: "${ELIDA_MCP_READ_TOKEN}"
+  #       scope: "read"
+  #     - name: "write"
+  #       key: "${ELIDA_MCP_WRITE_TOKEN}"
+  #       scope: "write"
+  #     - name: "admin"
+  #       key: "${ELIDA_MCP_ADMIN_TOKEN}"
+  #       scope: "admin"
 
 # WebSocket proxy configuration
 # Enables proxying of WebSocket connections for real-time AI agents
