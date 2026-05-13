@@ -124,7 +124,8 @@ type PolicyConfig struct {
 	Streaming      StreamingConfig      `yaml:"streaming"`       // Response streaming scan configuration
 	RiskLadder     RiskLadderConfig     `yaml:"risk_ladder"`     // Progressive escalation based on risk score
 	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"` // Token and tool call limits
-	Trust          TrustConfig          `yaml:"trust"`           // SBC-style trust configuration
+	Trust                TrustConfig                `yaml:"trust"`                 // SBC-style trust configuration
+	InstructionIntegrity InstructionIntegrityConfig `yaml:"instruction_integrity"` // Instruction file integrity monitoring
 }
 
 // TrustConfig holds SBC-style trust configuration for content scanning
@@ -165,6 +166,24 @@ type CircuitBreakerConfig struct {
 	MaxTokensPerSession int64 `yaml:"max_tokens_per_session"` // Block if total tokens exceed this
 	MaxToolCalls        int   `yaml:"max_tool_calls"`         // Block if tool calls exceed this
 	MaxToolFanout       int   `yaml:"max_tool_fanout"`        // Block if distinct tools exceed this
+}
+
+// InstructionIntegrityConfig configures instruction file integrity monitoring.
+type InstructionIntegrityConfig struct {
+	Enabled                  bool                    `yaml:"enabled"`
+	TrackedTypes             []string                `yaml:"tracked_types"`
+	ShapeDetection           bool                    `yaml:"shape_detection"`
+	ShapeConfidenceThreshold float64                 `yaml:"shape_confidence_threshold"`
+	AsyncQueueSize           int                     `yaml:"async_queue_size"`
+	Rules                    []InstructionRuleConfig `yaml:"rules"`
+}
+
+// InstructionRuleConfig defines a single instruction-specific policy rule.
+type InstructionRuleConfig struct {
+	Name     string   `yaml:"name"`
+	Patterns []string `yaml:"patterns"`
+	Severity string   `yaml:"severity"`
+	Action   string   `yaml:"action"`
 }
 
 // StreamingConfig holds streaming response scanning configuration
@@ -429,6 +448,22 @@ func defaults() *Config {
 				// Content within <system-reminder>...</system-reminder> is not scanned
 				TrustedTags: []string{"system-reminder"},
 			},
+			InstructionIntegrity: InstructionIntegrityConfig{
+				Enabled:                  false,
+				TrackedTypes:             []string{"claude_md", "cursorrules", "cursor_rules", "agents_md", "windsurfrules"},
+				ShapeDetection:           true,
+				ShapeConfidenceThreshold: 0.7,
+				AsyncQueueSize:           100,
+				Rules: []InstructionRuleConfig{
+					{Name: "instruction_shell_exec", Patterns: []string{`curl.*\|\s*(ba)?sh`, `wget.*\|\s*(ba)?sh`, `eval\s*\(`, `exec\s*\(`}, Severity: "critical", Action: "block"},
+					{Name: "instruction_prompt_injection", Patterns: []string{`ignore\s+(all\s+)?previous`, `you\s+are\s+now`, `disregard`}, Severity: "critical", Action: "block"},
+					{Name: "instruction_permission_escalation", Patterns: []string{`always\s+approve`, `never\s+ask.*confirmation`, `auto.?accept`}, Severity: "high", Action: "flag"},
+					{Name: "instruction_hidden_content", Patterns: []string{"[\\x{200B}-\\x{200F}]", "[\\x{202A}-\\x{202E}]"}, Severity: "critical", Action: "block"},
+					{Name: "instruction_obfuscation", Patterns: []string{`base64\s*decode`, `[A-Za-z0-9+/]{50,}={0,2}`}, Severity: "high", Action: "flag"},
+					{Name: "instruction_tool_manipulation", Patterns: []string{`always\s+use\s+tool`, `redirect.*to`, `prefer\s+tool`}, Severity: "medium", Action: "flag"},
+					{Name: "instruction_exfil_urls", Patterns: []string{`https?://[^\s]+\s*\|`, `fetch\s+https?://`, `post\s+to\s+https?://`}, Severity: "high", Action: "flag"},
+				},
+			},
 			Rules: []PolicyRule{
 				{
 					Name:        "large_response",
@@ -480,6 +515,11 @@ func defaults() *Config {
 		},
 		ShutdownTimeout: 30 * time.Second,
 	}
+}
+
+// DefaultConfig returns the default configuration. It is the public equivalent of defaults().
+func DefaultConfig() *Config {
+	return defaults()
 }
 
 // applyEnvOverrides applies environment variable overrides
