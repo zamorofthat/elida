@@ -1,12 +1,14 @@
 package instruction
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
 
 // mockStore implements the minimal storage interface for testing.
 type mockStore struct {
+	mu    sync.Mutex
 	files map[string]*Record
 }
 
@@ -15,16 +17,22 @@ func newMockStore() *mockStore {
 }
 
 func (m *mockStore) GetInstructionFile(hash string) (*Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	r := m.files[hash]
 	return r, nil
 }
 
 func (m *mockStore) SaveInstructionFile(record Record) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.files[record.Hash] = &record
 	return nil
 }
 
 func (m *mockStore) IncrementInstructionFileSessionCount(hash string, lastSeen time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if r, ok := m.files[hash]; ok {
 		r.SessionCount++
 		r.LastSeen = lastSeen
@@ -34,6 +42,12 @@ func (m *mockStore) IncrementInstructionFileSessionCount(hash string, lastSeen t
 
 func (m *mockStore) SaveEvent(evt Event) error {
 	return nil
+}
+
+func (m *mockStore) get(hash string) *Record {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.files[hash]
 }
 
 func TestRegistryCheckKnownClean(t *testing.T) {
@@ -89,7 +103,7 @@ func TestRegistryAsyncPersists(t *testing.T) {
 	// Give async worker time to process
 	time.Sleep(100 * time.Millisecond)
 
-	got := store.files["persist1"]
+	got := store.get("persist1")
 	if got == nil {
 		t.Fatal("expected record persisted by async worker")
 	}
