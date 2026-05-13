@@ -24,6 +24,8 @@ import (
 	"elida/internal/config"
 	"elida/internal/control"
 	"elida/internal/fingerprint"
+	"elida/internal/instruction"
+	"elida/internal/instructionstore"
 	"elida/internal/policy"
 	"elida/internal/proxy"
 	"elida/internal/session"
@@ -47,8 +49,9 @@ type app struct {
 
 	sqliteStore *storage.SQLiteStore
 
-	policyEngine    *policy.Engine
-	fingerprinter   *fingerprint.M3LiteScorer
+	policyEngine        *policy.Engine
+	instructionRegistry *instruction.Registry
+	fingerprinter       *fingerprint.M3LiteScorer
 	tp              *telemetry.Provider
 	ocsfEmitter     *telemetry.OCSFEmitter
 	proxyCaptureBuf *proxy.CaptureBuffer
@@ -114,6 +117,7 @@ func main() {
 	a.initOCSF()
 	a.initTelemetry()
 	a.initPolicyEngine()
+	a.initInstructionIntegrity()
 
 	// Start session manager (handles timeouts, cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -576,6 +580,42 @@ func (a *app) initPolicyEngine() {
 	slog.Info("policy engine enabled", "rules", len(policyRules))
 }
 
+func (a *app) initInstructionIntegrity() {
+	if !a.cfg.Policy.Enabled || !a.cfg.Policy.InstructionIntegrity.Enabled {
+		return
+	}
+	if a.sqliteStore == nil {
+		slog.Warn("instruction integrity requires storage, skipping")
+		return
+	}
+
+	iiCfg := a.cfg.Policy.InstructionIntegrity
+	var instrRules []instruction.Rule
+	for _, r := range iiCfg.Rules {
+		instrRules = append(instrRules, instruction.Rule{
+			Name:     r.Name,
+			Patterns: r.Patterns,
+			Severity: r.Severity,
+			Action:   r.Action,
+		})
+	}
+
+	scanner, err := instruction.NewScanner(instrRules)
+	if err != nil {
+		slog.Error("failed to create instruction scanner", "error", err)
+		return
+	}
+
+	adapter := instructionstore.NewSQLiteAdapter(a.sqliteStore)
+	a.instructionRegistry = instruction.NewRegistry(scanner, adapter, iiCfg.AsyncQueueSize)
+
+	slog.Info("instruction integrity enabled",
+		"tracked_types", iiCfg.TrackedTypes,
+		"rules", len(instrRules),
+		"shape_detection", iiCfg.ShapeDetection,
+	)
+}
+
 func (a *app) initProxy() {
 	var err error
 	var proxyOpts []proxy.ProxyOption
@@ -584,6 +624,9 @@ func (a *app) initProxy() {
 	}
 	if a.policyEngine != nil {
 		proxyOpts = append(proxyOpts, proxy.WithPolicyEngine(a.policyEngine))
+	}
+	if a.instructionRegistry != nil {
+		proxyOpts = append(proxyOpts, proxy.WithInstructionRegistry(a.instructionRegistry))
 	}
 	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
@@ -810,6 +853,10 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 		if err := a.ocsfEmitter.Close(); err != nil {
 			slog.Error("OCSF emitter close error", "error", err)
 		}
+	}
+
+	if a.instructionRegistry != nil {
+		a.instructionRegistry.Stop()
 	}
 
 	// Step 5: Flush telemetry AFTER draining (drain creates new OTEL spans)
