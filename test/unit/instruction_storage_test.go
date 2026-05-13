@@ -87,6 +87,25 @@ func TestIncrementSessionCount(t *testing.T) {
 	}
 }
 
+func TestSaveInstructionEvent(t *testing.T) {
+	store := newInstructionTestStore(t)
+
+	err := store.SaveInstructionEvent(storage.InstructionEvent{
+		Timestamp: time.Now(),
+		EventType: "instruction_integrity",
+		SessionID: "session-1",
+		Severity:  "info",
+		Data: map[string]interface{}{
+			"hash":        "abc123",
+			"file_type":   "claude_md",
+			"change_type": "first_seen",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestListInstructionFiles(t *testing.T) {
 	store := newInstructionTestStore(t)
 	now := time.Now().UTC().Truncate(time.Second)

@@ -1150,6 +1150,29 @@ func (s *SQLiteStore) IncrementInstructionFileSessionCount(hash string, lastSeen
 	return err
 }
 
+// InstructionEvent wraps an instruction integrity event for the events table.
+type InstructionEvent struct {
+	Timestamp time.Time
+	EventType string
+	SessionID string
+	Severity  string
+	Data      map[string]interface{}
+}
+
+// SaveInstructionEvent writes an instruction integrity event to the events table.
+func (s *SQLiteStore) SaveInstructionEvent(evt InstructionEvent) error {
+	data, err := json.Marshal(evt.Data)
+	if err != nil {
+		data = []byte("{}")
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO events (timestamp, event_type, session_id, severity, data)
+		VALUES (?, ?, ?, ?, ?)`,
+		evt.Timestamp, evt.EventType, evt.SessionID, evt.Severity, string(data),
+	)
+	return err
+}
+
 // ListInstructionFiles returns instruction file records, optionally filtered.
 func (s *SQLiteStore) ListInstructionFiles(fileType, scanStatus string) ([]instruction.Record, error) {
 	query := `SELECT hash, file_type, confidence, source_path, content, scan_status, scan_results,
