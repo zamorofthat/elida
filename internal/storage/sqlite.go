@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"elida/internal/instruction"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -229,7 +231,47 @@ func (s *SQLiteStore) migrate() error {
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Instruction file integrity table
+	instructionSchema := `
+	CREATE TABLE IF NOT EXISTS instruction_files (
+		hash TEXT PRIMARY KEY,
+		file_type TEXT NOT NULL,
+		confidence TEXT NOT NULL,
+		source_path TEXT,
+		content TEXT NOT NULL,
+		scan_status TEXT NOT NULL,
+		scan_results TEXT,
+		first_seen DATETIME NOT NULL,
+		last_seen DATETIME NOT NULL,
+		session_count INTEGER DEFAULT 1,
+		prev_hash TEXT,
+		diff TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_instruction_files_type ON instruction_files(file_type);
+	CREATE INDEX IF NOT EXISTS idx_instruction_files_status ON instruction_files(scan_status);
+	CREATE INDEX IF NOT EXISTS idx_instruction_files_first_seen ON instruction_files(first_seen);
+	`
+	if _, err := s.db.Exec(instructionSchema); err != nil {
+		return fmt.Errorf("instruction_files migration: %w", err)
+	}
+
+	// Add instruction columns to sessions table (idempotent)
+	sessionCols := []struct{ name, typ string }{
+		{"instruction_hash", "TEXT"},
+		{"instruction_file_type", "TEXT"},
+	}
+	for _, col := range sessionCols {
+		_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE sessions ADD COLUMN %s %s", col.name, col.typ))
+		// Ignore error — column already exists on subsequent runs
+	}
+
+	return nil
 }
 
 // SaveSession saves a completed session record
@@ -1047,6 +1089,112 @@ func (s *SQLiteStore) GetTTSRequestsBySession(sessionID string) ([]TTSRequest, e
 	return s.ListTTSRequests(ListTTSRequestsOptions{
 		SessionID: sessionID,
 	})
+}
+
+// SaveInstructionFile inserts or replaces an instruction file record.
+func (s *SQLiteStore) SaveInstructionFile(record instruction.Record) error {
+	scanResults, err := json.Marshal(record.ScanResults)
+	if err != nil {
+		scanResults = []byte("[]")
+	}
+
+	_, err = s.db.Exec(`
+		INSERT OR REPLACE INTO instruction_files
+		(hash, file_type, confidence, source_path, content, scan_status, scan_results, first_seen, last_seen, session_count, prev_hash, diff)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.Hash, record.FileType, record.Confidence, record.SourcePath,
+		record.Content, record.ScanStatus, string(scanResults),
+		record.FirstSeen, record.LastSeen, record.SessionCount,
+		record.PrevHash, record.Diff,
+	)
+	return err
+}
+
+// GetInstructionFile retrieves an instruction file by hash.
+func (s *SQLiteStore) GetInstructionFile(hash string) (*instruction.Record, error) {
+	row := s.db.QueryRow(`
+		SELECT hash, file_type, confidence, source_path, content, scan_status, scan_results,
+		       first_seen, last_seen, session_count, prev_hash, diff
+		FROM instruction_files WHERE hash = ?`, hash)
+
+	var r instruction.Record
+	var scanResultsStr, sourcePath, prevHash, diff sql.NullString
+	err := row.Scan(&r.Hash, &r.FileType, &r.Confidence, &sourcePath,
+		&r.Content, &r.ScanStatus, &scanResultsStr,
+		&r.FirstSeen, &r.LastSeen, &r.SessionCount, &prevHash, &diff)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get instruction file: %w", err)
+	}
+
+	if sourcePath.Valid {
+		r.SourcePath = sourcePath.String
+	}
+	if prevHash.Valid {
+		r.PrevHash = prevHash.String
+	}
+	if diff.Valid {
+		r.Diff = diff.String
+	}
+	unmarshalJSON(scanResultsStr, &r.ScanResults, "scan_results", r.Hash)
+	return &r, nil
+}
+
+// IncrementInstructionFileSessionCount bumps the session count and updates last_seen.
+func (s *SQLiteStore) IncrementInstructionFileSessionCount(hash string, lastSeen time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE instruction_files SET session_count = session_count + 1, last_seen = ?
+		WHERE hash = ?`, lastSeen, hash)
+	return err
+}
+
+// ListInstructionFiles returns instruction file records, optionally filtered.
+func (s *SQLiteStore) ListInstructionFiles(fileType, scanStatus string) ([]instruction.Record, error) {
+	query := `SELECT hash, file_type, confidence, source_path, content, scan_status, scan_results,
+	                 first_seen, last_seen, session_count, prev_hash, diff
+	          FROM instruction_files WHERE 1=1`
+	args := []interface{}{}
+
+	if fileType != "" {
+		query += " AND file_type = ?"
+		args = append(args, fileType)
+	}
+	if scanStatus != "" {
+		query += " AND scan_status = ?"
+		args = append(args, scanStatus)
+	}
+	query += " ORDER BY last_seen DESC"
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []instruction.Record
+	for rows.Next() {
+		var r instruction.Record
+		var scanResultsStr, sourcePath, prevHash, diff sql.NullString
+		if err := rows.Scan(&r.Hash, &r.FileType, &r.Confidence, &sourcePath,
+			&r.Content, &r.ScanStatus, &scanResultsStr,
+			&r.FirstSeen, &r.LastSeen, &r.SessionCount, &prevHash, &diff); err != nil {
+			return nil, err
+		}
+		if sourcePath.Valid {
+			r.SourcePath = sourcePath.String
+		}
+		if prevHash.Valid {
+			r.PrevHash = prevHash.String
+		}
+		if diff.Valid {
+			r.Diff = diff.String
+		}
+		unmarshalJSON(scanResultsStr, &r.ScanResults, "scan_results", r.Hash)
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }
 
 // TTSStats represents aggregate statistics for TTS requests
