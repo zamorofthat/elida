@@ -7,6 +7,28 @@ import (
 	"strings"
 )
 
+// Shape detection signal regexes — compiled once at package init.
+var (
+	directiveHeadingRe = regexp.MustCompile(`(?mi)^#{1,3}\s+(rules?|style\s+guide|conventions?|do\s+not|instructions?|constraints?|requirements?)`)
+	imperativeRe       = regexp.MustCompile(`(?i)\b(you\s+must|you\s+should|always|never|do\s+not|don't|ensure\s+that|make\s+sure)\b`)
+	projectContextRe   = regexp.MustCompile(`(?i)\b(this\s+project|this\s+repo|this\s+codebase|our\s+codebase|the\s+project)\b`)
+	codeConventionRe   = regexp.MustCompile(`(?i)\b(code\s+style|naming\s+convention|file\s+structure|import\s+order|lint|format|gofmt|eslint|prettier)\b`)
+	filePathRefRe      = regexp.MustCompile(`(?m)(internal/|src/|cmd/|test/|\.go|\.ts|\.py|\.js|Makefile|package\.json)`)
+)
+
+type shapeSignal struct {
+	re     *regexp.Regexp
+	weight float64
+}
+
+var shapeSignals = []shapeSignal{
+	{directiveHeadingRe, 0.25},
+	{imperativeRe, 0.20},
+	{projectContextRe, 0.20},
+	{codeConventionRe, 0.20},
+	{filePathRefRe, 0.15},
+}
+
 // pathMarkerRegex matches "Contents of <path>" lines injected by AI coding tools.
 var pathMarkerRegex = regexp.MustCompile(`(?m)^Contents of ([^\s(]+)(?:\s*\([^)]*\))?:`)
 
@@ -73,7 +95,7 @@ func Extract(content string, shapeDetection bool, shapeThreshold float64) *Instr
 	}
 
 	if shapeDetection {
-		if ft, score := classifyByShape(content); ft != FileTypeUnknown && score >= shapeThreshold {
+		if ft, score := classifyByShape(content); score >= shapeThreshold {
 			return &InstructionFile{
 				Type:       ft,
 				Content:    content,
@@ -87,8 +109,34 @@ func Extract(content string, shapeDetection bool, shapeThreshold float64) *Instr
 	return nil
 }
 
-// classifyByShape scores content against instruction file signals.
-// Stub — full implementation in Task 3.
 func classifyByShape(content string) (FileType, float64) {
-	return FileTypeUnknown, 0.0
+	if len(content) < 50 {
+		return FileTypeUnknown, 0.0
+	}
+
+	var score float64
+	for _, sig := range shapeSignals {
+		matches := sig.re.FindAllString(content, -1)
+		if len(matches) > 0 {
+			count := float64(len(matches))
+			boost := sig.weight
+			if count > 1 {
+				boost += sig.weight * 0.2 * minFloat(count-1, 4)
+			}
+			score += boost
+		}
+	}
+
+	if score > 1.0 {
+		score = 1.0
+	}
+
+	return FileTypeUnknown, score
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
