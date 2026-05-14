@@ -27,12 +27,20 @@ type Settings struct {
 
 // PolicySettings holds policy-related settings
 type PolicySettings struct {
-	Enabled       *bool               `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Mode          *string             `json:"mode,omitempty" yaml:"mode,omitempty"`     // "enforce" or "audit"
-	Preset        *string             `json:"preset,omitempty" yaml:"preset,omitempty"` // "minimal", "standard", "strict"
-	RiskLadder    *RiskLadderSettings `json:"risk_ladder,omitempty" yaml:"risk_ladder,omitempty"`
-	DisabledRules []string            `json:"disabled_rules,omitempty" yaml:"disabled_rules,omitempty"` // Rules to skip
-	CustomRules   []CustomRule        `json:"custom_rules,omitempty" yaml:"custom_rules,omitempty"`     // User-defined rules
+	Enabled              *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Mode                 *string                      `json:"mode,omitempty" yaml:"mode,omitempty"`     // "enforce" or "audit"
+	Preset               *string                      `json:"preset,omitempty" yaml:"preset,omitempty"` // "minimal", "standard", "strict"
+	RiskLadder           *RiskLadderSettings          `json:"risk_ladder,omitempty" yaml:"risk_ladder,omitempty"`
+	InstructionIntegrity *InstructionIntegritySettings `json:"instruction_integrity,omitempty" yaml:"instruction_integrity,omitempty"`
+	DisabledRules        []string                     `json:"disabled_rules,omitempty" yaml:"disabled_rules,omitempty"` // Rules to skip
+	CustomRules          []CustomRule                  `json:"custom_rules,omitempty" yaml:"custom_rules,omitempty"`     // User-defined rules
+}
+
+// InstructionIntegritySettings holds instruction file integrity settings
+type InstructionIntegritySettings struct {
+	Enabled                  *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	ShapeDetection           *bool    `json:"shape_detection,omitempty" yaml:"shape_detection,omitempty"`
+	ShapeConfidenceThreshold *float64 `json:"shape_confidence_threshold,omitempty" yaml:"shape_confidence_threshold,omitempty"`
 }
 
 // CustomRule represents a user-defined policy rule
@@ -156,6 +164,14 @@ func settingsFromConfig(cfg *Config) Settings {
 		}
 	}
 
+	// Instruction integrity settings from Config
+	iiCfg := cfg.Policy.InstructionIntegrity
+	settings.Policy.InstructionIntegrity = &InstructionIntegritySettings{
+		Enabled:                  &iiCfg.Enabled,
+		ShapeDetection:           &iiCfg.ShapeDetection,
+		ShapeConfidenceThreshold: &iiCfg.ShapeConfidenceThreshold,
+	}
+
 	// Capture settings from Storage config
 	if cfg.Storage.CaptureMode != "" {
 		settings.Capture.Mode = &cfg.Storage.CaptureMode
@@ -190,6 +206,9 @@ func getDefaultSettings() Settings {
 	maxCaptureSize := 10000
 	maxPerSession := 100
 
+	shapeDetection := true
+	shapeThreshold := 0.7
+
 	return Settings{
 		Policy: PolicySettings{
 			Enabled: &enabled,
@@ -201,6 +220,11 @@ func getDefaultSettings() Settings {
 				ThrottleScore:  &throttleScore,
 				BlockScore:     &blockScore,
 				TerminateScore: &terminateScore,
+			},
+			InstructionIntegrity: &InstructionIntegritySettings{
+				Enabled:                  &disabled,
+				ShapeDetection:           &shapeDetection,
+				ShapeConfidenceThreshold: &shapeThreshold,
 			},
 			DisabledRules: []string{},
 		},
@@ -365,6 +389,33 @@ func diffSettings(defaults, local Settings) map[string]SettingDiff {
 		}
 	}
 
+	// Instruction integrity diffs
+	if local.Policy.InstructionIntegrity != nil && defaults.Policy.InstructionIntegrity != nil {
+		li := local.Policy.InstructionIntegrity
+		di := defaults.Policy.InstructionIntegrity
+		if li.Enabled != nil && di.Enabled != nil && *li.Enabled != *di.Enabled {
+			diffs["policy.instruction_integrity.enabled"] = SettingDiff{
+				Path:         "policy.instruction_integrity.enabled",
+				DefaultValue: *di.Enabled,
+				LocalValue:   *li.Enabled,
+			}
+		}
+		if li.ShapeDetection != nil && di.ShapeDetection != nil && *li.ShapeDetection != *di.ShapeDetection {
+			diffs["policy.instruction_integrity.shape_detection"] = SettingDiff{
+				Path:         "policy.instruction_integrity.shape_detection",
+				DefaultValue: *di.ShapeDetection,
+				LocalValue:   *li.ShapeDetection,
+			}
+		}
+		if li.ShapeConfidenceThreshold != nil && di.ShapeConfidenceThreshold != nil && *li.ShapeConfidenceThreshold != *di.ShapeConfidenceThreshold {
+			diffs["policy.instruction_integrity.shape_confidence_threshold"] = SettingDiff{
+				Path:         "policy.instruction_integrity.shape_confidence_threshold",
+				DefaultValue: *di.ShapeConfidenceThreshold,
+				LocalValue:   *li.ShapeConfidenceThreshold,
+			}
+		}
+	}
+
 	// Failover diffs
 	if local.Failover.Enabled != nil && defaults.Failover.Enabled != nil {
 		if *local.Failover.Enabled != *defaults.Failover.Enabled {
@@ -436,6 +487,23 @@ func mergeSettings(defaults, local Settings) Settings {
 		}
 		if lr.TerminateScore != nil {
 			merged.Policy.RiskLadder.TerminateScore = lr.TerminateScore
+		}
+	}
+
+	// Merge instruction integrity settings
+	if local.Policy.InstructionIntegrity != nil {
+		if merged.Policy.InstructionIntegrity == nil {
+			merged.Policy.InstructionIntegrity = &InstructionIntegritySettings{}
+		}
+		ii := local.Policy.InstructionIntegrity
+		if ii.Enabled != nil {
+			merged.Policy.InstructionIntegrity.Enabled = ii.Enabled
+		}
+		if ii.ShapeDetection != nil {
+			merged.Policy.InstructionIntegrity.ShapeDetection = ii.ShapeDetection
+		}
+		if ii.ShapeConfidenceThreshold != nil {
+			merged.Policy.InstructionIntegrity.ShapeConfidenceThreshold = ii.ShapeConfidenceThreshold
 		}
 	}
 
