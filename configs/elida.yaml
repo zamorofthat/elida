@@ -246,6 +246,23 @@ policy:
       - "TaskList"
       - "TaskGet"
 
+  # Instruction file integrity monitoring
+  # Detects and tracks changes to AI coding tool instruction files
+  # (CLAUDE.md, .cursorrules, AGENTS.md, .windsurfrules)
+  instruction_integrity:
+    enabled: false  # Set to true to enable
+    tracked_types:
+      - claude_md
+      - cursorrules
+      - cursor_rules
+      - agents_md
+      - windsurfrules
+    shape_detection: true
+    shape_confidence_threshold: 0.7
+    async_queue_size: 100
+    # Rules are loaded from defaults — see internal/config/config.go
+    # Override here to customize
+
   # Policy preset - provides default rules based on security frameworks
   # Options:
   #   minimal  - Rate limiting and critical blocks only (8 rules)
