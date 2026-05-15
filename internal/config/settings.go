@@ -39,6 +39,7 @@ type PolicySettings struct {
 // InstructionIntegritySettings holds instruction file integrity settings
 type InstructionIntegritySettings struct {
 	Enabled                  *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	TrackedTypes             []string `json:"tracked_types,omitempty" yaml:"tracked_types,omitempty"`
 	ShapeDetection           *bool    `json:"shape_detection,omitempty" yaml:"shape_detection,omitempty"`
 	ShapeConfidenceThreshold *float64 `json:"shape_confidence_threshold,omitempty" yaml:"shape_confidence_threshold,omitempty"`
 }
@@ -168,6 +169,7 @@ func settingsFromConfig(cfg *Config) Settings {
 	iiCfg := cfg.Policy.InstructionIntegrity
 	settings.Policy.InstructionIntegrity = &InstructionIntegritySettings{
 		Enabled:                  &iiCfg.Enabled,
+		TrackedTypes:             iiCfg.TrackedTypes,
 		ShapeDetection:           &iiCfg.ShapeDetection,
 		ShapeConfidenceThreshold: &iiCfg.ShapeConfidenceThreshold,
 	}
@@ -223,6 +225,7 @@ func getDefaultSettings() Settings {
 			},
 			InstructionIntegrity: &InstructionIntegritySettings{
 				Enabled:                  &disabled,
+				TrackedTypes:             []string{"claude_md", "cursorrules", "cursor_rules", "agents_md", "windsurfrules"},
 				ShapeDetection:           &shapeDetection,
 				ShapeConfidenceThreshold: &shapeThreshold,
 			},
@@ -498,6 +501,9 @@ func mergeSettings(defaults, local Settings) Settings {
 		ii := local.Policy.InstructionIntegrity
 		if ii.Enabled != nil {
 			merged.Policy.InstructionIntegrity.Enabled = ii.Enabled
+		}
+		if len(ii.TrackedTypes) > 0 {
+			merged.Policy.InstructionIntegrity.TrackedTypes = ii.TrackedTypes
 		}
 		if ii.ShapeDetection != nil {
 			merged.Policy.InstructionIntegrity.ShapeDetection = ii.ShapeDetection
