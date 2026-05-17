@@ -88,6 +88,40 @@ func TestRegistryCheckBlocksMalicious(t *testing.T) {
 	}
 }
 
+func TestRegistryCheckNilFile(t *testing.T) {
+	scanner, _ := NewScanner(nil)
+	reg := NewRegistry(scanner, newMockStore(), 10)
+	defer reg.Stop()
+
+	result := reg.Check("session-1", nil)
+	if result.ShouldBlock {
+		t.Error("nil file should not block")
+	}
+	if len(result.Violations) != 0 {
+		t.Error("nil file should have no violations")
+	}
+}
+
+func TestRegistryQueueFull(t *testing.T) {
+	store := newMockStore()
+	scanner, _ := NewScanner(nil)
+	// Queue size of 1 — will fill quickly
+	reg := NewRegistry(scanner, store, 1)
+	defer reg.Stop()
+
+	// Send multiple files rapidly to overflow the queue
+	for i := 0; i < 10; i++ {
+		file := &InstructionFile{
+			Type: FileTypeClaudeMD, Content: "# Rules " + string(rune('A'+i)),
+			Hash: "hash" + string(rune('A'+i)), Confidence: ConfidenceHigh,
+		}
+		result := reg.Check("session", file)
+		// Should never panic or block, just drop async jobs
+		_ = result
+	}
+	// If we got here without deadlock or panic, the test passes
+}
+
 func TestRegistryAsyncPersists(t *testing.T) {
 	store := newMockStore()
 	scanner, _ := NewScanner(nil)

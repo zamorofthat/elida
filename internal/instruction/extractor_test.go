@@ -190,6 +190,56 @@ func TestExtract(t *testing.T) {
 	}
 }
 
+func TestExtractInstructionContent(t *testing.T) {
+	content := "Contents of /project/CLAUDE.md (project instructions):\n\n# My Project\n\n## Rules\nDo things right."
+	body := extractInstructionContent(content)
+	if body != "# My Project\n\n## Rules\nDo things right." {
+		t.Errorf("unexpected body: %q", body)
+	}
+}
+
+func TestExtractInstructionContentNoMarker(t *testing.T) {
+	content := "Just regular content with no marker"
+	body := extractInstructionContent(content)
+	if body != content {
+		t.Errorf("expected original content when no marker, got %q", body)
+	}
+}
+
+func TestExtractHashConsistency(t *testing.T) {
+	content := "# Rules\nAlways test."
+	h1 := hashContent(content)
+	h2 := hashContent(content)
+	if h1 != h2 {
+		t.Error("same content should produce same hash")
+	}
+	if len(h1) != 64 {
+		t.Errorf("SHA-256 hex should be 64 chars, got %d", len(h1))
+	}
+
+	different := hashContent("# Different content")
+	if h1 == different {
+		t.Error("different content should produce different hash")
+	}
+}
+
+func TestExtractUnknownFileType(t *testing.T) {
+	// Path marker present but not a recognized file type
+	content := "Contents of /project/README.md:\n\n# Readme\nThis is a readme."
+	result := Extract(content, false, 0.7)
+	if result != nil {
+		t.Errorf("README.md should not be extracted as instruction file, got %+v", result)
+	}
+}
+
+func TestExtractShortContentShape(t *testing.T) {
+	// Content too short for shape detection (< 50 chars)
+	result := Extract("Short.", true, 0.5)
+	if result != nil {
+		t.Error("very short content should not be detected")
+	}
+}
+
 func TestFileTypeString(t *testing.T) {
 	tests := []struct {
 		ft   FileType

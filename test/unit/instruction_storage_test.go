@@ -107,6 +107,57 @@ func TestSaveInstructionEvent(t *testing.T) {
 	}
 }
 
+func TestIncrementNonexistentHash(t *testing.T) {
+	store := newInstructionTestStore(t)
+	// Should not error — just affects 0 rows
+	err := store.IncrementInstructionFileSessionCount("nonexistent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetInstructionFileNotFound(t *testing.T) {
+	store := newInstructionTestStore(t)
+	got, err := store.GetInstructionFile("nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Error("expected nil for nonexistent hash")
+	}
+}
+
+func TestListInstructionFilesFilterByScanStatus(t *testing.T) {
+	store := newInstructionTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := store.SaveInstructionFile(instruction.Record{
+		Hash: "clean1", FileType: "claude_md", Confidence: "high",
+		Content: "clean", ScanStatus: "clean",
+		FirstSeen: now, LastSeen: now, SessionCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveInstructionFile(instruction.Record{
+		Hash: "flagged1", FileType: "claude_md", Confidence: "high",
+		Content: "flagged", ScanStatus: "flagged",
+		FirstSeen: now, LastSeen: now, SessionCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := store.ListInstructionFiles("", "flagged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Errorf("expected 1 flagged record, got %d", len(records))
+	}
+	if records[0].ScanStatus != "flagged" {
+		t.Errorf("expected flagged status, got %q", records[0].ScanStatus)
+	}
+}
+
 func TestListInstructionFiles(t *testing.T) {
 	store := newInstructionTestStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
