@@ -258,3 +258,38 @@ func TestFileTypeString(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFileType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  FileType
+	}{
+		{"claude_md", FileTypeClaudeMD},
+		{"cursorrules", FileTypeCursorRules},
+		{"cursor_rules", FileTypeCursorRulesDir},
+		{"agents_md", FileTypeAgentsMD},
+		{"windsurfrules", FileTypeWindsurfRules},
+		{"unknown", FileTypeUnknown},
+		{"", FileTypeUnknown},
+		{"garbage", FileTypeUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := ParseFileType(tt.input)
+			if got != tt.want {
+				t.Errorf("ParseFileType(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileTypeRoundTrip(t *testing.T) {
+	types := []FileType{FileTypeClaudeMD, FileTypeCursorRules, FileTypeCursorRulesDir, FileTypeAgentsMD, FileTypeWindsurfRules}
+	for _, ft := range types {
+		s := ft.String()
+		got := ParseFileType(s)
+		if got != ft {
+			t.Errorf("round-trip failed: %v -> %q -> %v", ft, s, got)
+		}
+	}
+}
