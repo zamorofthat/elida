@@ -95,9 +95,9 @@ func Extract(content string, shapeDetection bool, shapeThreshold float64) *Instr
 	}
 
 	if shapeDetection {
-		if ft, score := classifyByShape(content); score >= shapeThreshold {
+		if score := classifyByShape(content); score >= shapeThreshold {
 			return &InstructionFile{
-				Type:       ft,
+				Type:       FileTypeUnknown,
 				Content:    content,
 				Hash:       hashContent(content),
 				Confidence: ConfidenceMedium,
@@ -109,9 +109,12 @@ func Extract(content string, shapeDetection bool, shapeThreshold float64) *Instr
 	return nil
 }
 
-func classifyByShape(content string) (FileType, float64) {
+// classifyByShape scores content against instruction file signals.
+// Returns a confidence score (0.0-1.0). Shape detection cannot identify
+// a specific file type — callers should use FileTypeUnknown.
+func classifyByShape(content string) float64 {
 	if len(content) < 50 {
-		return FileTypeUnknown, 0.0
+		return 0.0
 	}
 
 	var score float64
@@ -131,7 +134,7 @@ func classifyByShape(content string) (FileType, float64) {
 		score = 1.0
 	}
 
-	return FileTypeUnknown, score
+	return score
 }
 
 func minFloat(a, b float64) float64 {

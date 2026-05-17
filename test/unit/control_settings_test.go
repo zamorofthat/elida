@@ -67,6 +67,7 @@ func TestSettingsPUT_CustomRuleWithThresholdFloat(t *testing.T) {
 	result := engine.EvaluateRequestContent("test-session", string(raw))
 	if result == nil {
 		t.Fatal("expected entropy violation after settings reload")
+		return
 	}
 	found := false
 	for _, v := range result.Violations {

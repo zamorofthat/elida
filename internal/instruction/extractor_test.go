@@ -109,7 +109,7 @@ func TestClassifyByShape(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, score := classifyByShape(tt.content)
+			score := classifyByShape(tt.content)
 			if tt.wantAbove >= 0 && score < tt.wantAbove {
 				t.Errorf("score = %.2f, want >= %.2f", score, tt.wantAbove)
 			}
@@ -175,6 +175,7 @@ func TestExtract(t *testing.T) {
 			}
 			if result == nil {
 				t.Fatal("expected non-nil result")
+				return
 			}
 			if result.Type != tt.wantType {
 				t.Errorf("type = %v, want %v", result.Type, tt.wantType)

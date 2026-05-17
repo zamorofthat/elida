@@ -250,7 +250,7 @@ policy:
   # Detects and tracks changes to AI coding tool instruction files
   # (CLAUDE.md, .cursorrules, AGENTS.md, .windsurfrules)
   instruction_integrity:
-    enabled: false  # Set to true to enable
+    enabled: true
     tracked_types:
       - claude_md
       - cursorrules

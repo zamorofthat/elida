@@ -27,12 +27,12 @@ type Settings struct {
 
 // PolicySettings holds policy-related settings
 type PolicySettings struct {
-	Enabled              *bool                        `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Mode                 *string                      `json:"mode,omitempty" yaml:"mode,omitempty"`     // "enforce" or "audit"
-	Preset               *string                      `json:"preset,omitempty" yaml:"preset,omitempty"` // "minimal", "standard", "strict"
-	RiskLadder           *RiskLadderSettings          `json:"risk_ladder,omitempty" yaml:"risk_ladder,omitempty"`
+	Enabled              *bool                         `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Mode                 *string                       `json:"mode,omitempty" yaml:"mode,omitempty"`     // "enforce" or "audit"
+	Preset               *string                       `json:"preset,omitempty" yaml:"preset,omitempty"` // "minimal", "standard", "strict"
+	RiskLadder           *RiskLadderSettings           `json:"risk_ladder,omitempty" yaml:"risk_ladder,omitempty"`
 	InstructionIntegrity *InstructionIntegritySettings `json:"instruction_integrity,omitempty" yaml:"instruction_integrity,omitempty"`
-	DisabledRules        []string                     `json:"disabled_rules,omitempty" yaml:"disabled_rules,omitempty"` // Rules to skip
+	DisabledRules        []string                      `json:"disabled_rules,omitempty" yaml:"disabled_rules,omitempty"` // Rules to skip
 	CustomRules          []CustomRule                  `json:"custom_rules,omitempty" yaml:"custom_rules,omitempty"`     // User-defined rules
 }
 
@@ -224,7 +224,7 @@ func getDefaultSettings() Settings {
 				TerminateScore: &terminateScore,
 			},
 			InstructionIntegrity: &InstructionIntegritySettings{
-				Enabled:                  &disabled,
+				Enabled:                  &enabled,
 				TrackedTypes:             []string{"claude_md", "cursorrules", "cursor_rules", "agents_md", "windsurfrules"},
 				ShapeDetection:           &shapeDetection,
 				ShapeConfidenceThreshold: &shapeThreshold,

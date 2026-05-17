@@ -54,18 +54,18 @@ type WebSocketHandler interface {
 
 // Proxy handles proxying requests to the backend
 type Proxy struct {
-	config           *config.Config
-	store            session.Store
-	manager          *session.Manager
-	router           *router.Router
-	telemetry        *telemetry.Provider
-	policy           *policy.Engine
-	storage          *storage.SQLiteStore // For persisting flagged sessions immediately
-	wsHandler        WebSocketHandler     // WebSocket proxy handler
-	captureBuffer    *CaptureBuffer       // For capture-all mode (policy-independent)
-	captureAll       bool                 // True when capture_mode == "all"
-	failover                *FailoverController  // Session-aware failover controller
-	trustedTagRegexs        []*regexp.Regexp     // Pre-compiled regexes for trusted tag stripping
+	config                  *config.Config
+	store                   session.Store
+	manager                 *session.Manager
+	router                  *router.Router
+	telemetry               *telemetry.Provider
+	policy                  *policy.Engine
+	storage                 *storage.SQLiteStore  // For persisting flagged sessions immediately
+	wsHandler               WebSocketHandler      // WebSocket proxy handler
+	captureBuffer           *CaptureBuffer        // For capture-all mode (policy-independent)
+	captureAll              bool                  // True when capture_mode == "all"
+	failover                *FailoverController   // Session-aware failover controller
+	trustedTagRegexs        []*regexp.Regexp      // Pre-compiled regexes for trusted tag stripping
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 }

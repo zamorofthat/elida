@@ -106,6 +106,7 @@ func TestRegistryAsyncPersists(t *testing.T) {
 	got := store.get("persist1")
 	if got == nil {
 		t.Fatal("expected record persisted by async worker")
+		return
 	}
 	if got.ScanStatus != "clean" {
 		t.Errorf("scan_status = %q, want %q", got.ScanStatus, "clean")

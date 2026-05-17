@@ -115,15 +115,15 @@ type RedactionPatternConfig struct {
 
 // PolicyConfig holds policy engine configuration
 type PolicyConfig struct {
-	Enabled        bool                 `yaml:"enabled"`
-	Mode           string               `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
-	CaptureContent bool                 `yaml:"capture_flagged"`  // Capture content for flagged sessions
-	MaxCaptureSize int                  `yaml:"max_capture_size"` // Max bytes to capture per request
-	Preset         string               `yaml:"preset"`           // minimal, standard, or strict
-	Rules          []PolicyRule         `yaml:"rules"`
-	Streaming      StreamingConfig      `yaml:"streaming"`       // Response streaming scan configuration
-	RiskLadder     RiskLadderConfig     `yaml:"risk_ladder"`     // Progressive escalation based on risk score
-	CircuitBreaker CircuitBreakerConfig `yaml:"circuit_breaker"` // Token and tool call limits
+	Enabled              bool                       `yaml:"enabled"`
+	Mode                 string                     `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
+	CaptureContent       bool                       `yaml:"capture_flagged"`  // Capture content for flagged sessions
+	MaxCaptureSize       int                        `yaml:"max_capture_size"` // Max bytes to capture per request
+	Preset               string                     `yaml:"preset"`           // minimal, standard, or strict
+	Rules                []PolicyRule               `yaml:"rules"`
+	Streaming            StreamingConfig            `yaml:"streaming"`             // Response streaming scan configuration
+	RiskLadder           RiskLadderConfig           `yaml:"risk_ladder"`           // Progressive escalation based on risk score
+	CircuitBreaker       CircuitBreakerConfig       `yaml:"circuit_breaker"`       // Token and tool call limits
 	Trust                TrustConfig                `yaml:"trust"`                 // SBC-style trust configuration
 	InstructionIntegrity InstructionIntegrityConfig `yaml:"instruction_integrity"` // Instruction file integrity monitoring
 }
@@ -449,7 +449,7 @@ func defaults() *Config {
 				TrustedTags: []string{"system-reminder"},
 			},
 			InstructionIntegrity: InstructionIntegrityConfig{
-				Enabled:                  false,
+				Enabled:                  true,
 				TrackedTypes:             []string{"claude_md", "cursorrules", "cursor_rules", "agents_md", "windsurfrules"},
 				ShapeDetection:           true,
 				ShapeConfidenceThreshold: 0.7,

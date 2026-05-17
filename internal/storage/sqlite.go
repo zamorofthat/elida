@@ -1194,7 +1194,7 @@ func (s *SQLiteStore) ListInstructionFiles(fileType, scanStatus string) ([]instr
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []instruction.Record
 	for rows.Next() {

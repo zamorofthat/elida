@@ -52,9 +52,9 @@ type app struct {
 	policyEngine        *policy.Engine
 	instructionRegistry *instruction.Registry
 	fingerprinter       *fingerprint.M3LiteScorer
-	tp              *telemetry.Provider
-	ocsfEmitter     *telemetry.OCSFEmitter
-	proxyCaptureBuf *proxy.CaptureBuffer
+	tp                  *telemetry.Provider
+	ocsfEmitter         *telemetry.OCSFEmitter
+	proxyCaptureBuf     *proxy.CaptureBuffer
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler

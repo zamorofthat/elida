@@ -9,8 +9,8 @@ import (
 func TestDefaultConfigHasInstructionIntegrity(t *testing.T) {
 	cfg := config.DefaultConfig()
 	ii := cfg.Policy.InstructionIntegrity
-	if ii.Enabled {
-		t.Error("instruction integrity should be disabled by default")
+	if !ii.Enabled {
+		t.Error("instruction integrity should be enabled by default")
 	}
 	if len(ii.TrackedTypes) == 0 {
 		t.Error("expected default tracked types")

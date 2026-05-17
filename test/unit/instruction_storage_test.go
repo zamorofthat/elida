@@ -52,6 +52,7 @@ func TestSaveAndGetInstructionFile(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected record, got nil")
+		return
 	}
 	if got.FileType != "claude_md" {
 		t.Errorf("file_type = %q, want %q", got.FileType, "claude_md")
@@ -111,11 +112,13 @@ func TestListInstructionFiles(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 
 	for i, ft := range []string{"claude_md", "cursorrules", "agents_md"} {
-		store.SaveInstructionFile(instruction.Record{
+		if err := store.SaveInstructionFile(instruction.Record{
 			Hash: ft + "_hash", FileType: ft, Confidence: "high",
 			Content: "content " + ft, ScanStatus: "clean",
 			FirstSeen: now.Add(time.Duration(i) * time.Minute), LastSeen: now, SessionCount: 1,
-		})
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	records, err := store.ListInstructionFiles("", "")
