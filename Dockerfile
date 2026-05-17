@@ -1,5 +1,5 @@
 # Build stage - Dashboard
-FROM oven/bun:1.3.12-alpine AS dashboard-builder
+FROM oven/bun:1.3.13-alpine AS dashboard-builder
 
 WORKDIR /app/web
 COPY web/package.json web/bun.lock ./

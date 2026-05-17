@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"elida/internal/config"
+	"elida/internal/instruction"
 	"elida/internal/policy"
 	"elida/internal/router"
 	"elida/internal/session"
@@ -53,18 +54,20 @@ type WebSocketHandler interface {
 
 // Proxy handles proxying requests to the backend
 type Proxy struct {
-	config           *config.Config
-	store            session.Store
-	manager          *session.Manager
-	router           *router.Router
-	telemetry        *telemetry.Provider
-	policy           *policy.Engine
-	storage          *storage.SQLiteStore // For persisting flagged sessions immediately
-	wsHandler        WebSocketHandler     // WebSocket proxy handler
-	captureBuffer    *CaptureBuffer       // For capture-all mode (policy-independent)
-	captureAll       bool                 // True when capture_mode == "all"
-	failover         *FailoverController  // Session-aware failover controller
-	trustedTagRegexs []*regexp.Regexp     // Pre-compiled regexes for trusted tag stripping
+	config                  *config.Config
+	store                   session.Store
+	manager                 *session.Manager
+	router                  *router.Router
+	telemetry               *telemetry.Provider
+	policy                  *policy.Engine
+	storage                 *storage.SQLiteStore  // For persisting flagged sessions immediately
+	wsHandler               WebSocketHandler      // WebSocket proxy handler
+	captureBuffer           *CaptureBuffer        // For capture-all mode (policy-independent)
+	captureAll              bool                  // True when capture_mode == "all"
+	failover                *FailoverController   // Session-aware failover controller
+	trustedTagRegexs        []*regexp.Regexp      // Pre-compiled regexes for trusted tag stripping
+	instructionRegistry     *instruction.Registry // Instruction file integrity registry
+	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 }
 
 // ProxyOption configures a Proxy.
@@ -83,6 +86,11 @@ func WithPolicyEngine(pe *policy.Engine) ProxyOption {
 // WithRouter sets a custom router (overrides config-derived routing).
 func WithRouter(r *router.Router) ProxyOption {
 	return func(p *Proxy) { p.router = r }
+}
+
+// WithInstructionRegistry sets the instruction file integrity registry.
+func WithInstructionRegistry(reg *instruction.Registry) ProxyOption {
+	return func(p *Proxy) { p.instructionRegistry = reg }
 }
 
 // New creates a new proxy handler with the given options.
@@ -123,8 +131,13 @@ func New(cfg *config.Config, store session.Store, manager *session.Manager, opts
 
 	// Pre-compile trusted tag regex patterns (avoids re-compilation per request)
 	for _, tag := range cfg.Policy.Trust.TrustedTags {
+		// For stripping (no capture group) — used by policy engine
 		pattern := fmt.Sprintf(`(?s)<%s>.*?</%s>`, regexp.QuoteMeta(tag), regexp.QuoteMeta(tag))
 		p.trustedTagRegexs = append(p.trustedTagRegexs, regexp.MustCompile(pattern))
+
+		// For extraction (with capture group) — used by instruction integrity check
+		extractPattern := fmt.Sprintf(`(?s)<%s>(.*?)</%s>`, regexp.QuoteMeta(tag), regexp.QuoteMeta(tag))
+		p.trustedTagExtractRegexs = append(p.trustedTagExtractRegexs, regexp.MustCompile(extractPattern))
 	}
 
 	// Initialize capture-all buffer when storage is enabled with capture_mode="all"
@@ -355,6 +368,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"delay_ms", delayMs,
 			)
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		}
+	}
+
+	// Instruction file integrity check — runs BEFORE policy scanning
+	// Extracts instruction files from trusted tag content (which policy skips)
+	if p.instructionRegistry != nil && len(requestBody) > 0 {
+		if files := p.extractInstructionFiles(requestBody); len(files) > 0 {
+			for _, file := range files {
+				result := p.instructionRegistry.Check(sess.ID, file)
+				if result.ShouldBlock {
+					slog.Warn("request blocked by instruction integrity check",
+						"session_id", sess.ID,
+						"hash", file.Hash,
+						"type", file.Type.String(),
+						"violations", len(result.Violations),
+					)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					if _, err := w.Write([]byte(`{"error":"instruction_integrity_violation","message":"Instruction file contains prohibited content"}`)); err != nil {
+						slog.Warn("write failed", "session_id", sess.ID, "error", err)
+					}
+					return
+				}
+			}
 		}
 	}
 
@@ -1742,6 +1779,70 @@ func extractModelFromBody(body []byte) string {
 func hashContent(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h)
+}
+
+// extractTrustedTagContent extracts the content from within trusted XML-style tags
+// using pre-compiled regexes with capture groups. This is separate from the stripping
+// regexes (which have no capture groups) used by the policy engine.
+func extractTrustedTagContent(content string, extractRegexs []*regexp.Regexp) []string {
+	var extracted []string
+	for _, re := range extractRegexs {
+		matches := re.FindAllStringSubmatch(content, -1)
+		for _, match := range matches {
+			if len(match) > 1 && match[1] != "" {
+				extracted = append(extracted, match[1])
+			}
+		}
+	}
+	return extracted
+}
+
+// extractInstructionFiles parses the request body and extracts instruction files
+// from trusted tag content in the system prompt and user messages.
+func (p *Proxy) extractInstructionFiles(body []byte) []*instruction.InstructionFile {
+	var req struct {
+		System   any `json:"system"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil
+	}
+
+	cfg := p.config.Policy.InstructionIntegrity
+	var files []*instruction.InstructionFile
+
+	// Check system prompt
+	if req.System != nil {
+		systemContent := extractMessageContent(req.System)
+		if systemContent != "" {
+			for _, tagContent := range extractTrustedTagContent(systemContent, p.trustedTagExtractRegexs) {
+				if file := instruction.Extract(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold); file != nil {
+					files = append(files, file)
+				}
+			}
+		}
+	}
+
+	// Check user messages
+	for _, msg := range req.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		content := extractMessageContent(msg.Content)
+		if content == "" {
+			continue
+		}
+		for _, tagContent := range extractTrustedTagContent(content, p.trustedTagExtractRegexs) {
+			if file := instruction.Extract(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold); file != nil {
+				files = append(files, file)
+			}
+		}
+	}
+
+	return files
 }
 
 // stripTrustedTags removes content within trusted XML-style tags using
