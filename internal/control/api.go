@@ -124,6 +124,10 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	h.mux.HandleFunc("/control/settings/local", h.handleSettingsLocal)
 	h.mux.HandleFunc("/control/settings/diff", h.handleSettingsDiff)
 
+	// Instruction file integrity
+	h.mux.HandleFunc("/control/instructions", h.handleInstructionFiles)
+	h.mux.HandleFunc("/control/instructions/{hash}", h.handleInstructionFile)
+
 	return h
 }
 
@@ -1717,4 +1721,64 @@ func (h *Handler) handleSettingsDiff(w http.ResponseWriter, r *http.Request) {
 		"modified_count": len(diff),
 		"modifications":  diff,
 	})
+}
+
+// handleInstructionFiles handles GET /control/instructions
+func (h *Handler) handleInstructionFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"files": []interface{}{}, "total": 0})
+		return
+	}
+
+	fileType := r.URL.Query().Get("file_type")
+	scanStatus := r.URL.Query().Get("scan_status")
+
+	files, err := h.historyStore.ListInstructionFiles(fileType, scanStatus)
+	if err != nil {
+		slog.Error("failed to list instruction files", "error", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"files": files,
+		"total": len(files),
+	})
+}
+
+// handleInstructionFile handles GET /control/instructions/{hash}
+func (h *Handler) handleInstructionFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	hash := r.PathValue("hash")
+	if hash == "" {
+		http.Error(w, "Missing hash", http.StatusBadRequest)
+		return
+	}
+
+	if h.historyStore == nil {
+		http.Error(w, "Storage not enabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	file, err := h.historyStore.GetInstructionFile(hash)
+	if err != nil {
+		slog.Error("failed to get instruction file", "error", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if file == nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, file)
 }
