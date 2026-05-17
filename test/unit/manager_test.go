@@ -16,6 +16,7 @@ func TestManager_GetOrCreate(t *testing.T) {
 	sess := manager.GetOrCreate("test-id", "http://backend", "127.0.0.1")
 	if sess == nil {
 		t.Fatal("expected session to be created")
+		return
 	}
 	if sess.ID != "test-id" {
 		t.Errorf("expected ID 'test-id', got %s", sess.ID)
@@ -35,6 +36,7 @@ func TestManager_GetOrCreate_GeneratesID(t *testing.T) {
 	sess := manager.GetOrCreate("", "http://backend", "127.0.0.1")
 	if sess == nil {
 		t.Fatal("expected session to be created")
+		return
 	}
 	if sess.ID == "" {
 		t.Error("expected ID to be generated")
@@ -166,6 +168,7 @@ func TestManager_Resume_AllowsNewRequests(t *testing.T) {
 	resumed := manager.GetOrCreate("resume-flow", "http://backend", "127.0.0.1")
 	if resumed == nil {
 		t.Fatal("expected resumed session to allow requests")
+		return
 	}
 	if resumed.ID != originalID {
 		t.Errorf("expected same session ID after resume, got %s", resumed.ID)
@@ -366,6 +369,7 @@ func TestManager_KillBlock_DurationMode(t *testing.T) {
 	sess := manager.GetOrCreateByClient("192.168.1.1:12345", "default", "http://backend")
 	if sess == nil {
 		t.Fatal("expected session to be created")
+		return
 	}
 	sessionID := sess.ID
 
@@ -401,6 +405,7 @@ func TestManager_KillBlock_PermanentMode(t *testing.T) {
 	sess := manager.GetOrCreateByClient("192.168.1.2:12345", "default", "http://backend")
 	if sess == nil {
 		t.Fatal("expected session to be created")
+		return
 	}
 	sessionID := sess.ID
 
@@ -429,6 +434,7 @@ func TestManager_KillBlock_UntilHourChangeMode(t *testing.T) {
 	sess := manager.GetOrCreateByClient("192.168.1.3:12345", "default", "http://backend")
 	if sess == nil {
 		t.Fatal("expected session to be created")
+		return
 	}
 	sessionID := sess.ID
 
@@ -454,6 +460,7 @@ func TestManager_KillBlock_DifferentClientsNotBlocked(t *testing.T) {
 	sess1 := manager.GetOrCreateByClient("192.168.1.100:12345", "default", "http://backend")
 	if sess1 == nil {
 		t.Fatal("expected session to be created for client 1")
+		return
 	}
 	manager.Kill(sess1.ID)
 

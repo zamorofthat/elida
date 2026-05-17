@@ -70,4 +70,5 @@ credentials/
 # Internal docs
 elida-internal/
 .claude/
+.agents/
 site/

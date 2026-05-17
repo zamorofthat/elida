@@ -135,6 +135,7 @@ func TestVoiceSessionManager_Lifecycle(t *testing.T) {
 	}
 	if vs1 == nil {
 		t.Fatal("expected session to be created")
+		return
 	}
 
 	// Activate it
@@ -345,6 +346,7 @@ func TestSessionControlParser_OpenAIRealtime(t *testing.T) {
 
 			if msg == nil {
 				t.Fatalf("expected message to be parsed")
+				return
 			}
 			if msg.Type != tt.expected {
 				t.Errorf("expected %s, got %s", tt.expected, msg.Type)
@@ -383,6 +385,7 @@ func TestSessionControlParser_Deepgram(t *testing.T) {
 			msg := parser.Parse([]byte(tt.data))
 			if msg == nil {
 				t.Fatalf("expected message to be parsed")
+				return
 			}
 			if msg.Type != tt.expected {
 				t.Errorf("expected %s, got %s", tt.expected, msg.Type)
@@ -417,6 +420,7 @@ func TestSessionControlParser_CustomPatterns(t *testing.T) {
 	msg := parser.Parse([]byte(inviteData))
 	if msg == nil {
 		t.Fatal("expected invite message to be parsed")
+		return
 	}
 	if msg.Type != ws.ControlInvite {
 		t.Errorf("expected ControlInvite, got %s", msg.Type)
@@ -430,6 +434,7 @@ func TestSessionControlParser_CustomPatterns(t *testing.T) {
 	msg = parser.Parse([]byte(byeData))
 	if msg == nil {
 		t.Fatal("expected bye message to be parsed")
+		return
 	}
 	if msg.Type != ws.ControlBye {
 		t.Errorf("expected ControlBye, got %s", msg.Type)
@@ -445,6 +450,7 @@ func TestSessionControlParser_MetadataExtraction(t *testing.T) {
 	msg := parser.Parse([]byte(data))
 	if msg == nil {
 		t.Fatal("expected message to be parsed")
+		return
 	}
 
 	if msg.Metadata["model"] != "gpt-4o-realtime" {
@@ -596,6 +602,7 @@ func TestSessionControlParser_OpenAITranscripts(t *testing.T) {
 			msg := parser.Parse([]byte(tt.data))
 			if msg == nil {
 				t.Fatal("expected message to be parsed")
+				return
 			}
 			if msg.Transcript != tt.expectTranscript {
 				t.Errorf("expected transcript %q, got %q", tt.expectTranscript, msg.Transcript)
@@ -621,6 +628,7 @@ func TestSessionControlParser_DeepgramTranscripts(t *testing.T) {
 	msg := parser.Parse([]byte(finalData))
 	if msg == nil {
 		t.Fatal("expected message to be parsed")
+		return
 	}
 	if msg.Transcript != "Hello world" {
 		t.Errorf("expected transcript 'Hello world', got %q", msg.Transcript)
@@ -637,6 +645,7 @@ func TestSessionControlParser_DeepgramTranscripts(t *testing.T) {
 	msg = parser.Parse([]byte(interimData))
 	if msg == nil {
 		t.Fatal("expected interim message to be parsed")
+		return
 	}
 	if msg.TranscriptFinal {
 		t.Error("expected final=false for interim")
@@ -713,6 +722,7 @@ func TestVoiceSessionManager_PostSessionPolicyScan(t *testing.T) {
 	flagged := engine.GetFlaggedSession("ws-session-1")
 	if flagged == nil {
 		t.Fatal("expected flagged session to exist")
+		return
 	}
 	if len(flagged.CapturedContent) == 0 {
 		t.Error("expected captured content from transcript")

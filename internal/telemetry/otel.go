@@ -551,6 +551,12 @@ const (
 	AttrFrameCount   = "elida.websocket.frame_count"
 	AttrTextFrames   = "elida.websocket.text_frames"
 	AttrBinaryFrames = "elida.websocket.binary_frames"
+
+	// SDR integrity attributes
+	AttrSDRRootHash                = "elida.sdr.root_hash"
+	AttrSDRAlgorithm               = "elida.sdr.algorithm"
+	AttrSDRCanonicalizationVersion = "elida.sdr.canonicalization_version"
+	AttrSDREventCount              = "elida.sdr.event_count"
 )
 
 // Violation represents a policy violation for telemetry export
@@ -599,6 +605,12 @@ type SessionRecord struct {
 	// Token tracking
 	TokensIn  int64
 	TokensOut int64
+
+	// SDR integrity metadata
+	SDRRootHash                string
+	SDRAlgorithm               string
+	SDRCanonicalizationVersion string
+	SDREventCount              int
 }
 
 // StartRequestSpan starts a span for an HTTP request
@@ -702,6 +714,14 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 		attribute.String(AttrViolationSeverity, maxSeverity),
 		attribute.StringSlice(AttrViolationActions, actions),
 		attribute.Int(AttrCaptureCount, record.CaptureCount),
+	}
+	if record.SDRRootHash != "" {
+		attrs = append(attrs,
+			attribute.String(AttrSDRRootHash, record.SDRRootHash),
+			attribute.String(AttrSDRAlgorithm, record.SDRAlgorithm),
+			attribute.String(AttrSDRCanonicalizationVersion, record.SDRCanonicalizationVersion),
+			attribute.Int(AttrSDREventCount, record.SDREventCount),
+		)
 	}
 
 	// Add WebSocket attributes if this is a WebSocket session

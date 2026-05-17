@@ -53,6 +53,7 @@ func TestSQLiteStore_SaveAndGet(t *testing.T) {
 
 	if retrieved == nil {
 		t.Fatal("retrieved session is nil")
+		return
 	}
 
 	if retrieved.ID != record.ID {
@@ -257,6 +258,7 @@ func TestSQLiteStore_SaveAndGetWithCapturedContent(t *testing.T) {
 
 	if retrieved == nil {
 		t.Fatal("retrieved session is nil")
+		return
 	}
 
 	// Verify captured content
@@ -336,6 +338,7 @@ func TestSQLiteStore_SaveAndGetWithViolations(t *testing.T) {
 
 	if retrieved == nil {
 		t.Fatal("retrieved session is nil")
+		return
 	}
 
 	// Verify violations

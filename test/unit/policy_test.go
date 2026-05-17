@@ -48,6 +48,7 @@ func TestStreamingScanner_BasicChunk(t *testing.T) {
 	result = scanner.ScanChunk([]byte("Here is some <script>alert('xss')</script> content"))
 	if result == nil {
 		t.Fatal("expected violation for XSS pattern")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("expected ShouldBlock to be true")
@@ -78,6 +79,7 @@ func TestStreamingScanner_CrossChunkPattern(t *testing.T) {
 	result = scanner.ScanChunk([]byte("ipt>alert('xss')</script>"))
 	if result == nil {
 		t.Fatal("expected violation for cross-chunk pattern")
+		return
 	}
 	if !result.ShouldTerminate {
 		t.Error("expected ShouldTerminate to be true")
@@ -439,6 +441,7 @@ func TestActions_Flag(t *testing.T) {
 	result := engine.EvaluateRequestContent("test-session", "FLAG_ME please")
 	if result == nil {
 		t.Fatal("expected result")
+		return
 	}
 	if result.ShouldBlock {
 		t.Error("flag action should not block")
@@ -464,6 +467,7 @@ func TestActions_Block(t *testing.T) {
 	result := engine.EvaluateRequestContent("test-session", "BLOCK_ME please")
 	if result == nil {
 		t.Fatal("expected result")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("block action should set ShouldBlock")
@@ -489,6 +493,7 @@ func TestActions_Terminate(t *testing.T) {
 	result := engine.EvaluateRequestContent("test-session", "TERMINATE_ME now")
 	if result == nil {
 		t.Fatal("expected result")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("terminate action should also block")
@@ -522,6 +527,7 @@ func TestAuditMode_NoEnforcement(t *testing.T) {
 	result := engine.EvaluateRequestContent("test-session", "SHOULD_BLOCK content")
 	if result == nil {
 		t.Fatal("expected result even in audit mode")
+		return
 	}
 
 	// In audit mode, violations are detected but not enforced
@@ -645,6 +651,7 @@ func TestCaptureContent_FlaggedSessions(t *testing.T) {
 	flagged := engine.GetFlaggedSession(sessionID)
 	if flagged == nil {
 		t.Fatal("expected flagged session")
+		return
 	}
 	if len(flagged.CapturedContent) != 1 {
 		t.Errorf("expected 1 captured request, got %d", len(flagged.CapturedContent))
@@ -681,6 +688,7 @@ func TestUpdateLastCaptureWithResponse(t *testing.T) {
 	flagged := engine.GetFlaggedSession(sessionID)
 	if flagged == nil {
 		t.Fatal("expected flagged session")
+		return
 	}
 	if flagged.CapturedContent[0].ResponseBody != "response body here" {
 		t.Error("response body not captured")
@@ -765,6 +773,7 @@ func TestMultipleViolations(t *testing.T) {
 	result := engine.EvaluateRequestContent("test-session", "PATTERN_A and PATTERN_B both here")
 	if result == nil {
 		t.Fatal("expected result")
+		return
 	}
 	if len(result.Violations) != 2 {
 		t.Errorf("expected 2 violations, got %d", len(result.Violations))
@@ -835,6 +844,7 @@ func TestReloadConfig_SwitchMode(t *testing.T) {
 	result = engine.EvaluateRequestContent("test2", "BLOCKED content")
 	if result == nil {
 		t.Fatal("expected result in audit mode")
+		return
 	}
 	if result.ShouldBlock {
 		t.Error("should not block in audit mode after reload")
@@ -889,6 +899,7 @@ func TestReloadConfig_AddRules(t *testing.T) {
 	result = engine.EvaluateRequestContent("test2", "PATTERN_B content")
 	if result == nil {
 		t.Fatal("expected PATTERN_B to match after reload")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("expected blocking for PATTERN_B")
@@ -1017,6 +1028,7 @@ func TestAddExternalRiskPoints_CreatesSession(t *testing.T) {
 	flagged := engine.GetFlaggedSession("sess-1")
 	if flagged == nil {
 		t.Fatal("expected flagged session to be created")
+		return
 	}
 	if flagged.RiskScore != 10 {
 		t.Errorf("risk score = %f, want 10", flagged.RiskScore)
@@ -1032,6 +1044,7 @@ func TestAddExternalRiskPoints_Accumulates(t *testing.T) {
 	flagged := engine.GetFlaggedSession("sess-1")
 	if flagged == nil {
 		t.Fatal("expected flagged session")
+		return
 	}
 	if flagged.RiskScore != 15 {
 		t.Errorf("risk score = %f, want 15", flagged.RiskScore)
@@ -1046,6 +1059,7 @@ func TestAddExternalRiskPoints_CapsAtMax(t *testing.T) {
 	flagged := engine.GetFlaggedSession("sess-1")
 	if flagged == nil {
 		t.Fatal("expected flagged session")
+		return
 	}
 	if flagged.RiskScore != policy.MaxRiskScore {
 		t.Errorf("risk score = %f, want %f (max)", flagged.RiskScore, policy.MaxRiskScore)
@@ -1082,6 +1096,7 @@ func TestAddExternalRiskPoints_WithRiskLadder(t *testing.T) {
 	flagged := engine.GetFlaggedSession("sess-1")
 	if flagged == nil {
 		t.Fatal("expected flagged session")
+		return
 	}
 	if flagged.CurrentAction != string(policy.ActionBlock) {
 		t.Errorf("action = %s, want block (risk=%f exceeds threshold 15)", flagged.CurrentAction, flagged.RiskScore)
@@ -1408,6 +1423,7 @@ func TestContentEntropy_Base64(t *testing.T) {
 	result := engine.EvaluateRequestContent("entropy-session", encoded)
 	if result == nil {
 		t.Fatal("expected entropy violation for base64 content")
+		return
 	}
 	found := false
 	for _, v := range result.Violations {
@@ -1645,6 +1661,7 @@ func TestContentEntropy_WithSourceAttribution(t *testing.T) {
 	result := engine.EvaluateContentWithSource("entropy-source-test", encoded, "request", source)
 	if result == nil {
 		t.Fatal("expected entropy violation with source attribution")
+		return
 	}
 	found := false
 	for _, v := range result.Violations {
@@ -1687,6 +1704,7 @@ func TestContentEntropy_BlockAction(t *testing.T) {
 	result := engine.EvaluateRequestContent("entropy-block-test", encoded)
 	if result == nil {
 		t.Fatal("expected entropy violation")
+		return
 	}
 	if !result.ShouldBlock {
 		t.Error("expected ShouldBlock=true for block action entropy rule")
@@ -1716,6 +1734,7 @@ func TestContentEntropy_TerminateAction(t *testing.T) {
 	result := engine.EvaluateRequestContent("entropy-term-test", encoded)
 	if result == nil {
 		t.Fatal("expected entropy violation")
+		return
 	}
 	if !result.ShouldTerminate {
 		t.Error("expected ShouldTerminate=true for terminate action entropy rule")
@@ -1750,6 +1769,7 @@ func TestStreamingScanner_EntropyOnFinalize(t *testing.T) {
 	result := scanner.Finalize()
 	if result == nil {
 		t.Fatal("expected entropy violation from streaming finalize")
+		return
 	}
 	found := false
 	for _, v := range result.Violations {
