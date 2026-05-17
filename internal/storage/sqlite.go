@@ -276,15 +276,9 @@ func (s *SQLiteStore) migrate() error {
 		return fmt.Errorf("instruction_files migration: %w", err)
 	}
 
-	// Add instruction columns to sessions table (idempotent)
-	sessionCols := []struct{ name, typ string }{
-		{"instruction_hash", "TEXT"},
-		{"instruction_file_type", "TEXT"},
-	}
-	for _, col := range sessionCols {
-		_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE sessions ADD COLUMN %s %s", col.name, col.typ))
-		// Ignore error — column already exists on subsequent runs
-	}
+	// Add instruction columns to sessions table (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN instruction_hash TEXT")
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN instruction_file_type TEXT")
 
 	return nil
 }
