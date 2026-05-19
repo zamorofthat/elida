@@ -19,6 +19,7 @@ import (
 	"elida/internal/config"
 	"elida/internal/instruction"
 	"elida/internal/policy"
+	"elida/internal/redaction"
 	"elida/internal/router"
 	"elida/internal/session"
 	"elida/internal/storage"
@@ -68,6 +69,7 @@ type Proxy struct {
 	trustedTagRegexs        []*regexp.Regexp      // Pre-compiled regexes for trusted tag stripping
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
+	redactor                redaction.Redactor    // Redaction provider for sensitive data
 }
 
 // ProxyOption configures a Proxy.
@@ -91,6 +93,11 @@ func WithRouter(r *router.Router) ProxyOption {
 // WithInstructionRegistry sets the instruction file integrity registry.
 func WithInstructionRegistry(reg *instruction.Registry) ProxyOption {
 	return func(p *Proxy) { p.instructionRegistry = reg }
+}
+
+// WithRedactor sets the redaction provider.
+func WithRedactor(r redaction.Redactor) ProxyOption {
+	return func(p *Proxy) { p.redactor = r }
 }
 
 // New creates a new proxy handler with the given options.
@@ -549,6 +556,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ResponseBytes: bytesOut,
 				DurationMs:    time.Since(startTime).Milliseconds(),
 				StatusCode:    statusCode,
+			}
+
+			if p.redactor != nil {
+				ttsRecord.Text = p.redactor.Redact(ttsRecord.Text)
 			}
 
 			if err := p.storage.SaveTTSRequest(ttsRecord); err != nil {
@@ -1591,6 +1602,17 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
 		})
+	}
+
+	// Redact sensitive data before persistence
+	if p.redactor != nil {
+		for i := range record.CapturedContent {
+			record.CapturedContent[i].RequestBody = p.redactor.Redact(record.CapturedContent[i].RequestBody)
+			record.CapturedContent[i].ResponseBody = p.redactor.Redact(record.CapturedContent[i].ResponseBody)
+		}
+		for i := range record.Violations {
+			record.Violations[i].MatchedText = p.redactor.Redact(record.Violations[i].MatchedText)
+		}
 	}
 
 	// Save to storage (upserts if exists)

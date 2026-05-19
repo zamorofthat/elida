@@ -304,6 +304,7 @@ func (a *app) initSessionEndCallback() {
 
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
+		a.redactRecord(&record)
 		a.scoreFingerprint(&snap)
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
@@ -361,6 +362,21 @@ func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessi
 			ResponseBody: c.ResponseBody,
 			StatusCode:   c.StatusCode,
 		})
+	}
+}
+
+// redactRecord applies redaction to all sensitive fields in a session record
+// before persistence. Must be called after enrichment, before SQLite write.
+func (a *app) redactRecord(record *storage.SessionRecord) {
+	if a.redactor == nil {
+		return
+	}
+	for i := range record.CapturedContent {
+		record.CapturedContent[i].RequestBody = a.redactor.Redact(record.CapturedContent[i].RequestBody)
+		record.CapturedContent[i].ResponseBody = a.redactor.Redact(record.CapturedContent[i].ResponseBody)
+	}
+	for i := range record.Violations {
+		record.Violations[i].MatchedText = a.redactor.Redact(record.Violations[i].MatchedText)
 	}
 }
 
@@ -683,6 +699,9 @@ func (a *app) initProxy() {
 	if a.instructionRegistry != nil {
 		proxyOpts = append(proxyOpts, proxy.WithInstructionRegistry(a.instructionRegistry))
 	}
+	if a.redactor != nil {
+		proxyOpts = append(proxyOpts, proxy.WithRedactor(a.redactor))
+	}
 	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
 		slog.Error("failed to create proxy", "error", err)
@@ -751,6 +770,12 @@ func (a *app) initWebSocket() {
 						IsFinal:   t.IsFinal,
 						Source:    t.Source,
 					})
+				}
+
+				if a.redactor != nil {
+					for i := range record.Transcript {
+						record.Transcript[i].Text = a.redactor.Redact(record.Transcript[i].Text)
+					}
 				}
 
 				if err := a.sqliteStore.SaveVoiceSession(record); err != nil {
