@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// Redactor redacts sensitive content before persistence.
+type Redactor interface {
+	Redact(content string) string
+}
+
 // Store is the storage interface the registry needs.
 type Store interface {
 	GetInstructionFile(hash string) (*Record, error)
@@ -38,8 +43,9 @@ type asyncJob struct {
 
 // Registry is the in-memory hash registry with inline scanning and async persistence.
 type Registry struct {
-	scanner *Scanner
-	store   Store
+	scanner  *Scanner
+	store    Store
+	redactor Redactor
 
 	mu      sync.RWMutex
 	entries map[string]*registryEntry
@@ -62,6 +68,11 @@ func NewRegistry(scanner *Scanner, store Store, queueSize int) *Registry {
 	}
 	go r.worker()
 	return r
+}
+
+// SetRedactor sets the redactor for content persistence.
+func (r *Registry) SetRedactor(red Redactor) {
+	r.redactor = red
 }
 
 // Stop shuts down the async worker.
@@ -161,12 +172,17 @@ func (r *Registry) processJob(job asyncJob) {
 		}
 	}
 
+	content := file.Content
+	if r.redactor != nil {
+		content = r.redactor.Redact(content)
+	}
+
 	record := Record{
 		Hash:         file.Hash,
 		FileType:     file.Type.String(),
 		Confidence:   string(file.Confidence),
 		SourcePath:   file.SourcePath,
-		Content:      file.Content,
+		Content:      content,
 		ScanStatus:   status,
 		ScanResults:  job.result.Violations,
 		FirstSeen:    now,

@@ -679,6 +679,9 @@ func (a *app) initInstructionIntegrity() {
 
 	adapter := instructionstore.NewSQLiteAdapter(a.sqliteStore)
 	a.instructionRegistry = instruction.NewRegistry(scanner, adapter, iiCfg.AsyncQueueSize)
+	if a.redactor != nil {
+		a.instructionRegistry.SetRedactor(a.redactor)
+	}
 
 	slog.Info("instruction integrity enabled",
 		"tracked_types", iiCfg.TrackedTypes,
