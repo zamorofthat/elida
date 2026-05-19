@@ -103,3 +103,27 @@ func TestValidateSecurityConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultConfigSecurityDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Control binds to localhost
+	if cfg.Control.Listen != "127.0.0.1:9090" {
+		t.Errorf("control.listen = %q, want %q", cfg.Control.Listen, "127.0.0.1:9090")
+	}
+
+	// Redaction enabled by default
+	if !cfg.Storage.Redaction.Enabled {
+		t.Error("storage.redaction.enabled should be true by default")
+	}
+
+	// AllowInsecure defaults to false
+	if cfg.Control.Auth.AllowInsecure {
+		t.Error("control.auth.allow_insecure should be false by default")
+	}
+
+	// Security validation passes with defaults
+	if err := ValidateSecurityConfig(cfg); err != nil {
+		t.Errorf("default config should pass security validation: %v", err)
+	}
+}

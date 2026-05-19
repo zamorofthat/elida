@@ -387,7 +387,7 @@ func defaults() *Config {
 			},
 		},
 		Control: ControlConfig{
-			Listen:  ":9090",
+			Listen:  "127.0.0.1:9090",
 			Enabled: true,
 		},
 		Logging: LoggingConfig{
@@ -408,6 +408,7 @@ func defaults() *Config {
 			CaptureMode:           "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
 			MaxCaptureSize:        10000,          // 10KB per body
 			MaxCapturedPerSession: 100,            // Max 100 request/response pairs per session
+			Redaction:             RedactionConfig{Enabled: true},
 		},
 		OCSF: OCSFConfig{
 			Enabled: false,
