@@ -28,6 +28,7 @@ import (
 	"elida/internal/instructionstore"
 	"elida/internal/policy"
 	"elida/internal/proxy"
+	"elida/internal/redaction"
 	"elida/internal/session"
 	"elida/internal/storage"
 	"elida/internal/telemetry"
@@ -55,6 +56,7 @@ type app struct {
 	tp                  *telemetry.Provider
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
+	redactor            *redaction.PatternRedactor
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -117,6 +119,7 @@ func main() {
 
 	a.initSessionStore()
 	a.initSQLiteStorage()
+	a.initRedactor()
 	a.initFingerprint()
 	a.initSessionEndCallback()
 	a.initOCSF()
@@ -215,6 +218,30 @@ func (a *app) initSQLiteStorage() {
 		os.Exit(1)
 	}
 	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
+}
+
+func (a *app) initRedactor() {
+	rcfg := redaction.Config{
+		Enabled: a.cfg.Storage.Redaction.Enabled,
+	}
+	for _, p := range a.cfg.Storage.Redaction.CustomPatterns {
+		rcfg.CustomPatterns = append(rcfg.CustomPatterns, redaction.PatternConfig{
+			Name:        p.Name,
+			Pattern:     p.Pattern,
+			Replacement: p.Replacement,
+		})
+	}
+
+	r, err := redaction.NewFromConfig(rcfg)
+	if err != nil {
+		slog.Error("failed to create redactor", "error", err)
+		os.Exit(1)
+	}
+	a.redactor = r
+
+	if a.cfg.Storage.Redaction.Enabled {
+		slog.Info("redaction enabled", "patterns", len(redaction.DefaultPatterns())+len(a.cfg.Storage.Redaction.CustomPatterns))
+	}
 }
 
 func (a *app) initFingerprint() {
