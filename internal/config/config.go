@@ -689,6 +689,9 @@ func (c *Config) applyEnvOverrides() {
 		c.Control.Auth.APIKey = v
 		c.Control.Auth.Enabled = true // Auto-enable if key is set
 	}
+	if os.Getenv("ELIDA_CONTROL_AUTH_ALLOW_INSECURE") == "true" {
+		c.Control.Auth.AllowInsecure = true
+	}
 
 	// Proxy auth overrides
 	if os.Getenv("ELIDA_PROXY_AUTH_ENABLED") == "true" {
