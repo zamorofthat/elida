@@ -101,6 +101,11 @@ func main() {
 
 	a := &app{cfg: cfg, configPath: *configPath}
 
+	if err := config.ValidateSecurityConfig(cfg); err != nil {
+		slog.Error("security configuration error", "error", err)
+		os.Exit(1)
+	}
+
 	initLogging(cfg)
 
 	slog.Info("starting ELIDA",
