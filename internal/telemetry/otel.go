@@ -46,6 +46,7 @@ type Provider struct {
 	meterProvider *sdkmetric.MeterProvider
 	meter         metric.Meter
 	ocsfEmitter   *OCSFEmitter
+	redactor      contentRedactor
 	// GenAI metrics instruments
 	tokenUsage        metric.Int64Histogram
 	operationDuration metric.Float64Histogram
@@ -252,6 +253,12 @@ func (p *Provider) SetOCSFEmitter(e *OCSFEmitter) {
 	p.ocsfEmitter = e
 }
 
+// SetRedactor attaches a redactor that will be applied to content-bearing
+// span attributes and log record fields before they are exported.
+func (p *Provider) SetRedactor(r contentRedactor) {
+	p.redactor = r
+}
+
 // Tracer returns the tracer for creating spans
 func (p *Provider) Tracer() trace.Tracer {
 	return p.tracer
@@ -333,7 +340,7 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		// ELIDA-specific
 		otellog.String("elida.violation.rule", v.RuleName),
 		otellog.String("elida.violation.severity", v.Severity),
-		otellog.String("elida.violation.matched_text", truncateBody(v.MatchedText, 200)),
+		otellog.String("elida.violation.matched_text", truncateBody(p.redact(v.MatchedText), 200)),
 		otellog.String("elida.violation.action", v.Action),
 		otellog.String("elida.violation.description", v.Description),
 	)
@@ -381,7 +388,7 @@ func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matche
 			otellog.String("gen_ai.operation.name", "chat"),
 			otellog.String("gen_ai.request.model", model),
 			otellog.String("elida.violation.rule", ruleName),
-			otellog.String("elida.violation.matched_text", truncateBody(matchedText, 200)),
+			otellog.String("elida.violation.matched_text", truncateBody(p.redact(matchedText), 200)),
 			otellog.String("elida.violation.action", "block"),
 		)
 
@@ -391,7 +398,7 @@ func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matche
 
 	// Emit OCSF Detection Finding for block event
 	if p.ocsfEmitter != nil {
-		bd := BuildBlockDetection(sessionID, ruleName, matchedText, backend, model)
+		bd := BuildBlockDetection(sessionID, ruleName, p.redact(matchedText), backend, model)
 		p.ocsfEmitter.Emit(ctx, OCSFClassDetectionFinding, bd.SeverityID, bd)
 	}
 }
@@ -451,8 +458,8 @@ func (p *Provider) emitContentRecord(ctx context.Context, sessionID, requestBody
 		otellog.String("gen_ai.provider.name", providerName),
 		otellog.String("gen_ai.operation.name", "chat"),
 		otellog.String("gen_ai.request.model", model),
-		otellog.String("elida.capture.request_body", truncateBody(requestBody, maxSize)),
-		otellog.String("elida.capture.response_body", truncateBody(responseBody, maxSize)),
+		otellog.String("elida.capture.request_body", truncateBody(p.redact(requestBody), maxSize)),
+		otellog.String("elida.capture.response_body", truncateBody(p.redact(responseBody), maxSize)),
 		otellog.Bool("elida.capture.flagged", flagged),
 	)
 
@@ -513,6 +520,15 @@ func setTraceContext(rec *otellog.Record, ctx context.Context) {
 	if spanCtx.HasSpanID() {
 		rec.AddAttributes(otellog.String("span_id", spanCtx.SpanID().String()))
 	}
+}
+
+// redact applies the provider's redactor to s, or returns s unchanged if no
+// redactor is set.
+func (p *Provider) redact(s string) string {
+	if p.redactor == nil {
+		return s
+	}
+	return p.redactor.Redact(s)
 }
 
 // truncateBody truncates a string to maxLen bytes
@@ -747,7 +763,7 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 				attribute.String("rule_name", v.RuleName),
 				attribute.String("description", v.Description),
 				attribute.String("severity", v.Severity),
-				attribute.String("matched_text", v.MatchedText),
+				attribute.String("matched_text", p.redact(v.MatchedText)),
 				attribute.String("action", v.Action),
 			),
 		)
@@ -761,8 +777,8 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 				attribute.String("capture.timestamp", c.Timestamp),
 				attribute.String("capture.method", c.Method),
 				attribute.String("capture.path", c.Path),
-				attribute.String("capture.request_body", c.RequestBody),
-				attribute.String("capture.response_body", c.ResponseBody),
+				attribute.String("capture.request_body", p.redact(c.RequestBody)),
+				attribute.String("capture.response_body", p.redact(c.ResponseBody)),
 				attribute.Int("capture.status_code", c.StatusCode),
 			),
 		)

@@ -603,6 +603,14 @@ func (a *app) initTelemetry() {
 	if a.tp != nil && a.ocsfEmitter != nil {
 		a.tp.SetOCSFEmitter(a.ocsfEmitter)
 	}
+
+	// Wire redactor into OCSF emitter and OTEL provider
+	if a.ocsfEmitter != nil && a.redactor != nil {
+		a.ocsfEmitter.SetRedactor(a.redactor)
+	}
+	if a.tp != nil && a.redactor != nil {
+		a.tp.SetRedactor(a.redactor)
+	}
 }
 
 func (a *app) initPolicyEngine() {
