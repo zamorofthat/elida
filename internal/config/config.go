@@ -263,8 +263,9 @@ type ControlConfig struct {
 
 // ControlAuthConfig holds control API authentication settings
 type ControlAuthConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	APIKey  string `yaml:"api_key"` // API key for Bearer token auth
+	Enabled       bool   `yaml:"enabled"`
+	APIKey        string `yaml:"api_key"`        // API key for Bearer token auth
+	AllowInsecure bool   `yaml:"allow_insecure"` // Allow non-loopback without auth
 }
 
 // LoggingConfig holds logging configuration
