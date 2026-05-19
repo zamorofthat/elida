@@ -47,7 +47,11 @@ spec:
             - name: ELIDA_LISTEN
               value: ":{{ .Values.elida.listenPort }}"
             - name: ELIDA_CONTROL_LISTEN
-              value: ":{{ .Values.elida.controlPort }}"
+              value: {{ .Values.elida.controlListen | quote }}
+            {{- if .Values.elida.controlAuth.enabled }}
+            - name: ELIDA_CONTROL_AUTH_API_KEY
+              value: {{ .Values.elida.controlAuth.apiKey | quote }}
+            {{- end }}
             {{- if .Values.redis.enabled }}
             - name: ELIDA_SESSION_STORE
               value: redis
