@@ -55,9 +55,22 @@ type OCSFNozzle interface {
 	Close() error
 }
 
+// contentRedactor is a local interface so the telemetry package does not
+// import elida/internal/redaction (avoids potential import cycles).
+type contentRedactor interface {
+	Redact(string) string
+}
+
 // OCSFEmitter fans out OCSF events to all enabled nozzles.
 type OCSFEmitter struct {
-	nozzles []OCSFNozzle
+	nozzles  []OCSFNozzle
+	redactor contentRedactor
+}
+
+// SetRedactor attaches a redactor that will be applied to the JSON payload
+// of every OCSF event before it is sent to nozzles.
+func (e *OCSFEmitter) SetRedactor(r contentRedactor) {
+	e.redactor = r
 }
 
 // NewOCSFEmitter creates an emitter from config, initializing enabled nozzles.
@@ -106,6 +119,11 @@ func (e *OCSFEmitter) Emit(ctx context.Context, classUID int, severityID int, ev
 	if err != nil {
 		slog.Warn("OCSF marshal failed", "class_uid", classUID, "error", err)
 		return
+	}
+
+	// Redact the serialized JSON payload so sensitive data never reaches nozzles.
+	if e.redactor != nil {
+		data = []byte(e.redactor.Redact(string(data)))
 	}
 
 	for _, n := range e.nozzles {

@@ -146,3 +146,36 @@ func TestRegistryAsyncPersists(t *testing.T) {
 		t.Errorf("scan_status = %q, want %q", got.ScanStatus, "clean")
 	}
 }
+
+func TestRegistryRedactsContent(t *testing.T) {
+	store := newMockStore()
+	scanner, _ := NewScanner(nil)
+
+	mockRedactor := &testRedactor{}
+	reg := NewRegistry(scanner, store, 10)
+	reg.SetRedactor(mockRedactor)
+	defer reg.Stop()
+
+	file := &InstructionFile{
+		Type: FileTypeClaudeMD, Content: "API key: sk-ant-1234567890abcdef1234567890",
+		Hash: "redact1", Confidence: ConfidenceHigh,
+	}
+	reg.Check("session-1", file)
+
+	time.Sleep(100 * time.Millisecond)
+
+	got := store.get("redact1")
+	if got == nil {
+		t.Fatal("expected persisted record")
+		return
+	}
+	if got.Content == "API key: sk-ant-1234567890abcdef1234567890" {
+		t.Error("content should be redacted before persistence")
+	}
+}
+
+type testRedactor struct{}
+
+func (r *testRedactor) Redact(s string) string {
+	return "[REDACTED]"
+}

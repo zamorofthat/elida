@@ -263,8 +263,9 @@ type ControlConfig struct {
 
 // ControlAuthConfig holds control API authentication settings
 type ControlAuthConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	APIKey  string `yaml:"api_key"` // API key for Bearer token auth
+	Enabled       bool   `yaml:"enabled"`
+	APIKey        string `yaml:"api_key"`        // API key for Bearer token auth
+	AllowInsecure bool   `yaml:"allow_insecure"` // Allow non-loopback without auth
 }
 
 // LoggingConfig holds logging configuration
@@ -386,7 +387,7 @@ func defaults() *Config {
 			},
 		},
 		Control: ControlConfig{
-			Listen:  ":9090",
+			Listen:  "127.0.0.1:9090",
 			Enabled: true,
 		},
 		Logging: LoggingConfig{
@@ -407,6 +408,7 @@ func defaults() *Config {
 			CaptureMode:           "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
 			MaxCaptureSize:        10000,          // 10KB per body
 			MaxCapturedPerSession: 100,            // Max 100 request/response pairs per session
+			Redaction:             RedactionConfig{Enabled: true},
 		},
 		OCSF: OCSFConfig{
 			Enabled: false,
@@ -437,6 +439,15 @@ func defaults() *Config {
 			Enabled:        false,
 			CaptureContent: true,
 			MaxCaptureSize: 10000, // 10KB per request
+			RiskLadder: RiskLadderConfig{
+				Enabled: true,
+				Thresholds: []RiskThresholdConfig{
+					{Score: 5, Action: "warn"},
+					{Score: 15, Action: "throttle", ThrottleRate: 10},
+					{Score: 30, Action: "block"},
+					{Score: 50, Action: "terminate"},
+				},
+			},
 			Streaming: StreamingConfig{
 				Mode:          "chunked", // Low latency by default
 				OverlapSize:   1024,      // 1KB overlap for cross-chunk patterns
@@ -455,7 +466,7 @@ func defaults() *Config {
 				ShapeConfidenceThreshold: 0.7,
 				AsyncQueueSize:           100,
 				Rules: []InstructionRuleConfig{
-					{Name: "instruction_shell_exec", Patterns: []string{`curl.*\|\s*(ba)?sh`, `wget.*\|\s*(ba)?sh`, `eval\s*\(`, `exec\s*\(`}, Severity: "critical", Action: "block"},
+					{Name: "instruction_shell_exec", Patterns: []string{`curl\s+[^|]*\|\s*(ba)?sh`, `wget\s+[^|]*\|\s*(ba)?sh`, `eval\s*\(`, `exec\s*\(`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_prompt_injection", Patterns: []string{`ignore\s+(all\s+)?previous`, `you\s+are\s+now`, `disregard`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_permission_escalation", Patterns: []string{`always\s+approve`, `never\s+ask.*confirmation`, `auto.?accept`}, Severity: "high", Action: "flag"},
 					{Name: "instruction_hidden_content", Patterns: []string{"[\\x{200B}-\\x{200F}]", "[\\x{202A}-\\x{202E}]"}, Severity: "critical", Action: "block"},
@@ -686,6 +697,9 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_CONTROL_API_KEY"); v != "" {
 		c.Control.Auth.APIKey = v
 		c.Control.Auth.Enabled = true // Auto-enable if key is set
+	}
+	if os.Getenv("ELIDA_CONTROL_AUTH_ALLOW_INSECURE") == "true" {
+		c.Control.Auth.AllowInsecure = true
 	}
 
 	// Proxy auth overrides
@@ -986,6 +1000,39 @@ func (c *Config) ApplyPolicyPreset() {
 
 	// Prepend preset rules, keeping any custom rules from config
 	c.Policy.Rules = append(presetRules, c.Policy.Rules...)
+
+	// Generate rules from circuit breaker config (if enabled)
+	if c.Policy.CircuitBreaker.Enabled {
+		cb := c.Policy.CircuitBreaker
+		if cb.TokensPerMinute > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_tokens_per_min", Type: "tokens_per_minute",
+				Threshold: cb.TokensPerMinute, Severity: "critical", Action: "block",
+				Description: "Circuit breaker: token rate exceeded",
+			})
+		}
+		if cb.MaxTokensPerSession > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_max_tokens", Type: "tokens_total",
+				Threshold: cb.MaxTokensPerSession, Severity: "critical", Action: "block",
+				Description: "Circuit breaker: session token budget exceeded",
+			})
+		}
+		if cb.MaxToolCalls > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_tool_calls", Type: "tool_call_count",
+				Threshold: int64(cb.MaxToolCalls), Severity: "critical", Action: "block",
+				Description: "Circuit breaker: tool call limit exceeded",
+			})
+		}
+		if cb.MaxToolFanout > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_tool_fanout", Type: "tool_fanout",
+				Threshold: int64(cb.MaxToolFanout), Severity: "warning", Action: "flag",
+				Description: "Circuit breaker: distinct tool limit exceeded",
+			})
+		}
+	}
 }
 
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
@@ -1102,13 +1149,13 @@ func getStandardPreset() []PolicyRule {
 			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
 		}, Severity: "warning", Action: "flag", Description: "LLM08: Privilege escalation pattern in request"},
 		{Name: "network_exfiltration", Type: "content_match", Target: "response", Patterns: []string{
-			"curl.*\\|\\s*(ba)?sh",
-			"wget.*\\|\\s*(ba)?sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
+			"wget\\s+[^|]*\\|\\s*(ba)?sh",
 			"reverse\\s+shell",
 		}, Severity: "critical", Action: "block", Description: "LLM08: Data exfiltration attempt (response)"},
 		{Name: "network_exfiltration_request", Type: "content_match", Target: "request", Patterns: []string{
-			"curl.*\\|\\s*(ba)?sh",
-			"wget.*\\|\\s*(ba)?sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
+			"wget\\s+[^|]*\\|\\s*(ba)?sh",
 			"reverse\\s+shell",
 		}, Severity: "warning", Action: "flag", Description: "LLM08: Data exfiltration pattern in request"},
 
@@ -1140,7 +1187,7 @@ func getStandardPreset() []PolicyRule {
 		{Name: "dangerous_tool_arguments", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
 			"rm\\s+-rf",
 			"chmod\\s+777",
-			"curl.*\\|.*sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 		}, Severity: "critical", Action: "terminate", Description: "LLM08: Dangerous patterns in tool arguments"},
 	}
 }
@@ -1389,7 +1436,7 @@ func getMCPPreset() []PolicyRule {
 		{Name: "mcp_dangerous_tool_args", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
 			"rm\\s+-rf",
 			"chmod\\s+777",
-			"curl.*\\|.*sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 			"DROP\\s+TABLE",
 			";\\.*(rm|del|format|shutdown)",
 		}, Severity: "critical", Action: "terminate", Description: "MCP: Dangerous patterns in tool call arguments"},
