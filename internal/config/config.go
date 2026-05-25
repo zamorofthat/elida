@@ -439,6 +439,15 @@ func defaults() *Config {
 			Enabled:        false,
 			CaptureContent: true,
 			MaxCaptureSize: 10000, // 10KB per request
+			RiskLadder: RiskLadderConfig{
+				Enabled: true,
+				Thresholds: []RiskThresholdConfig{
+					{Score: 5, Action: "warn"},
+					{Score: 15, Action: "throttle", ThrottleRate: 10},
+					{Score: 30, Action: "block"},
+					{Score: 50, Action: "terminate"},
+				},
+			},
 			Streaming: StreamingConfig{
 				Mode:          "chunked", // Low latency by default
 				OverlapSize:   1024,      // 1KB overlap for cross-chunk patterns
