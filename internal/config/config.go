@@ -1000,6 +1000,39 @@ func (c *Config) ApplyPolicyPreset() {
 
 	// Prepend preset rules, keeping any custom rules from config
 	c.Policy.Rules = append(presetRules, c.Policy.Rules...)
+
+	// Generate rules from circuit breaker config (if enabled)
+	if c.Policy.CircuitBreaker.Enabled {
+		cb := c.Policy.CircuitBreaker
+		if cb.TokensPerMinute > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_tokens_per_min", Type: "tokens_per_minute",
+				Threshold: cb.TokensPerMinute, Severity: "critical", Action: "block",
+				Description: "Circuit breaker: token rate exceeded",
+			})
+		}
+		if cb.MaxTokensPerSession > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_max_tokens", Type: "tokens_total",
+				Threshold: cb.MaxTokensPerSession, Severity: "critical", Action: "block",
+				Description: "Circuit breaker: session token budget exceeded",
+			})
+		}
+		if cb.MaxToolCalls > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_tool_calls", Type: "tool_call_count",
+				Threshold: int64(cb.MaxToolCalls), Severity: "critical", Action: "block",
+				Description: "Circuit breaker: tool call limit exceeded",
+			})
+		}
+		if cb.MaxToolFanout > 0 {
+			c.Policy.Rules = append(c.Policy.Rules, PolicyRule{
+				Name: "circuit_breaker_tool_fanout", Type: "tool_fanout",
+				Threshold: int64(cb.MaxToolFanout), Severity: "warning", Action: "flag",
+				Description: "Circuit breaker: distinct tool limit exceeded",
+			})
+		}
+	}
 }
 
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
