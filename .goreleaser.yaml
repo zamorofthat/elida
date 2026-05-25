@@ -27,15 +27,22 @@ builds:
         goarch: arm64
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
     files:
       - README.md
       - LICENSE
       - configs/elida.yaml
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+sboms:
+  - artifacts: archive
+    documents:
+      - "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.sbom.json"
 
 checksum:
   name_template: checksums.txt
