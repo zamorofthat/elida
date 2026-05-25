@@ -28,8 +28,13 @@ data:
         duration: {{ .Values.elida.session.killBlock.duration }}
 
     control:
-      listen: ":{{ .Values.elida.controlPort }}"
+      listen: {{ .Values.elida.controlListen | quote }}
       enabled: true
+      {{- if .Values.elida.controlAuth.enabled }}
+      auth:
+        api_key: {{ .Values.elida.controlAuth.apiKey | quote }}
+        allow_insecure: {{ .Values.elida.controlAuth.allowInsecure }}
+      {{- end }}
 
     logging:
       format: json
@@ -44,6 +49,8 @@ data:
     storage:
       enabled: {{ .Values.elida.storage.enabled }}
       path: {{ .Values.elida.storage.path | quote }}
+      redaction:
+        enabled: {{ .Values.elida.storage.redaction.enabled }}
 
     policy:
       enabled: {{ .Values.elida.policy.enabled }}

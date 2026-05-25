@@ -75,7 +75,7 @@ session:
 # Control API configuration
 control:
   # Address for the control API
-  listen: ":9090"
+  listen: "127.0.0.1:9090"
   # Enable the control API
   enabled: true
   # Authentication for control API (recommended for production)
@@ -176,6 +176,9 @@ storage:
   # Max request/response pairs to capture per session (default 100)
   # Once reached, new captures for that session are dropped
   max_captured_per_session: 100
+  # Redaction: scrub PII/secrets from captured bodies before storage
+  redaction:
+    enabled: true
 
 # Policy configuration (for flagging suspicious sessions)
 # Based on OWASP LLM Top 10, NIST AI RMF, and OWASP API Security

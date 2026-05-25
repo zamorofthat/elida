@@ -6,6 +6,29 @@ import { IconX } from './shared/Icons'
 import { SessionTurns } from './SessionTurns'
 
 // ---------------------------------------------------------------------------
+// Expandable matched text for policy violations
+// ---------------------------------------------------------------------------
+
+function ExpandableMatch({ text }) {
+  const [expanded, setExpanded] = useState(false)
+  const isLong = text.length > 80
+
+  return (
+    <div
+      class={`detail-violation-match ${isLong ? 'expandable' : ''}`}
+      onClick={isLong ? () => setExpanded(!expanded) : undefined}
+    >
+      <code class={expanded ? 'expanded' : ''}>
+        {expanded || !isLong ? text : text.slice(0, 80) + '…'}
+      </code>
+      {isLong && (
+        <span class="expand-hint">{expanded ? '▲ collapse' : '▼ expand'}</span>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Behavior Radar — 7-axis radar chart of behavioral features
 // ---------------------------------------------------------------------------
 
@@ -456,9 +479,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
                     </div>
                     <div class="detail-violation-desc">{v.description}</div>
                     {v.matched_text && (
-                      <div class="detail-violation-match">
-                        <code>{v.matched_text}</code>
-                      </div>
+                      <ExpandableMatch text={v.matched_text} />
                     )}
                     {v.framework_ref && (
                       <span class="detail-violation-ref">{v.framework_ref}</span>

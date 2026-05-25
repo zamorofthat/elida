@@ -28,6 +28,7 @@ import (
 	"elida/internal/instructionstore"
 	"elida/internal/policy"
 	"elida/internal/proxy"
+	"elida/internal/redaction"
 	"elida/internal/session"
 	"elida/internal/storage"
 	"elida/internal/telemetry"
@@ -55,6 +56,7 @@ type app struct {
 	tp                  *telemetry.Provider
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
+	redactor            *redaction.PatternRedactor
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -101,6 +103,11 @@ func main() {
 
 	a := &app{cfg: cfg, configPath: *configPath}
 
+	if err := config.ValidateSecurityConfig(cfg); err != nil {
+		slog.Error("security configuration error", "error", err)
+		os.Exit(1)
+	}
+
 	initLogging(cfg)
 
 	slog.Info("starting ELIDA",
@@ -112,6 +119,7 @@ func main() {
 
 	a.initSessionStore()
 	a.initSQLiteStorage()
+	a.initRedactor()
 	a.initFingerprint()
 	a.initSessionEndCallback()
 	a.initOCSF()
@@ -212,6 +220,30 @@ func (a *app) initSQLiteStorage() {
 	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
 }
 
+func (a *app) initRedactor() {
+	rcfg := redaction.Config{
+		Enabled: a.cfg.Storage.Redaction.Enabled,
+	}
+	for _, p := range a.cfg.Storage.Redaction.CustomPatterns {
+		rcfg.CustomPatterns = append(rcfg.CustomPatterns, redaction.PatternConfig{
+			Name:        p.Name,
+			Pattern:     p.Pattern,
+			Replacement: p.Replacement,
+		})
+	}
+
+	r, err := redaction.NewFromConfig(rcfg)
+	if err != nil {
+		slog.Error("failed to create redactor", "error", err)
+		os.Exit(1)
+	}
+	a.redactor = r
+
+	if a.cfg.Storage.Redaction.Enabled {
+		slog.Info("redaction enabled", "patterns", len(redaction.DefaultPatterns())+len(a.cfg.Storage.Redaction.CustomPatterns))
+	}
+}
+
 func (a *app) initFingerprint() {
 	if !a.cfg.Fingerprint.Enabled || a.sqliteStore == nil {
 		return
@@ -272,6 +304,7 @@ func (a *app) initSessionEndCallback() {
 
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
+		a.redactRecord(&record)
 		a.scoreFingerprint(&snap)
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
@@ -329,6 +362,21 @@ func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessi
 			ResponseBody: c.ResponseBody,
 			StatusCode:   c.StatusCode,
 		})
+	}
+}
+
+// redactRecord applies redaction to all sensitive fields in a session record
+// before persistence. Must be called after enrichment, before SQLite write.
+func (a *app) redactRecord(record *storage.SessionRecord) {
+	if a.redactor == nil {
+		return
+	}
+	for i := range record.CapturedContent {
+		record.CapturedContent[i].RequestBody = a.redactor.Redact(record.CapturedContent[i].RequestBody)
+		record.CapturedContent[i].ResponseBody = a.redactor.Redact(record.CapturedContent[i].ResponseBody)
+	}
+	for i := range record.Violations {
+		record.Violations[i].MatchedText = a.redactor.Redact(record.Violations[i].MatchedText)
 	}
 }
 
@@ -555,6 +603,14 @@ func (a *app) initTelemetry() {
 	if a.tp != nil && a.ocsfEmitter != nil {
 		a.tp.SetOCSFEmitter(a.ocsfEmitter)
 	}
+
+	// Wire redactor into OCSF emitter and OTEL provider
+	if a.ocsfEmitter != nil && a.redactor != nil {
+		a.ocsfEmitter.SetRedactor(a.redactor)
+	}
+	if a.tp != nil && a.redactor != nil {
+		a.tp.SetRedactor(a.redactor)
+	}
 }
 
 func (a *app) initPolicyEngine() {
@@ -631,6 +687,9 @@ func (a *app) initInstructionIntegrity() {
 
 	adapter := instructionstore.NewSQLiteAdapter(a.sqliteStore)
 	a.instructionRegistry = instruction.NewRegistry(scanner, adapter, iiCfg.AsyncQueueSize)
+	if a.redactor != nil {
+		a.instructionRegistry.SetRedactor(a.redactor)
+	}
 
 	slog.Info("instruction integrity enabled",
 		"tracked_types", iiCfg.TrackedTypes,
@@ -650,6 +709,9 @@ func (a *app) initProxy() {
 	}
 	if a.instructionRegistry != nil {
 		proxyOpts = append(proxyOpts, proxy.WithInstructionRegistry(a.instructionRegistry))
+	}
+	if a.redactor != nil {
+		proxyOpts = append(proxyOpts, proxy.WithRedactor(a.redactor))
 	}
 	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
@@ -719,6 +781,12 @@ func (a *app) initWebSocket() {
 						IsFinal:   t.IsFinal,
 						Source:    t.Source,
 					})
+				}
+
+				if a.redactor != nil {
+					for i := range record.Transcript {
+						record.Transcript[i].Text = a.redactor.Redact(record.Transcript[i].Text)
+					}
 				}
 
 				if err := a.sqliteStore.SaveVoiceSession(record); err != nil {

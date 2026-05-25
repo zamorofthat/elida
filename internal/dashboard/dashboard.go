@@ -41,18 +41,42 @@ func New() *Handler {
 	}
 }
 
-// ServeHTTP serves the dashboard files
+// ServeHTTP serves the dashboard files with SPA fallback.
+// Static assets (JS, CSS, images) are served directly.
+// All other paths get index.html so client-side routing works on reload.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// Serve index.html for root and SPA routes
+	// Serve index.html for root
 	if path == "/" || path == "" || path == "/index.html" {
 		h.serveIndex(w, r)
 		return
 	}
 
-	// Try to serve static files
-	h.fileServer.ServeHTTP(w, r)
+	// Check if the path matches a real static file
+	if h.hasStaticFile(path) {
+		h.fileServer.ServeHTTP(w, r)
+		return
+	}
+
+	// SPA fallback: serve index.html for all other routes
+	h.serveIndex(w, r)
+}
+
+// hasStaticFile checks if a path corresponds to an embedded static file.
+func (h *Handler) hasStaticFile(path string) bool {
+	// Strip leading slash for embed.FS lookup
+	name := "static" + path
+	f, err := staticFiles.Open(name)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	info, err := fs.Stat(staticFiles, name)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
 }
 
 // serveIndex serves the index.html file directly

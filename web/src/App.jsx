@@ -80,6 +80,24 @@ export function Login({ onLogin }) {
 // Session Table Component
 // ============================================================================
 
+function ExpandableViolation({ text }) {
+  const [expanded, setExpanded] = useState(false)
+  const isLong = text.length > 80
+  return (
+    <div
+      class={`violation-match ${isLong ? 'clickable' : ''}`}
+      onClick={isLong ? () => setExpanded(!expanded) : undefined}
+    >
+      Matched: <code class={expanded ? 'expanded' : ''}>
+        {expanded || !isLong ? text : text.slice(0, 80) + '…'}
+      </code>
+      {isLong && (
+        <span class="expand-hint">{expanded ? '▲' : '▼'}</span>
+      )}
+    </div>
+  )
+}
+
 function SessionTable({ sessions, showActions, onKill, onViewDetails, searchTerm }) {
   const formatBackends = (session) => {
     if (session.backends_used && Object.keys(session.backends_used).length > 0) {
@@ -268,9 +286,7 @@ function SessionDetails({ session, onClose }) {
                     </div>
                     <div class="violation-desc">{v.description}</div>
                     {v.matched_text && (
-                      <div class="violation-match">
-                        Matched: <code>{v.matched_text}</code>
-                      </div>
+                      <ExpandableViolation text={v.matched_text} />
                     )}
                   </div>
                 ))}

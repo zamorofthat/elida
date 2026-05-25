@@ -3,6 +3,20 @@ import { apiFetch } from '../apiFetch'
 import { truncateId } from '../utils'
 import { SeverityBadge } from './shared/Badge'
 
+function ExpandableSnippet({ text }) {
+  const [expanded, setExpanded] = useState(false)
+  const isLong = text.length > 60
+  return (
+    <code
+      class={`policy-violation-snippet ${isLong ? 'clickable' : ''} ${expanded ? 'expanded' : ''}`}
+      onClick={isLong ? () => setExpanded(!expanded) : undefined}
+      title={isLong && !expanded ? 'Click to expand' : undefined}
+    >
+      {expanded || !isLong ? text : text.slice(0, 60) + '…'}
+    </code>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Policy Page
 // ---------------------------------------------------------------------------
@@ -167,7 +181,7 @@ export function PolicyPage() {
                 <SeverityBadge severity={v.severity} />
                 <span class="policy-violation-rule">{v.rule_name}</span>
                 {v.matched_text && (
-                  <code class="policy-violation-snippet">{v.matched_text.slice(0, 60)}</code>
+                  <ExpandableSnippet text={v.matched_text} />
                 )}
               </div>
             ))}
