@@ -466,7 +466,7 @@ func defaults() *Config {
 				ShapeConfidenceThreshold: 0.7,
 				AsyncQueueSize:           100,
 				Rules: []InstructionRuleConfig{
-					{Name: "instruction_shell_exec", Patterns: []string{`curl.*\|\s*(ba)?sh`, `wget.*\|\s*(ba)?sh`, `eval\s*\(`, `exec\s*\(`}, Severity: "critical", Action: "block"},
+					{Name: "instruction_shell_exec", Patterns: []string{`curl\s+[^|]*\|\s*(ba)?sh`, `wget\s+[^|]*\|\s*(ba)?sh`, `eval\s*\(`, `exec\s*\(`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_prompt_injection", Patterns: []string{`ignore\s+(all\s+)?previous`, `you\s+are\s+now`, `disregard`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_permission_escalation", Patterns: []string{`always\s+approve`, `never\s+ask.*confirmation`, `auto.?accept`}, Severity: "high", Action: "flag"},
 					{Name: "instruction_hidden_content", Patterns: []string{"[\\x{200B}-\\x{200F}]", "[\\x{202A}-\\x{202E}]"}, Severity: "critical", Action: "block"},
@@ -1149,13 +1149,13 @@ func getStandardPreset() []PolicyRule {
 			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
 		}, Severity: "warning", Action: "flag", Description: "LLM08: Privilege escalation pattern in request"},
 		{Name: "network_exfiltration", Type: "content_match", Target: "response", Patterns: []string{
-			"curl.*\\|\\s*(ba)?sh",
-			"wget.*\\|\\s*(ba)?sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
+			"wget\\s+[^|]*\\|\\s*(ba)?sh",
 			"reverse\\s+shell",
 		}, Severity: "critical", Action: "block", Description: "LLM08: Data exfiltration attempt (response)"},
 		{Name: "network_exfiltration_request", Type: "content_match", Target: "request", Patterns: []string{
-			"curl.*\\|\\s*(ba)?sh",
-			"wget.*\\|\\s*(ba)?sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
+			"wget\\s+[^|]*\\|\\s*(ba)?sh",
 			"reverse\\s+shell",
 		}, Severity: "warning", Action: "flag", Description: "LLM08: Data exfiltration pattern in request"},
 
@@ -1187,7 +1187,7 @@ func getStandardPreset() []PolicyRule {
 		{Name: "dangerous_tool_arguments", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
 			"rm\\s+-rf",
 			"chmod\\s+777",
-			"curl.*\\|.*sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 		}, Severity: "critical", Action: "terminate", Description: "LLM08: Dangerous patterns in tool arguments"},
 	}
 }
@@ -1436,7 +1436,7 @@ func getMCPPreset() []PolicyRule {
 		{Name: "mcp_dangerous_tool_args", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
 			"rm\\s+-rf",
 			"chmod\\s+777",
-			"curl.*\\|.*sh",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 			"DROP\\s+TABLE",
 			";\\.*(rm|del|format|shutdown)",
 		}, Severity: "critical", Action: "terminate", Description: "MCP: Dangerous patterns in tool call arguments"},
