@@ -17,14 +17,15 @@ elida:
   listenPort: 8080
   # Control API port
   controlPort: 9090
-  # Control API listen address (default: localhost only for security)
-  controlListen: "127.0.0.1:9090"
+  # Control API listen address. Kubernetes Services require a pod-reachable bind.
+  controlListen: ":9090"
 
-  # Control API authentication (required for non-localhost bindings)
+  # Control API authentication. Enable auth before exposing controlIngress.
+  # allowInsecure acknowledges unauthenticated in-cluster access for the default ClusterIP service.
   controlAuth:
     enabled: false
     apiKey: ""
-    allowInsecure: false
+    allowInsecure: true
 
   # TLS configuration
   tls:

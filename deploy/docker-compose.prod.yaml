@@ -19,8 +19,8 @@ services:
     environment:
       # Core config
       - ELIDA_LISTEN=:8080
-      - ELIDA_CONTROL_LISTEN=${ELIDA_CONTROL_LISTEN:-127.0.0.1:9090}
-      - ELIDA_CONTROL_AUTH_API_KEY=${ELIDA_CONTROL_AUTH_API_KEY:-}
+      - ELIDA_CONTROL_LISTEN=${ELIDA_CONTROL_LISTEN:-:9090}
+      - ELIDA_CONTROL_API_KEY=${ELIDA_CONTROL_API_KEY:?Set ELIDA_CONTROL_API_KEY for the production control API}
       - ELIDA_STORAGE_REDACTION_ENABLED=${ELIDA_STORAGE_REDACTION_ENABLED:-true}
 
       # TLS
@@ -55,7 +55,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/control/health"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider --header=\"X-API-Key: $$ELIDA_CONTROL_API_KEY\" http://localhost:9090/control/health"]
       interval: 30s
       timeout: 5s
       retries: 3

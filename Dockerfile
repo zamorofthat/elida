@@ -60,12 +60,19 @@ USER elida
 EXPOSE 8080 9090
 
 # Environment variables for configuration
+# Control API binds to all interfaces inside the container (required for
+# Docker healthcheck and port mapping). Auth is enforced by the security
+# validator — set ELIDA_CONTROL_API_KEY or ELIDA_CONTROL_AUTH_ALLOW_INSECURE=true.
 ENV ELIDA_LISTEN=:8080
 ENV ELIDA_CONTROL_LISTEN=:9090
 
-# Health check
+# Health check — uses X-API-Key header when auth is configured
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:9090/control/health || exit 1
+  CMD if [ -n "$ELIDA_CONTROL_API_KEY" ]; then \
+      wget --no-verbose --tries=1 --spider --header="X-API-Key: $ELIDA_CONTROL_API_KEY" http://localhost:9090/control/health; \
+    else \
+      wget --no-verbose --tries=1 --spider http://localhost:9090/control/health; \
+    fi || exit 1
 
 # Run
 ENTRYPOINT ["./elida"]
