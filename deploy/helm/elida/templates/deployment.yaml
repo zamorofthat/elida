@@ -13,8 +13,11 @@ spec:
       {{- include "elida.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        elida.dev/control-listen: {{ .Values.elida.controlListen | quote }}
+        elida.dev/control-auth: {{ ternary "enabled" "disabled" .Values.elida.controlAuth.enabled | quote }}
+        elida.dev/control-allow-insecure: {{ .Values.elida.controlAuth.allowInsecure | quote }}
+      {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
@@ -49,7 +52,7 @@ spec:
             - name: ELIDA_CONTROL_LISTEN
               value: {{ .Values.elida.controlListen | quote }}
             {{- if .Values.elida.controlAuth.enabled }}
-            - name: ELIDA_CONTROL_AUTH_API_KEY
+            - name: ELIDA_CONTROL_API_KEY
               value: {{ .Values.elida.controlAuth.apiKey | quote }}
             {{- end }}
             {{- if .Values.redis.enabled }}
