@@ -63,14 +63,17 @@ type contentRedactor interface {
 
 // OCSFEmitter fans out OCSF events to all enabled nozzles.
 type OCSFEmitter struct {
-	nozzles  []OCSFNozzle
-	redactor contentRedactor
+	nozzles    []OCSFNozzle
+	redactor   contentRedactor
+	redactorMu sync.RWMutex
 }
 
 // SetRedactor attaches a redactor that will be applied to the JSON payload
 // of every OCSF event before it is sent to nozzles.
 func (e *OCSFEmitter) SetRedactor(r contentRedactor) {
+	e.redactorMu.Lock()
 	e.redactor = r
+	e.redactorMu.Unlock()
 }
 
 // NewOCSFEmitter creates an emitter from config, initializing enabled nozzles.
@@ -122,8 +125,11 @@ func (e *OCSFEmitter) Emit(ctx context.Context, classUID int, severityID int, ev
 	}
 
 	// Redact the serialized JSON payload so sensitive data never reaches nozzles.
-	if e.redactor != nil {
-		data = []byte(e.redactor.Redact(string(data)))
+	e.redactorMu.RLock()
+	red := e.redactor
+	e.redactorMu.RUnlock()
+	if red != nil {
+		data = []byte(red.Redact(string(data)))
 	}
 
 	for _, n := range e.nozzles {
