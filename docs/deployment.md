@@ -7,7 +7,7 @@
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   zamorofthat/elida:latest
 ```
@@ -136,7 +136,7 @@ See `deploy/terraform/` for AWS infrastructure modules.
 |----------|-------------|---------|
 | `ELIDA_LISTEN` | Proxy listen address | `:8080` |
 | `ELIDA_BACKEND` | Default backend URL | `http://localhost:11434` |
-| `ELIDA_CONTROL_LISTEN` | Control API address | `:9090` |
+| `ELIDA_CONTROL_LISTEN` | Control API address inside the container | `:9090` |
 | `ELIDA_POLICY_ENABLED` | Enable security policies | `false` |
 | `ELIDA_POLICY_PRESET` | Preset: `minimal`, `standard`, `strict` | - |
 | `ELIDA_STORAGE_ENABLED` | Enable session history (SQLite) | `false` |

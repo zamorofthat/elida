@@ -21,7 +21,7 @@ Think Session Border Controller (SBC) from telecom — but instead of managing V
 ## 30-Second Quickstart
 
 ```bash
-docker run -p 8080:8080 -p 9090:9090 \
+docker run -p 8080:8080 -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.groq.com/openai/v1 \
   ghcr.io/zamorofthat/elida:latest
 ```
@@ -36,7 +36,7 @@ ANTHROPIC_BASE_URL=http://localhost:8080 claude
 OPENAI_BASE_URL=http://localhost:8080 your-tool
 ```
 
-Open the dashboard at [http://localhost:9090](http://localhost:9090).
+Open the dashboard at [http://localhost:9090](http://localhost:9090). The example publishes the dashboard on host localhost only; add `ELIDA_CONTROL_API_KEY` before exposing it beyond your machine.
 
 ![ELIDA Dashboard](docs/images/elidascreenshot.png)
 
