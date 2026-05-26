@@ -47,8 +47,8 @@ type Provider struct {
 	meterProvider *sdkmetric.MeterProvider
 	meter         metric.Meter
 	ocsfEmitter   *OCSFEmitter
-	redactor   contentRedactor
-	redactorMu sync.RWMutex
+	redactor      contentRedactor
+	redactorMu    sync.RWMutex
 	// GenAI metrics instruments
 	tokenUsage        metric.Int64Histogram
 	operationDuration metric.Float64Histogram
