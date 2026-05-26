@@ -17,7 +17,7 @@ Session-aware reverse proxy for securing AI agent traffic. Think of it as a Sess
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.openai.com \
   zamorofthat/elida:latest
 ```
@@ -29,7 +29,7 @@ Then configure your AI tools to use `http://localhost:8080` as the API base URL.
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.openai.com \
   -e ELIDA_POLICY_ENABLED=true \
   -e ELIDA_POLICY_PRESET=standard \
@@ -43,7 +43,7 @@ Capture all requests/responses for compliance:
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -v elida-data:/data \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   -e ELIDA_POLICY_ENABLED=true \
@@ -60,7 +60,7 @@ Export session records to Jaeger, Datadog, etc.:
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   -e ELIDA_POLICY_ENABLED=true \
   -e ELIDA_POLICY_PRESET=standard \
@@ -77,7 +77,7 @@ Share session state across multiple instances:
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   -e ELIDA_SESSION_STORE=redis \
   -e ELIDA_REDIS_ADDR=redis:6379 \
@@ -96,7 +96,7 @@ export ELIDA_CONTROL_API_KEY=$(openssl rand -base64 32)
 
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -v elida-data:/data \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   -e ELIDA_POLICY_ENABLED=true \
@@ -124,7 +124,7 @@ echo "Save this key: $ELIDA_CONTROL_API_KEY"
 # Run with auth enabled (setting the key auto-enables auth)
 docker run -d \
   -p 8080:8080 \
-  -p 9090:9090 \
+  -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   -e ELIDA_CONTROL_API_KEY=$ELIDA_CONTROL_API_KEY \
   zamorofthat/elida:latest
@@ -166,7 +166,8 @@ docker run -d \
 |----------|-------------|---------|
 | `ELIDA_LISTEN` | Proxy listen address | `:8080` |
 | `ELIDA_BACKEND` | Default backend URL | `http://localhost:11434` |
-| `ELIDA_CONTROL_LISTEN` | Control API address | `:9090` |
+| `ELIDA_CONTROL_LISTEN` | Control API address inside the container | `:9090` |
+| `ELIDA_CONTROL_AUTH_ALLOW_INSECURE` | Allow unauthenticated non-loopback control bind. Set to `true` for local Docker use or behind network isolation. | not set |
 | `ELIDA_CONTROL_AUTH_ENABLED` | Enable control API auth | `false` |
 | `ELIDA_CONTROL_API_KEY` | API key for control API | - |
 | `ELIDA_POLICY_ENABLED` | Enable security policies | `false` |

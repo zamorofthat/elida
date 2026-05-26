@@ -1,5 +1,13 @@
 ELIDA has been deployed successfully!
 
+{{- if not .Values.elida.controlAuth.enabled }}
+
+CONTROL API AUTH IS DISABLED for this release.
+The control listener is {{ .Values.elida.controlListen | quote }} and allow_insecure is {{ .Values.elida.controlAuth.allowInsecure }}.
+This is intended for in-cluster or port-forward-only access. Enable elida.controlAuth.enabled before exposing controlIngress.
+Pod annotations also record the control auth mode for kubectl describe/inspection.
+{{- end }}
+
 1. Get the proxy URL:
 {{- if .Values.ingress.enabled }}
   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ (index .Values.ingress.hosts 0).host }}

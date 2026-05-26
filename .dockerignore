@@ -89,8 +89,13 @@ web/node_modules/
 web/dist/
 web/.bun/
 
+# Internal docs (private specs, plans, roadmap — never ship in image)
+elida-internal/
+
 # Claude/AI artifacts
 .claude/
+.agents/
+.ai/
 CLAUDE.md
 CLAUDE.md.backup
 *.backup

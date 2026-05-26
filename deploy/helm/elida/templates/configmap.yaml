@@ -30,11 +30,12 @@ data:
     control:
       listen: {{ .Values.elida.controlListen | quote }}
       enabled: true
-      {{- if .Values.elida.controlAuth.enabled }}
       auth:
+        enabled: {{ .Values.elida.controlAuth.enabled }}
+        {{- if .Values.elida.controlAuth.enabled }}
         api_key: {{ .Values.elida.controlAuth.apiKey | quote }}
+        {{- end }}
         allow_insecure: {{ .Values.elida.controlAuth.allowInsecure }}
-      {{- end }}
 
     logging:
       format: json
