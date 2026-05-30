@@ -439,6 +439,13 @@ func defaults() *Config {
 			Enabled:        false,
 			CaptureContent: true,
 			MaxCaptureSize: 10000, // 10KB per request
+			CircuitBreaker: CircuitBreakerConfig{
+				Enabled:             true,
+				TokensPerMinute:     50000,   // ~$1/min at Claude pricing
+				MaxTokensPerSession: 1000000, // 1M tokens before cutoff
+				MaxToolCalls:        500,     // Normal session: 50-200
+				MaxToolFanout:       30,      // Most sessions: 5-15 distinct tools
+			},
 			RiskLadder: RiskLadderConfig{
 				Enabled: true,
 				Thresholds: []RiskThresholdConfig{

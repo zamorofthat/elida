@@ -266,6 +266,14 @@ policy:
     # Rules are loaded from defaults — see internal/config/config.go
     # Override here to customize
 
+  # Circuit breaker — automatic limits on runaway sessions
+  circuit_breaker:
+    enabled: true
+    tokens_per_minute: 50000        # Flag if token rate exceeds 50k/min
+    max_tokens_per_session: 10000000 # Flag if session total exceeds 1M tokens
+    max_tool_calls: 500             # Flag if session exceeds 500 tool calls
+    max_tool_fanout: 30             # Flag if session uses 30+ distinct tools
+
   # Policy preset - provides default rules based on security frameworks
   # Options:
   #   minimal  - Rate limiting and critical blocks only (8 rules)
