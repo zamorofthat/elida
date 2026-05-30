@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -47,6 +48,7 @@ type Provider struct {
 	meter         metric.Meter
 	ocsfEmitter   *OCSFEmitter
 	redactor      contentRedactor
+	redactorMu    sync.RWMutex
 	// GenAI metrics instruments
 	tokenUsage        metric.Int64Histogram
 	operationDuration metric.Float64Histogram
@@ -256,7 +258,9 @@ func (p *Provider) SetOCSFEmitter(e *OCSFEmitter) {
 // SetRedactor attaches a redactor that will be applied to content-bearing
 // span attributes and log record fields before they are exported.
 func (p *Provider) SetRedactor(r contentRedactor) {
+	p.redactorMu.Lock()
 	p.redactor = r
+	p.redactorMu.Unlock()
 }
 
 // Tracer returns the tracer for creating spans
@@ -525,10 +529,13 @@ func setTraceContext(rec *otellog.Record, ctx context.Context) {
 // redact applies the provider's redactor to s, or returns s unchanged if no
 // redactor is set.
 func (p *Provider) redact(s string) string {
-	if p.redactor == nil {
+	p.redactorMu.RLock()
+	r := p.redactor
+	p.redactorMu.RUnlock()
+	if r == nil {
 		return s
 	}
-	return p.redactor.Redact(s)
+	return r.Redact(s)
 }
 
 // truncateBody truncates a string to maxLen bytes

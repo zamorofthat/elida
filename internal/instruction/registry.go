@@ -72,7 +72,9 @@ func NewRegistry(scanner *Scanner, store Store, queueSize int) *Registry {
 
 // SetRedactor sets the redactor for content persistence.
 func (r *Registry) SetRedactor(red Redactor) {
+	r.mu.Lock()
 	r.redactor = red
+	r.mu.Unlock()
 }
 
 // Stop shuts down the async worker.
@@ -172,9 +174,13 @@ func (r *Registry) processJob(job asyncJob) {
 		}
 	}
 
+	r.mu.RLock()
+	red := r.redactor
+	r.mu.RUnlock()
+
 	content := file.Content
-	if r.redactor != nil {
-		content = r.redactor.Redact(content)
+	if red != nil {
+		content = red.Redact(content)
 	}
 
 	record := Record{
