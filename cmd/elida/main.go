@@ -633,12 +633,25 @@ func (a *app) initPolicyEngine() {
 		}
 	}
 
+	riskThresholds := make([]policy.RiskThreshold, len(a.cfg.Policy.RiskLadder.Thresholds))
+	for i, t := range a.cfg.Policy.RiskLadder.Thresholds {
+		riskThresholds[i] = policy.RiskThreshold{
+			Score:        t.Score,
+			Action:       policy.RiskLadderAction(t.Action),
+			ThrottleRate: t.ThrottleRate,
+		}
+	}
+
 	a.policyEngine = policy.NewEngine(policy.Config{
 		Enabled:        a.cfg.Policy.Enabled,
 		Mode:           a.cfg.Policy.Mode,
 		CaptureContent: a.cfg.Policy.CaptureContent,
 		MaxCaptureSize: a.cfg.Policy.MaxCaptureSize,
 		Rules:          policyRules,
+		RiskLadder: policy.RiskLadderConfig{
+			Enabled:    a.cfg.Policy.RiskLadder.Enabled,
+			Thresholds: riskThresholds,
+		},
 	})
 
 	// Wire anomaly callback for real-time OCSF 2004 emission
