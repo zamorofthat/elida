@@ -20,6 +20,7 @@
     "vitest": "^4.0.18"
   },
   "overrides": {
-    "undici": "7.24.1"
+    "undici": "7.24.1",
+    "picomatch": "4.0.4"
   }
 }
