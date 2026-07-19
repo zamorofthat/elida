@@ -30,7 +30,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s -X main.Version=${VERSION}" -o elida ./cmd/elida
 
 # Runtime stage
-FROM alpine:3.23
+FROM alpine:3.24
 
 # Create non-root user
 RUN addgroup -g 1000 elida && \
