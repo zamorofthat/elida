@@ -54,3 +54,23 @@ func TestEnforceModeLadderStillBlocks(t *testing.T) {
 		t.Error("enforce mode: ShouldBlockByRisk = false, want true")
 	}
 }
+
+// mode is enforce unless explicitly set to audit — pins the default
+func TestUnsetModeDefaultsToEnforce(t *testing.T) {
+	e := NewEngine(Config{
+		Enabled: true,
+		RiskLadder: RiskLadderConfig{
+			Enabled: true,
+		},
+	})
+
+	if e.IsAuditMode() {
+		t.Error("unset mode: IsAuditMode = true, want false (enforce is the default)")
+	}
+
+	e.AddExternalRiskPoints("sess-default", 100, "test")
+
+	if !e.ShouldBlockByRisk("sess-default") {
+		t.Error("unset mode: ShouldBlockByRisk = false, want true (enforce is the default)")
+	}
+}
