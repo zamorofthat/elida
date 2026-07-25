@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func findRule(rules []PolicyRule, name string) *PolicyRule {
 	for i := range rules {
@@ -119,4 +122,99 @@ func TestObserveRuleActionNormalizedToFlag(t *testing.T) {
 	if r == nil || r.Action != "flag" {
 		t.Fatalf("observe rule action = %v, want flag", r)
 	}
+}
+
+// Feedback #3: the coding-agent preset enforces deterministic structural
+// rules and observes the content/statistical heuristics that false-fire on
+// legitimate agent traffic.
+func TestCodingAgentPreset(t *testing.T) {
+	cfg := &Config{}
+	cfg.Policy.Preset = "coding-agent"
+	cfg.ApplyPolicyPreset()
+
+	if len(cfg.Policy.Rules) == 0 {
+		t.Fatal("coding-agent preset produced no rules")
+	}
+
+	// Structural rules enforce.
+	enforced := map[string]string{
+		"block_dangerous_tools":    "block",
+		"dangerous_tool_arguments": "block", // block, not terminate: a tool-arg pattern is not a confirmed breach
+		"tool_credential_access":   "block",
+	}
+	for name, wantAction := range enforced {
+		r := findRule(cfg.Policy.Rules, name)
+		if r == nil {
+			t.Errorf("enforced rule %q missing", name)
+			continue
+		}
+		if r.Observe {
+			t.Errorf("rule %q is observe, must enforce", name)
+		}
+		if r.Action != wantAction {
+			t.Errorf("rule %q action = %q, want %q", name, r.Action, wantAction)
+		}
+	}
+
+	// Content/statistical heuristics are observe — the exact rules that
+	// broke real agent turns under `standard` (bash -c, sudo, rm -rf,
+	// curl|sh) plus the measured-noisy anomaly rules.
+	observed := []string{
+		"shell_execution", "privilege_escalation", "destructive_file_ops",
+		"network_exfiltration", "rate_anomaly", "compound_anomaly",
+	}
+	for _, name := range observed {
+		r := findRule(cfg.Policy.Rules, name)
+		if r == nil {
+			t.Errorf("observe rule %q missing", name)
+			continue
+		}
+		if !r.Observe {
+			t.Errorf("rule %q must be observe in coding-agent preset", name)
+		}
+		if r.Action != "flag" {
+			t.Errorf("rule %q action = %q, want flag", name, r.Action)
+		}
+	}
+
+	// No rule in this preset may terminate — a coding agent's own output
+	// must never kill the session.
+	for _, r := range cfg.Policy.Rules {
+		if r.Action == "terminate" {
+			t.Errorf("rule %q has action terminate; coding-agent preset must not terminate", r.Name)
+		}
+	}
+}
+
+// Overriding a coding-agent rule by name still works (Task 1 semantics).
+func TestCodingAgentPresetIsOverridable(t *testing.T) {
+	cfg := &Config{}
+	cfg.Policy.Preset = "coding-agent"
+	cfg.Policy.Rules = []PolicyRule{
+		{Name: "shell_execution", Type: "content_match", Target: "response",
+			Patterns: []string{"bash\\s+-c\\s+"}, Severity: "critical", Action: "block",
+			Description: "this deployment wants shell blocked"},
+	}
+	cfg.ApplyPolicyPreset()
+
+	r := findRule(cfg.Policy.Rules, "shell_execution")
+	if r == nil || r.Action != "block" || r.Observe {
+		t.Fatalf("override failed: got %+v, want enforcing block rule", r)
+	}
+}
+
+// Feedback #3 (bonus): a bare rate/entropy heuristic must not be worded as
+// a confirmed exfiltration.
+func TestAnomalyDescriptionsNotAlarmist(t *testing.T) {
+	for _, preset := range [][]PolicyRule{getStandardPreset(), getCodingAgentPreset()} {
+		if r := findRule(preset, "compound_anomaly"); r != nil {
+			if containsFold(r.Description, "exfiltration") {
+				t.Errorf("compound_anomaly description still says 'exfiltration': %q", r.Description)
+			}
+		}
+	}
+}
+
+func containsFold(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }
