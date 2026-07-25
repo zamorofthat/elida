@@ -235,3 +235,82 @@ func TestReloadConfigSwitchesAuditClamp(t *testing.T) {
 		t.Error("audit mode post-reload: ShouldBlockByRisk = true for pre-existing session on recompute, want false")
 	}
 }
+
+// Directly-constructed observe rules with an explicit "block" action must
+// still be neutralized: the engine is the single choke point rules pass
+// through, and it must not trust callers who bypass config loading (where
+// the action→"flag" normalization currently lives) to have normalized
+// Action themselves.
+func TestDirectObserveBlockRuleDoesNotBlock(t *testing.T) {
+	e := NewEngine(Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []Rule{
+			{Name: "direct_observe_block", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+				Patterns: []string{`sudo\s+rm`}, Severity: SeverityCritical,
+				Action: "block", Observe: true},
+		},
+		RiskLadder: RiskLadderConfig{Enabled: true},
+	})
+
+	result := e.EvaluateRequestContent("sess-direct-observe", "please run sudo rm -rf /tmp/x")
+	if result == nil {
+		t.Fatal("expected a content check result for the matched observe rule")
+	}
+	if result.ShouldBlock {
+		t.Error("ShouldBlock = true for directly-constructed observe+block rule, want false")
+	}
+	if result.ShouldTerminate {
+		t.Error("ShouldTerminate = true for directly-constructed observe+block rule, want false")
+	}
+	if !e.IsFlagged("sess-direct-observe") {
+		t.Error("session not flagged despite observe rule match")
+	}
+	score, _, _ := e.GetSessionRiskScore("sess-direct-observe")
+	if score != 0 {
+		t.Errorf("risk score = %v, want 0 (observe rule must not feed the ladder)", score)
+	}
+}
+
+// Same as above, but the observe+block rule is introduced via ReloadConfig
+// rather than NewEngine — both ingest paths must normalize.
+func TestDirectObserveBlockRuleAfterReload(t *testing.T) {
+	e := NewEngine(Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []Rule{
+			{Name: "benign", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+				Patterns: []string{"harmless"}, Severity: SeverityInfo, Action: "flag"},
+		},
+		RiskLadder: RiskLadderConfig{Enabled: true},
+	})
+
+	e.ReloadConfig(Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []Rule{
+			{Name: "direct_observe_block", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+				Patterns: []string{`sudo\s+rm`}, Severity: SeverityCritical,
+				Action: "block", Observe: true},
+		},
+		RiskLadder: RiskLadderConfig{Enabled: true},
+	})
+
+	result := e.EvaluateRequestContent("sess-direct-observe-reload", "please run sudo rm -rf /tmp/x")
+	if result == nil {
+		t.Fatal("expected a content check result for the matched observe rule")
+	}
+	if result.ShouldBlock {
+		t.Error("ShouldBlock = true for directly-constructed observe+block rule after reload, want false")
+	}
+	if result.ShouldTerminate {
+		t.Error("ShouldTerminate = true for directly-constructed observe+block rule after reload, want false")
+	}
+	if !e.IsFlagged("sess-direct-observe-reload") {
+		t.Error("session not flagged despite observe rule match")
+	}
+	score, _, _ := e.GetSessionRiskScore("sess-direct-observe-reload")
+	if score != 0 {
+		t.Errorf("risk score = %v, want 0 (observe rule must not feed the ladder)", score)
+	}
+}

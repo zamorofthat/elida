@@ -77,11 +77,12 @@ type Rule struct {
 	Description    string     `yaml:"description" json:"description"`
 	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
 	// Observe marks a rule observe-only: flag + capture, excluded from risk
-	// scoring. NOTE: the engine only excludes observe rules from scoring — it
-	// does NOT neutralize enforcement actions. The action→"flag" normalization
-	// happens in config loading (config.ApplyPolicyPreset). Code constructing
-	// Rule values directly MUST set Action to "flag" for observe rules, or the
-	// rule will still enforce. See docs/policy-rules-reference.md.
+	// scoring. The engine normalizes Action to "flag" for observe rules at
+	// ingest (NewEngine/ReloadConfig), so this is safe even for Rule values
+	// constructed directly. Config loading (config.ApplyPolicyPreset) also
+	// normalizes on the way in — belt and braces. Still, set Action: "flag"
+	// explicitly for observe rules as good practice. See
+	// docs/policy-rules-reference.md.
 	Observe bool `yaml:"observe" json:"observe,omitempty"`
 }
 
@@ -286,11 +287,38 @@ func observeRulesFrom(rules []Rule) map[string]bool {
 	return m
 }
 
+// normalizeObserveRules defensively forces Action to "flag" for every
+// observe-only rule. This is the engine's ingest-time choke point: config
+// loading (config.ApplyPolicyPreset) already normalizes observe rules, but
+// callers can also construct Rule values directly and hand them to
+// NewEngine/ReloadConfig, bypassing that path entirely. Without this, an
+// Observe:true rule with Action:"block" would still enforce, defeating the
+// purpose of "observe-only".
+//
+// Returns a new slice — it never mutates the caller's backing array, since
+// that slice may be aliased and reused by the caller after this call
+// returns.
+func normalizeObserveRules(rules []Rule) []Rule {
+	out := make([]Rule, len(rules))
+	for i, r := range rules {
+		if r.Observe {
+			r.Action = "flag"
+		}
+		out[i] = r
+	}
+	return out
+}
+
 // NewEngine creates a new policy engine
 func NewEngine(cfg Config) *Engine {
 	if cfg.MaxCaptureSize == 0 {
 		cfg.MaxCaptureSize = 10000 // Default 10KB per request
 	}
+
+	// Defense in depth: neutralize enforcement on observe rules at the
+	// engine's ingest choke point, even if the caller constructed Rule
+	// values directly and skipped config-load normalization.
+	cfg.Rules = normalizeObserveRules(cfg.Rules)
 
 	// Default to enforce mode if not specified
 	auditMode := cfg.Mode == "audit"
@@ -360,6 +388,11 @@ func NewEngine(cfg Config) *Engine {
 // ReloadConfig dynamically updates the policy engine configuration.
 // This allows settings changes to take effect without restart.
 func (e *Engine) ReloadConfig(cfg Config) {
+	// Defense in depth: neutralize enforcement on observe rules at the
+	// engine's ingest choke point, even if the caller constructed Rule
+	// values directly and skipped config-load normalization.
+	cfg.Rules = normalizeObserveRules(cfg.Rules)
+
 	// Compile regex patterns outside the lock to avoid blocking evaluations
 	newCompiledRules := make([]CompiledRule, 0)
 	for _, rule := range cfg.Rules {

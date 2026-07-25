@@ -47,10 +47,12 @@ ladder. Use it to keep noisy heuristics visible without letting them
 escalate.
 
 > **Note for programmatic use:** the action→`flag` normalization happens
-> when the YAML config is loaded. If you construct policy rules directly
-> against the engine API (bypassing config loading), you must set
-> `Action: "flag"` on observe rules yourself — the engine excludes observe
-> rules from risk scoring but does not override their enforcement action.
+> when the YAML config is loaded, and again in the policy engine itself
+> (`NewEngine`/`ReloadConfig`), which forces `Action: "flag"` on any rule
+> with `Observe: true` before it takes effect. So constructing policy rules
+> directly against the engine API — bypassing config loading — is safe:
+> this is defense in depth. Setting `Action: "flag"` explicitly on observe
+> rules is still good practice.
 
 ### Audit mode and the risk ladder
 
