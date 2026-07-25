@@ -49,8 +49,8 @@ New preset alongside `minimal`/`standard`:
 - **Enforced (deterministic, structural):** dangerous tool names
   (`exec_*/shell_*/rm_*/sudo_*/eval_*`), credential-exfil tool calls,
   tool-call circuit breaker with `max_tool_fanout: 100`.
-- **Shadow (new per-rule `shadow: true` field):** shell/agency content
-  patterns, PII regex, `rate_anomaly`, `compound_anomaly`. Shadow = flag +
+- **Observe (new per-rule `observe: true` field):** shell/agency content
+  patterns, PII regex, `rate_anomaly`, `compound_anomaly`. Observe = flag +
   capture, but contributes **0** to the risk ladder.
 - Reword anomaly rule messages: "elevated rate/entropy signal", not
   "agent exfiltration pattern" — a heuristic must not read as a confirmed breach.

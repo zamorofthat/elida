@@ -4,7 +4,7 @@
 
 **Goal:** Fix integration-feedback items #1 (custom rules can't override preset rules), #2 (audit mode still blocks via the risk ladder), and #3 (no coding-agent-safe preset) in the ELIDA policy layer.
 
-**Architecture:** All changes live in `internal/config/config.go` (preset merge, new preset, new rule field), `internal/policy/policy.go` (audit-mode ladder clamp, shadow-rule scoring exclusion), and `cmd/elida/main.go` (one field in the config→engine conversion). Semantics follow "local overrides default" layering (Splunk/Cribl-style): a same-named custom rule replaces the preset rule.
+**Architecture:** All changes live in `internal/config/config.go` (preset merge, new preset, new rule field), `internal/policy/policy.go` (audit-mode ladder clamp, observe-rule scoring exclusion), and `cmd/elida/main.go` (one field in the config→engine conversion). Semantics follow "local overrides default" layering (Splunk/Cribl-style): a same-named custom rule replaces the preset rule.
 
 **Tech Stack:** Go 1.26, stdlib testing (in-package tests, matching `internal/config/security_test.go`).
 
@@ -401,21 +401,21 @@ computed and logged; it just can't act."
 
 ---
 
-### Task 3: Shadow rules — flag and capture, zero ladder contribution
+### Task 3: Observe rules — flag and capture, zero ladder contribution
 
 **Files:**
 - Modify: `internal/config/config.go` — `PolicyRule` struct (line ~203), end of `ApplyPolicyPreset()` (normalization)
 - Modify: `internal/policy/policy.go` — `Rule` struct (line ~68), `Engine` struct (line ~230s), `NewEngine` (line ~271), `ReloadConfig` (line ~342), `recordViolations` (line ~1026)
 - Modify: `cmd/elida/main.go` — config→policy rule conversion (line ~620)
-- Test: `internal/policy/shadow_test.go` (create), plus one test appended to `internal/config/policy_preset_test.go`
+- Test: `internal/policy/observe_test.go` (create), plus one test appended to `internal/config/policy_preset_test.go`
 
 **Interfaces:**
-- Consumes: Task 1's merge (shadow rules in presets must be overridable by name).
-- Produces: `config.PolicyRule.Shadow bool` (yaml `shadow`), `policy.Rule.Shadow bool`. Semantics: a shadow rule's action is forced to `flag` at config load, and its violations are recorded on the session (visible in `/control/flagged`) but excluded from `ViolationEvents`, so they contribute **0** to `calculateRiskScore`. Task 4's preset sets `Shadow: true` on its statistical/content rules.
+- Consumes: Task 1's merge (observe rules in presets must be overridable by name).
+- Produces: `config.PolicyRule.Observe bool` (yaml `observe`), `policy.Rule.Observe bool`. Semantics: a observe rule's action is forced to `flag` at config load, and its violations are recorded on the session (visible in `/control/flagged`) but excluded from `ViolationEvents`, so they contribute **0** to `calculateRiskScore`. Task 4's preset sets `Observe: true` on its statistical/content rules.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `internal/policy/shadow_test.go`:
+Create `internal/policy/observe_test.go`:
 
 ```go
 package policy
@@ -425,26 +425,26 @@ import (
 	"time"
 )
 
-// Shadow rules flag and capture but contribute zero to the risk ladder
+// Observe rules flag and capture but contribute zero to the risk ladder
 // (feedback #3: statistical/PII rules are noise on coding-agent traffic —
 // they must not drive escalation).
-func TestShadowRuleViolationsDoNotFeedRiskLadder(t *testing.T) {
+func TestObserveRuleViolationsDoNotFeedRiskLadder(t *testing.T) {
 	e := NewEngine(Config{
 		Enabled: true,
 		Mode:    "enforce",
 		Rules: []Rule{
-			{Name: "shadow_shell", Type: RuleTypeContentMatch, Target: TargetRequest,
+			{Name: "observe_shell", Type: RuleTypeContentMatch, Target: TargetRequest,
 				Patterns: []string{"sudo\\s+rm"}, Severity: SeverityCritical,
-				Action: "flag", Shadow: true},
+				Action: "flag", Observe: true},
 		},
 		RiskLadder: RiskLadderConfig{Enabled: true},
 	})
 
-	// Record many critical shadow violations — enough that, if they fed the
+	// Record many critical observe violations — enough that, if they fed the
 	// ladder, the session would be far past the block threshold (30).
 	for i := 0; i < 50; i++ {
-		e.recordViolations("sess-shadow", []Violation{{
-			RuleName:  "shadow_shell",
+		e.recordViolations("sess-observe", []Violation{{
+			RuleName:  "observe_shell",
 			Severity:  SeverityCritical,
 			Action:    "flag",
 			Timestamp: time.Now(),
@@ -452,21 +452,21 @@ func TestShadowRuleViolationsDoNotFeedRiskLadder(t *testing.T) {
 	}
 
 	// Still flagged and visible…
-	if !e.IsFlagged("sess-shadow") {
-		t.Fatal("shadow violations must still flag the session")
+	if !e.IsFlagged("sess-observe") {
+		t.Fatal("observe violations must still flag the session")
 	}
 	// …but the ladder never moved.
-	score, _, _ := e.GetSessionRiskScore("sess-shadow")
+	score, _, _ := e.GetSessionRiskScore("sess-observe")
 	if score != 0 {
-		t.Errorf("risk score = %v, want 0 (shadow rules contribute nothing)", score)
+		t.Errorf("risk score = %v, want 0 (observe rules contribute nothing)", score)
 	}
-	if e.ShouldBlockByRisk("sess-shadow") {
-		t.Error("ShouldBlockByRisk = true from shadow-only violations, want false")
+	if e.ShouldBlockByRisk("sess-observe") {
+		t.Error("ShouldBlockByRisk = true from observe-only violations, want false")
 	}
 }
 
-// Non-shadow rules are unaffected.
-func TestNonShadowRulesStillFeedRiskLadder(t *testing.T) {
+// Non-observe rules are unaffected.
+func TestNonObserveRulesStillFeedRiskLadder(t *testing.T) {
 	e := NewEngine(Config{
 		Enabled: true,
 		Mode:    "enforce",
@@ -488,7 +488,7 @@ func TestNonShadowRulesStillFeedRiskLadder(t *testing.T) {
 
 	score, _, _ := e.GetSessionRiskScore("sess-real")
 	if score <= 0 {
-		t.Errorf("risk score = %v, want > 0 for non-shadow violations", score)
+		t.Errorf("risk score = %v, want > 0 for non-observe violations", score)
 	}
 }
 ```
@@ -498,41 +498,41 @@ Note: if `RuleTypeContentMatch`, `TargetRequest`, or `SeverityCritical` are name
 Append to `internal/config/policy_preset_test.go`:
 
 ```go
-// A shadow rule can never block: its action is normalized to flag at load.
-func TestShadowRuleActionNormalizedToFlag(t *testing.T) {
+// A observe rule can never block: its action is normalized to flag at load.
+func TestObserveRuleActionNormalizedToFlag(t *testing.T) {
 	cfg := &Config{}
 	cfg.Policy.Rules = []PolicyRule{
-		{Name: "shadowed", Type: "content_match", Patterns: []string{"x"},
-			Action: "block", Shadow: true},
+		{Name: "observed", Type: "content_match", Patterns: []string{"x"},
+			Action: "block", Observe: true},
 	}
 	cfg.ApplyPolicyPreset()
-	r := findRule(cfg.Policy.Rules, "shadowed")
+	r := findRule(cfg.Policy.Rules, "observed")
 	if r == nil || r.Action != "flag" {
-		t.Fatalf("shadow rule action = %v, want flag", r)
+		t.Fatalf("observe rule action = %v, want flag", r)
 	}
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `go test ./internal/policy/ -run TestShadow -v && go test ./internal/config/ -run TestShadowRuleActionNormalizedToFlag -v`
-Expected: compile FAIL (`Shadow` field doesn't exist) — that's the failing state for structural changes.
+Run: `go test ./internal/policy/ -run TestObserve -v && go test ./internal/config/ -run TestObserveRuleActionNormalizedToFlag -v`
+Expected: compile FAIL (`Observe` field doesn't exist) — that's the failing state for structural changes.
 
 - [ ] **Step 3: Implement**
 
 3a. `internal/config/config.go` — add to `PolicyRule` (after `Action`, line ~213):
 
 ```go
-	Shadow         bool     `yaml:"shadow"` // Flag + capture only: never enforces, contributes 0 to the risk ladder
+	Observe         bool     `yaml:"observe"` // Flag + capture only: never enforces, contributes 0 to the risk ladder
 ```
 
 3b. Same file, at the very end of `ApplyPolicyPreset()` (after the suppress_rules filter from Task 1):
 
 ```go
-	// Shadow rules observe only — normalize their action to flag so a
-	// misconfigured shadow+block rule can never enforce.
+	// Observe rules observe only — normalize their action to flag so a
+	// misconfigured observe+block rule can never enforce.
 	for i := range c.Policy.Rules {
-		if c.Policy.Rules[i].Shadow {
+		if c.Policy.Rules[i].Observe {
 			c.Policy.Rules[i].Action = "flag"
 		}
 	}
@@ -541,23 +541,23 @@ Expected: compile FAIL (`Shadow` field doesn't exist) — that's the failing sta
 3c. `internal/policy/policy.go` — add to `Rule` (after `Action`, line ~78):
 
 ```go
-	Shadow         bool       `yaml:"shadow" json:"shadow,omitempty"` // Flag + capture only: excluded from risk scoring
+	Observe         bool       `yaml:"observe" json:"observe,omitempty"` // Flag + capture only: excluded from risk scoring
 ```
 
 3d. Same file — add to the `Engine` struct (near `riskLadderEnabled`, line ~241):
 
 ```go
-	shadowRules       map[string]bool // rule name -> shadow (excluded from risk scoring)
+	observeRules       map[string]bool // rule name -> observe (excluded from risk scoring)
 ```
 
-In `NewEngine` (inside the `e := &Engine{...}` literal, line ~290s) add `shadowRules: shadowRulesFrom(cfg.Rules),` and in `ReloadConfig` (line ~371 area, alongside `e.auditMode = ...`) add `e.shadowRules = shadowRulesFrom(cfg.Rules)`. Add the helper near `NewEngine`:
+In `NewEngine` (inside the `e := &Engine{...}` literal, line ~290s) add `observeRules: observeRulesFrom(cfg.Rules),` and in `ReloadConfig` (line ~371 area, alongside `e.auditMode = ...`) add `e.observeRules = observeRulesFrom(cfg.Rules)`. Add the helper near `NewEngine`:
 
 ```go
-// shadowRulesFrom indexes which rule names are shadow (observe-only).
-func shadowRulesFrom(rules []Rule) map[string]bool {
+// observeRulesFrom indexes which rule names are observe (observe-only).
+func observeRulesFrom(rules []Rule) map[string]bool {
 	m := make(map[string]bool)
 	for _, r := range rules {
-		if r.Shadow {
+		if r.Observe {
 			m[r.Name] = true
 		}
 	}
@@ -565,12 +565,12 @@ func shadowRulesFrom(rules []Rule) map[string]bool {
 }
 ```
 
-3e. Same file, in `recordViolations` (line ~1057), guard the event append — the violation list, counts, and capture behavior stay untouched; only the decay-scored event stream skips shadow rules:
+3e. Same file, in `recordViolations` (line ~1057), guard the event append — the violation list, counts, and capture behavior stay untouched; only the decay-scored event stream skips observe rules:
 
 ```go
-		// Record event for decay calculation — shadow rules are visible in
+		// Record event for decay calculation — observe rules are visible in
 		// the violation list but contribute nothing to the risk score.
-		if !e.shadowRules[v.RuleName] {
+		if !e.observeRules[v.RuleName] {
 			flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
 				RuleName:   v.RuleName,
 				Severity:   v.Severity,
@@ -585,7 +585,7 @@ func shadowRulesFrom(rules []Rule) map[string]bool {
 3f. `cmd/elida/main.go` — in the conversion loop (line ~622), add to the `policy.Rule{...}` literal:
 
 ```go
-			Shadow:         r.Shadow,
+			Observe:         r.Observe,
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -602,10 +602,10 @@ Expected: PASS.
 
 ```bash
 git add internal/config/config.go internal/policy/policy.go cmd/elida/main.go \
-        internal/policy/shadow_test.go internal/config/policy_preset_test.go
-git commit -m "feat(policy): shadow rules — flag and capture without feeding the risk ladder
+        internal/policy/observe_test.go internal/config/policy_preset_test.go
+git commit -m "feat(policy): observe rules — flag and capture without feeding the risk ladder
 
-A rule with shadow: true is normalized to action: flag and its violations
+A rule with observe: true is normalized to action: flag and its violations
 are excluded from risk scoring. Groundwork for the coding-agent preset
 (feedback #3): statistical/content heuristics stay observable without
 driving escalation."
@@ -620,8 +620,8 @@ driving escalation."
 - Test: `internal/config/policy_preset_test.go` (append)
 
 **Interfaces:**
-- Consumes: Task 1's merge (users tune this preset by redefining rules by name), Task 3's `Shadow` field.
-- Produces: preset name `"coding-agent"`. Enforced structural rules: `block_dangerous_tools`, `dangerous_tool_arguments` (downgraded terminate→block), `tool_credential_access`, minimal rate/count rules. Shadow rules: the shell/agency/injection content heuristics + `rate_anomaly`/`compound_anomaly` + `pii_patterns`.
+- Consumes: Task 1's merge (users tune this preset by redefining rules by name), Task 3's `Observe` field.
+- Produces: preset name `"coding-agent"`. Enforced structural rules: `block_dangerous_tools`, `dangerous_tool_arguments` (downgraded terminate→block), `tool_credential_access`, minimal rate/count rules. Observe rules: the shell/agency/injection content heuristics + `rate_anomaly`/`compound_anomaly` + `pii_patterns`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -629,7 +629,7 @@ Append to `internal/config/policy_preset_test.go`:
 
 ```go
 // Feedback #3: the coding-agent preset enforces deterministic structural
-// rules and shadows the content/statistical heuristics that false-fire on
+// rules and observes the content/statistical heuristics that false-fire on
 // legitimate agent traffic.
 func TestCodingAgentPreset(t *testing.T) {
 	cfg := &Config{}
@@ -652,29 +652,29 @@ func TestCodingAgentPreset(t *testing.T) {
 			t.Errorf("enforced rule %q missing", name)
 			continue
 		}
-		if r.Shadow {
-			t.Errorf("rule %q is shadow, must enforce", name)
+		if r.Observe {
+			t.Errorf("rule %q is observe, must enforce", name)
 		}
 		if r.Action != wantAction {
 			t.Errorf("rule %q action = %q, want %q", name, r.Action, wantAction)
 		}
 	}
 
-	// Content/statistical heuristics are shadow — the exact rules that
+	// Content/statistical heuristics are observe — the exact rules that
 	// broke real agent turns under `standard` (bash -c, sudo, rm -rf,
 	// curl|sh) plus the measured-noisy anomaly rules.
-	shadowed := []string{
+	observed := []string{
 		"shell_execution", "privilege_escalation", "destructive_file_ops",
 		"network_exfiltration", "rate_anomaly", "compound_anomaly",
 	}
-	for _, name := range shadowed {
+	for _, name := range observed {
 		r := findRule(cfg.Policy.Rules, name)
 		if r == nil {
-			t.Errorf("shadow rule %q missing", name)
+			t.Errorf("observe rule %q missing", name)
 			continue
 		}
-		if !r.Shadow {
-			t.Errorf("rule %q must be shadow in coding-agent preset", name)
+		if !r.Observe {
+			t.Errorf("rule %q must be observe in coding-agent preset", name)
 		}
 		if r.Action != "flag" {
 			t.Errorf("rule %q action = %q, want flag", name, r.Action)
@@ -702,7 +702,7 @@ func TestCodingAgentPresetIsOverridable(t *testing.T) {
 	cfg.ApplyPolicyPreset()
 
 	r := findRule(cfg.Policy.Rules, "shell_execution")
-	if r == nil || r.Action != "block" || r.Shadow {
+	if r == nil || r.Action != "block" || r.Observe {
 		t.Fatalf("override failed: got %+v, want enforcing block rule", r)
 	}
 }
@@ -749,7 +749,7 @@ Expected: compile FAIL (`getCodingAgentPreset` undefined).
 ```go
 // getCodingAgentPreset returns a policy tuned for trusted coding agents
 // (Claude Code, Hermes, Cursor): deterministic structural rules ENFORCE,
-// content/statistical heuristics run in SHADOW — flagged and captured but
+// content/statistical heuristics run in OBSERVE — flagged and captured but
 // never blocking and never feeding the risk ladder. Rationale: coding
 // agents legitimately emit bash -c / sudo / rm -rf / curl|sh in their own
 // output, and their rapid tool loops look like high-rate high-entropy
@@ -774,38 +774,38 @@ func getCodingAgentPreset() []PolicyRule {
 		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 120, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 120/min"},
 		{Name: "high_request_count", Type: "request_count", Threshold: 2000, Severity: "warning", Action: "flag", Description: "FIREWALL: Session exceeded 2000 requests"},
 
-		// ---- Shadow: heuristics that false-fire on legitimate agent output ----
-		{Name: "shell_execution", Type: "content_match", Target: "both", Shadow: true, Patterns: []string{
+		// ---- Observe: heuristics that false-fire on legitimate agent output ----
+		{Name: "shell_execution", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
 			"(run|execute)\\s+(a\\s+)?(bash|shell|terminal)\\s+(command|script)",
 			"bash\\s+-c\\s+",
 			"/bin/(ba)?sh\\s+",
-		}, Severity: "warning", Action: "flag", Description: "LLM08: Shell execution pattern (shadow)"},
-		{Name: "privilege_escalation", Type: "content_match", Target: "both", Shadow: true, Patterns: []string{
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Shell execution pattern (observe)"},
+		{Name: "privilege_escalation", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
 			"sudo\\s+(rm|chmod|chown|kill|bash|sh|python|perl|ruby|apt|yum|dnf|pip|npm|make|gcc|curl|wget)\\b",
 			"(run|execute)\\s+(this\\s+)?(command\\s+)?(as|with)\\s+root",
 			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
-		}, Severity: "warning", Action: "flag", Description: "LLM08: Privilege escalation pattern (shadow)"},
-		{Name: "destructive_file_ops", Type: "content_match", Target: "both", Shadow: true, Patterns: []string{
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Privilege escalation pattern (observe)"},
+		{Name: "destructive_file_ops", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
 			"rm\\s+(-rf?|--recursive)\\s+/",
 			"rm\\s+-rf\\s+\\*",
 			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
-		}, Severity: "warning", Action: "flag", Description: "LLM08: Destructive file operation (shadow)"},
-		{Name: "network_exfiltration", Type: "content_match", Target: "both", Shadow: true, Patterns: []string{
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Destructive file operation (observe)"},
+		{Name: "network_exfiltration", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
 			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 			"wget\\s+[^|]*\\|\\s*(ba)?sh",
 			"reverse\\s+shell",
-		}, Severity: "warning", Action: "flag", Description: "LLM08: Piped-download pattern (shadow)"},
-		{Name: "prompt_injection_ignore", Type: "content_match", Target: "both", Shadow: true, Patterns: []string{
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Piped-download pattern (observe)"},
+		{Name: "prompt_injection_ignore", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
 			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
 			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
 			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
-		}, Severity: "warning", Action: "flag", Description: "LLM01: Prompt injection pattern (shadow)"},
+		}, Severity: "warning", Action: "flag", Description: "LLM01: Prompt injection pattern (observe)"},
 
-		// ---- Shadow: statistical anomalies (measured noise on agent tool loops) ----
-		{Name: "rate_anomaly", Type: "rate_anomaly", Shadow: true, Severity: "warning", Action: "flag",
-			ThresholdFloat: 0.01, MinSamples: 10, Description: "ANOMALY: Request rate statistically abnormal (shadow)"},
-		{Name: "compound_anomaly", Type: "compound_anomaly", Shadow: true, Severity: "warning", Action: "flag",
-			ThresholdFloat: 0.15, MinSamples: 5, Description: "ANOMALY: Sustained high-rate + high-entropy burst (elevated rate/entropy signal, shadow)"},
+		// ---- Observe: statistical anomalies (measured noise on agent tool loops) ----
+		{Name: "rate_anomaly", Type: "rate_anomaly", Observe: true, Severity: "warning", Action: "flag",
+			ThresholdFloat: 0.01, MinSamples: 10, Description: "ANOMALY: Request rate statistically abnormal (observe)"},
+		{Name: "compound_anomaly", Type: "compound_anomaly", Observe: true, Severity: "warning", Action: "flag",
+			ThresholdFloat: 0.15, MinSamples: 5, Description: "ANOMALY: Sustained high-rate + high-entropy burst (elevated rate/entropy signal, observe)"},
 	}
 }
 ```
@@ -826,11 +826,11 @@ Expected: PASS.
 
 ```bash
 git add internal/config/config.go internal/config/policy_preset_test.go
-git commit -m "feat(policy): coding-agent preset — enforce structural rules, shadow heuristics
+git commit -m "feat(policy): coding-agent preset — enforce structural rules, observe heuristics
 
 New preset for trusted coding agents (feedback #3): dangerous tool
 names/args and credential-access tools block; shell/sudo/rm/curl|sh
-content patterns and rate/entropy anomalies run in shadow. Nothing in
+content patterns and rate/entropy anomalies run in observe. Nothing in
 the preset can terminate a session, and the compound_anomaly wording no
 longer claims 'exfiltration' for a bare statistical signal."
 ```
@@ -878,9 +878,9 @@ policy:
   suppress_rules: [destructive_file_ops, compound_anomaly]
 ​```
 
-### Shadow rules
+### Observe rules
 
-`shadow: true` makes a rule observe-only: it flags and captures, its
+`observe: true` makes a rule observe-only: it flags and captures, its
 action is forced to `flag`, and it contributes **nothing** to the risk
 ladder. Use it to keep noisy heuristics visible without letting them
 escalate.
@@ -901,7 +901,7 @@ whose tool loops look like high-rate bursts to anomaly detectors:
 - **Enforced:** dangerous tool names (`exec_*`, `shell_*`, `rm_*`,
   `sudo_*`, `eval_*`), dangerous tool arguments, credential-access tool
   calls, generous rate limits (120 req/min).
-- **Shadow:** shell/privilege/destructive/exfil content patterns, prompt
+- **Observe:** shell/privilege/destructive/exfil content patterns, prompt
   injection heuristics, `rate_anomaly`, `compound_anomaly`.
 - Nothing in the preset terminates a session.
 
@@ -916,7 +916,7 @@ policy:
 ​```
 ```
 
-In `docs/configuration.md`, extend the policy section's option list with `suppress_rules`, `shadow`, and the `coding-agent` preset value (match the file's existing table/format — read it first).
+In `docs/configuration.md`, extend the policy section's option list with `suppress_rules`, `observe`, and the `coding-agent` preset value (match the file's existing table/format — read it first).
 
 - [ ] **Step 2: Update CHANGELOG.md**
 
@@ -933,9 +933,9 @@ Add under a new "Unreleased" heading at the top (match existing entry style):
 
 ### Added
 - `policy.suppress_rules`: drop preset, custom, or generated rules by name.
-- `shadow: true` on a rule: flag + capture without feeding the risk ladder.
+- `observe: true` on a rule: flag + capture without feeding the risk ladder.
 - `coding-agent` policy preset: structural rules enforce, content and
-  statistical heuristics run in shadow. (#feedback-3)
+  statistical heuristics run in observe. (#feedback-3)
 
 ### Changed
 - `compound_anomaly` description no longer claims an "exfiltration
@@ -952,7 +952,7 @@ Re-read each doc claim and confirm it matches a test from Tasks 1–4.
 
 ```bash
 git add docs/policy-rules-reference.md docs/configuration.md CHANGELOG.md
-git commit -m "docs(policy): document rule layering, shadow rules, audit-mode ladder, coding-agent preset"
+git commit -m "docs(policy): document rule layering, observe rules, audit-mode ladder, coding-agent preset"
 ```
 
 ---
