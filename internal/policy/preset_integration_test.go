@@ -32,7 +32,7 @@ func toPolicyRules(rules []config.PolicyRule) []Rule {
 // codingAgentEngine loads the coding-agent preset through the real config
 // layer (config.ApplyPolicyPreset) and builds a policy.Engine from the
 // converted rules, mirroring what cmd/elida/main.go does at startup.
-func codingAgentEngine(t *testing.T, mode string) *Engine {
+func codingAgentEngine(t *testing.T) *Engine {
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Policy.Preset = "coding-agent"
@@ -40,7 +40,7 @@ func codingAgentEngine(t *testing.T, mode string) *Engine {
 
 	return NewEngine(Config{
 		Enabled:    true,
-		Mode:       mode,
+		Mode:       "enforce",
 		Rules:      toPolicyRules(cfg.Policy.Rules),
 		RiskLadder: RiskLadderConfig{Enabled: true},
 	})
@@ -50,7 +50,7 @@ func codingAgentEngine(t *testing.T, mode string) *Engine {
 // block a shell_exec tool call through the real EvaluateToolCalls path,
 // while leaving unrelated tool names untouched.
 func TestCodingAgentPresetToolBlocking(t *testing.T) {
-	e := codingAgentEngine(t, "enforce")
+	e := codingAgentEngine(t)
 
 	blocked := e.EvaluateToolCalls("sess-tool-blocked", []ToolCall{
 		{Name: "shell_exec", Arguments: "{}"},
@@ -71,7 +71,7 @@ func TestCodingAgentPresetToolBlocking(t *testing.T) {
 // command in tool arguments — the coding-agent preset treats a tool-arg
 // pattern match as suspicious, not a confirmed breach.
 func TestCodingAgentPresetDangerousArgsBlocked(t *testing.T) {
-	e := codingAgentEngine(t, "enforce")
+	e := codingAgentEngine(t)
 
 	result := e.EvaluateToolCalls("sess-dangerous-args", []ToolCall{
 		{Name: "run_command", Arguments: `{"cmd":"rm -rf /tmp/demo"}`},
@@ -88,7 +88,7 @@ func TestCodingAgentPresetDangerousArgsBlocked(t *testing.T) {
 // must flag and capture through EvaluateRequestContent but never block, and
 // must not feed the risk ladder.
 func TestCodingAgentPresetPIIObservedNotBlocked(t *testing.T) {
-	e := codingAgentEngine(t, "enforce")
+	e := codingAgentEngine(t)
 
 	result := e.EvaluateRequestContent("sess-pii", "my SSN is 123-45-6789")
 	if result == nil {
@@ -112,7 +112,7 @@ func TestCodingAgentPresetPIIObservedNotBlocked(t *testing.T) {
 // itself (external points, e.g. from behavioral fingerprinting) still
 // terminates at the default threshold.
 func TestCodingAgentPresetLadderStillTerminates(t *testing.T) {
-	e := codingAgentEngine(t, "enforce")
+	e := codingAgentEngine(t)
 
 	e.AddExternalRiskPoints("sess-ladder", 100, "test")
 	if !e.ShouldTerminateByRisk("sess-ladder") {

@@ -117,7 +117,9 @@ jobs:
         run: go mod download
 
       - name: Run unit tests
-        run: go test -v -race -coverpkg=./internal/... -coverprofile=coverage.out ./test/unit/...
+        # ./internal/... includes the in-package unit tests, which carry most
+        # of the coverage; integration/chaos suites run in their own jobs.
+        run: go test -v -race -coverpkg=./internal/... -coverprofile=coverage.out ./internal/... ./test/unit/...
 
       - name: Upload coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
