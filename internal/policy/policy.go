@@ -76,6 +76,7 @@ type Rule struct {
 	Severity       Severity   `yaml:"severity" json:"severity"`
 	Description    string     `yaml:"description" json:"description"`
 	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
+	Shadow         bool       `yaml:"shadow" json:"shadow,omitempty"` // Flag + capture only: excluded from risk scoring
 }
 
 // Violation represents a policy violation
@@ -234,8 +235,9 @@ type Engine struct {
 	compiledToolRules []CompiledToolRule // Tool call rules with compiled patterns
 	flaggedSessions   map[string]*FlaggedSession
 	captureContent    bool
-	maxCaptureSize    int  // Max bytes to capture per request
-	auditMode         bool // If true, log but don't enforce (dry-run)
+	maxCaptureSize    int             // Max bytes to capture per request
+	auditMode         bool            // If true, log but don't enforce (dry-run)
+	shadowRules       map[string]bool // rule name -> shadow (excluded from risk scoring)
 
 	// Risk ladder configuration
 	riskLadderEnabled bool
@@ -265,6 +267,17 @@ type Config struct {
 type RiskLadderConfig struct {
 	Enabled    bool            `yaml:"enabled" json:"enabled"`
 	Thresholds []RiskThreshold `yaml:"thresholds" json:"thresholds"`
+}
+
+// shadowRulesFrom indexes which rule names are shadow (observe-only).
+func shadowRulesFrom(rules []Rule) map[string]bool {
+	m := make(map[string]bool)
+	for _, r := range rules {
+		if r.Shadow {
+			m[r.Name] = true
+		}
+	}
+	return m
 }
 
 // NewEngine creates a new policy engine
@@ -297,6 +310,7 @@ func NewEngine(cfg Config) *Engine {
 		riskLadderEnabled: cfg.RiskLadder.Enabled,
 		riskThresholds:    thresholds,
 		detectors:         make(map[string]*SessionDetector),
+		shadowRules:       shadowRulesFrom(cfg.Rules),
 	}
 
 	// Compile regex patterns for content rules
@@ -369,6 +383,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	defer e.mu.Unlock()
 
 	e.auditMode = cfg.Mode == "audit"
+	e.shadowRules = shadowRulesFrom(cfg.Rules)
 
 	e.captureContent = cfg.CaptureContent
 	if cfg.MaxCaptureSize > 0 {
@@ -1053,13 +1068,16 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 		// Always increment count (don't deduplicate)
 		flagged.ViolationCounts[v.RuleName]++
 
-		// Record event for decay calculation
-		flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
-			RuleName:   v.RuleName,
-			Severity:   v.Severity,
-			SourceRole: v.SourceRole,
-			Timestamp:  v.Timestamp,
-		})
+		// Record event for decay calculation — shadow rules are visible in
+		// the violation list but contribute nothing to the risk score.
+		if !e.shadowRules[v.RuleName] {
+			flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
+				RuleName:   v.RuleName,
+				Severity:   v.Severity,
+				SourceRole: v.SourceRole,
+				Timestamp:  v.Timestamp,
+			})
+		}
 
 		if !existingRules[v.RuleName] {
 			flagged.Violations = append(flagged.Violations, v)

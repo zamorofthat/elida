@@ -106,3 +106,17 @@ func TestSuppressRulesAppliesToCircuitBreakerAndNoPreset(t *testing.T) {
 		t.Error("suppress_rules ignored when no preset is set")
 	}
 }
+
+// A shadow rule can never block: its action is normalized to flag at load.
+func TestShadowRuleActionNormalizedToFlag(t *testing.T) {
+	cfg := &Config{}
+	cfg.Policy.Rules = []PolicyRule{
+		{Name: "shadowed", Type: "content_match", Patterns: []string{"x"},
+			Action: "block", Shadow: true},
+	}
+	cfg.ApplyPolicyPreset()
+	r := findRule(cfg.Policy.Rules, "shadowed")
+	if r == nil || r.Action != "flag" {
+		t.Fatalf("shadow rule action = %v, want flag", r)
+	}
+}

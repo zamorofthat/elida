@@ -212,6 +212,7 @@ type PolicyRule struct {
 	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
 	Action         string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
+	Shadow         bool     `yaml:"shadow"` // Flag + capture only: never enforces, contributes 0 to the risk ladder
 }
 
 // BackendConfig defines a single backend configuration
@@ -1083,6 +1084,14 @@ func (c *Config) ApplyPolicyPreset() {
 
 	if len(overridden) > 0 {
 		slog.Info("preset rules overridden by custom rules", "preset", c.Policy.Preset, "rules", overridden)
+	}
+
+	// Shadow rules observe only — normalize their action to flag so a
+	// misconfigured shadow+block rule can never enforce.
+	for i := range c.Policy.Rules {
+		if c.Policy.Rules[i].Shadow {
+			c.Policy.Rules[i].Action = "flag"
+		}
 	}
 }
 
