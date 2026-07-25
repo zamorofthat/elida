@@ -211,8 +211,8 @@ type PolicyRule struct {
 	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
 	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
-	Action         string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
-	Shadow         bool     `yaml:"shadow"` // Flag + capture only: never enforces, contributes 0 to the risk ladder
+	Action         string   `yaml:"action"`  // flag, block, terminate (for content/tool rules)
+	Observe        bool     `yaml:"observe"` // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
 }
 
 // BackendConfig defines a single backend configuration
@@ -1086,10 +1086,10 @@ func (c *Config) ApplyPolicyPreset() {
 		slog.Info("preset rules overridden by custom rules", "preset", c.Policy.Preset, "rules", overridden)
 	}
 
-	// Shadow rules observe only — normalize their action to flag so a
-	// misconfigured shadow+block rule can never enforce.
+	// Observe-only rules never enforce — normalize their action to flag so
+	// a misconfigured observe+block rule can never enforce.
 	for i := range c.Policy.Rules {
-		if c.Policy.Rules[i].Shadow {
+		if c.Policy.Rules[i].Observe {
 			c.Policy.Rules[i].Action = "flag"
 		}
 	}

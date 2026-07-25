@@ -75,8 +75,8 @@ type Rule struct {
 	Patterns       []string   `yaml:"patterns" json:"patterns,omitempty"`               // For content_match rules (regex)
 	Severity       Severity   `yaml:"severity" json:"severity"`
 	Description    string     `yaml:"description" json:"description"`
-	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
-	Shadow         bool       `yaml:"shadow" json:"shadow,omitempty"` // Flag + capture only: excluded from risk scoring
+	Action         string     `yaml:"action" json:"action,omitempty"`   // "flag", "block", "terminate"
+	Observe        bool       `yaml:"observe" json:"observe,omitempty"` // Observe only: flag + capture, excluded from risk scoring
 }
 
 // Violation represents a policy violation
@@ -237,7 +237,7 @@ type Engine struct {
 	captureContent    bool
 	maxCaptureSize    int             // Max bytes to capture per request
 	auditMode         bool            // If true, log but don't enforce (dry-run)
-	shadowRules       map[string]bool // rule name -> shadow (excluded from risk scoring)
+	observeRules      map[string]bool // rule name -> observe-only (excluded from risk scoring)
 
 	// Risk ladder configuration
 	riskLadderEnabled bool
@@ -269,11 +269,11 @@ type RiskLadderConfig struct {
 	Thresholds []RiskThreshold `yaml:"thresholds" json:"thresholds"`
 }
 
-// shadowRulesFrom indexes which rule names are shadow (observe-only).
-func shadowRulesFrom(rules []Rule) map[string]bool {
+// observeRulesFrom indexes which rule names are observe-only.
+func observeRulesFrom(rules []Rule) map[string]bool {
 	m := make(map[string]bool)
 	for _, r := range rules {
-		if r.Shadow {
+		if r.Observe {
 			m[r.Name] = true
 		}
 	}
@@ -310,7 +310,7 @@ func NewEngine(cfg Config) *Engine {
 		riskLadderEnabled: cfg.RiskLadder.Enabled,
 		riskThresholds:    thresholds,
 		detectors:         make(map[string]*SessionDetector),
-		shadowRules:       shadowRulesFrom(cfg.Rules),
+		observeRules:      observeRulesFrom(cfg.Rules),
 	}
 
 	// Compile regex patterns for content rules
@@ -383,7 +383,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	defer e.mu.Unlock()
 
 	e.auditMode = cfg.Mode == "audit"
-	e.shadowRules = shadowRulesFrom(cfg.Rules)
+	e.observeRules = observeRulesFrom(cfg.Rules)
 
 	e.captureContent = cfg.CaptureContent
 	if cfg.MaxCaptureSize > 0 {
@@ -1068,9 +1068,10 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 		// Always increment count (don't deduplicate)
 		flagged.ViolationCounts[v.RuleName]++
 
-		// Record event for decay calculation — shadow rules are visible in
-		// the violation list but contribute nothing to the risk score.
-		if !e.shadowRules[v.RuleName] {
+		// Record event for decay calculation — observe-only rules are
+		// visible in the violation list but contribute nothing to the risk
+		// score.
+		if !e.observeRules[v.RuleName] {
 			flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
 				RuleName:   v.RuleName,
 				Severity:   v.Severity,

@@ -107,16 +107,16 @@ func TestSuppressRulesAppliesToCircuitBreakerAndNoPreset(t *testing.T) {
 	}
 }
 
-// A shadow rule can never block: its action is normalized to flag at load.
-func TestShadowRuleActionNormalizedToFlag(t *testing.T) {
+// An observe-only rule can never block: its action is normalized to flag at load.
+func TestObserveRuleActionNormalizedToFlag(t *testing.T) {
 	cfg := &Config{}
 	cfg.Policy.Rules = []PolicyRule{
-		{Name: "shadowed", Type: "content_match", Patterns: []string{"x"},
-			Action: "block", Shadow: true},
+		{Name: "observed", Type: "content_match", Patterns: []string{"x"},
+			Action: "block", Observe: true},
 	}
 	cfg.ApplyPolicyPreset()
-	r := findRule(cfg.Policy.Rules, "shadowed")
+	r := findRule(cfg.Policy.Rules, "observed")
 	if r == nil || r.Action != "flag" {
-		t.Fatalf("shadow rule action = %v, want flag", r)
+		t.Fatalf("observe rule action = %v, want flag", r)
 	}
 }

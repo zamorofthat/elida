@@ -5,26 +5,26 @@ import (
 	"time"
 )
 
-// Shadow rules flag and capture but contribute zero to the risk ladder
+// Observe-only rules flag and capture but contribute zero to the risk ladder
 // (feedback #3: statistical/PII rules are noise on coding-agent traffic —
 // they must not drive escalation).
-func TestShadowRuleViolationsDoNotFeedRiskLadder(t *testing.T) {
+func TestObserveRuleViolationsDoNotFeedRiskLadder(t *testing.T) {
 	e := NewEngine(Config{
 		Enabled: true,
 		Mode:    "enforce",
 		Rules: []Rule{
-			{Name: "shadow_shell", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+			{Name: "observe_shell", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
 				Patterns: []string{"sudo\\s+rm"}, Severity: SeverityCritical,
-				Action: "flag", Shadow: true},
+				Action: "flag", Observe: true},
 		},
 		RiskLadder: RiskLadderConfig{Enabled: true},
 	})
 
-	// Record many critical shadow violations — enough that, if they fed the
-	// ladder, the session would be far past the block threshold (30).
+	// Record many critical observe-only violations — enough that, if they
+	// fed the ladder, the session would be far past the block threshold (30).
 	for i := 0; i < 50; i++ {
-		e.recordViolations("sess-shadow", []Violation{{
-			RuleName:  "shadow_shell",
+		e.recordViolations("sess-observe", []Violation{{
+			RuleName:  "observe_shell",
 			Severity:  SeverityCritical,
 			Action:    "flag",
 			Timestamp: time.Now(),
@@ -32,21 +32,21 @@ func TestShadowRuleViolationsDoNotFeedRiskLadder(t *testing.T) {
 	}
 
 	// Still flagged and visible…
-	if !e.IsFlagged("sess-shadow") {
-		t.Fatal("shadow violations must still flag the session")
+	if !e.IsFlagged("sess-observe") {
+		t.Fatal("observe-only violations must still flag the session")
 	}
 	// …but the ladder never moved.
-	score, _, _ := e.GetSessionRiskScore("sess-shadow")
+	score, _, _ := e.GetSessionRiskScore("sess-observe")
 	if score != 0 {
-		t.Errorf("risk score = %v, want 0 (shadow rules contribute nothing)", score)
+		t.Errorf("risk score = %v, want 0 (observe-only rules contribute nothing)", score)
 	}
-	if e.ShouldBlockByRisk("sess-shadow") {
-		t.Error("ShouldBlockByRisk = true from shadow-only violations, want false")
+	if e.ShouldBlockByRisk("sess-observe") {
+		t.Error("ShouldBlockByRisk = true from observe-only violations, want false")
 	}
 }
 
-// Non-shadow rules are unaffected.
-func TestNonShadowRulesStillFeedRiskLadder(t *testing.T) {
+// Non-observe rules are unaffected.
+func TestNonObserveRulesStillFeedRiskLadder(t *testing.T) {
 	e := NewEngine(Config{
 		Enabled: true,
 		Mode:    "enforce",
@@ -68,6 +68,6 @@ func TestNonShadowRulesStillFeedRiskLadder(t *testing.T) {
 
 	score, _, _ := e.GetSessionRiskScore("sess-real")
 	if score <= 0 {
-		t.Errorf("risk score = %v, want > 0 for non-shadow violations", score)
+		t.Errorf("risk score = %v, want > 0 for non-observe violations", score)
 	}
 }
