@@ -62,17 +62,17 @@ func TestUniqueCustomRulesStillAppended(t *testing.T) {
 	}
 }
 
-// Feedback #1: disabled_rules drops rules by name without redefining them.
-func TestDisabledRulesRemovesPresetRule(t *testing.T) {
+// Feedback #1: suppress_rules drops rules by name without redefining them.
+func TestSuppressRulesRemovesPresetRule(t *testing.T) {
 	cfg := &Config{}
 	cfg.Policy.Preset = "standard"
-	cfg.Policy.DisabledRules = []string{"destructive_file_ops", "compound_anomaly"}
+	cfg.Policy.SuppressRules = []string{"destructive_file_ops", "compound_anomaly"}
 
 	cfg.ApplyPolicyPreset()
 
 	for _, name := range []string{"destructive_file_ops", "compound_anomaly"} {
 		if findRule(cfg.Policy.Rules, name) != nil {
-			t.Errorf("rule %q present after being listed in disabled_rules", name)
+			t.Errorf("rule %q present after being listed in suppress_rules", name)
 		}
 	}
 	// Sibling rules survive.
@@ -81,28 +81,28 @@ func TestDisabledRulesRemovesPresetRule(t *testing.T) {
 	}
 }
 
-// disabled_rules also applies to generated circuit-breaker rules and works
+// suppress_rules also applies to generated circuit-breaker rules and works
 // with no preset set.
-func TestDisabledRulesAppliesToCircuitBreakerAndNoPreset(t *testing.T) {
+func TestSuppressRulesAppliesToCircuitBreakerAndNoPreset(t *testing.T) {
 	cfg := &Config{}
 	cfg.Policy.Preset = "minimal"
 	cfg.Policy.CircuitBreaker.Enabled = true
 	cfg.Policy.CircuitBreaker.MaxToolFanout = 30
-	cfg.Policy.DisabledRules = []string{"circuit_breaker_tool_fanout"}
+	cfg.Policy.SuppressRules = []string{"circuit_breaker_tool_fanout"}
 
 	cfg.ApplyPolicyPreset()
 
 	if findRule(cfg.Policy.Rules, "circuit_breaker_tool_fanout") != nil {
-		t.Error("generated circuit_breaker_tool_fanout present despite disabled_rules")
+		t.Error("generated circuit_breaker_tool_fanout present despite suppress_rules")
 	}
 
 	cfg2 := &Config{}
 	cfg2.Policy.Rules = []PolicyRule{
 		{Name: "noisy_rule", Type: "content_match", Patterns: []string{"x"}, Action: "flag"},
 	}
-	cfg2.Policy.DisabledRules = []string{"noisy_rule"}
+	cfg2.Policy.SuppressRules = []string{"noisy_rule"}
 	cfg2.ApplyPolicyPreset()
 	if findRule(cfg2.Policy.Rules, "noisy_rule") != nil {
-		t.Error("disabled_rules ignored when no preset is set")
+		t.Error("suppress_rules ignored when no preset is set")
 	}
 }

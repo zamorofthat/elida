@@ -122,7 +122,7 @@ type PolicyConfig struct {
 	MaxCaptureSize       int                        `yaml:"max_capture_size"` // Max bytes to capture per request
 	Preset               string                     `yaml:"preset"`           // minimal, standard, or strict
 	Rules                []PolicyRule               `yaml:"rules"`
-	DisabledRules        []string                   `yaml:"disabled_rules"`   // Rule names to drop after merge (preset, custom, or generated)
+	SuppressRules        []string                   `yaml:"suppress_rules"`   // Rule names to suppress after merge (preset, custom, or generated)
 	Streaming            StreamingConfig            `yaml:"streaming"`             // Response streaming scan configuration
 	RiskLadder           RiskLadderConfig           `yaml:"risk_ladder"`           // Progressive escalation based on risk score
 	CircuitBreaker       CircuitBreakerConfig       `yaml:"circuit_breaker"`       // Token and tool call limits
@@ -1059,25 +1059,25 @@ func (c *Config) ApplyPolicyPreset() {
 		}
 	}
 
-	// Drop rules named in disabled_rules (applies to preset, custom, and
+	// Drop rules named in suppress_rules (applies to preset, custom, and
 	// generated rules alike).
-	if len(c.Policy.DisabledRules) > 0 {
-		disabled := make(map[string]bool, len(c.Policy.DisabledRules))
-		for _, name := range c.Policy.DisabledRules {
-			disabled[name] = true
+	if len(c.Policy.SuppressRules) > 0 {
+		suppressed := make(map[string]bool, len(c.Policy.SuppressRules))
+		for _, name := range c.Policy.SuppressRules {
+			suppressed[name] = true
 		}
 		kept := c.Policy.Rules[:0]
-		var dropped []string
+		var suppressedRules []string
 		for _, r := range c.Policy.Rules {
-			if disabled[r.Name] {
-				dropped = append(dropped, r.Name)
+			if suppressed[r.Name] {
+				suppressedRules = append(suppressedRules, r.Name)
 				continue
 			}
 			kept = append(kept, r)
 		}
 		c.Policy.Rules = kept
-		if len(dropped) > 0 {
-			slog.Info("policy rules disabled by config", "rules", dropped)
+		if len(suppressedRules) > 0 {
+			slog.Info("policy rules suppressed by config", "rules", suppressedRules)
 		}
 	}
 
