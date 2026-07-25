@@ -20,7 +20,7 @@
 
 ---
 
-### Task 1: Local-overrides-default rule merge + `disabled_rules` (#1)
+### Task 1: Local-overrides-default rule merge + `suppress_rules` (#1)
 
 **Files:**
 - Modify: `internal/config/config.go` — `PolicyConfig` struct (line ~117), `ApplyPolicyPreset()` (line ~988)
@@ -28,7 +28,7 @@
 
 **Interfaces:**
 - Consumes: existing `PolicyRule`, `getMinimalPreset()`, `getStandardPreset()`, `getStrictPreset()`, `getMCPPreset()`.
-- Produces: `PolicyConfig.DisabledRules []string` (yaml `disabled_rules`); `ApplyPolicyPreset()` with replace-by-name merge semantics. Task 4 relies on this merge behavior; no signature changes.
+- Produces: `PolicyConfig.SuppressRules []string` (yaml `suppress_rules`); `ApplyPolicyPreset()` with replace-by-name merge semantics. Task 4 relies on this merge behavior; no signature changes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -99,17 +99,17 @@ func TestUniqueCustomRulesStillAppended(t *testing.T) {
 	}
 }
 
-// Feedback #1: disabled_rules drops rules by name without redefining them.
-func TestDisabledRulesRemovesPresetRule(t *testing.T) {
+// Feedback #1: suppress_rules drops rules by name without redefining them.
+func TestSuppressRulesRemovesPresetRule(t *testing.T) {
 	cfg := &Config{}
 	cfg.Policy.Preset = "standard"
-	cfg.Policy.DisabledRules = []string{"destructive_file_ops", "compound_anomaly"}
+	cfg.Policy.SuppressRules = []string{"destructive_file_ops", "compound_anomaly"}
 
 	cfg.ApplyPolicyPreset()
 
 	for _, name := range []string{"destructive_file_ops", "compound_anomaly"} {
 		if findRule(cfg.Policy.Rules, name) != nil {
-			t.Errorf("rule %q present after being listed in disabled_rules", name)
+			t.Errorf("rule %q present after being listed in suppress_rules", name)
 		}
 	}
 	// Sibling rules survive.
@@ -118,54 +118,54 @@ func TestDisabledRulesRemovesPresetRule(t *testing.T) {
 	}
 }
 
-// disabled_rules also applies to generated circuit-breaker rules and works
+// suppress_rules also applies to generated circuit-breaker rules and works
 // with no preset set.
-func TestDisabledRulesAppliesToCircuitBreakerAndNoPreset(t *testing.T) {
+func TestSuppressRulesAppliesToCircuitBreakerAndNoPreset(t *testing.T) {
 	cfg := &Config{}
 	cfg.Policy.Preset = "minimal"
 	cfg.Policy.CircuitBreaker.Enabled = true
 	cfg.Policy.CircuitBreaker.MaxToolFanout = 30
-	cfg.Policy.DisabledRules = []string{"circuit_breaker_tool_fanout"}
+	cfg.Policy.SuppressRules = []string{"circuit_breaker_tool_fanout"}
 
 	cfg.ApplyPolicyPreset()
 
 	if findRule(cfg.Policy.Rules, "circuit_breaker_tool_fanout") != nil {
-		t.Error("generated circuit_breaker_tool_fanout present despite disabled_rules")
+		t.Error("generated circuit_breaker_tool_fanout present despite suppress_rules")
 	}
 
 	cfg2 := &Config{}
 	cfg2.Policy.Rules = []PolicyRule{
 		{Name: "noisy_rule", Type: "content_match", Patterns: []string{"x"}, Action: "flag"},
 	}
-	cfg2.Policy.DisabledRules = []string{"noisy_rule"}
+	cfg2.Policy.SuppressRules = []string{"noisy_rule"}
 	cfg2.ApplyPolicyPreset()
 	if findRule(cfg2.Policy.Rules, "noisy_rule") != nil {
-		t.Error("disabled_rules ignored when no preset is set")
+		t.Error("suppress_rules ignored when no preset is set")
 	}
 }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `go test ./internal/config/ -run 'TestCustomRuleOverridesPresetRule|TestUniqueCustomRulesStillAppended|TestDisabledRulesRemovesPresetRule|TestDisabledRulesAppliesToCircuitBreakerAndNoPreset' -v`
+Run: `go test ./internal/config/ -run 'TestCustomRuleOverridesPresetRule|TestUniqueCustomRulesStillAppended|TestSuppressRulesRemovesPresetRule|TestSuppressRulesAppliesToCircuitBreakerAndNoPreset' -v`
 
-Expected: `TestCustomRuleOverridesPresetRule` FAILS (`shell_execution appears 2 times`); `TestDisabledRules*` FAIL (rules still present). `TestUniqueCustomRulesStillAppended` may already pass — that's fine, it pins existing behavior.
+Expected: `TestCustomRuleOverridesPresetRule` FAILS (`shell_execution appears 2 times`); `TestSuppressRules*` FAIL (rules still present). `TestUniqueCustomRulesStillAppended` may already pass — that's fine, it pins existing behavior.
 
 - [ ] **Step 3: Implement the merge**
 
 In `internal/config/config.go`, add to `PolicyConfig` (after the `Rules` field, line ~123):
 
 ```go
-	DisabledRules        []string                   `yaml:"disabled_rules"`   // Rule names to drop after merge (preset, custom, or generated)
+	SuppressRules        []string                   `yaml:"suppress_rules"`   // Rule names to drop after merge (preset, custom, or generated)
 ```
 
-Replace the body of `ApplyPolicyPreset()` (line ~989). The current early-`return`s for empty/unknown preset must NOT skip the disabled_rules filter, so restructure:
+Replace the body of `ApplyPolicyPreset()` (line ~989). The current early-`return`s for empty/unknown preset must NOT skip the suppress_rules filter, so restructure:
 
 ```go
 // ApplyPolicyPreset applies a policy preset with local-overrides-default
 // layering: a custom rule with the same name as a preset rule REPLACES the
 // preset rule (like Splunk/Cribl local vs default configs). Rules named in
-// policy.disabled_rules are dropped after the merge — this also covers
+// policy.suppress_rules are dropped after the merge — this also covers
 // generated circuit-breaker rules.
 func (c *Config) ApplyPolicyPreset() {
 	var presetRules []PolicyRule
@@ -206,11 +206,11 @@ func (c *Config) ApplyPolicyPreset() {
 	// `if c.Policy.CircuitBreaker.Enabled { ... }` block currently at
 	// lines ~1012-1044) ...
 
-	// Drop rules named in disabled_rules (applies to preset, custom, and
+	// Drop rules named in suppress_rules (applies to preset, custom, and
 	// generated rules alike).
-	if len(c.Policy.DisabledRules) > 0 {
-		disabled := make(map[string]bool, len(c.Policy.DisabledRules))
-		for _, name := range c.Policy.DisabledRules {
+	if len(c.Policy.SuppressRules) > 0 {
+		disabled := make(map[string]bool, len(c.Policy.SuppressRules))
+		for _, name := range c.Policy.SuppressRules {
 			disabled[name] = true
 		}
 		kept := c.Policy.Rules[:0]
@@ -224,7 +224,7 @@ func (c *Config) ApplyPolicyPreset() {
 		}
 		c.Policy.Rules = kept
 		if len(dropped) > 0 {
-			slog.Info("policy rules disabled by config", "rules", dropped)
+			slog.Info("policy rules suppressed by config", "rules", dropped)
 		}
 	}
 
@@ -237,7 +237,7 @@ func (c *Config) ApplyPolicyPreset() {
 Notes for the implementer:
 - The circuit-breaker block is moved verbatim, not rewritten. Do not change its rule contents.
 - `log/slog` is already imported in this file (check the import block; add it if not).
-- Behavior change vs. today: with an unknown or empty preset, circuit-breaker rules are now generated too (previously the early `return` skipped them). This is a bug-adjacent cleanup — a `circuit_breaker.enabled: true` config with no preset silently generated nothing. Keep it; it's covered by `TestDisabledRulesAppliesToCircuitBreakerAndNoPreset`.
+- Behavior change vs. today: with an unknown or empty preset, circuit-breaker rules are now generated too (previously the early `return` skipped them). This is a bug-adjacent cleanup — a `circuit_breaker.enabled: true` config with no preset silently generated nothing. Keep it; it's covered by `TestSuppressRulesAppliesToCircuitBreakerAndNoPreset`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -253,11 +253,11 @@ Expected: PASS everywhere. If `cmd/elida` or `internal/control` fail to compile,
 
 ```bash
 git add internal/config/config.go internal/config/policy_preset_test.go
-git commit -m "fix(policy): custom rules override same-named preset rules; add disabled_rules
+git commit -m "fix(policy): custom rules override same-named preset rules; add suppress_rules
 
 Local-overrides-default layering (feedback #1): a custom rule with the
 same name as a preset rule now replaces it instead of coexisting, and
-policy.disabled_rules drops any named rule after the merge."
+policy.suppress_rules drops any named rule after the merge."
 ```
 
 ---
@@ -526,7 +526,7 @@ Expected: compile FAIL (`Shadow` field doesn't exist) — that's the failing sta
 	Shadow         bool     `yaml:"shadow"` // Flag + capture only: never enforces, contributes 0 to the risk ladder
 ```
 
-3b. Same file, at the very end of `ApplyPolicyPreset()` (after the disabled_rules filter from Task 1):
+3b. Same file, at the very end of `ApplyPolicyPreset()` (after the suppress_rules filter from Task 1):
 
 ```go
 	// Shadow rules observe only — normalize their action to flag so a
@@ -875,7 +875,7 @@ circuit-breaker rules:
 ​```yaml
 policy:
   preset: standard
-  disabled_rules: [destructive_file_ops, compound_anomaly]
+  suppress_rules: [destructive_file_ops, compound_anomaly]
 ​```
 
 ### Shadow rules
@@ -916,7 +916,7 @@ policy:
 ​```
 ```
 
-In `docs/configuration.md`, extend the policy section's option list with `disabled_rules`, `shadow`, and the `coding-agent` preset value (match the file's existing table/format — read it first).
+In `docs/configuration.md`, extend the policy section's option list with `suppress_rules`, `shadow`, and the `coding-agent` preset value (match the file's existing table/format — read it first).
 
 - [ ] **Step 2: Update CHANGELOG.md**
 
@@ -932,7 +932,7 @@ Add under a new "Unreleased" heading at the top (match existing entry style):
   observe/warn and can no longer block or terminate. (#feedback-2)
 
 ### Added
-- `policy.disabled_rules`: drop preset, custom, or generated rules by name.
+- `policy.suppress_rules`: drop preset, custom, or generated rules by name.
 - `shadow: true` on a rule: flag + capture without feeding the risk ladder.
 - `coding-agent` policy preset: structural rules enforce, content and
   statistical heuristics run in shadow. (#feedback-3)

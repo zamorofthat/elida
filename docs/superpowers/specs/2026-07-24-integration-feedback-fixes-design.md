@@ -30,7 +30,7 @@ In `ApplyPolicyPreset()` (`internal/config/config.go:989`), replace the blind
 2. For each custom rule: if its `name` matches a preset rule, the custom rule
    **replaces** the preset rule (Splunk/Cribl/Grafana local-vs-default
    semantics). Otherwise it is appended.
-3. New `policy.disabled_rules: [name, ...]` list drops preset rules by name
+3. New `policy.suppress_rules: [name, ...]` list drops preset rules by name
    without redefining them.
 4. Startup log lists which preset rules were overridden or disabled, so the
    layering is visible.
