@@ -1223,6 +1223,19 @@ func (e *Engine) determineRiskAction(score float64) (string, int) {
 		}
 	}
 
+	// mode: audit is a dry run — the ladder may observe and warn but must
+	// never act. Without this, accumulated flags escalate to 403s while
+	// every individual rule is audit-only (feedback #2).
+	if e.auditMode {
+		switch action {
+		case string(ActionThrottle), string(ActionBlock), string(ActionTerminate):
+			slog.Info("risk ladder action suppressed (audit mode)",
+				"computed_action", action, "risk_score", score)
+			action = string(ActionWarn)
+			throttleRate = 0
+		}
+	}
+
 	return action, throttleRate
 }
 
