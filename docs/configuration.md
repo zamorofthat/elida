@@ -72,13 +72,14 @@ proxy:
 policy:
   enabled: true
   mode: "enforce"        # "enforce" or "audit"
-  preset: "standard"     # "minimal", "standard", or "strict"
+  preset: "standard"     # "minimal", "standard", "strict", "mcp", or "coding-agent"
   capture_flagged: true
   rules:
     - name: "high_request_count"
       type: "request_count"
       threshold: 100
       severity: "warning"
+  suppress_rules: []     # Rule names to drop after merge (preset, custom, or generated)
 
 # Storage (session history and capture)
 storage:
@@ -225,6 +226,57 @@ Request-side flags score **10.0 points** (critical severity) on the risk ladder.
 | 15 | Throttle |
 | 30 | Block |
 | 50 | Terminate |
+
+### Rule Suppression and Observe Mode
+
+Two knobs shape which rules run and how much weight they carry, on top of
+the local-overrides-default merge described above (a custom rule with the
+same `name` as a preset rule replaces it).
+
+| Field | Type | Description |
+|-------|------|--------------|
+| `policy.suppress_rules` | `[]string` | Rule names to drop after the merge. Works on preset rules, custom rules, and generated circuit-breaker rules alike. |
+| `rules[].observe` | `bool` | Marks a single rule observe-only: it still flags and captures, but its action is forced to `flag` and it contributes nothing to the risk ladder. |
+
+```yaml
+policy:
+  preset: standard
+  suppress_rules: [destructive_file_ops, compound_anomaly]
+  rules:
+    - name: shell_execution
+      type: content_match
+      target: response
+      patterns: ["bash\\s+-c\\s+"]
+      severity: warning
+      action: flag
+      observe: true   # flag + capture only, never escalates the risk ladder
+```
+
+`mode: audit` is a true dry run on top of this: rule actions don't enforce
+and the risk ladder is clamped to observe/warn, so audit mode can never
+throttle, block, or terminate — even if individual rules or the risk
+ladder would otherwise escalate.
+
+### The `coding-agent` Preset
+
+`policy.preset: coding-agent` is tuned for trusted coding agents (Claude
+Code, Hermes, Cursor) whose legitimate output contains `bash -c`, `sudo`,
+`rm -rf`, `curl | sh`, and whose tool loops look like high-rate bursts to
+anomaly detectors. Structural rules (dangerous tool names/arguments,
+credential-access tool calls, rate limits) enforce; content and
+statistical heuristics (shell/privilege/destructive/exfil patterns,
+prompt injection, PII, `rate_anomaly`, `compound_anomaly`) run in observe
+mode. Nothing in the preset terminates a session. See
+[docs/policy-rules-reference.md](policy-rules-reference.md) for the full
+rule list.
+
+```yaml
+policy:
+  preset: coding-agent
+  circuit_breaker:
+    enabled: true
+    max_tool_fanout: 100   # agents legitimately expose 30+ tools
+```
 
 ### Allowlisted Tools
 
