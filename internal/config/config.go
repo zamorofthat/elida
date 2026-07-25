@@ -122,7 +122,7 @@ type PolicyConfig struct {
 	MaxCaptureSize       int                        `yaml:"max_capture_size"` // Max bytes to capture per request
 	Preset               string                     `yaml:"preset"`           // minimal, standard, or strict
 	Rules                []PolicyRule               `yaml:"rules"`
-	SuppressRules        []string                   `yaml:"suppress_rules"`   // Rule names to suppress after merge (preset, custom, or generated)
+	SuppressRules        []string                   `yaml:"suppress_rules"`        // Rule names to suppress after merge (preset, custom, or generated)
 	Streaming            StreamingConfig            `yaml:"streaming"`             // Response streaming scan configuration
 	RiskLadder           RiskLadderConfig           `yaml:"risk_ladder"`           // Progressive escalation based on risk score
 	CircuitBreaker       CircuitBreakerConfig       `yaml:"circuit_breaker"`       // Token and tool call limits
@@ -990,7 +990,7 @@ func GetDefaultRoutingMethods() []string {
 // ApplyPolicyPreset applies a policy preset with local-overrides-default
 // layering: a custom rule with the same name as a preset rule REPLACES the
 // preset rule (like Splunk/Cribl local vs default configs). Rules named in
-// policy.disabled_rules are dropped after the merge — this also covers
+// policy.suppress_rules are dropped after the merge — this also covers
 // generated circuit-breaker rules.
 func (c *Config) ApplyPolicyPreset() {
 	var presetRules []PolicyRule
@@ -1085,7 +1085,6 @@ func (c *Config) ApplyPolicyPreset() {
 		slog.Info("preset rules overridden by custom rules", "preset", c.Policy.Preset, "rules", overridden)
 	}
 }
-
 
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
 func getMinimalPreset() []PolicyRule {
