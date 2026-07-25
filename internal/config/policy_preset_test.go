@@ -286,3 +286,91 @@ func TestNoPresetKeepsDefaultRules(t *testing.T) {
 		t.Errorf("high_request_count threshold = %d, want 100 (default)", r.Threshold)
 	}
 }
+
+// suppress_rules naming a rule that doesn't exist in the merged set must be
+// a no-op: no panic, and every other rule survives untouched.
+func TestSuppressUnknownRuleNameIsNoOp(t *testing.T) {
+	cfg := &Config{}
+	cfg.Policy.Preset = "standard"
+	cfg.Policy.SuppressRules = []string{"does_not_exist"}
+
+	cfg.ApplyPolicyPreset()
+
+	if len(cfg.Policy.Rules) == 0 {
+		t.Fatal("suppressing an unknown rule name wiped out all rules")
+	}
+	if findRule(cfg.Policy.Rules, "rate_limit_high") == nil {
+		t.Error("rate_limit_high missing after suppressing an unknown rule name")
+	}
+	if findRule(cfg.Policy.Rules, "high_request_count") == nil {
+		t.Error("high_request_count missing after suppressing an unknown rule name")
+	}
+}
+
+// suppress_rules on an observe-only preset rule removes it entirely — it
+// does not linger in some disabled-but-present state.
+func TestSuppressedObserveRuleFullyRemoved(t *testing.T) {
+	cfg := &Config{}
+	cfg.Policy.Preset = "coding-agent"
+	cfg.Policy.SuppressRules = []string{"rate_anomaly"}
+
+	cfg.ApplyPolicyPreset()
+
+	if findRule(cfg.Policy.Rules, "rate_anomaly") != nil {
+		t.Error("rate_anomaly present after being listed in suppress_rules")
+	}
+	// Sibling observe rule survives.
+	if findRule(cfg.Policy.Rules, "compound_anomaly") == nil {
+		t.Error("compound_anomaly wrongly removed alongside rate_anomaly")
+	}
+}
+
+// Load()'ing the standard preset must produce the preset's own threshold
+// values, not defaults()' — extends the Task-6 regression coverage
+// (TestDefaultRulesDoNotOverridePresetRules) to a second preset.
+func TestStandardPresetViaLoadKeepsThresholds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "elida.yaml")
+	yaml := "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\npolicy:\n  enabled: true\n  mode: enforce\n  preset: standard\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := findRule(cfg.Policy.Rules, "high_request_count")
+	if r == nil {
+		t.Fatal("high_request_count missing")
+	}
+	if r.Threshold != 100 {
+		t.Errorf("high_request_count threshold = %d, want 100 (standard preset value)", r.Threshold)
+	}
+
+	rl := findRule(cfg.Policy.Rules, "rate_limit_high")
+	if rl == nil {
+		t.Fatal("rate_limit_high missing")
+	}
+	if rl.Threshold != 60 {
+		t.Errorf("rate_limit_high threshold = %d, want 60 (standard preset value)", rl.Threshold)
+	}
+}
+
+// The strict preset must still enforce compound_anomaly with a blocking,
+// non-observe action — this branch's observe-rule work must not have
+// softened strict mode.
+func TestStrictPresetStillEnforcesCompoundAnomaly(t *testing.T) {
+	rules := getStrictPreset()
+
+	r := findRule(rules, "compound_anomaly")
+	if r == nil {
+		t.Fatal("compound_anomaly missing from strict preset")
+	}
+	if r.Action != "block" {
+		t.Errorf("compound_anomaly action = %q, want %q", r.Action, "block")
+	}
+	if r.Observe {
+		t.Error("compound_anomaly Observe = true, want false in strict preset")
+	}
+}
