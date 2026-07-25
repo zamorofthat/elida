@@ -72,3 +72,7 @@ elida-internal/
 .claude/
 .agents/
 site/
+
+# Superpowers planning/scratch artifacts
+docs/superpowers/
+.superpowers/
