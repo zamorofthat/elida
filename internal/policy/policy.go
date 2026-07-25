@@ -75,8 +75,14 @@ type Rule struct {
 	Patterns       []string   `yaml:"patterns" json:"patterns,omitempty"`               // For content_match rules (regex)
 	Severity       Severity   `yaml:"severity" json:"severity"`
 	Description    string     `yaml:"description" json:"description"`
-	Action         string     `yaml:"action" json:"action,omitempty"`   // "flag", "block", "terminate"
-	Observe        bool       `yaml:"observe" json:"observe,omitempty"` // Observe only: flag + capture, excluded from risk scoring
+	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
+	// Observe marks a rule observe-only: flag + capture, excluded from risk
+	// scoring. NOTE: the engine only excludes observe rules from scoring — it
+	// does NOT neutralize enforcement actions. The action→"flag" normalization
+	// happens in config loading (config.ApplyPolicyPreset). Code constructing
+	// Rule values directly MUST set Action to "flag" for observe rules, or the
+	// rule will still enforce. See docs/policy-rules-reference.md.
+	Observe bool `yaml:"observe" json:"observe,omitempty"`
 }
 
 // Violation represents a policy violation

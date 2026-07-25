@@ -46,6 +46,12 @@ action is forced to `flag`, and it contributes **nothing** to the risk
 ladder. Use it to keep noisy heuristics visible without letting them
 escalate.
 
+> **Note for programmatic use:** the action→`flag` normalization happens
+> when the YAML config is loaded. If you construct policy rules directly
+> against the engine API (bypassing config loading), you must set
+> `Action: "flag"` on observe rules yourself — the engine excludes observe
+> rules from risk scoring but does not override their enforcement action.
+
 ### Audit mode and the risk ladder
 
 `mode: audit` is a true dry run: rule actions don't enforce **and** the
