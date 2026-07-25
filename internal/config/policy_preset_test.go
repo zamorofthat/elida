@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -218,4 +220,69 @@ func TestAnomalyDescriptionsNotAlarmist(t *testing.T) {
 
 func containsFold(s, sub string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+}
+
+// Regression: built-in default rules (from defaults()) must not act as
+// custom overrides of preset rules when the user supplies no rules.
+func TestDefaultRulesDoNotOverridePresetRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "elida.yaml")
+	yaml := "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\npolicy:\n  enabled: true\n  mode: enforce\n  preset: coding-agent\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := findRule(cfg.Policy.Rules, "high_request_count")
+	if r == nil {
+		t.Fatal("high_request_count missing")
+	}
+	if r.Threshold != 2000 {
+		t.Errorf("high_request_count threshold = %d, want 2000 (preset value; default rules must not override presets)", r.Threshold)
+	}
+	if got := countRule(cfg.Policy.Rules, "high_request_count"); got != 1 {
+		t.Errorf("high_request_count appears %d times, want 1", got)
+	}
+}
+
+// A user-WRITTEN same-named rule still overrides the preset through Load().
+func TestUserRulesStillOverridePresetViaLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "elida.yaml")
+	yaml := "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\npolicy:\n  enabled: true\n  preset: coding-agent\n  rules:\n    - name: high_request_count\n      type: request_count\n      threshold: 5000\n      severity: warning\n      action: flag\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := findRule(cfg.Policy.Rules, "high_request_count")
+	if r == nil || r.Threshold != 5000 {
+		t.Fatalf("user rule did not win: %+v", r)
+	}
+}
+
+// With no preset and no user rules, the built-in default rules must still be
+// present (Load() must not blank out Policy.Rules unconditionally).
+func TestNoPresetKeepsDefaultRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "elida.yaml")
+	yaml := "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\npolicy:\n  enabled: true\n  mode: enforce\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := findRule(cfg.Policy.Rules, "high_request_count")
+	if r == nil {
+		t.Fatal("high_request_count missing; default rules must survive Load() with no preset")
+	}
+	if r.Threshold != 100 {
+		t.Errorf("high_request_count threshold = %d, want 100 (default)", r.Threshold)
+	}
 }

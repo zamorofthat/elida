@@ -351,8 +351,23 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := defaults()
+	defaultRules := cfg.Policy.Rules
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file: %w", err)
+	}
+
+	// If the user's YAML has no `policy.rules:` key, yaml.Unmarshal leaves
+	// cfg.Policy.Rules pointing at the exact slice defaults() built above.
+	// ApplyPolicyPreset() treats any rule already in Policy.Rules as a
+	// user-authored override that REPLACES the same-named preset rule, so
+	// left untouched those generic built-in defaults (e.g. high_request_count
+	// threshold 100) would silently clobber preset-tuned values (e.g. 2000
+	// for coding-agent). Detect "still the defaults" via slice identity
+	// (same length, same backing array) and clear it so a preset only meets
+	// rules the user actually wrote. A user who explicitly writes
+	// `rules: []` gets a distinct empty slice from yaml and is unaffected.
+	if cfg.Policy.Preset != "" && samePolicyRulesSlice(cfg.Policy.Rules, defaultRules) {
+		cfg.Policy.Rules = nil
 	}
 
 	// Override with environment variables
@@ -366,6 +381,22 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// samePolicyRulesSlice reports whether a and b are the same underlying
+// slice (identical length and, when non-empty, identical backing array).
+// Used to detect whether yaml.Unmarshal left Policy.Rules untouched from
+// defaults(), i.e. the user's config had no "policy.rules:" key, as
+// opposed to an explicit "rules: []", which yaml allocates as a distinct
+// (but also empty) slice.
+func samePolicyRulesSlice(a, b []PolicyRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return false
+	}
+	return &a[0] == &b[0]
 }
 
 // defaults returns a Config with sensible default values
