@@ -161,7 +161,8 @@ func TestCodingAgentPreset(t *testing.T) {
 	// curl|sh) plus the measured-noisy anomaly rules.
 	observed := []string{
 		"shell_execution", "privilege_escalation", "destructive_file_ops",
-		"network_exfiltration", "rate_anomaly", "compound_anomaly",
+		"network_exfiltration", "prompt_injection_ignore", "pii_ssn_request",
+		"pii_credit_card", "rate_anomaly", "compound_anomaly",
 	}
 	for _, name := range observed {
 		r := findRule(cfg.Policy.Rules, name)

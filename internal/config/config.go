@@ -1159,6 +1159,16 @@ func getCodingAgentPreset() []PolicyRule {
 			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
 			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
 		}, Severity: "warning", Action: "flag", Description: "LLM01: Prompt injection pattern (observe)"},
+		{Name: "pii_ssn_request", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"social\\s+security\\s+(number|#)",
+			"\\bssn\\b",
+			"\\d{3}-\\d{2}-\\d{4}",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: SSN pattern (observe)"},
+		{Name: "pii_credit_card", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"credit\\s+card\\s+(number|#|info)",
+			"\\bcvv\\b",
+			"\\bcvc\\b",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Credit card pattern (observe)"},
 
 		// ---- Observe: statistical anomalies (measured noise on agent tool loops) ----
 		{Name: "rate_anomaly", Type: "rate_anomaly", Observe: true, Severity: "warning", Action: "flag",
