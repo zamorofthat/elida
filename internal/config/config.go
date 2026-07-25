@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -121,6 +122,7 @@ type PolicyConfig struct {
 	MaxCaptureSize       int                        `yaml:"max_capture_size"` // Max bytes to capture per request
 	Preset               string                     `yaml:"preset"`           // minimal, standard, or strict
 	Rules                []PolicyRule               `yaml:"rules"`
+	DisabledRules        []string                   `yaml:"disabled_rules"`   // Rule names to drop after merge (preset, custom, or generated)
 	Streaming            StreamingConfig            `yaml:"streaming"`             // Response streaming scan configuration
 	RiskLadder           RiskLadderConfig           `yaml:"risk_ladder"`           // Progressive escalation based on risk score
 	CircuitBreaker       CircuitBreakerConfig       `yaml:"circuit_breaker"`       // Token and tool call limits
@@ -985,14 +987,16 @@ func GetDefaultRoutingMethods() []string {
 	return []string{"header", "model", "path", "default"}
 }
 
-// ApplyPolicyPreset applies a policy preset, merging with any custom rules
+// ApplyPolicyPreset applies a policy preset with local-overrides-default
+// layering: a custom rule with the same name as a preset rule REPLACES the
+// preset rule (like Splunk/Cribl local vs default configs). Rules named in
+// policy.disabled_rules are dropped after the merge — this also covers
+// generated circuit-breaker rules.
 func (c *Config) ApplyPolicyPreset() {
-	if c.Policy.Preset == "" {
-		return
-	}
-
 	var presetRules []PolicyRule
 	switch c.Policy.Preset {
+	case "":
+		// no preset — custom rules only
 	case "minimal":
 		presetRules = getMinimalPreset()
 	case "standard":
@@ -1002,11 +1006,25 @@ func (c *Config) ApplyPolicyPreset() {
 	case "mcp":
 		presetRules = getMCPPreset()
 	default:
-		return // Unknown preset, use rules as-is
+		slog.Warn("unknown policy preset, using custom rules only", "preset", c.Policy.Preset)
 	}
 
-	// Prepend preset rules, keeping any custom rules from config
-	c.Policy.Rules = append(presetRules, c.Policy.Rules...)
+	// Local overrides default: same-named custom rule replaces the preset rule.
+	customNames := make(map[string]bool, len(c.Policy.Rules))
+	for _, r := range c.Policy.Rules {
+		customNames[r.Name] = true
+	}
+	var overridden []string
+	merged := make([]PolicyRule, 0, len(presetRules)+len(c.Policy.Rules))
+	for _, pr := range presetRules {
+		if customNames[pr.Name] {
+			overridden = append(overridden, pr.Name)
+			continue
+		}
+		merged = append(merged, pr)
+	}
+	merged = append(merged, c.Policy.Rules...)
+	c.Policy.Rules = merged
 
 	// Generate rules from circuit breaker config (if enabled)
 	if c.Policy.CircuitBreaker.Enabled {
@@ -1040,7 +1058,34 @@ func (c *Config) ApplyPolicyPreset() {
 			})
 		}
 	}
+
+	// Drop rules named in disabled_rules (applies to preset, custom, and
+	// generated rules alike).
+	if len(c.Policy.DisabledRules) > 0 {
+		disabled := make(map[string]bool, len(c.Policy.DisabledRules))
+		for _, name := range c.Policy.DisabledRules {
+			disabled[name] = true
+		}
+		kept := c.Policy.Rules[:0]
+		var dropped []string
+		for _, r := range c.Policy.Rules {
+			if disabled[r.Name] {
+				dropped = append(dropped, r.Name)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		c.Policy.Rules = kept
+		if len(dropped) > 0 {
+			slog.Info("policy rules disabled by config", "rules", dropped)
+		}
+	}
+
+	if len(overridden) > 0 {
+		slog.Info("preset rules overridden by custom rules", "preset", c.Policy.Preset, "rules", overridden)
+	}
 }
+
 
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
 func getMinimalPreset() []PolicyRule {
