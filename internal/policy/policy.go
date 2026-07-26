@@ -76,6 +76,14 @@ type Rule struct {
 	Severity       Severity   `yaml:"severity" json:"severity"`
 	Description    string     `yaml:"description" json:"description"`
 	Action         string     `yaml:"action" json:"action,omitempty"` // "flag", "block", "terminate"
+	// Observe marks a rule observe-only: flag + capture, excluded from risk
+	// scoring. The engine normalizes Action to "flag" for observe rules at
+	// ingest (NewEngine/ReloadConfig), so this is safe even for Rule values
+	// constructed directly. Config loading (config.ApplyPolicyPreset) also
+	// normalizes on the way in — belt and braces. Still, set Action: "flag"
+	// explicitly for observe rules as good practice. See
+	// docs/policy-rules-reference.md.
+	Observe bool `yaml:"observe" json:"observe,omitempty"`
 }
 
 // Violation represents a policy violation
@@ -234,8 +242,9 @@ type Engine struct {
 	compiledToolRules []CompiledToolRule // Tool call rules with compiled patterns
 	flaggedSessions   map[string]*FlaggedSession
 	captureContent    bool
-	maxCaptureSize    int  // Max bytes to capture per request
-	auditMode         bool // If true, log but don't enforce (dry-run)
+	maxCaptureSize    int             // Max bytes to capture per request
+	auditMode         bool            // If true, log but don't enforce (dry-run)
+	observeRules      map[string]bool // rule name -> observe-only (excluded from risk scoring)
 
 	// Risk ladder configuration
 	riskLadderEnabled bool
@@ -267,11 +276,49 @@ type RiskLadderConfig struct {
 	Thresholds []RiskThreshold `yaml:"thresholds" json:"thresholds"`
 }
 
+// observeRulesFrom indexes which rule names are observe-only.
+func observeRulesFrom(rules []Rule) map[string]bool {
+	m := make(map[string]bool)
+	for _, r := range rules {
+		if r.Observe {
+			m[r.Name] = true
+		}
+	}
+	return m
+}
+
+// normalizeObserveRules defensively forces Action to "flag" for every
+// observe-only rule. This is the engine's ingest-time choke point: config
+// loading (config.ApplyPolicyPreset) already normalizes observe rules, but
+// callers can also construct Rule values directly and hand them to
+// NewEngine/ReloadConfig, bypassing that path entirely. Without this, an
+// Observe:true rule with Action:"block" would still enforce, defeating the
+// purpose of "observe-only".
+//
+// Returns a new slice — it never mutates the caller's backing array, since
+// that slice may be aliased and reused by the caller after this call
+// returns.
+func normalizeObserveRules(rules []Rule) []Rule {
+	out := make([]Rule, len(rules))
+	for i, r := range rules {
+		if r.Observe {
+			r.Action = "flag"
+		}
+		out[i] = r
+	}
+	return out
+}
+
 // NewEngine creates a new policy engine
 func NewEngine(cfg Config) *Engine {
 	if cfg.MaxCaptureSize == 0 {
 		cfg.MaxCaptureSize = 10000 // Default 10KB per request
 	}
+
+	// Defense in depth: neutralize enforcement on observe rules at the
+	// engine's ingest choke point, even if the caller constructed Rule
+	// values directly and skipped config-load normalization.
+	cfg.Rules = normalizeObserveRules(cfg.Rules)
 
 	// Default to enforce mode if not specified
 	auditMode := cfg.Mode == "audit"
@@ -297,6 +344,7 @@ func NewEngine(cfg Config) *Engine {
 		riskLadderEnabled: cfg.RiskLadder.Enabled,
 		riskThresholds:    thresholds,
 		detectors:         make(map[string]*SessionDetector),
+		observeRules:      observeRulesFrom(cfg.Rules),
 	}
 
 	// Compile regex patterns for content rules
@@ -340,6 +388,11 @@ func NewEngine(cfg Config) *Engine {
 // ReloadConfig dynamically updates the policy engine configuration.
 // This allows settings changes to take effect without restart.
 func (e *Engine) ReloadConfig(cfg Config) {
+	// Defense in depth: neutralize enforcement on observe rules at the
+	// engine's ingest choke point, even if the caller constructed Rule
+	// values directly and skipped config-load normalization.
+	cfg.Rules = normalizeObserveRules(cfg.Rules)
+
 	// Compile regex patterns outside the lock to avoid blocking evaluations
 	newCompiledRules := make([]CompiledRule, 0)
 	for _, rule := range cfg.Rules {
@@ -369,6 +422,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	defer e.mu.Unlock()
 
 	e.auditMode = cfg.Mode == "audit"
+	e.observeRules = observeRulesFrom(cfg.Rules)
 
 	e.captureContent = cfg.CaptureContent
 	if cfg.MaxCaptureSize > 0 {
@@ -1053,13 +1107,17 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 		// Always increment count (don't deduplicate)
 		flagged.ViolationCounts[v.RuleName]++
 
-		// Record event for decay calculation
-		flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
-			RuleName:   v.RuleName,
-			Severity:   v.Severity,
-			SourceRole: v.SourceRole,
-			Timestamp:  v.Timestamp,
-		})
+		// Record event for decay calculation — observe-only rules are
+		// visible in the violation list but contribute nothing to the risk
+		// score.
+		if !e.observeRules[v.RuleName] {
+			flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
+				RuleName:   v.RuleName,
+				Severity:   v.Severity,
+				SourceRole: v.SourceRole,
+				Timestamp:  v.Timestamp,
+			})
+		}
 
 		if !existingRules[v.RuleName] {
 			flagged.Violations = append(flagged.Violations, v)
@@ -1220,6 +1278,19 @@ func (e *Engine) determineRiskAction(score float64) (string, int) {
 			if threshold.Action == ActionThrottle {
 				throttleRate = threshold.ThrottleRate
 			}
+		}
+	}
+
+	// mode: audit is a dry run — the ladder may observe and warn but must
+	// never act. Without this, accumulated flags escalate to 403s while
+	// every individual rule is audit-only (feedback #2).
+	if e.auditMode {
+		switch action {
+		case string(ActionThrottle), string(ActionBlock), string(ActionTerminate):
+			slog.Info("risk ladder action suppressed (audit mode)",
+				"computed_action", action, "risk_score", score)
+			action = string(ActionWarn)
+			throttleRate = 0
 		}
 	}
 

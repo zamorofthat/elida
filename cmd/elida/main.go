@@ -630,6 +630,7 @@ func (a *app) initPolicyEngine() {
 			Severity:       policy.Severity(r.Severity),
 			Description:    r.Description,
 			Action:         r.Action,
+			Observe:        r.Observe,
 		}
 	}
 

@@ -9,6 +9,83 @@ This document contains the complete set of default policy rules available in ELI
 | `minimal` | Basic rate limiting only | Development/testing |
 | `standard` | OWASP LLM Top 10 basics + rate limits | Production default |
 | `strict` | Full OWASP + NIST + PII detection | High-security environments |
+| `coding-agent` | Structural rules enforce, content/statistical heuristics observe | Trusted coding agents (Claude Code, Hermes, Cursor) |
+
+## Rule layering: presets, overrides, and disabled rules
+
+Preset and custom rules merge with **local-overrides-default** semantics
+(like Splunk or Cribl configs): a custom rule with the same `name` as a
+preset rule **replaces** it. To soften one `standard` rule without
+rebuilding the policy:
+
+```yaml
+policy:
+  preset: standard
+  rules:
+    - name: shell_execution        # replaces the preset rule of this name
+      type: content_match
+      target: response
+      patterns: ["bash\\s+-c\\s+"]
+      severity: warning
+      action: flag                 # preset had block
+```
+
+To drop rules entirely, list them by name — this also works on generated
+circuit-breaker rules:
+
+```yaml
+policy:
+  preset: standard
+  suppress_rules: [destructive_file_ops, compound_anomaly]
+```
+
+### Observe rules
+
+`observe: true` makes a rule observe-only: it flags and captures, its
+action is forced to `flag`, and it contributes **nothing** to the risk
+ladder. Use it to keep noisy heuristics visible without letting them
+escalate.
+
+> **Note for programmatic use:** the action→`flag` normalization happens
+> when the YAML config is loaded, and again in the policy engine itself
+> (`NewEngine`/`ReloadConfig`), which forces `Action: "flag"` on any rule
+> with `Observe: true` before it takes effect. So constructing policy rules
+> directly against the engine API — bypassing config loading — is safe:
+> this is defense in depth. Setting `Action: "flag"` explicitly on observe
+> rules is still good practice.
+
+### Audit mode and the risk ladder
+
+`mode: audit` is a true dry run: rule actions don't enforce **and** the
+risk ladder is clamped to observe/warn. Scores still accumulate and are
+visible in the dashboard, but audit mode can never throttle, block, or
+terminate.
+
+### The `coding-agent` preset
+
+Tuned for trusted coding agents (Claude Code, Hermes, Cursor), whose
+legitimate output contains `bash -c`, `sudo`, `rm -rf`, `curl | sh` and
+whose tool loops look like high-rate bursts to anomaly detectors:
+
+- **Enforced:** dangerous tool names (`exec_*`, `shell_*`, `rm_*`,
+  `sudo_*`, `eval_*`), dangerous tool arguments, credential-access tool
+  calls, generous rate limits (120 req/min).
+- **Observe:** shell/privilege/destructive/exfil content patterns, prompt
+  injection heuristics, the two PII patterns (`pii_ssn_request`,
+  `pii_credit_card`), `rate_anomaly`, `compound_anomaly`.
+- Nothing in the preset terminates a session.
+
+Recommended companion settings:
+
+```yaml
+policy:
+  preset: coding-agent
+  circuit_breaker:
+    enabled: true
+    max_tool_fanout: 100   # agents legitimately expose 30+ tools
+```
+
+---
 
 ## Configuration
 

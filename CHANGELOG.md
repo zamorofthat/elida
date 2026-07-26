@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Custom policy rules now **replace** same-named preset rules
+  (local-overrides-default) instead of coexisting with them. (#feedback-1)
+- `mode: audit` is now a true dry run: the risk ladder is clamped to
+  observe/warn and can no longer block or terminate. (#feedback-2)
+
 ### Added
 
+- `policy.suppress_rules`: drop preset, custom, or generated rules by name.
+- `observe: true` on a rule: flag + capture without feeding the risk ladder.
+- `coding-agent` policy preset: structural rules enforce, content and
+  statistical heuristics run in observe. (#feedback-3)
 - **Statistical Anomaly Detection**: Three new rule types for detecting session anomalies that evade static thresholds:
   - `rate_anomaly` — Poisson-based end-of-session retrospective check. Splits request timestamps into baseline/test windows, flags when observed rate is statistically abnormal (p-value threshold).
   - `content_entropy` — Shannon entropy of request/response content. Detects base64-encoded, compressed, or encrypted payloads that evade regex pattern matching. Strict preset only (code content can naturally reach 5.0-5.5).
@@ -20,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `compound_anomaly` description no longer claims an "exfiltration
+  pattern" for a bare rate/entropy signal.
 - Standard preset now includes `rate_anomaly` (p<0.01, warning) and `compound_anomaly` (threshold 0.15, flag) rules
 - Strict preset tightens `rate_anomaly` to p<0.001/critical, `compound_anomaly` to threshold 0.10/block, and adds `content_entropy` at 5.5 bits/byte
 - `StreamingScanner` accumulates full content for entropy evaluation on `Finalize()`, with burst-level reset on `Reset()`

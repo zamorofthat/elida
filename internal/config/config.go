@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -119,8 +120,9 @@ type PolicyConfig struct {
 	Mode                 string                     `yaml:"mode"`             // "enforce" (default) or "audit" (dry-run)
 	CaptureContent       bool                       `yaml:"capture_flagged"`  // Capture content for flagged sessions
 	MaxCaptureSize       int                        `yaml:"max_capture_size"` // Max bytes to capture per request
-	Preset               string                     `yaml:"preset"`           // minimal, standard, or strict
+	Preset               string                     `yaml:"preset"`           // minimal, standard, strict, mcp, or coding-agent
 	Rules                []PolicyRule               `yaml:"rules"`
+	SuppressRules        []string                   `yaml:"suppress_rules"`        // Rule names to suppress after merge (preset, custom, or generated)
 	Streaming            StreamingConfig            `yaml:"streaming"`             // Response streaming scan configuration
 	RiskLadder           RiskLadderConfig           `yaml:"risk_ladder"`           // Progressive escalation based on risk score
 	CircuitBreaker       CircuitBreakerConfig       `yaml:"circuit_breaker"`       // Token and tool call limits
@@ -209,7 +211,8 @@ type PolicyRule struct {
 	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
 	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
-	Action         string   `yaml:"action"` // flag, block, terminate (for content/tool rules)
+	Action         string   `yaml:"action"`  // flag, block, terminate (for content/tool rules)
+	Observe        bool     `yaml:"observe"` // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
 }
 
 // BackendConfig defines a single backend configuration
@@ -348,8 +351,23 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := defaults()
+	defaultRules := cfg.Policy.Rules
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file: %w", err)
+	}
+
+	// If the user's YAML has no `policy.rules:` key, yaml.Unmarshal leaves
+	// cfg.Policy.Rules pointing at the exact slice defaults() built above.
+	// ApplyPolicyPreset() treats any rule already in Policy.Rules as a
+	// user-authored override that REPLACES the same-named preset rule, so
+	// left untouched those generic built-in defaults (e.g. high_request_count
+	// threshold 100) would silently clobber preset-tuned values (e.g. 2000
+	// for coding-agent). Detect "still the defaults" via slice identity
+	// (same length, same backing array) and clear it so a preset only meets
+	// rules the user actually wrote. A user who explicitly writes
+	// `rules: []` gets a distinct empty slice from yaml and is unaffected.
+	if cfg.Policy.Preset != "" && samePolicyRulesSlice(cfg.Policy.Rules, defaultRules) {
+		cfg.Policy.Rules = nil
 	}
 
 	// Override with environment variables
@@ -363,6 +381,22 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// samePolicyRulesSlice reports whether a and b are the same underlying
+// slice (identical length and, when non-empty, identical backing array).
+// Used to detect whether yaml.Unmarshal left Policy.Rules untouched from
+// defaults(), i.e. the user's config had no "policy.rules:" key, as
+// opposed to an explicit "rules: []", which yaml allocates as a distinct
+// (but also empty) slice.
+func samePolicyRulesSlice(a, b []PolicyRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return false
+	}
+	return &a[0] == &b[0]
 }
 
 // defaults returns a Config with sensible default values
@@ -985,14 +1019,16 @@ func GetDefaultRoutingMethods() []string {
 	return []string{"header", "model", "path", "default"}
 }
 
-// ApplyPolicyPreset applies a policy preset, merging with any custom rules
+// ApplyPolicyPreset applies a policy preset with local-overrides-default
+// layering: a custom rule with the same name as a preset rule REPLACES the
+// preset rule (like Splunk/Cribl local vs default configs). Rules named in
+// policy.suppress_rules are dropped after the merge — this also covers
+// generated circuit-breaker rules.
 func (c *Config) ApplyPolicyPreset() {
-	if c.Policy.Preset == "" {
-		return
-	}
-
 	var presetRules []PolicyRule
 	switch c.Policy.Preset {
+	case "":
+		// no preset — custom rules only
 	case "minimal":
 		presetRules = getMinimalPreset()
 	case "standard":
@@ -1001,12 +1037,28 @@ func (c *Config) ApplyPolicyPreset() {
 		presetRules = getStrictPreset()
 	case "mcp":
 		presetRules = getMCPPreset()
+	case "coding-agent":
+		presetRules = getCodingAgentPreset()
 	default:
-		return // Unknown preset, use rules as-is
+		slog.Warn("unknown policy preset, using custom rules only", "preset", c.Policy.Preset)
 	}
 
-	// Prepend preset rules, keeping any custom rules from config
-	c.Policy.Rules = append(presetRules, c.Policy.Rules...)
+	// Local overrides default: same-named custom rule replaces the preset rule.
+	customNames := make(map[string]bool, len(c.Policy.Rules))
+	for _, r := range c.Policy.Rules {
+		customNames[r.Name] = true
+	}
+	var overridden []string
+	merged := make([]PolicyRule, 0, len(presetRules)+len(c.Policy.Rules))
+	for _, pr := range presetRules {
+		if customNames[pr.Name] {
+			overridden = append(overridden, pr.Name)
+			continue
+		}
+		merged = append(merged, pr)
+	}
+	merged = append(merged, c.Policy.Rules...)
+	c.Policy.Rules = merged
 
 	// Generate rules from circuit breaker config (if enabled)
 	if c.Policy.CircuitBreaker.Enabled {
@@ -1040,6 +1092,40 @@ func (c *Config) ApplyPolicyPreset() {
 			})
 		}
 	}
+
+	// Drop rules named in suppress_rules (applies to preset, custom, and
+	// generated rules alike).
+	if len(c.Policy.SuppressRules) > 0 {
+		suppressed := make(map[string]bool, len(c.Policy.SuppressRules))
+		for _, name := range c.Policy.SuppressRules {
+			suppressed[name] = true
+		}
+		kept := c.Policy.Rules[:0]
+		var suppressedRules []string
+		for _, r := range c.Policy.Rules {
+			if suppressed[r.Name] {
+				suppressedRules = append(suppressedRules, r.Name)
+				continue
+			}
+			kept = append(kept, r)
+		}
+		c.Policy.Rules = kept
+		if len(suppressedRules) > 0 {
+			slog.Info("policy rules suppressed by config", "rules", suppressedRules)
+		}
+	}
+
+	if len(overridden) > 0 {
+		slog.Info("preset rules overridden by custom rules", "preset", c.Policy.Preset, "rules", overridden)
+	}
+
+	// Observe-only rules never enforce — normalize their action to flag so
+	// a misconfigured observe+block rule can never enforce.
+	for i := range c.Policy.Rules {
+		if c.Policy.Rules[i].Observe {
+			c.Policy.Rules[i].Action = "flag"
+		}
+	}
 }
 
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
@@ -1048,6 +1134,78 @@ func getMinimalPreset() []PolicyRule {
 		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 60, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 60/min"},
 		{Name: "high_request_count", Type: "request_count", Threshold: 500, Severity: "warning", Action: "flag", Description: "FIREWALL: Session exceeded 500 requests"},
 		{Name: "long_running_session", Type: "duration", Threshold: 3600, Severity: "warning", Action: "flag", Description: "FIREWALL: Session running longer than 1 hour"},
+	}
+}
+
+// getCodingAgentPreset returns a policy tuned for trusted coding agents
+// (Claude Code, Hermes, Cursor): deterministic structural rules ENFORCE,
+// content/statistical heuristics run in OBSERVE — flagged and captured but
+// never blocking and never feeding the risk ladder. Rationale: coding
+// agents legitimately emit bash -c / sudo / rm -rf / curl|sh in their own
+// output, and their rapid tool loops look like high-rate high-entropy
+// bursts to anomaly detectors (integration feedback #3).
+func getCodingAgentPreset() []PolicyRule {
+	return []PolicyRule{
+		// ---- Enforced: structural, can't false-fire on agent output ----
+		{Name: "block_dangerous_tools", Type: "tool_blocked", Target: "response", Patterns: []string{
+			"exec_*", "shell_*", "rm_*", "sudo_*", "eval_*",
+		}, Severity: "critical", Action: "block", Description: "LLM07: Block dangerous tool calls"},
+		{Name: "dangerous_tool_arguments", Type: "tool_argument_pattern", Target: "response", Patterns: []string{
+			"rm\\s+-rf\\s+/",
+			"chmod\\s+777\\s+/",
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
+		}, Severity: "critical", Action: "block", Description: "LLM08: Dangerous patterns in tool arguments"},
+		{Name: "tool_credential_access", Type: "content_match", Target: "request", Patterns: []string{
+			"\"function\"\\s*:\\s*\"(get|read|fetch)_(secret|credential|password|key)\"",
+			"\"name\"\\s*:\\s*\"(vault_read|secret_manager|get_api_key)\"",
+		}, Severity: "critical", Action: "block", Description: "LLM07: Tool requests credential access"},
+
+		// ---- Enforced: generous runaway limits (coding sessions are long) ----
+		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 120, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 120/min"},
+		{Name: "high_request_count", Type: "request_count", Threshold: 2000, Severity: "warning", Action: "flag", Description: "FIREWALL: Session exceeded 2000 requests"},
+
+		// ---- Observe: heuristics that false-fire on legitimate agent output ----
+		{Name: "shell_execution", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"(run|execute)\\s+(a\\s+)?(bash|shell|terminal)\\s+(command|script)",
+			"bash\\s+-c\\s+",
+			"/bin/(ba)?sh\\s+",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Shell execution pattern (observe)"},
+		{Name: "privilege_escalation", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"sudo\\s+(rm|chmod|chown|kill|bash|sh|python|perl|ruby|apt|yum|dnf|pip|npm|make|gcc|curl|wget)\\b",
+			"(run|execute)\\s+(this\\s+)?(command\\s+)?(as|with)\\s+root",
+			"(get|gain|obtain)\\s+(root|admin|superuser)\\s+(access|privileges|permissions)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Privilege escalation pattern (observe)"},
+		{Name: "destructive_file_ops", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"rm\\s+(-rf?|--recursive)\\s+/",
+			"rm\\s+-rf\\s+\\*",
+			"(delete|remove|wipe)\\s+all\\s+(files|data|everything)",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Destructive file operation (observe)"},
+		{Name: "network_exfiltration", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"curl\\s+[^|]*\\|\\s*(ba)?sh",
+			"wget\\s+[^|]*\\|\\s*(ba)?sh",
+			"reverse\\s+shell",
+		}, Severity: "warning", Action: "flag", Description: "LLM08: Piped-download pattern (observe)"},
+		{Name: "prompt_injection_ignore", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"ignore\\s+(all\\s+)?(previous|prior|above|your)\\s+(instructions|prompts|rules)",
+			"disregard\\s+(all\\s+)?(your\\s+)?(previous|prior|system)\\s+(instructions|prompts)",
+			"forget\\s+(all\\s+)?(previous|prior|your)\\s+(instructions|training|rules)",
+		}, Severity: "warning", Action: "flag", Description: "LLM01: Prompt injection pattern (observe)"},
+		{Name: "pii_ssn_request", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"social\\s+security\\s+(number|#)",
+			"\\bssn\\b",
+			"\\d{3}-\\d{2}-\\d{4}",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: SSN pattern (observe)"},
+		{Name: "pii_credit_card", Type: "content_match", Target: "both", Observe: true, Patterns: []string{
+			"credit\\s+card\\s+(number|#|info)",
+			"\\bcvv\\b",
+			"\\bcvc\\b",
+		}, Severity: "warning", Action: "flag", Description: "LLM06: Credit card pattern (observe)"},
+
+		// ---- Observe: statistical anomalies (measured noise on agent tool loops) ----
+		{Name: "rate_anomaly", Type: "rate_anomaly", Observe: true, Severity: "warning", Action: "flag",
+			ThresholdFloat: 0.01, MinSamples: 10, Description: "ANOMALY: Request rate statistically abnormal (observe)"},
+		{Name: "compound_anomaly", Type: "compound_anomaly", Observe: true, Severity: "warning", Action: "flag",
+			ThresholdFloat: 0.15, MinSamples: 5, Description: "ANOMALY: Sustained high-rate + high-entropy burst (elevated rate/entropy signal, observe)"},
 	}
 }
 
@@ -1065,7 +1223,7 @@ func getStandardPreset() []PolicyRule {
 
 		// Statistical anomaly detection
 		{Name: "rate_anomaly", Type: "rate_anomaly", Severity: "warning", Description: "ANOMALY: Request rate statistically abnormal (p<0.01)", Action: "flag", ThresholdFloat: 0.01, MinSamples: 10},
-		{Name: "compound_anomaly", Type: "compound_anomaly", Severity: "warning", Description: "ANOMALY: Sustained high-rate + high-entropy burst (agent exfiltration pattern)", Action: "flag", ThresholdFloat: 0.15, MinSamples: 5},
+		{Name: "compound_anomaly", Type: "compound_anomaly", Severity: "warning", Description: "ANOMALY: Sustained high-rate + high-entropy burst (elevated rate/entropy signal)", Action: "flag", ThresholdFloat: 0.15, MinSamples: 5},
 
 		// OWASP LLM01 - Prompt Injection (REQUEST-SIDE)
 		{Name: "prompt_injection_ignore", Type: "content_match", Target: "response", Patterns: []string{
