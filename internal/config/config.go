@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -41,6 +42,11 @@ type ProxyConfig struct {
 type ProxyAuthConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	APIKey  string `yaml:"api_key"` // API key for Bearer token or X-API-Key header auth
+	// TrustedNetworks lists CIDRs whose DIRECT peers skip the API-key check
+	// (e.g. loopback + the docker bridge). Lets un-keyed auxiliary agent
+	// calls work on a trusted network while the LAN still needs the key.
+	// The trust decision never consults X-Forwarded-For.
+	TrustedNetworks []string `yaml:"trusted_networks"`
 }
 
 // WebSocketConfig holds WebSocket proxy configuration
@@ -943,6 +949,15 @@ func (c *Config) Validate() *ValidationResult {
 			Message: "API key required when proxy auth is enabled",
 			Hint:    "set ELIDA_PROXY_API_KEY env var",
 		})
+	}
+
+	for _, cidr := range c.Proxy.Auth.TrustedNetworks {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   "proxy.auth.trusted_networks",
+				Message: fmt.Sprintf("invalid CIDR %q: %v", cidr, err),
+			})
+		}
 	}
 
 	// OCSF webhook validation

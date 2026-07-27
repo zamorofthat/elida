@@ -127,3 +127,17 @@ func TestDefaultConfigSecurityDefaults(t *testing.T) {
 		t.Errorf("default config should pass security validation: %v", err)
 	}
 }
+
+func TestTrustedNetworksValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Proxy.Auth.Enabled = true
+	cfg.Proxy.Auth.APIKey = "k"
+	cfg.Proxy.Auth.TrustedNetworks = []string{"127.0.0.1/32", "bogus"}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("invalid CIDR in trusted_networks must fail validation")
+	}
+	cfg.Proxy.Auth.TrustedNetworks = []string{"127.0.0.1/32", "172.16.0.0/12", "::1/128"}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("valid CIDRs rejected: %v", err)
+	}
+}

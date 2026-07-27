@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
@@ -70,6 +71,7 @@ type Proxy struct {
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 	redactor                redaction.Redactor    // Redaction provider for sensitive data
+	trustedNets             []*net.IPNet          // proxy.auth.trusted_networks parsed at startup
 }
 
 // ProxyOption configures a Proxy.
@@ -107,6 +109,12 @@ func New(cfg *config.Config, store session.Store, manager *session.Manager, opts
 		store:   store,
 		manager: manager,
 	}
+
+	nets, err := parseTrustedNetworks(cfg.Proxy.Auth.TrustedNetworks)
+	if err != nil {
+		return nil, fmt.Errorf("parsing proxy.auth.trusted_networks: %w", err)
+	}
+	p.trustedNets = nets
 
 	for _, opt := range opts {
 		opt(p)
@@ -277,7 +285,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Proxy authentication check (skip health endpoints)
-	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
+	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) && !p.isTrustedClient(r) {
 		if !p.validateProxyAuth(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -1557,6 +1565,44 @@ func (p *Proxy) validateProxyAuth(r *http.Request) bool {
 // secureCompare performs constant-time string comparison to prevent timing attacks
 func secureCompare(provided, expected string) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+// parseTrustedNetworks parses CIDR strings; any invalid entry is an error
+// (fail closed at startup rather than silently skipping).
+func parseTrustedNetworks(cidrs []string) ([]*net.IPNet, error) {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", c, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+// isTrustedClient reports whether the request's DIRECT peer is inside a
+// trusted network. Deliberately ignores X-Forwarded-For / X-Real-IP: those
+// headers are client-controlled, and consulting them here would let any
+// client spoof its way past auth (feedback #4b security invariant).
+func (p *Proxy) isTrustedClient(r *http.Request) bool {
+	if len(p.trustedNets) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr // no port component
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range p.trustedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // persistFlaggedSession saves a flagged session to storage immediately
