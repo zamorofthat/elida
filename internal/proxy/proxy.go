@@ -313,16 +313,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create session
-	sessionID := r.Header.Get(p.config.Session.Header)
+	// Get or create session.
+	// Identity precedence: X-Session-ID header -> body-derived (OpenAI user
+	// field / configured path; backend-independent so failover doesn't split
+	// a conversation) -> per-(client,backend) IP-hash fallback.
+	sessionID := p.resolveSessionID(r, requestBody)
 
 	var sess *session.Session
 	if sessionID != "" {
-		// Explicit session ID provided - use it
 		sess = p.manager.GetOrCreate(sessionID, backend.URL.String(), r.RemoteAddr)
 	} else if p.config.Session.GenerateIfMissing {
-		// No session ID - use client IP + backend based session tracking
-		// Each (client, backend) pair gets its own session for granular control
+		// No derivable identity - use client IP + backend based session tracking
 		sess = p.manager.GetOrCreateByClient(session.RealClientAddr(r), backend.Name, backend.URL.String())
 	}
 
@@ -624,6 +625,18 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 			StatusCode:  statusCode,
 		})
 	}
+}
+
+// resolveSessionID returns the session ID for a request: the session header
+// if present, else an ID derived from the request body (OpenAI `user` field
+// or session.derive_from.body_path). Returns "" when neither applies, which
+// selects the per-(client,backend) fallback in the caller.
+func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
+	if id := r.Header.Get(p.config.Session.Header); id != "" {
+		return id
+	}
+	df := p.config.Session.DeriveFrom
+	return session.DeriveIDFromBody(body, df.OpenAIUser, df.BodyPath)
 }
 
 // isStreamingRequest determines if the request expects a streaming response

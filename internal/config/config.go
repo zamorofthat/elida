@@ -233,12 +233,21 @@ type RoutingConfig struct {
 
 // SessionConfig holds session-related configuration
 type SessionConfig struct {
-	Timeout           time.Duration   `yaml:"timeout"`
-	Header            string          `yaml:"header"`
-	GenerateIfMissing bool            `yaml:"generate_if_missing"`
-	Store             string          `yaml:"store"` // "memory" or "redis"
-	Redis             RedisConfig     `yaml:"redis"`
-	KillBlock         KillBlockConfig `yaml:"kill_block"`
+	Timeout           time.Duration       `yaml:"timeout"`
+	Header            string              `yaml:"header"`
+	GenerateIfMissing bool                `yaml:"generate_if_missing"`
+	DeriveFrom        SessionDeriveConfig `yaml:"derive_from"` // body-derived session identity (feedback #4)
+	Store             string              `yaml:"store"`       // "memory" or "redis"
+	Redis             RedisConfig         `yaml:"redis"`
+	KillBlock         KillBlockConfig     `yaml:"kill_block"`
+}
+
+// SessionDeriveConfig controls deriving session identity from the request body
+// when no session header is present. Derived IDs contain no backend component,
+// so a conversation keeps one session across backend failover.
+type SessionDeriveConfig struct {
+	OpenAIUser bool   `yaml:"openai_user"` // use the standard OpenAI `user` field (default true)
+	BodyPath   string `yaml:"body_path"`   // optional dot-path, e.g. "metadata.conversation_id"; takes precedence over the user field
 }
 
 // KillBlockConfig configures how long killed sessions stay blocked
@@ -408,6 +417,7 @@ func defaults() *Config {
 			Timeout:           5 * time.Minute,
 			Header:            "X-Session-ID",
 			GenerateIfMissing: true,
+			DeriveFrom:        SessionDeriveConfig{OpenAIUser: true},
 			Store:             "memory",
 			Redis: RedisConfig{
 				Addr:      "localhost:6379",
