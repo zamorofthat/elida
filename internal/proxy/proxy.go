@@ -285,8 +285,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Proxy authentication check (skip health endpoints)
-	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) && !p.isTrustedClient(r) {
-		if !p.validateProxyAuth(r) {
+	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
+		if p.isTrustedClient(r) {
+			slog.Debug("proxy auth bypassed for trusted network client", "remote_addr", r.RemoteAddr)
+		} else if !p.validateProxyAuth(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {

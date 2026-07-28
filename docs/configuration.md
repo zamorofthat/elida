@@ -46,6 +46,12 @@ session:
   generate_if_missing: true
   store: "memory"  # "memory" or "redis"
 
+  # Derive session identity from the request body when no X-Session-ID
+  # header is sent (see "Body-Derived Session Identity" below)
+  derive_from:
+    openai_user: true   # use the OpenAI `user` field (default true)
+    body_path: ""        # optional dot-path, e.g. "metadata.conversation_id"
+
   # Kill block configuration
   kill_block:
     # "duration"          — Block for a specific time after kill
@@ -67,6 +73,7 @@ proxy:
   auth:
     enabled: true
     api_key: "your-proxy-api-key"  # Or use ELIDA_PROXY_API_KEY env var
+    trusted_networks: []           # CIDRs whose direct peers skip the API-key check
 
 # Policy engine
 policy:
@@ -186,6 +193,29 @@ proxy:
 - **Header stripping** — `X-Elida-API-Key` is stripped before forwarding to backend (not leaked)
 - **Health bypass** — `/health`, `/healthz`, `/ready`, `/readyz` bypass auth for load balancer probes
 
+### Trusted Networks (`proxy.auth.trusted_networks`)
+
+A CIDR allowlist whose **direct peers** skip the API-key check entirely. This lets un-keyed auxiliary agent calls (compression, title generation) work on a trusted network while the wider LAN still needs the key.
+
+```yaml
+proxy:
+  auth:
+    enabled: true
+    api_key: "your-proxy-api-key"
+    trusted_networks:
+      - "127.0.0.1/32"    # loopback
+      - "::1/128"         # loopback (IPv6)
+      - "172.16.0.0/12"   # e.g. a private/container network
+```
+
+- **Direct peer only** — the trust decision looks at the TCP connection's remote address only. It never consults `X-Forwarded-For` or `X-Real-IP`, so a client can't spoof its way past auth by setting those headers.
+- **Fail closed at startup** — an invalid CIDR in `trusted_networks` fails config validation rather than being silently skipped.
+- **Empty list = no bypass** — if `trusted_networks` is unset or empty, nobody is exempt; auth behaves exactly as if the feature didn't exist.
+- **Docker gateway gotcha** — a containerized ELIDA sees requests from a host-side client through the Docker bridge, so `r.RemoteAddr` is the bridge gateway (typically `172.17.0.1`), not the real client. Include the bridge subnet (e.g. `172.17.0.0/16`) if you want host-side calls exempted — but that also exempts every other container on the same bridge network.
+- **Reverse-proxy deployment caveat** — trust is decided by the *direct* peer. If ELIDA sits behind a local reverse proxy (nginx, Envoy, a load balancer), all external traffic arrives at ELIDA with the reverse proxy's source IP — trusting loopback (or that proxy's IP) would exempt every external client, not just internal callers. Only use `trusted_networks` when ELIDA itself is the network-facing listener; behind a reverse proxy, rely on `proxy.auth.api_key` instead (and have the proxy enforce access control upstream).
+
+A per-request `slog.Debug` line (`"proxy auth bypassed for trusted network client"`) is emitted whenever a request actually uses the bypass, so the effect is visible when debug logging is enabled.
+
 ### Backend API Key Injection (Keyless Clients)
 
 ELIDA can inject API keys server-side, enabling keyless clients (SBC pattern):
@@ -298,7 +328,11 @@ Tools like `Bash` are intentionally excluded — they can execute dangerous comm
 
 ## Session ID Behavior
 
-Sessions are identified by the `X-Session-ID` header. If not provided, ELIDA generates one automatically.
+ELIDA resolves a session ID per request, in order of precedence:
+
+1. **`X-Session-ID` header** — if present, used verbatim.
+2. **Body-derived identity** (`session.derive_from`) — see below.
+3. **Client-IP + backend fallback** — `client-<hash>-<backend>`; requests from the same client to the same backend are grouped into one session automatically when neither of the above applies.
 
 ```bash
 # Use explicit session ID
@@ -308,7 +342,26 @@ curl -H "X-Session-ID: my-agent-task-123" http://localhost:8080/api/generate ...
 < X-Session-ID: my-agent-task-123
 ```
 
-For Claude Code, ELIDA uses client IP-based session tracking, so all requests from the same IP are grouped into a single session automatically.
+### Body-Derived Session Identity (`session.derive_from`)
+
+When no `X-Session-ID` header is sent, ELIDA can derive a stable session ID from the JSON request body, so one conversation keeps one session even if routing sends its requests to different backends (failover, load balancing, retries). Derived IDs deliberately contain no backend component — failover never splits a conversation into separate sessions, and the kill-switch stays per-conversation instead of per-host.
+
+```yaml
+session:
+  derive_from:
+    openai_user: true   # derive from the OpenAI `user` field (default: true)
+    body_path: ""       # optional dot-path, e.g. "metadata.conversation_id"
+```
+
+Precedence when deriving from the body:
+
+1. `session.derive_from.body_path`, if configured and the path resolves to a non-empty string in the body — takes precedence over the `user` field.
+2. `session.derive_from.openai_user` — the standard OpenAI `user` field, on by default.
+3. Neither applies (or both are disabled) — falls through to the client-IP + backend fallback above.
+
+Derived values are formatted as `user-<value>` when the value is short and contains only `[A-Za-z0-9._:-]`, or `user-<16 hex chars>` (a SHA-256-based hash) otherwise — so arbitrary or long `user`/body values never leak verbatim into the session ID.
+
+Set `openai_user: false` and leave `body_path` empty to disable body-derived identity entirely and always use the client-IP + backend fallback when no `X-Session-ID` header is sent.
 
 ## Settings Hierarchy (Layered Configuration)
 
