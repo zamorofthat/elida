@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session identity can now derive from the OpenAI `user` field (default on)
   or a configurable `session.derive_from.body_path` — one conversation keeps
   one session across backend failover, and the kill-switch becomes
-  per-conversation instead of per-host. (#feedback-4)
+  per-conversation instead of per-host; see the security note in
+  docs/configuration.md for multi-tenant deployments. (#feedback-4)
 - `proxy.auth.trusted_networks`: CIDR allowlist whose direct peers skip
   inference-path auth, so un-keyed auxiliary agent calls (compression,
   title generation) work on trusted networks while the LAN still needs the

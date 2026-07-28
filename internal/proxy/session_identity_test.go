@@ -15,7 +15,8 @@ func identityProxy(openaiUser bool, bodyPath string) *Proxy {
 	return &Proxy{config: cfg}
 }
 
-// Feedback #4: precedence is header -> user field -> body path config -> "" (IP fallback).
+// Feedback #4: precedence is header -> body_path (explicit config wins) ->
+// user field -> "" (IP fallback).
 func TestResolveSessionIDPrecedence(t *testing.T) {
 	p := identityProxy(true, "")
 
@@ -35,6 +36,12 @@ func TestResolveSessionIDPrecedence(t *testing.T) {
 	// Nothing derivable -> "" (caller falls back to IP-hash session).
 	if got := p.resolveSessionID(r, []byte(`{"model":"gemma"}`)); got != "" {
 		t.Errorf("no source: got %q, want empty", got)
+	}
+
+	// body_path wins over the user field when both are present and configured.
+	pBoth := identityProxy(true, "metadata.conversation_id")
+	if got := pBoth.resolveSessionID(r, []byte(`{"user":"u1","metadata":{"conversation_id":"c9"}}`)); got != "user-c9" {
+		t.Errorf("body_path should win over user field: got %q, want user-c9", got)
 	}
 }
 
