@@ -29,6 +29,7 @@ type Config struct {
 	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
 	OCSF            OCSFConfig               `yaml:"ocsf"`             // OCSF native transport configuration
 	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
+	Failover        FailoverConfig           `yaml:"failover"`         // Failover configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
 
@@ -222,6 +223,7 @@ type BackendConfig struct {
 	Models  []string `yaml:"models"`  // glob patterns: ["gpt-*", "claude-*"]
 	Default bool     `yaml:"default"` // is this the default backend?
 	APIKey  string   `yaml:"api_key"` // API key to inject (keeps client keyless)
+	Model   string   `yaml:"model"`   // model id to substitute when FAILOVER lands on this backend (feedback #8); normal routing never rewrites
 }
 
 // RoutingConfig defines routing method priority
@@ -337,6 +339,15 @@ type FingerprintConfig struct {
 	RidgeLambda   float64       `yaml:"ridge_lambda"`   // Ridge regularization parameter (default: 1e-6)
 	WarmUp        int           `yaml:"warm_up"`        // Min sessions before scoring (default: 100)
 	FlushInterval time.Duration `yaml:"flush_interval"` // How often to persist dirty baselines (default: 5m)
+}
+
+// FailoverConfig holds failover configuration
+type FailoverConfig struct {
+	Enabled       bool          `yaml:"enabled"`        // Enable failover (default: false)
+	MaxRetries    int           `yaml:"max_retries"`    // Max retry attempts (default: 2)
+	RetryDelay    time.Duration `yaml:"retry_delay"`    // Delay between retries (default: 0)
+	FallbackOrder []string      `yaml:"fallback_order"` // Order of backends to try on failure
+	PreserveModel bool          `yaml:"preserve_model"` // Preserve model ID across failovers
 }
 
 // Load reads and parses the configuration file
@@ -564,6 +575,11 @@ func defaults() *Config {
 				AutoStartSession: true, // Auto-start if no explicit INVITE detected
 				Protocols:        []string{"openai_realtime", "deepgram", "elevenlabs", "livekit"},
 			},
+		},
+		Failover: FailoverConfig{
+			Enabled:    false,
+			MaxRetries: 2,
+			RetryDelay: 0,
 		},
 		ShutdownTimeout: 30 * time.Second,
 	}
