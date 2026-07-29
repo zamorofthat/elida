@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-Session Compound Detector** (`internal/policy/detector.go`): `SessionDetector` with adaptive CUSUM, incremental entropy, burst boundary detection, and ring buffer burst history. All operations O(1) per request.
 - **CLI `-listen` Flag**: Override listen address from the command line (e.g. `elida -listen :8082`). Priority: CLI flag > `ELIDA_LISTEN` env > config file.
 - **`ThresholdFloat` and `MinSamples` Rule Fields**: New optional fields on policy rules for probability thresholds (0-1), entropy thresholds (bits/byte), and minimum data points before evaluation.
+- Session identity can now derive from the OpenAI `user` field (default on)
+  or a configurable `session.derive_from.body_path` — one conversation keeps
+  one session across backend failover, and the kill-switch becomes
+  per-conversation instead of per-host; see the security note in
+  docs/configuration.md for multi-tenant deployments. (#feedback-4)
+- `proxy.auth.trusted_networks`: CIDR allowlist whose direct peers skip
+  inference-path auth, so un-keyed auxiliary agent calls (compression,
+  title generation) work on trusted networks while the LAN still needs the
+  key. Trust never consults X-Forwarded-For. (#feedback-4b)
+- Startup warning when the inference proxy listens on a non-loopback
+  address without authentication (symmetric with the control-API warning).
 
 ### Changed
 
