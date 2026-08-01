@@ -95,7 +95,7 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			Name:        "phone_us",
-			Regex:       regexp.MustCompile(`(?:\+?1[-.\s])?(?:\(\d{3}\)\s?|\d{3}[-.])\d{3}[-.]\d{4}\b`),
+			Regex:       regexp.MustCompile(`(?:\+?1[-.\s])?(?:\(\d{3}\)\s?|\b\d{3}[-.])\d{3}[-.]\d{4}\b`),
 			Replacement: "[REDACTED_PHONE]",
 		},
 		{
@@ -216,12 +216,34 @@ func (r *PatternRedactor) Redact(content string) string {
 	result := content
 	for _, pattern := range r.patterns {
 		p := pattern
-		result = p.Regex.ReplaceAllStringFunc(result, func(m string) string {
-			if p.Validate != nil && !p.Validate(m) {
-				return m
+		if p.Validate == nil {
+			result = p.Regex.ReplaceAllString(result, p.Replacement)
+		} else {
+			// For patterns with validators, use FindAllStringIndex to get positions
+			// so we can check context (e.g., preceding digits for phone patterns)
+			indices := p.Regex.FindAllStringIndex(result, -1)
+			if indices == nil {
+				continue
 			}
-			return p.Regex.ReplaceAllString(m, p.Replacement)
-		})
+			// Build replacements in reverse order to maintain indices
+			for i := len(indices) - 1; i >= 0; i-- {
+				start, end := indices[i][0], indices[i][1]
+				m := result[start:end]
+				// Check context for phone pattern: reject if preceded by a digit
+				if p.Name == "phone_us" && start > 0 {
+					precedingChar := result[start-1]
+					if precedingChar >= '0' && precedingChar <= '9' {
+						continue
+					}
+				}
+				// Apply custom validator if present
+				if !p.Validate(m) {
+					continue
+				}
+				replacement := p.Regex.ReplaceAllString(m, p.Replacement)
+				result = result[:start] + replacement + result[end:]
+			}
+		}
 	}
 	return result
 }

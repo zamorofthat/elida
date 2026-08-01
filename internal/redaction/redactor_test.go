@@ -16,9 +16,11 @@ func TestPhoneRequiresFormatContext(t *testing.T) {
 		"+1 415.555.2671",
 	}
 	untouched := []string{
-		`"created": 1753305600`, // unix timestamp — the 716x false positive
-		"id 1753305600123",      // bare digit run
-		"n_params 7241000000",   // model metadata
+		`"created": 1753305600`,     // unix timestamp — the 716x false positive
+		"id 1753305600123",          // bare digit run
+		"n_params 7241000000",       // model metadata
+		"9415-555-2671 order ref",   // digit run bleeding into phone-shaped tail (prevented by \b)
+		"count 1234555234667 items", // bare digit run resembling phone but too long
 	}
 	for _, s := range redacted {
 		if out := r.Redact(s); !strings.Contains(out, "[REDACTED_PHONE]") {
@@ -80,6 +82,8 @@ func TestSecretPatternsStillWork(t *testing.T) {
 		"key sk-abcdefghijklmnopqrstuvwx":                      "[REDACTED",
 		`"password": "hunter2secret"`:                          "[REDACTED",
 		"ssn 123-45-6789":                                      "[REDACTED",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc":             "[REDACTED_JWT]",
+		"AKIAIOSFODNN7EXAMPLE":                                 "[REDACTED_AWS_KEY]",
 	}
 	for in, want := range cases {
 		if out := r.Redact(in); !strings.Contains(out, want) {
