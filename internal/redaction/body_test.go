@@ -86,3 +86,86 @@ func TestRedactBodyDisabled(t *testing.T) {
 		t.Errorf("disabled redactor modified body: %q", out)
 	}
 }
+
+// Issue #1: CRITICAL redaction bypass — non-data: lines leak unredacted.
+// Non-data: lines in SSE should be redacted, and whole-body JSON detection should win.
+func TestRedactBodyEventLineBypass(t *testing.T) {
+	r := NewPatternRedactor()
+	// Event line with SSN and data line following it
+	in := "event: ssn is 123-45-6789\ndata: {\"id\":1}\n"
+	out := r.RedactBody(in)
+	if !strings.Contains(out, "[REDACTED") {
+		t.Error("event line with SSN not redacted")
+	}
+	// JSON body containing the string "data: " should stay on JSON path (valid JSON out)
+	jsonWithDataString := `{"msg":"data: something","id":123}`
+	out = r.RedactBody(jsonWithDataString)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("JSON with 'data: ' string lost validity: %v", err)
+	}
+}
+
+// Issue #2: IMPORTANT precision loss — large integers round-trip via float64.
+// Use json.Number to preserve exact digits.
+func TestRedactBodyNumberPrecision(t *testing.T) {
+	r := NewPatternRedactor()
+	// 19-digit integer that loses precision in float64
+	in := `{"id":9007199254740993}`
+	out := r.RedactBody(in)
+	if !strings.Contains(out, "9007199254740993") {
+		t.Errorf("19-digit integer precision lost: %q", out)
+	}
+	// Float should also survive
+	floatIn := `{"value":3.14}`
+	floatOut := r.RedactBody(floatIn)
+	if !strings.Contains(floatOut, "3.14") {
+		t.Errorf("float lost: %q", floatOut)
+	}
+}
+
+// Issue #3: isSSE robustness — detect SSE when ANY line starts with data:,
+// not just if the first line does.
+func TestRedactBodySSEWithRetryPreamble(t *testing.T) {
+	r := NewPatternRedactor()
+	// SSE stream with retry header before first data line
+	sse := "retry: 3000\ndata: {\"id\":1,\"msg\":\"ssn is 123-45-6789\"}\n"
+	out := r.RedactBody(sse)
+	// Should be treated as SSE and the data line should have JSON redaction
+	var v map[string]any
+	dataLine := strings.TrimPrefix(strings.TrimPrefix(out, "retry: 3000\n"), "data: ")
+	if err := json.Unmarshal([]byte(dataLine), &v); err != nil {
+		t.Fatalf("data line should be parseable JSON: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "[REDACTED") {
+		t.Error("SSN in data line not redacted")
+	}
+}
+
+// Issue #4: MINOR \r\n — CRLF SSE lines should stay parseable with \r preserved.
+func TestRedactBodySSEWithCRLF(t *testing.T) {
+	r := NewPatternRedactor()
+	// CRLF-terminated SSE lines
+	sse := "data: {\"id\":1,\"msg\":\"ssn 123-45-6789\"}\r\ndata: [DONE]\r\n"
+	out := r.RedactBody(sse)
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		// Remove trailing \r if present
+		lineContent := strings.TrimSuffix(line, "\r")
+		payload := strings.TrimPrefix(lineContent, "data: ")
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var v map[string]any
+		if err := json.Unmarshal([]byte(payload), &v); err != nil {
+			t.Fatalf("CRLF SSE line not parseable: %v\n%s", err, line)
+		}
+	}
+	// Verify redaction happened
+	if !strings.Contains(out, "[REDACTED") {
+		t.Error("SSN in CRLF SSE not redacted")
+	}
+}
