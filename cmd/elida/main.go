@@ -373,8 +373,8 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 		return
 	}
 	for i := range record.CapturedContent {
-		record.CapturedContent[i].RequestBody = a.redactor.Redact(record.CapturedContent[i].RequestBody)
-		record.CapturedContent[i].ResponseBody = a.redactor.Redact(record.CapturedContent[i].ResponseBody)
+		record.CapturedContent[i].RequestBody = a.redactor.RedactBody(record.CapturedContent[i].RequestBody)
+		record.CapturedContent[i].ResponseBody = a.redactor.RedactBody(record.CapturedContent[i].ResponseBody)
 	}
 	for i := range record.Violations {
 		record.Violations[i].MatchedText = a.redactor.Redact(record.Violations[i].MatchedText)
