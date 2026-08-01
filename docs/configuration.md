@@ -237,6 +237,9 @@ See [`.env.example`](../.env.example) for the full list of variables ELIDA reads
 on real traffic; it is now wired up automatically from config at startup — set
 `failover.enabled: true` to turn it on.
 
+> **Limitation:** failover currently applies only to non-streaming requests; streaming (SSE)
+> responses are returned from the primary backend as-is, with no failover on error.
+
 ```yaml
 failover:
   enabled: true          # default: false

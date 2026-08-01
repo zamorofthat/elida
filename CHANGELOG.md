@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged and getting a 400 from a cross-provider backend. (#feedback-8)
 - Failover is now actually wired up from config at startup
   (`failover.enabled: true`) — previously the failover controller was
-  constructible only in tests and had no effect on real traffic.
+  constructible only in tests and had no effect on real traffic. Applies to
+  non-streaming requests only; streaming (SSE) responses have no failover
+  on error.
 - When failover is attempted but exhausts every candidate (all skipped or
   failed), the client now receives a `502` with a JSON
   `{"error":"failover_exhausted",...}` body instead of the last attempted
