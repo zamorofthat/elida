@@ -352,7 +352,7 @@ func TestOpenAIRehydrator(t *testing.T) {
 	originalReq.Header.Set("Content-Type", "application/json")
 
 	rehydrator := &proxy.OpenAIRehydrator{}
-	req, err := rehydrator.Rehydrate(state, originalReq)
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestAnthropicRehydrator(t *testing.T) {
 	originalReq.Header.Set("Content-Type", "application/json")
 
 	rehydrator := &proxy.AnthropicRehydrator{}
-	req, err := rehydrator.Rehydrate(state, originalReq)
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -497,7 +497,7 @@ func TestFailover_FullFlow(t *testing.T) {
 	// Rehydrate for OpenAI
 	originalReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-4"}`))
 	rehydrator := proxy.GetRehydrator(fallback.Type)
-	req, err := rehydrator.Rehydrate(state, originalReq)
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
 	if err != nil {
 		t.Fatalf("rehydration failed: %v", err)
 	}

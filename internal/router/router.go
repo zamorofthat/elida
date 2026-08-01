@@ -254,6 +254,23 @@ func (r *Router) matchByHeader(req *http.Request) *Backend {
 	return backend
 }
 
+// ModelMatches reports whether model matches any of the given glob patterns.
+// Exported so callers outside this package (e.g. failover model resolution)
+// can reuse the same matching semantics as normal routing.
+func ModelMatches(patterns []string, model string) bool {
+	for _, pattern := range patterns {
+		matched, err := filepath.Match(pattern, model)
+		if err != nil {
+			slog.Warn("invalid model pattern", "pattern", pattern, "error", err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 // matchByModel extracts model from request body and matches against backend patterns
 func (r *Router) matchByModel(body []byte) *Backend {
 	if len(body) == 0 {

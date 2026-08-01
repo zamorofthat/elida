@@ -1418,14 +1418,38 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 		return 0, 0, false
 	}
 
+	// Resolve which model to send to the target backend before doing
+	// anything else - never send a request the backend can't understand.
+	originalModel, err := originalModelFromRequest(originalReq)
+	if err != nil {
+		slog.Error("failed to read original request for failover model resolution",
+			"session_id", sess.ID,
+			"target_backend", fallbackBackend.Name,
+			"error", err,
+		)
+		return 0, 0, false
+	}
+
+	newModel, ok := ResolveFailoverModel(originalModel, fallbackBackend)
+	if !ok {
+		slog.Error("failover skipped backend: no compatible model",
+			"session_id", sess.ID,
+			"original_model", originalModel,
+			"backend", fallbackBackend.Name,
+		)
+		sess.AddFailedBackend(fallbackBackend.Name)
+		return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
+	}
+
 	// Get session state for rehydration
 	state := sess.Serialize()
 
 	// Get the appropriate rehydrator for the target backend
 	rehydrator := GetRehydrator(fallbackInfo.Type)
 
-	// Rehydrate the request with full conversation history
-	newReq, err := rehydrator.Rehydrate(state, originalReq)
+	// Rehydrate the request with full conversation history, carrying the
+	// resolved target model
+	newReq, err := rehydrator.Rehydrate(state, originalReq, newModel)
 	if err != nil {
 		slog.Error("failed to rehydrate request for failover",
 			"session_id", sess.ID,
