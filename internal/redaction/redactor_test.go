@@ -14,13 +14,14 @@ func TestPhoneRequiresFormatContext(t *testing.T) {
 		"call me at 555-867-5309",
 		"call (415) 555-2671 today",
 		"+1 415.555.2671",
+		"555-867-5309 is my number", // start-of-text case
 	}
 	untouched := []string{
-		`"created": 1753305600`,     // unix timestamp — the 716x false positive
-		"id 1753305600123",          // bare digit run
-		"n_params 7241000000",       // model metadata
-		"9415-555-2671 order ref",   // digit run bleeding into phone-shaped tail (prevented by \b)
-		"count 1234555234667 items", // bare digit run resembling phone but too long
+		`"created": 1753305600`,       // unix timestamp — the 716x false positive
+		"id 1753305600123",            // bare digit run
+		"n_params 7241000000",         // model metadata
+		"9415-555-2671 order ref",     // digit run bleeding into phone-shaped tail
+		"tracking 12345-415-555-2671", // longer digit run with phone-shaped tail
 	}
 	for _, s := range redacted {
 		if out := r.Redact(s); !strings.Contains(out, "[REDACTED_PHONE]") {
