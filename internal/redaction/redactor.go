@@ -2,7 +2,9 @@
 package redaction
 
 import (
+	"net"
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -16,6 +18,13 @@ type Pattern struct {
 	Name        string
 	Regex       *regexp.Regexp
 	Replacement string
+	Validate    func(match string) bool // nil validates everything (previous behavior)
+}
+
+// Options configures a PatternRedactor.
+type Options struct {
+	RedactPrivateIPs bool      // also redact loopback/RFC1918 IPs (default false — feedback #10: every measured hit was loopback)
+	CustomPatterns   []Pattern // appended after defaults
 }
 
 // PatternRedactor implements Redactor using regex patterns
@@ -25,8 +34,45 @@ type PatternRedactor struct {
 	enabled  bool
 }
 
+// luhnValid reports whether digits (0-9 only) pass the Luhn checksum.
+func luhnValid(digits string) bool {
+	if len(digits) < 13 {
+		return false
+	}
+	sum, alt := 0, false
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := int(digits[i] - '0')
+		if d < 0 || d > 9 {
+			return false
+		}
+		if alt {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		alt = !alt
+	}
+	return sum%10 == 0
+}
+
+// isPrivateOrLoopbackIP reports whether ip is loopback, RFC1918, or link-local.
+func isPrivateOrLoopbackIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
 // DefaultPatterns returns the standard set of PII redaction patterns
 func DefaultPatterns() []Pattern {
+	return defaultPatterns(false)
+}
+
+// defaultPatterns returns the standard set of PII redaction patterns with configurable private IP handling
+func defaultPatterns(redactPrivateIPs bool) []Pattern {
 	return []Pattern{
 		{
 			Name:        "email",
@@ -40,12 +86,16 @@ func DefaultPatterns() []Pattern {
 		},
 		{
 			Name:        "credit_card",
-			Regex:       regexp.MustCompile(`\b(?:\d[ -]*?){13,16}\b`),
+			Regex:       regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`),
 			Replacement: "[REDACTED_CC]",
+			Validate: func(m string) bool {
+				digits := strings.ReplaceAll(strings.ReplaceAll(m, " ", ""), "-", "")
+				return len(digits) >= 13 && len(digits) <= 16 && luhnValid(digits)
+			},
 		},
 		{
 			Name:        "phone_us",
-			Regex:       regexp.MustCompile(`\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b`),
+			Regex:       regexp.MustCompile(`(?:\+?1[-.\s])?(?:\(\d{3}\)\s?|\d{3}[-.])\d{3}[-.]\d{4}\b`),
 			Replacement: "[REDACTED_PHONE]",
 		},
 		{
@@ -77,6 +127,9 @@ func DefaultPatterns() []Pattern {
 			Name:        "ip_address",
 			Regex:       regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
 			Replacement: "[REDACTED_IP]",
+			Validate: func(m string) bool {
+				return redactPrivateIPs || !isPrivateOrLoopbackIP(m)
+			},
 		},
 		{
 			Name:        "jwt_token",
@@ -98,8 +151,15 @@ func DefaultPatterns() []Pattern {
 
 // NewPatternRedactor creates a new PatternRedactor with default patterns
 func NewPatternRedactor() *PatternRedactor {
+	return NewPatternRedactorWithOptions(Options{})
+}
+
+// NewPatternRedactorWithOptions creates a new PatternRedactor with custom options
+func NewPatternRedactorWithOptions(opts Options) *PatternRedactor {
+	patterns := defaultPatterns(opts.RedactPrivateIPs)
+	patterns = append(patterns, opts.CustomPatterns...)
 	return &PatternRedactor{
-		patterns: DefaultPatterns(),
+		patterns: patterns,
 		enabled:  true,
 	}
 }
@@ -155,7 +215,13 @@ func (r *PatternRedactor) Redact(content string) string {
 
 	result := content
 	for _, pattern := range r.patterns {
-		result = pattern.Regex.ReplaceAllString(result, pattern.Replacement)
+		p := pattern
+		result = p.Regex.ReplaceAllStringFunc(result, func(m string) string {
+			if p.Validate != nil && !p.Validate(m) {
+				return m
+			}
+			return p.Regex.ReplaceAllString(m, p.Replacement)
+		})
 	}
 	return result
 }
