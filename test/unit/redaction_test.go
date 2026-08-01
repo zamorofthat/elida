@@ -128,10 +128,34 @@ func TestRedactor_Password(t *testing.T) {
 func TestRedactor_IPAddress(t *testing.T) {
 	r := redaction.NewPatternRedactor()
 
-	input := "Client IP: 192.168.1.100 connected"
+	// Public IP: private/loopback IPs are skipped by default (feedback #10 —
+	// every measured hit in production was loopback noise, not PII).
+	input := "Client IP: 203.0.113.42 connected"
 	result := r.Redact(input)
 	if !strings.Contains(result, "[REDACTED_IP]") {
 		t.Errorf("expected IP redaction, got %q", result)
+	}
+}
+
+// Private/loopback IPs are NOT redacted by default (feedback #10).
+func TestRedactor_PrivateIPNotRedactedByDefault(t *testing.T) {
+	r := redaction.NewPatternRedactor()
+
+	input := "Client IP: 192.168.1.100 connected"
+	result := r.Redact(input)
+	if result != input {
+		t.Errorf("expected private IP to be left alone by default, got %q", result)
+	}
+}
+
+// RedactPrivateIPs: true opts back into redacting private/loopback IPs.
+func TestRedactor_PrivateIPRedactedWhenOptedIn(t *testing.T) {
+	r := redaction.NewPatternRedactorWithOptions(redaction.Options{RedactPrivateIPs: true})
+
+	input := "Client IP: 192.168.1.100 connected"
+	result := r.Redact(input)
+	if !strings.Contains(result, "[REDACTED_IP]") {
+		t.Errorf("expected private IP redaction when opted in, got %q", result)
 	}
 }
 

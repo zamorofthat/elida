@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -126,4 +128,43 @@ func TestDefaultConfigSecurityDefaults(t *testing.T) {
 	if err := ValidateSecurityConfig(cfg); err != nil {
 		t.Errorf("default config should pass security validation: %v", err)
 	}
+
+	// redact_private_ips defaults to false (feedback #10: every measured
+	// hit in production was loopback/RFC1918 noise, not PII).
+	if cfg.Storage.Redaction.RedactPrivateIPs {
+		t.Error("storage.redaction.redact_private_ips should be false by default")
+	}
+}
+
+// redact_private_ips parses from YAML and is off by default when omitted.
+func TestRedactPrivateIPsConfig(t *testing.T) {
+	load := func(t *testing.T, yaml string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "elida.yaml")
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+
+	t.Run("explicit true", func(t *testing.T) {
+		cfg := load(t, "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\n"+
+			"storage:\n  redaction:\n    enabled: true\n    redact_private_ips: true\n")
+		if !cfg.Storage.Redaction.RedactPrivateIPs {
+			t.Error("expected redact_private_ips: true to parse as true")
+		}
+	})
+
+	t.Run("omitted defaults false", func(t *testing.T) {
+		cfg := load(t, "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\n"+
+			"storage:\n  redaction:\n    enabled: true\n")
+		if cfg.Storage.Redaction.RedactPrivateIPs {
+			t.Error("expected redact_private_ips to default false when omitted")
+		}
+	})
 }

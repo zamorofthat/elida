@@ -222,7 +222,8 @@ func (a *app) initSQLiteStorage() {
 
 func (a *app) initRedactor() {
 	rcfg := redaction.Config{
-		Enabled: a.cfg.Storage.Redaction.Enabled,
+		Enabled:          a.cfg.Storage.Redaction.Enabled,
+		RedactPrivateIPs: a.cfg.Storage.Redaction.RedactPrivateIPs,
 	}
 	for _, p := range a.cfg.Storage.Redaction.CustomPatterns {
 		rcfg.CustomPatterns = append(rcfg.CustomPatterns, redaction.PatternConfig{

@@ -11,6 +11,9 @@ import (
 // Redactor handles redaction of sensitive data
 type Redactor interface {
 	Redact(content string) string
+	// RedactBody redacts a request/response body while preserving JSON
+	// structure when the body is (or contains) JSON — see PatternRedactor.RedactBody.
+	RedactBody(body string) string
 }
 
 // Pattern represents a redaction pattern
@@ -272,8 +275,9 @@ func (r *PatternRedactor) redactSlice(data []interface{}) []interface{} {
 
 // Config holds redaction configuration
 type Config struct {
-	Enabled        bool            `yaml:"enabled"`
-	CustomPatterns []PatternConfig `yaml:"patterns"`
+	Enabled          bool            `yaml:"enabled"`
+	RedactPrivateIPs bool            `yaml:"redact_private_ips"`
+	CustomPatterns   []PatternConfig `yaml:"patterns"`
 }
 
 // PatternConfig represents a custom pattern in config
@@ -285,10 +289,8 @@ type PatternConfig struct {
 
 // NewFromConfig creates a Redactor from configuration
 func NewFromConfig(cfg Config) (*PatternRedactor, error) {
-	r := &PatternRedactor{
-		patterns: DefaultPatterns(),
-		enabled:  cfg.Enabled,
-	}
+	r := NewPatternRedactorWithOptions(Options{RedactPrivateIPs: cfg.RedactPrivateIPs})
+	r.enabled = cfg.Enabled
 
 	// Add custom patterns
 	for _, pc := range cfg.CustomPatterns {
@@ -306,4 +308,9 @@ type NoopRedactor struct{}
 // Redact returns the content unchanged
 func (r *NoopRedactor) Redact(content string) string {
 	return content
+}
+
+// RedactBody returns the body unchanged
+func (r *NoopRedactor) RedactBody(body string) string {
+	return body
 }

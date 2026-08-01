@@ -59,6 +59,9 @@ type OCSFNozzle interface {
 // import elida/internal/redaction (avoids potential import cycles).
 type contentRedactor interface {
 	Redact(string) string
+	// RedactBody redacts a JSON payload while preserving its structure —
+	// see redaction.PatternRedactor.RedactBody.
+	RedactBody(string) string
 }
 
 // OCSFEmitter fans out OCSF events to all enabled nozzles.
@@ -129,7 +132,7 @@ func (e *OCSFEmitter) Emit(ctx context.Context, classUID int, severityID int, ev
 	red := e.redactor
 	e.redactorMu.RUnlock()
 	if red != nil {
-		data = []byte(red.Redact(string(data)))
+		data = []byte(red.RedactBody(string(data)))
 	}
 
 	for _, n := range e.nozzles {

@@ -103,8 +103,9 @@ type EventsConfig struct {
 
 // RedactionConfig holds redaction configuration
 type RedactionConfig struct {
-	Enabled        bool                     `yaml:"enabled"`
-	CustomPatterns []RedactionPatternConfig `yaml:"patterns"`
+	Enabled          bool                     `yaml:"enabled"`
+	RedactPrivateIPs bool                     `yaml:"redact_private_ips"` // also redact loopback/RFC1918 IPs (default false)
+	CustomPatterns   []RedactionPatternConfig `yaml:"patterns"`
 }
 
 // RedactionPatternConfig represents a custom redaction pattern

@@ -104,3 +104,36 @@ func TestLuhnValid(t *testing.T) {
 		t.Error("too-short accepted")
 	}
 }
+
+// NewFromConfig (the constructor cmd/elida/main.go's initRedactor uses)
+// threads Config.RedactPrivateIPs through to the pattern set, same as
+// NewPatternRedactorWithOptions.
+func TestNewFromConfigThreadsRedactPrivateIPs(t *testing.T) {
+	rDefault, err := NewFromConfig(Config{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := rDefault.Redact("--host 127.0.0.1"); out != "--host 127.0.0.1" {
+		t.Errorf("default Config should skip private IPs: %q", out)
+	}
+
+	rOptIn, err := NewFromConfig(Config{Enabled: true, RedactPrivateIPs: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := rOptIn.Redact("--host 127.0.0.1"); !strings.Contains(out, "[REDACTED_IP]") {
+		t.Errorf("RedactPrivateIPs: true should redact private IPs: %q", out)
+	}
+
+	// Enabled flag and custom patterns still respected.
+	if rDefault.IsEnabled() != true {
+		t.Error("Enabled: true should produce an enabled redactor")
+	}
+	rDisabled, err := NewFromConfig(Config{Enabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rDisabled.IsEnabled() {
+		t.Error("Enabled: false should produce a disabled redactor")
+	}
+}
