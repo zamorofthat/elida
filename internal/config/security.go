@@ -23,9 +23,22 @@ func IsLoopback(addr string) bool {
 	return host == "localhost"
 }
 
+// proxyAuthWarningNeeded reports whether the inference proxy is listening on
+// a non-loopback address without authentication enabled — the same
+// loopback-detection logic used for the control-API warning.
+func proxyAuthWarningNeeded(listen string, authEnabled bool) bool {
+	return !authEnabled && !IsLoopback(listen)
+}
+
 // ValidateSecurityConfig checks security-critical configuration at startup.
 // Returns an error for hard failures, logs warnings for soft recommendations.
 func ValidateSecurityConfig(cfg *Config) error {
+	if proxyAuthWarningNeeded(cfg.Listen, cfg.Proxy.Auth.Enabled) {
+		slog.Warn("inference proxy running WITHOUT authentication on non-loopback address — set ELIDA_PROXY_API_KEY or proxy.auth, or restrict with proxy.auth.trusted_networks",
+			"listen", cfg.Listen,
+		)
+	}
+
 	if !cfg.Control.Enabled {
 		return nil
 	}

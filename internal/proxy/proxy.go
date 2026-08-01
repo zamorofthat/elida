@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
@@ -70,6 +71,7 @@ type Proxy struct {
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 	redactor                redaction.Redactor    // Redaction provider for sensitive data
+	trustedNets             []*net.IPNet          // proxy.auth.trusted_networks parsed at startup
 }
 
 // ProxyOption configures a Proxy.
@@ -107,6 +109,12 @@ func New(cfg *config.Config, store session.Store, manager *session.Manager, opts
 		store:   store,
 		manager: manager,
 	}
+
+	nets, err := parseTrustedNetworks(cfg.Proxy.Auth.TrustedNetworks)
+	if err != nil {
+		return nil, fmt.Errorf("parsing proxy.auth.trusted_networks: %w", err)
+	}
+	p.trustedNets = nets
 
 	for _, opt := range opts {
 		opt(p)
@@ -278,7 +286,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Proxy authentication check (skip health endpoints)
 	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
-		if !p.validateProxyAuth(r) {
+		if p.isTrustedClient(r) {
+			slog.Debug("proxy auth bypassed for trusted network client", "remote_addr", r.RemoteAddr)
+		} else if !p.validateProxyAuth(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
@@ -313,16 +323,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create session
-	sessionID := r.Header.Get(p.config.Session.Header)
+	// Get or create session.
+	// Identity precedence: X-Session-ID header -> body-derived (OpenAI user
+	// field / configured path; backend-independent so failover doesn't split
+	// a conversation) -> per-(client,backend) IP-hash fallback.
+	sessionID := p.resolveSessionID(r, requestBody)
 
 	var sess *session.Session
 	if sessionID != "" {
-		// Explicit session ID provided - use it
 		sess = p.manager.GetOrCreate(sessionID, backend.URL.String(), r.RemoteAddr)
 	} else if p.config.Session.GenerateIfMissing {
-		// No session ID - use client IP + backend based session tracking
-		// Each (client, backend) pair gets its own session for granular control
+		// No derivable identity - use client IP + backend based session tracking
 		sess = p.manager.GetOrCreateByClient(session.RealClientAddr(r), backend.Name, backend.URL.String())
 	}
 
@@ -624,6 +635,18 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 			StatusCode:  statusCode,
 		})
 	}
+}
+
+// resolveSessionID returns the session ID for a request: the session header
+// if present, else an ID derived from the request body (OpenAI `user` field
+// or session.derive_from.body_path). Returns "" when neither applies, which
+// selects the per-(client,backend) fallback in the caller.
+func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
+	if id := r.Header.Get(p.config.Session.Header); id != "" {
+		return id
+	}
+	df := p.config.Session.DeriveFrom
+	return session.DeriveIDFromBody(body, df.OpenAIUser, df.BodyPath)
 }
 
 // isStreamingRequest determines if the request expects a streaming response
@@ -1544,6 +1567,44 @@ func (p *Proxy) validateProxyAuth(r *http.Request) bool {
 // secureCompare performs constant-time string comparison to prevent timing attacks
 func secureCompare(provided, expected string) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+// parseTrustedNetworks parses CIDR strings; any invalid entry is an error
+// (fail closed at startup rather than silently skipping).
+func parseTrustedNetworks(cidrs []string) ([]*net.IPNet, error) {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", c, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+// isTrustedClient reports whether the request's DIRECT peer is inside a
+// trusted network. Deliberately ignores X-Forwarded-For / X-Real-IP: those
+// headers are client-controlled, and consulting them here would let any
+// client spoof its way past auth (feedback #4b security invariant).
+func (p *Proxy) isTrustedClient(r *http.Request) bool {
+	if len(p.trustedNets) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr // no port component
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range p.trustedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // persistFlaggedSession saves a flagged session to storage immediately
