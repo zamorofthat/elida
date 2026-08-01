@@ -5,12 +5,51 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// envRefPattern matches ${IDENTIFIER} references in config values.
+var envRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// nonAlphanumericPattern matches non-alphanumeric characters for replacement.
+var nonAlphanumericPattern = regexp.MustCompile(`[^A-Za-z0-9]`)
+
+// expandEnvRefs expands ${IDENTIFIER} references from the environment in a
+// single config string. Field-targeted by the caller — policy regex patterns
+// are never passed through here (feedback #9). Unset variables warn and stay
+// literal so a missing key is visible, not silently empty.
+func expandEnvRefs(s string) string {
+	return envRefPattern.ReplaceAllStringFunc(s, func(m string) string {
+		name := m[2 : len(m)-1]
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		slog.Warn("config references unset environment variable", "var", name)
+		return m
+	})
+}
+
+// autoBackendKey returns a key for a backend with an empty api_key:
+// <UPPER(NAME)>_API_KEY first (non-alphanumerics -> _), then the
+// conventional variable for its type. Empty if neither is set.
+func autoBackendKey(name, typ string) (string, string) {
+	nameVar := strings.ToUpper(nonAlphanumericPattern.ReplaceAllString(name, "_")) + "_API_KEY"
+	if v := os.Getenv(nameVar); v != "" {
+		return v, nameVar
+	}
+	typeVars := map[string]string{"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "mistral": "MISTRAL_API_KEY"}
+	if tv, ok := typeVars[typ]; ok {
+		if v := os.Getenv(tv); v != "" {
+			return v, tv
+		}
+	}
+	return "", ""
+}
 
 // Config holds all configuration for ELIDA
 type Config struct {
@@ -383,6 +422,22 @@ func Load(path string) (*Config, error) {
 
 	// Override with environment variables
 	cfg.applyEnvOverrides()
+
+	// Expand environment variable references and auto-load provider keys
+	cfg.Backend = expandEnvRefs(cfg.Backend)
+	cfg.Proxy.Auth.APIKey = expandEnvRefs(cfg.Proxy.Auth.APIKey)
+	cfg.Control.Auth.APIKey = expandEnvRefs(cfg.Control.Auth.APIKey)
+	for name, b := range cfg.Backends {
+		b.URL = expandEnvRefs(b.URL)
+		b.APIKey = expandEnvRefs(b.APIKey)
+		if b.APIKey == "" {
+			if key, envVar := autoBackendKey(name, b.Type); key != "" {
+				b.APIKey = key
+				slog.Info("backend api_key loaded from environment", "backend", name, "env_var", envVar)
+			}
+		}
+		cfg.Backends[name] = b
+	}
 
 	// Apply policy preset if specified
 	cfg.ApplyPolicyPreset()
