@@ -128,7 +128,18 @@ func DefaultFailoverConfig() FailoverConfig {
 	}
 }
 
-// FailoverController handles backend failover logic
+// FailoverController handles backend failover logic.
+//
+// backends is populated exclusively via RegisterBackend at startup (see
+// BuildFailoverController) and is otherwise only read from - by
+// SelectFallback/HandleFailover on the request path and by GetBackend.
+// MarkBackendUnhealthy/MarkBackendHealthy mutate an entry's Healthy field
+// and are currently uncalled by any production code path, but if health
+// marking is ever wired up (e.g. from a background health checker), note
+// that the backends map is NOT safe for concurrent mutation: RegisterBackend
+// and the Mark* methods write to the map/struct fields with no locking. A
+// mutex (or a sync.Map) needs to guard backends before Mark* calls can
+// safely run concurrently with request-path reads.
 type FailoverController struct {
 	config   FailoverConfig
 	backends map[string]*Backend

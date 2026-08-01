@@ -435,6 +435,17 @@ func Load(path string) (*Config, error) {
 				b.APIKey = key
 				slog.Info("backend api_key loaded from environment", "backend", name, "env_var", envVar)
 			}
+		} else if strings.Contains(b.APIKey, "${") {
+			// expandEnvRefs already warned generically about the unset
+			// variable; this backend-specific warning calls out that the
+			// unexpanded "${VAR}" literal is about to be sent to the
+			// backend as-is - a credential-shaped value, never logged here.
+			unsetVar := "unknown"
+			if m := envRefPattern.FindStringSubmatch(b.APIKey); len(m) > 1 {
+				unsetVar = m[1]
+			}
+			slog.Warn("backend api_key references unset environment variable and will be sent as a literal credential",
+				"backend", name, "var", unsetVar)
 		}
 		cfg.Backends[name] = b
 	}

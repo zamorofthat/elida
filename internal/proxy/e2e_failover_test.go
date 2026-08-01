@@ -141,6 +141,102 @@ func TestE2EFailover_RewritesModelOnSuccess(t *testing.T) {
 	}
 }
 
+// TestE2EFailover_FallbackHTTPFailureChainsToNextBackend covers the
+// IMPORTANT finding that a fallback whose response comes back with err ==
+// nil but an HTTP 5xx status was being forwarded straight to the client
+// instead of being treated as a failure and retried against the next
+// backend - inconsistent with transport errors (connection refused, EOF,
+// etc.), which already recurse via DetectFailure. Here "primary" fails with
+// a transport-level condition (connection refused, since its server is
+// closed before the request), "fallback1" responds successfully at the
+// HTTP layer but with a 500 body, and "fallback2" succeeds - the client
+// must see fallback2's 200, not fallback1's 500.
+func TestE2EFailover_FallbackHTTPFailureChainsToNextBackend(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+
+	fallback1Hit := false
+	fallback1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallback1Hit = true
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"fallback1 down"}`))
+	}))
+	defer fallback1.Close()
+
+	fallback2Hit := false
+	fallback2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallback2Hit = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi from fallback2"}}]}`))
+	}))
+	defer fallback2.Close()
+
+	backends := map[string]config.BackendConfig{
+		"primary":   {URL: primary.URL, Type: "openai", Default: true},
+		"fallback1": {URL: fallback1.URL, Type: "openai"},
+		"fallback2": {URL: fallback2.URL, Type: "openai"},
+	}
+	rt := newE2EFailoverRouter(t, backends, map[string]*httptest.Server{
+		"primary": primary, "fallback1": fallback1, "fallback2": fallback2,
+	})
+
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	cfg := &config.Config{
+		Backend: primary.URL,
+		Session: config.SessionConfig{
+			Timeout:           5 * time.Minute,
+			Header:            "X-Session-ID",
+			GenerateIfMissing: true,
+		},
+	}
+
+	p, err := New(cfg, store, manager, WithRouter(rt))
+	if err != nil {
+		t.Fatalf("failed to create proxy: %v", err)
+	}
+
+	fc := NewFailoverController(FailoverConfig{
+		Enabled:       true,
+		MaxRetries:    3,
+		FallbackOrder: []string{"primary", "fallback1", "fallback2"},
+		RetryDelay:    0,
+	})
+	fc.RegisterBackend("primary", primary.URL, "openai", 0)
+	fc.RegisterBackend("fallback1", fallback1.URL, "openai", 1)
+	fc.RegisterBackend("fallback2", fallback2.URL, "openai", 2)
+	p.SetFailoverController(fc)
+
+	const sessionID = "e2e-failover-chain-on-http-5xx"
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", sessionID)
+
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if !fallback1Hit {
+		t.Error("expected fallback1 to be hit (it's next in fallback_order after primary)")
+	}
+	if !fallback2Hit {
+		t.Error("expected fallback2 to be hit after fallback1's 500 was treated as a failure")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from fallback2, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "hi from fallback2") {
+		t.Errorf("expected the client to receive fallback2's response, got: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "fallback1 down") {
+		t.Errorf("fallback1's 500 body must not be forwarded to the client, got: %s", w.Body.String())
+	}
+}
+
 // TestE2EFailover_SkipsUnmappableBackend_AllUnavailable covers the brief's
 // second case: the only configured fallback has no backends.<name>.model and
 // its models globs (["zzz-*"]) don't match "gemma" and can't be validated

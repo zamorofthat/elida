@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +41,33 @@ func TestEnvExpansionUnsetLeftLiteral(t *testing.T) {
 		"backends:\n  local:\n    url: \"http://127.0.0.1:1\"\n    type: openai\n    default: true\n    api_key: \"${DEFINITELY_UNSET_VAR_XYZ}\"\n")
 	if got := cfg.Backends["local"].APIKey; got != "${DEFINITELY_UNSET_VAR_XYZ}" {
 		t.Errorf("unset var mangled: %q", got)
+	}
+}
+
+// Unset variable in a backend api_key: beyond the generic expansion warning,
+// a backend-specific warning must call out that the literal "${VAR}" text
+// is about to be sent to that backend as a credential (MINOR finding).
+func TestEnvExpansionUnsetBackendAPIKeyWarnsSpecifically(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	cfg := loadYAML(t, "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\n"+
+		"backends:\n  local:\n    url: \"http://127.0.0.1:1\"\n    type: openai\n    default: true\n    api_key: \"${DEFINITELY_UNSET_VAR_XYZ}\"\n")
+	if got := cfg.Backends["local"].APIKey; got != "${DEFINITELY_UNSET_VAR_XYZ}" {
+		t.Fatalf("unset var mangled: %q", got)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "backend api_key references unset environment variable and will be sent as a literal credential") {
+		t.Errorf("expected backend-specific unset-var warning, got log output: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "backend=local") {
+		t.Errorf("expected warning to name the backend, got log output: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "var=DEFINITELY_UNSET_VAR_XYZ") {
+		t.Errorf("expected warning to name the unset var, got log output: %s", logOutput)
 	}
 }
 

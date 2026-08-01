@@ -1526,6 +1526,17 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 		http.Error(w, "Backend unavailable after failover", http.StatusBadGateway)
 		return http.StatusBadGateway, 0, true
 	}
+
+	// A fallback that responds without a transport error can still fail at
+	// the HTTP layer (5xx, or 429 without Retry-After) - the same failure
+	// modes DetectFailure already checks for the initial backend and for
+	// fallback transport errors above. Forwarding it straight to the client
+	// would be inconsistent with how transport errors are handled (they
+	// recurse to the next backend); chain to the next fallback instead.
+	if failureType := DetectFailure(resp, nil); failureType != FailureNone {
+		_ = resp.Body.Close()
+		return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
+	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// Copy response headers
