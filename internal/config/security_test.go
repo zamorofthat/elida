@@ -127,3 +127,35 @@ func TestDefaultConfigSecurityDefaults(t *testing.T) {
 		t.Errorf("default config should pass security validation: %v", err)
 	}
 }
+
+func TestTrustedNetworksValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Proxy.Auth.Enabled = true
+	cfg.Proxy.Auth.APIKey = "k"
+	cfg.Proxy.Auth.TrustedNetworks = []string{"127.0.0.1/32", "bogus"}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("invalid CIDR in trusted_networks must fail validation")
+	}
+	cfg.Proxy.Auth.TrustedNetworks = []string{"127.0.0.1/32", "172.16.0.0/12", "::1/128"}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("valid CIDRs rejected: %v", err)
+	}
+}
+
+func TestProxyUnauthenticatedWarning(t *testing.T) {
+	tests := []struct {
+		listen  string
+		enabled bool
+		warn    bool
+	}{
+		{"127.0.0.1:8000", false, false}, // loopback — quiet
+		{":8000", false, true},           // all interfaces, no auth — warn
+		{"0.0.0.0:8000", false, true},
+		{":8000", true, false}, // authed — quiet
+	}
+	for _, tt := range tests {
+		if got := proxyAuthWarningNeeded(tt.listen, tt.enabled); got != tt.warn {
+			t.Errorf("proxyAuthWarningNeeded(%q, %v) = %v, want %v", tt.listen, tt.enabled, got, tt.warn)
+		}
+	}
+}
