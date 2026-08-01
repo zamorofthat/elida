@@ -32,12 +32,21 @@ backends:
     type: groq
     models: ["llama-*", "mixtral-*"]
     api_key: ""  # Optional: use GROQ_API_KEY env var instead
+    model: ""    # Optional: model id substituted in ONLY when failover lands here
 routing:
     methods:
       - header
       - model
       - path
       - default
+
+# Failover (see "Failover" below; disabled by default)
+failover:
+  enabled: false
+  max_retries: 2
+  retry_delay: 100ms
+  fallback_order: []      # e.g. [openai, anthropic] — set explicitly; see recommendation below
+  preserve_model: true
 
 # Session management
 session:
@@ -159,6 +168,132 @@ All configuration can be overridden with environment variables:
 | `ELIDA_REDIS_DB` | `0` | Redis database number |
 | `ELIDA_CONTROL_API_KEY` | — | API key for control API auth (auto-enables auth) |
 | `ELIDA_PROXY_API_KEY` | — | API key for proxy auth (auto-enables auth) |
+
+## Secrets in Config: `${ENV}` Expansion and Auto Provider Keys
+
+Config values can reference environment variables directly, and backend API keys can be picked
+up automatically by convention, so secrets never need to be committed alongside `elida.yaml`.
+
+### `${VAR}` expansion
+
+`${IDENTIFIER}` references are expanded from the environment in five fields: `backend`,
+`backends.<name>.url`, `backends.<name>.api_key`, `proxy.auth.api_key`, and
+`control.auth.api_key`. Nowhere else — in particular, policy rule `patterns` are never expanded,
+so a regex like `${HOME}$` is never mistaken for a secret reference.
+
+```yaml
+backends:
+  openai:
+    url: "https://api.openai.com"
+    type: openai
+    api_key: "${OPENAI_API_KEY}"
+```
+
+An unset variable is left as the literal `${VAR}` string (not silently emptied) and logs a
+warning at startup, so a missing secret is visible immediately instead of failing mysteriously
+downstream.
+
+### Auto provider keys
+
+If `backends.<name>.api_key` is left empty (or omitted), ELIDA looks it up automatically, in order:
+
+1. `<NAME>_API_KEY` — the backend's own name, upper-cased, with non-alphanumerics replaced by
+   `_` (e.g. backend `eu-llm` → `EU_LLM_API_KEY`).
+2. The conventional variable for the backend's `type`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+   `MISTRAL_API_KEY`.
+
+An explicit `api_key` (literal or `${VAR}`-expanded) always wins over both.
+
+### Recommended pattern: keys in env, config in git
+
+Keep `elida.yaml` free of secrets and safe to commit, with keys supplied entirely by the
+environment:
+
+```yaml
+# elida.yaml — safe to commit
+backends:
+  primary:
+    url: "https://api.openai.com"
+    type: openai
+    default: true
+    # no api_key: picked up automatically from OPENAI_API_KEY
+  nemotron:
+    url: "https://integrate.api.nvidia.com/v1"
+    type: openai
+    # no api_key: picked up automatically from NEMOTRON_API_KEY
+```
+
+```bash
+# .env / deployment secrets — never committed
+OPENAI_API_KEY=sk-...
+NEMOTRON_API_KEY=nvapi-...
+```
+
+See [`.env.example`](../.env.example) for the full list of variables ELIDA reads.
+
+## Failover
+
+**Disabled by default.** Failover was previously constructible only in tests and had no effect
+on real traffic; it is now wired up automatically from config at startup — set
+`failover.enabled: true` to turn it on.
+
+```yaml
+failover:
+  enabled: true          # default: false
+  max_retries: 2         # default: 2 — max failover hops before giving up
+  retry_delay: 100ms     # default: 0 — delay before trying the next backend
+  fallback_order:        # order to try backends in; see recommendation below
+    - primary
+    - secondary
+  preserve_model: true   # default: true
+```
+
+When a request fails (5xx, timeout, connection error, or a 429 without `Retry-After`), ELIDA
+retries it against the next backend in `fallback_order`, replaying the session's full
+conversation history (system prompt + messages) so the fallback backend has full context, not
+just the single failed request.
+
+**Recommendation: always set `fallback_order` explicitly.** Backends not listed in
+`fallback_order` are still eligible — they're simply tried last, in unspecified (map iteration)
+order. For predictable failover, list every backend you want considered, in priority order.
+
+### `backends.<name>.model` — failover-only model rewrite
+
+```yaml
+backends:
+  primary:
+    url: "https://api.mymodel.com"
+    type: openai
+    models: ["gemma"]
+    default: true
+  fallback:
+    url: "https://api.openai.com"
+    type: openai
+    model: "gpt-4"   # substituted in on failover only; normal routing is untouched
+```
+
+`backends.<name>.model` only takes effect when a request fails over onto that backend — it never
+changes normal (non-failover) routing, nor the model a directly-addressed backend receives.
+
+Different backends/providers use disjoint model catalogs (a `gemma` request can't be sent to an
+Anthropic backend as-is), so failover must resolve a compatible model id for the target before
+forwarding. Decision order:
+
+1. **Explicit substitution** — `backends.<name>.model`, if set, always wins.
+2. **Glob-compatible passthrough** — if the target's `models` globs match the original model id
+   unchanged, it's forwarded as-is.
+3. **Remap table** — otherwise, ELIDA's built-in model-family remap table (e.g. `gpt-4` ↔
+   `claude-3-opus-20240229`) is consulted; the result is only accepted if it also matches the
+   target's `models` globs, or the target declares no `models` at all (nothing to validate
+   against).
+4. **Skip loudly** — if nothing above resolves to a valid model for the target, that backend is
+   skipped entirely (no request is ever sent to it), and failover moves on to the next candidate
+   in `fallback_order`. This prevents forwarding an untranslated model id to a backend that
+   can't understand it (previously a 400 from the target backend).
+
+If every candidate is skipped or fails, the client receives a `502` with a JSON body
+(`{"error":"failover_exhausted","message":"All backends unavailable"}`) instead of the last
+attempted backend's raw response.
 
 ## Proxy Authentication
 
