@@ -700,7 +700,22 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 		if retried {
 			return statusCode, bytesOut
 		}
-		// Failover failed or not possible, continue with error handling
+		// Failover was attempted but never produced a usable response: every
+		// candidate was exhausted, skipped as model-incompatible (see
+		// ResolveFailoverModel), or an internal failover step failed. Do NOT
+		// fall through to forward the original failed backend's raw
+		// response - that would be byte-for-byte indistinguishable from
+		// failover being disabled and would silently hide that failover was
+		// attempted and gave up. Tell the client plainly instead.
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		slog.Warn("failover exhausted: no backend could serve the request",
+			"session_id", sess.ID,
+			"original_backend", backend.Name,
+			"failed_backends", sess.GetFailedBackends(),
+		)
+		return p.writeFailoverExhaustedResponse(w)
 	}
 
 	if err != nil {
@@ -1367,6 +1382,26 @@ func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, message string, term
 	return http.StatusForbidden, int64(len(body))
 }
 
+// writeFailoverExhaustedResponse writes a JSON 502 response indicating that
+// failover was attempted for this request but no backend could serve it -
+// either the retry-depth safety valve tripped, or the failover controller
+// ran out of viable candidates (including candidates skipped for having no
+// compatible model, see ResolveFailoverModel). Callers use this instead of
+// forwarding the last-attempted backend's raw response, which would
+// otherwise be indistinguishable from failover being disabled entirely.
+func (p *Proxy) writeFailoverExhaustedResponse(w http.ResponseWriter) (int, int64) {
+	w.Header().Set("Content-Type", "application/json")
+	body, _ := json.Marshal(map[string]string{
+		"error":   "failover_exhausted",
+		"message": "All backends unavailable",
+	})
+	w.WriteHeader(http.StatusBadGateway)
+	if _, err := w.Write(body); err != nil {
+		slog.Warn("write failed", "context", "failover_exhausted_response", "error", err)
+	}
+	return http.StatusBadGateway, int64(len(body))
+}
+
 // ReverseProxy creates a standard reverse proxy using the default backend
 func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 	defaultBackend := p.router.GetDefaultBackend()
@@ -1392,8 +1427,8 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 			"max_retries", maxFailoverRetries,
 			"last_backend", failedBackend.Name,
 		)
-		http.Error(w, "All backends unavailable", http.StatusBadGateway)
-		return http.StatusBadGateway, 0, true
+		statusCode, bytesOut := p.writeFailoverExhaustedResponse(w)
+		return statusCode, bytesOut, true
 	}
 	ctx := originalReq.Context()
 
