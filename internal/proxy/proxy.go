@@ -723,7 +723,22 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 		if retried {
 			return statusCode, bytesOut
 		}
-		// Failover failed or not possible, continue with error handling
+		// Failover was attempted but never produced a usable response: every
+		// candidate was exhausted, skipped as model-incompatible (see
+		// ResolveFailoverModel), or an internal failover step failed. Do NOT
+		// fall through to forward the original failed backend's raw
+		// response - that would be byte-for-byte indistinguishable from
+		// failover being disabled and would silently hide that failover was
+		// attempted and gave up. Tell the client plainly instead.
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		slog.Warn("failover exhausted: no backend could serve the request",
+			"session_id", sess.ID,
+			"original_backend", backend.Name,
+			"failed_backends", sess.GetFailedBackends(),
+		)
+		return p.writeFailoverExhaustedResponse(w)
 	}
 
 	if err != nil {
@@ -1390,6 +1405,26 @@ func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, message string, term
 	return http.StatusForbidden, int64(len(body))
 }
 
+// writeFailoverExhaustedResponse writes a JSON 502 response indicating that
+// failover was attempted for this request but no backend could serve it -
+// either the retry-depth safety valve tripped, or the failover controller
+// ran out of viable candidates (including candidates skipped for having no
+// compatible model, see ResolveFailoverModel). Callers use this instead of
+// forwarding the last-attempted backend's raw response, which would
+// otherwise be indistinguishable from failover being disabled entirely.
+func (p *Proxy) writeFailoverExhaustedResponse(w http.ResponseWriter) (int, int64) {
+	w.Header().Set("Content-Type", "application/json")
+	body, _ := json.Marshal(map[string]string{
+		"error":   "failover_exhausted",
+		"message": "All backends unavailable",
+	})
+	w.WriteHeader(http.StatusBadGateway)
+	if _, err := w.Write(body); err != nil {
+		slog.Warn("write failed", "context", "failover_exhausted_response", "error", err)
+	}
+	return http.StatusBadGateway, int64(len(body))
+}
+
 // ReverseProxy creates a standard reverse proxy using the default backend
 func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 	defaultBackend := p.router.GetDefaultBackend()
@@ -1415,8 +1450,8 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 			"max_retries", maxFailoverRetries,
 			"last_backend", failedBackend.Name,
 		)
-		http.Error(w, "All backends unavailable", http.StatusBadGateway)
-		return http.StatusBadGateway, 0, true
+		statusCode, bytesOut := p.writeFailoverExhaustedResponse(w)
+		return statusCode, bytesOut, true
 	}
 	ctx := originalReq.Context()
 
@@ -1441,14 +1476,38 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 		return 0, 0, false
 	}
 
+	// Resolve which model to send to the target backend before doing
+	// anything else - never send a request the backend can't understand.
+	originalModel, err := originalModelFromRequest(originalReq)
+	if err != nil {
+		slog.Error("failed to read original request for failover model resolution",
+			"session_id", sess.ID,
+			"target_backend", fallbackBackend.Name,
+			"error", err,
+		)
+		return 0, 0, false
+	}
+
+	newModel, ok := ResolveFailoverModel(originalModel, fallbackBackend)
+	if !ok {
+		slog.Error("failover skipped backend: no compatible model",
+			"session_id", sess.ID,
+			"original_model", originalModel,
+			"backend", fallbackBackend.Name,
+		)
+		sess.AddFailedBackend(fallbackBackend.Name)
+		return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
+	}
+
 	// Get session state for rehydration
 	state := sess.Serialize()
 
 	// Get the appropriate rehydrator for the target backend
 	rehydrator := GetRehydrator(fallbackInfo.Type)
 
-	// Rehydrate the request with full conversation history
-	newReq, err := rehydrator.Rehydrate(state, originalReq)
+	// Rehydrate the request with full conversation history, carrying the
+	// resolved target model
+	newReq, err := rehydrator.Rehydrate(state, originalReq, newModel)
 	if err != nil {
 		slog.Error("failed to rehydrate request for failover",
 			"session_id", sess.ID,
@@ -1489,6 +1548,17 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 		)
 		http.Error(w, "Backend unavailable after failover", http.StatusBadGateway)
 		return http.StatusBadGateway, 0, true
+	}
+
+	// A fallback that responds without a transport error can still fail at
+	// the HTTP layer (5xx, or 429 without Retry-After) - the same failure
+	// modes DetectFailure already checks for the initial backend and for
+	// fallback transport errors above. Forwarding it straight to the client
+	// would be inconsistent with how transport errors are handled (they
+	// recurse to the next backend); chain to the next fallback instead.
+	if failureType := DetectFailure(resp, nil); failureType != FailureNone {
+		_ = resp.Body.Close()
+		return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

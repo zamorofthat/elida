@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"elida/internal/config"
+	"elida/internal/router"
 	"elida/internal/session"
 )
 
@@ -126,7 +128,18 @@ func DefaultFailoverConfig() FailoverConfig {
 	}
 }
 
-// FailoverController handles backend failover logic
+// FailoverController handles backend failover logic.
+//
+// backends is populated exclusively via RegisterBackend at startup (see
+// BuildFailoverController) and is otherwise only read from - by
+// SelectFallback/HandleFailover on the request path and by GetBackend.
+// MarkBackendUnhealthy/MarkBackendHealthy mutate an entry's Healthy field
+// and are currently uncalled by any production code path, but if health
+// marking is ever wired up (e.g. from a background health checker), note
+// that the backends map is NOT safe for concurrent mutation: RegisterBackend
+// and the Mark* methods write to the map/struct fields with no locking. A
+// mutex (or a sync.Map) needs to guard backends before Mark* calls can
+// safely run concurrently with request-path reads.
 type FailoverController struct {
 	config   FailoverConfig
 	backends map[string]*Backend
@@ -280,6 +293,44 @@ func (fc *FailoverController) GetBackend(name string) (*Backend, bool) {
 // IsEnabled returns whether failover is enabled
 func (fc *FailoverController) IsEnabled() bool {
 	return fc.config.Enabled
+}
+
+// BuildFailoverController translates the static config.FailoverConfig plus the
+// live router backends into a ready-to-use *FailoverController. It returns nil
+// when failover is disabled in config, so callers can skip wiring it in entirely.
+//
+// Priority assignment: backends listed in cfg.FallbackOrder get their index in
+// that list (0, 1, 2, ...); backends not listed there are registered with
+// priority len(cfg.FallbackOrder)+1 so they are only tried after the explicit
+// fallback order is exhausted.
+func BuildFailoverController(cfg config.FailoverConfig, rt *router.Router) *FailoverController {
+	if !cfg.Enabled {
+		return nil
+	}
+
+	fc := NewFailoverController(FailoverConfig{
+		Enabled:       cfg.Enabled,
+		MaxRetries:    cfg.MaxRetries,
+		RetryDelay:    cfg.RetryDelay,
+		PreserveModel: cfg.PreserveModel,
+		FallbackOrder: cfg.FallbackOrder,
+	})
+
+	priority := make(map[string]int, len(cfg.FallbackOrder))
+	for i, name := range cfg.FallbackOrder {
+		priority[name] = i
+	}
+	unlisted := len(cfg.FallbackOrder) + 1
+
+	for name, backend := range rt.Backends() {
+		p, ok := priority[name]
+		if !ok {
+			p = unlisted
+		}
+		fc.RegisterBackend(name, backend.URL.String(), backend.Type, p)
+	}
+
+	return fc
 }
 
 func contains(slice []string, item string) bool {

@@ -156,11 +156,19 @@ listen: ":8080"
 backends:
   anthropic:
     url: "https://api.anthropic.com"
+    api_key: "${ANTHROPIC_API_KEY}"   # or omit: auto-read from ANTHROPIC_API_KEY
     models: ["claude-*"]
     default: true
   openai:
     url: "https://api.openai.com"
+    api_key: "${OPENAI_API_KEY}"      # or omit: auto-read from OPENAI_API_KEY
     models: ["gpt-*", "o1-*"]
+
+# Failover across the backends above when one fails (disabled by default).
+# See docs/configuration.md#failover for the full model-rewrite behavior.
+failover:
+  enabled: true
+  fallback_order: [anthropic, openai]   # set explicitly — see recommendation in configuration.md
 
 session:
   timeout: 30m
