@@ -99,7 +99,7 @@ func TestE2EFailover_RewritesModelOnSuccess(t *testing.T) {
 	p.SetFailoverController(fc)
 
 	const sessionID = "e2e-failover-success"
-	reqBody := `{"model":"gemma","messages":[{"role":"user","content":"hello"}]}`
+	reqBody := `{"model":"gemma","messages":[{"role":"user","content":"hello-e2e-conversation"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", sessionID)
@@ -119,6 +119,13 @@ func TestE2EFailover_RewritesModelOnSuccess(t *testing.T) {
 	}
 	if !strings.Contains(string(fallbackBody), `"model":"fallback-model"`) {
 		t.Errorf("expected fallback to receive rewritten model \"fallback-model\", got body: %s", fallbackBody)
+	}
+	// The session has no recorded history (RecordMessage/SetSystemPrompt have
+	// no production callers), so rehydration must fall back to preserving the
+	// original request's conversation rather than replaying an empty one -
+	// otherwise the user's prompt is silently dropped on failover.
+	if !strings.Contains(string(fallbackBody), "hello-e2e-conversation") {
+		t.Errorf("expected fallback to receive the original conversation, got body: %s", fallbackBody)
 	}
 
 	sess, ok := manager.Get(sessionID)

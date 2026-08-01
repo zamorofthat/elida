@@ -410,6 +410,165 @@ func TestAnthropicRehydrator(t *testing.T) {
 	t.Logf("Rehydrated body: %s", bodyStr)
 }
 
+// =============================================================================
+// Rehydrator empty-vs-non-empty session state tests
+//
+// Session.RecordMessage/SetSystemPrompt have no production callers, so on
+// the real failover path state.Messages is always empty. Rehydrators must
+// fall back to the original request's own conversation in that case instead
+// of overwriting it with the empty session history - otherwise the user's
+// prompt is silently dropped. When state.Messages IS populated (e.g. by a
+// future caller, or these very tests), the recorded history still wins and
+// replaces the original request's messages, per existing behavior.
+// =============================================================================
+
+func TestOpenAIRehydrator_EmptyState_PreservesOriginalMessages(t *testing.T) {
+	state := &session.SessionState{ID: "empty-state"} // no Messages, no SystemPrompt
+
+	originalBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello-original-conversation"}]}`
+	originalReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(originalBody))
+	originalReq.Header.Set("Content-Type", "application/json")
+
+	rehydrator := &proxy.OpenAIRehydrator{}
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	if !bytes.Contains(body, []byte("hello-original-conversation")) {
+		t.Errorf("expected original conversation preserved, got: %s", body)
+	}
+}
+
+func TestOpenAIRehydrator_NonEmptyState_ReplacesOriginalMessages(t *testing.T) {
+	state := &session.SessionState{
+		ID: "non-empty-state",
+		Messages: []session.Message{
+			{Role: "user", Content: "recorded-session-message"},
+		},
+	}
+
+	originalBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello-original-conversation"}]}`
+	originalReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(originalBody))
+	originalReq.Header.Set("Content-Type", "application/json")
+
+	rehydrator := &proxy.OpenAIRehydrator{}
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	if !bytes.Contains(body, []byte("recorded-session-message")) {
+		t.Errorf("expected recorded session history in rehydrated request, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("hello-original-conversation")) {
+		t.Errorf("did not expect original request messages when session state is non-empty, got: %s", body)
+	}
+}
+
+func TestAnthropicRehydrator_EmptyState_PreservesOriginalMessagesAndSystem(t *testing.T) {
+	state := &session.SessionState{ID: "empty-state"} // no Messages, no SystemPrompt
+
+	originalBody := `{"model":"claude-3-sonnet-20240229","max_tokens":1024,` +
+		`"system":"original-system-prompt","messages":[{"role":"user","content":"hello-original-conversation"}]}`
+	originalReq := httptest.NewRequest("POST", "/v1/messages", bytes.NewBufferString(originalBody))
+	originalReq.Header.Set("Content-Type", "application/json")
+
+	rehydrator := &proxy.AnthropicRehydrator{}
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	if !bytes.Contains(body, []byte("hello-original-conversation")) {
+		t.Errorf("expected original conversation preserved, got: %s", body)
+	}
+	if !bytes.Contains(body, []byte("original-system-prompt")) {
+		t.Errorf("expected original system prompt preserved, got: %s", body)
+	}
+}
+
+func TestAnthropicRehydrator_NonEmptyState_ReplacesOriginalMessages(t *testing.T) {
+	state := &session.SessionState{
+		ID:           "non-empty-state",
+		SystemPrompt: "recorded-system-prompt",
+		Messages: []session.Message{
+			{Role: "user", Content: "recorded-session-message"},
+		},
+	}
+
+	originalBody := `{"model":"claude-3-sonnet-20240229","max_tokens":1024,` +
+		`"system":"original-system-prompt","messages":[{"role":"user","content":"hello-original-conversation"}]}`
+	originalReq := httptest.NewRequest("POST", "/v1/messages", bytes.NewBufferString(originalBody))
+	originalReq.Header.Set("Content-Type", "application/json")
+
+	rehydrator := &proxy.AnthropicRehydrator{}
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	if !bytes.Contains(body, []byte("recorded-session-message")) {
+		t.Errorf("expected recorded session history in rehydrated request, got: %s", body)
+	}
+	if !bytes.Contains(body, []byte("recorded-system-prompt")) {
+		t.Errorf("expected recorded system prompt in rehydrated request, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("hello-original-conversation")) || bytes.Contains(body, []byte("original-system-prompt")) {
+		t.Errorf("did not expect original request content when session state is non-empty, got: %s", body)
+	}
+}
+
+func TestOllamaRehydrator_EmptyState_PreservesOriginalMessages(t *testing.T) {
+	state := &session.SessionState{ID: "empty-state"} // no Messages, no SystemPrompt
+
+	originalBody := `{"model":"llama3.2","messages":[{"role":"user","content":"hello-original-conversation"}]}`
+	originalReq := httptest.NewRequest("POST", "/api/chat", bytes.NewBufferString(originalBody))
+	originalReq.Header.Set("Content-Type", "application/json")
+
+	rehydrator := &proxy.OllamaRehydrator{}
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	if !bytes.Contains(body, []byte("hello-original-conversation")) {
+		t.Errorf("expected original conversation preserved, got: %s", body)
+	}
+}
+
+func TestOllamaRehydrator_NonEmptyState_ReplacesOriginalMessages(t *testing.T) {
+	state := &session.SessionState{
+		ID: "non-empty-state",
+		Messages: []session.Message{
+			{Role: "user", Content: "recorded-session-message"},
+		},
+	}
+
+	originalBody := `{"model":"llama3.2","messages":[{"role":"user","content":"hello-original-conversation"}]}`
+	originalReq := httptest.NewRequest("POST", "/api/chat", bytes.NewBufferString(originalBody))
+	originalReq.Header.Set("Content-Type", "application/json")
+
+	rehydrator := &proxy.OllamaRehydrator{}
+	req, err := rehydrator.Rehydrate(state, originalReq, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	body, _ := io.ReadAll(req.Body)
+	if !bytes.Contains(body, []byte("recorded-session-message")) {
+		t.Errorf("expected recorded session history in rehydrated request, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("hello-original-conversation")) {
+		t.Errorf("did not expect original request messages when session state is non-empty, got: %s", body)
+	}
+}
+
 func TestSelectCompatibleModel(t *testing.T) {
 	tests := []struct {
 		original string

@@ -252,9 +252,12 @@ failover:
 ```
 
 When a request fails (5xx, timeout, connection error, or a 429 without `Retry-After`), ELIDA
-retries it against the next backend in `fallback_order`, replaying the session's full
-conversation history (system prompt + messages) so the fallback backend has full context, not
-just the single failed request.
+retries it against the next backend in `fallback_order`. The retry preserves the original
+request's conversation (its messages, and any system prompt) so the fallback backend sees the
+same content the client sent — not just an empty prompt. When the session has recorded
+conversation history (via the session APIs), that recorded history is used instead, giving the
+fallback backend the fuller context accumulated across the session rather than just the single
+failed request.
 
 **Recommendation: always set `fallback_order` explicitly.** Backends not listed in
 `fallback_order` are still eligible — they're simply tried last, in unspecified (map iteration)

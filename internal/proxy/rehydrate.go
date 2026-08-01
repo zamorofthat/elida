@@ -46,23 +46,34 @@ func (r *OpenAIRehydrator) Rehydrate(state *session.SessionState, originalReq *h
 		}
 	}
 
-	// Build messages array
-	messages := make([]map[string]string, 0, len(state.Messages)+1)
-
-	// Add system prompt if exists
-	if state.SystemPrompt != "" {
-		messages = append(messages, map[string]string{
-			"role":    "system",
-			"content": state.SystemPrompt,
-		})
-	}
-
-	// Add conversation history
-	for _, msg := range state.Messages {
-		messages = append(messages, map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
-		})
+	// Build messages array. state.Messages/state.SystemPrompt only ever get
+	// populated by Session.RecordMessage/SetSystemPrompt, which today have no
+	// production callers - so on the real failover path the session history
+	// is always empty. Overwriting the outgoing request with that empty
+	// history would silently drop the user's conversation, so when there's
+	// no recorded history, fall back to the original request's own messages
+	// (chat-completions requests are stateless: the full conversation,
+	// including any system message, already lives in the original body).
+	var messages any
+	if len(state.Messages) > 0 {
+		msgs := make([]map[string]string, 0, len(state.Messages)+1)
+		if state.SystemPrompt != "" {
+			msgs = append(msgs, map[string]string{
+				"role":    "system",
+				"content": state.SystemPrompt,
+			})
+		}
+		for _, msg := range state.Messages {
+			msgs = append(msgs, map[string]string{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
+		}
+		messages = msgs
+	} else if orig, ok := originalBody["messages"]; ok {
+		messages = orig
+	} else {
+		messages = []map[string]string{}
 	}
 
 	// Build new request body
@@ -112,18 +123,29 @@ func (r *AnthropicRehydrator) Rehydrate(state *session.SessionState, originalReq
 		}
 	}
 
-	// Build messages array (Anthropic doesn't include system in messages)
-	messages := make([]map[string]string, 0, len(state.Messages))
-
-	for _, msg := range state.Messages {
-		// Skip system messages - Anthropic uses separate system field
-		if msg.Role == "system" {
-			continue
+	// Build messages array (Anthropic doesn't include system in messages).
+	// As in the OpenAI rehydrator, state.Messages/state.SystemPrompt are
+	// always empty in production (no caller ever records session history),
+	// so fall back to the original request's own messages/system fields
+	// instead of replaying an empty conversation to the fallback backend.
+	var messages any
+	if len(state.Messages) > 0 {
+		msgs := make([]map[string]string, 0, len(state.Messages))
+		for _, msg := range state.Messages {
+			// Skip system messages - Anthropic uses separate system field
+			if msg.Role == "system" {
+				continue
+			}
+			msgs = append(msgs, map[string]string{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
 		}
-		messages = append(messages, map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
-		})
+		messages = msgs
+	} else if orig, ok := originalBody["messages"]; ok {
+		messages = orig
+	} else {
+		messages = []map[string]string{}
 	}
 
 	// Build new request body
@@ -133,8 +155,12 @@ func (r *AnthropicRehydrator) Rehydrate(state *session.SessionState, originalReq
 	}
 
 	// Add system prompt as separate field
-	if state.SystemPrompt != "" {
-		body["system"] = state.SystemPrompt
+	if len(state.Messages) > 0 {
+		if state.SystemPrompt != "" {
+			body["system"] = state.SystemPrompt
+		}
+	} else if system, ok := originalBody["system"]; ok {
+		body["system"] = system
 	}
 
 	// Select model - use the caller-resolved target model when given
@@ -185,23 +211,31 @@ func (r *OllamaRehydrator) Rehydrate(state *session.SessionState, originalReq *h
 		}
 	}
 
-	// Build messages array for Ollama chat format
-	messages := make([]map[string]string, 0, len(state.Messages)+1)
-
-	// Add system prompt
-	if state.SystemPrompt != "" {
-		messages = append(messages, map[string]string{
-			"role":    "system",
-			"content": state.SystemPrompt,
-		})
-	}
-
-	// Add conversation history
-	for _, msg := range state.Messages {
-		messages = append(messages, map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
-		})
+	// Build messages array for Ollama chat format. As in the other
+	// rehydrators, state.Messages/state.SystemPrompt are always empty in
+	// production (no caller ever records session history), so fall back to
+	// the original request's own messages instead of replaying an empty
+	// conversation to the fallback backend.
+	var messages any
+	if len(state.Messages) > 0 {
+		msgs := make([]map[string]string, 0, len(state.Messages)+1)
+		if state.SystemPrompt != "" {
+			msgs = append(msgs, map[string]string{
+				"role":    "system",
+				"content": state.SystemPrompt,
+			})
+		}
+		for _, msg := range state.Messages {
+			msgs = append(msgs, map[string]string{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
+		}
+		messages = msgs
+	} else if orig, ok := originalBody["messages"]; ok {
+		messages = orig
+	} else {
+		messages = []map[string]string{}
 	}
 
 	// Build request body
