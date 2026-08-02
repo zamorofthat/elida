@@ -3,14 +3,54 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// envRefPattern matches ${IDENTIFIER} references in config values.
+var envRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// nonAlphanumericPattern matches non-alphanumeric characters for replacement.
+var nonAlphanumericPattern = regexp.MustCompile(`[^A-Za-z0-9]`)
+
+// expandEnvRefs expands ${IDENTIFIER} references from the environment in a
+// single config string. Field-targeted by the caller — policy regex patterns
+// are never passed through here (feedback #9). Unset variables warn and stay
+// literal so a missing key is visible, not silently empty.
+func expandEnvRefs(s string) string {
+	return envRefPattern.ReplaceAllStringFunc(s, func(m string) string {
+		name := m[2 : len(m)-1]
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		slog.Warn("config references unset environment variable", "var", name)
+		return m
+	})
+}
+
+// autoBackendKey returns a key for a backend with an empty api_key:
+// <UPPER(NAME)>_API_KEY first (non-alphanumerics -> _), then the
+// conventional variable for its type. Empty if neither is set.
+func autoBackendKey(name, typ string) (string, string) {
+	nameVar := strings.ToUpper(nonAlphanumericPattern.ReplaceAllString(name, "_")) + "_API_KEY"
+	if v := os.Getenv(nameVar); v != "" {
+		return v, nameVar
+	}
+	typeVars := map[string]string{"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "mistral": "MISTRAL_API_KEY"}
+	if tv, ok := typeVars[typ]; ok {
+		if v := os.Getenv(tv); v != "" {
+			return v, tv
+		}
+	}
+	return "", ""
+}
 
 // Config holds all configuration for ELIDA
 type Config struct {
@@ -29,6 +69,7 @@ type Config struct {
 	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
 	OCSF            OCSFConfig               `yaml:"ocsf"`             // OCSF native transport configuration
 	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
+	Failover        FailoverConfig           `yaml:"failover"`         // Failover configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
 
@@ -41,6 +82,11 @@ type ProxyConfig struct {
 type ProxyAuthConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	APIKey  string `yaml:"api_key"` // API key for Bearer token or X-API-Key header auth
+	// TrustedNetworks lists CIDRs whose DIRECT peers skip the API-key check
+	// (e.g. loopback + the docker bridge). Lets un-keyed auxiliary agent
+	// calls work on a trusted network while the LAN still needs the key.
+	// The trust decision never consults X-Forwarded-For.
+	TrustedNetworks []string `yaml:"trusted_networks"`
 }
 
 // WebSocketConfig holds WebSocket proxy configuration
@@ -223,6 +269,7 @@ type BackendConfig struct {
 	Models  []string `yaml:"models"`  // glob patterns: ["gpt-*", "claude-*"]
 	Default bool     `yaml:"default"` // is this the default backend?
 	APIKey  string   `yaml:"api_key"` // API key to inject (keeps client keyless)
+	Model   string   `yaml:"model"`   // model id to substitute when FAILOVER lands on this backend (feedback #8); normal routing never rewrites
 }
 
 // RoutingConfig defines routing method priority
@@ -234,12 +281,21 @@ type RoutingConfig struct {
 
 // SessionConfig holds session-related configuration
 type SessionConfig struct {
-	Timeout           time.Duration   `yaml:"timeout"`
-	Header            string          `yaml:"header"`
-	GenerateIfMissing bool            `yaml:"generate_if_missing"`
-	Store             string          `yaml:"store"` // "memory" or "redis"
-	Redis             RedisConfig     `yaml:"redis"`
-	KillBlock         KillBlockConfig `yaml:"kill_block"`
+	Timeout           time.Duration       `yaml:"timeout"`
+	Header            string              `yaml:"header"`
+	GenerateIfMissing bool                `yaml:"generate_if_missing"`
+	DeriveFrom        SessionDeriveConfig `yaml:"derive_from"` // body-derived session identity (feedback #4)
+	Store             string              `yaml:"store"`       // "memory" or "redis"
+	Redis             RedisConfig         `yaml:"redis"`
+	KillBlock         KillBlockConfig     `yaml:"kill_block"`
+}
+
+// SessionDeriveConfig controls deriving session identity from the request body
+// when no session header is present. Derived IDs contain no backend component,
+// so a conversation keeps one session across backend failover.
+type SessionDeriveConfig struct {
+	OpenAIUser bool   `yaml:"openai_user"` // use the standard OpenAI `user` field (default true)
+	BodyPath   string `yaml:"body_path"`   // optional dot-path, e.g. "metadata.conversation_id"; takes precedence over the user field
 }
 
 // KillBlockConfig configures how long killed sessions stay blocked
@@ -340,6 +396,15 @@ type FingerprintConfig struct {
 	FlushInterval time.Duration `yaml:"flush_interval"` // How often to persist dirty baselines (default: 5m)
 }
 
+// FailoverConfig holds failover configuration
+type FailoverConfig struct {
+	Enabled       bool          `yaml:"enabled"`        // Enable failover (default: false)
+	MaxRetries    int           `yaml:"max_retries"`    // Max retry attempts (default: 2)
+	RetryDelay    time.Duration `yaml:"retry_delay"`    // Delay between retries (default: 0)
+	FallbackOrder []string      `yaml:"fallback_order"` // Order of backends to try on failure
+	PreserveModel bool          `yaml:"preserve_model"` // Preserve model ID across failovers
+}
+
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
@@ -373,6 +438,33 @@ func Load(path string) (*Config, error) {
 
 	// Override with environment variables
 	cfg.applyEnvOverrides()
+
+	// Expand environment variable references and auto-load provider keys
+	cfg.Backend = expandEnvRefs(cfg.Backend)
+	cfg.Proxy.Auth.APIKey = expandEnvRefs(cfg.Proxy.Auth.APIKey)
+	cfg.Control.Auth.APIKey = expandEnvRefs(cfg.Control.Auth.APIKey)
+	for name, b := range cfg.Backends {
+		b.URL = expandEnvRefs(b.URL)
+		b.APIKey = expandEnvRefs(b.APIKey)
+		if b.APIKey == "" {
+			if key, envVar := autoBackendKey(name, b.Type); key != "" {
+				b.APIKey = key
+				slog.Info("backend api_key loaded from environment", "backend", name, "env_var", envVar)
+			}
+		} else if strings.Contains(b.APIKey, "${") {
+			// expandEnvRefs already warned generically about the unset
+			// variable; this backend-specific warning calls out that the
+			// unexpanded "${VAR}" literal is about to be sent to the
+			// backend as-is - a credential-shaped value, never logged here.
+			unsetVar := "unknown"
+			if m := envRefPattern.FindStringSubmatch(b.APIKey); len(m) > 1 {
+				unsetVar = m[1]
+			}
+			slog.Warn("backend api_key references unset environment variable and will be sent as a literal credential",
+				"backend", name, "var", unsetVar)
+		}
+		cfg.Backends[name] = b
+	}
 
 	// Apply policy preset if specified
 	cfg.ApplyPolicyPreset()
@@ -409,6 +501,7 @@ func defaults() *Config {
 			Timeout:           5 * time.Minute,
 			Header:            "X-Session-ID",
 			GenerateIfMissing: true,
+			DeriveFrom:        SessionDeriveConfig{OpenAIUser: true},
 			Store:             "memory",
 			Redis: RedisConfig{
 				Addr:      "localhost:6379",
@@ -565,6 +658,11 @@ func defaults() *Config {
 				AutoStartSession: true, // Auto-start if no explicit INVITE detected
 				Protocols:        []string{"openai_realtime", "deepgram", "elevenlabs", "livekit"},
 			},
+		},
+		Failover: FailoverConfig{
+			Enabled:    false,
+			MaxRetries: 2,
+			RetryDelay: 0,
 		},
 		ShutdownTimeout: 30 * time.Second,
 	}
@@ -934,6 +1032,15 @@ func (c *Config) Validate() *ValidationResult {
 			Message: "API key required when proxy auth is enabled",
 			Hint:    "set ELIDA_PROXY_API_KEY env var",
 		})
+	}
+
+	for _, cidr := range c.Proxy.Auth.TrustedNetworks {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   "proxy.auth.trusted_networks",
+				Message: fmt.Sprintf("invalid CIDR %q: %v", cidr, err),
+			})
+		}
 	}
 
 	// OCSF webhook validation

@@ -738,6 +738,11 @@ func (a *app) initProxy() {
 		a.proxyHandler.SetStorage(a.sqliteStore)
 	}
 
+	if fc := proxy.BuildFailoverController(a.cfg.Failover, a.proxyHandler.GetRouter()); fc != nil {
+		a.proxyHandler.SetFailoverController(fc)
+		slog.Info("failover enabled", "max_retries", a.cfg.Failover.MaxRetries, "fallback_order", a.cfg.Failover.FallbackOrder)
+	}
+
 	a.proxyCaptureBuf = a.proxyHandler.GetCaptureBuffer()
 }
 

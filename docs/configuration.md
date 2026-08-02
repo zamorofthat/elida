@@ -32,6 +32,7 @@ backends:
     type: groq
     models: ["llama-*", "mixtral-*"]
     api_key: ""  # Optional: use GROQ_API_KEY env var instead
+    model: ""    # Optional: model id substituted in ONLY when failover lands here
 routing:
     methods:
       - header
@@ -39,12 +40,26 @@ routing:
       - path
       - default
 
+# Failover (see "Failover" below; disabled by default)
+failover:
+  enabled: false
+  max_retries: 2
+  retry_delay: 100ms
+  fallback_order: []      # e.g. [openai, anthropic] — set explicitly; see recommendation below
+  preserve_model: true
+
 # Session management
 session:
   timeout: 5m
   header: "X-Session-ID"
   generate_if_missing: true
   store: "memory"  # "memory" or "redis"
+
+  # Derive session identity from the request body when no X-Session-ID
+  # header is sent (see "Body-Derived Session Identity" below)
+  derive_from:
+    openai_user: true   # use the OpenAI `user` field (default true)
+    body_path: ""        # optional dot-path, e.g. "metadata.conversation_id"
 
   # Kill block configuration
   kill_block:
@@ -67,6 +82,7 @@ proxy:
   auth:
     enabled: true
     api_key: "your-proxy-api-key"  # Or use ELIDA_PROXY_API_KEY env var
+    trusted_networks: []           # CIDRs whose direct peers skip the API-key check
 
 # Policy engine
 policy:
@@ -164,6 +180,138 @@ All configuration can be overridden with environment variables:
 | `ELIDA_CONTROL_API_KEY` | — | API key for control API auth (auto-enables auth) |
 | `ELIDA_PROXY_API_KEY` | — | API key for proxy auth (auto-enables auth) |
 
+## Secrets in Config: `${ENV}` Expansion and Auto Provider Keys
+
+Config values can reference environment variables directly, and backend API keys can be picked
+up automatically by convention, so secrets never need to be committed alongside `elida.yaml`.
+
+### `${VAR}` expansion
+
+`${IDENTIFIER}` references are expanded from the environment in five fields: `backend`,
+`backends.<name>.url`, `backends.<name>.api_key`, `proxy.auth.api_key`, and
+`control.auth.api_key`. Nowhere else — in particular, policy rule `patterns` are never expanded,
+so a regex like `${HOME}$` is never mistaken for a secret reference.
+
+```yaml
+backends:
+  openai:
+    url: "https://api.openai.com"
+    type: openai
+    api_key: "${OPENAI_API_KEY}"
+```
+
+An unset variable is left as the literal `${VAR}` string (not silently emptied) and logs a
+warning at startup, so a missing secret is visible immediately instead of failing mysteriously
+downstream.
+
+### Auto provider keys
+
+If `backends.<name>.api_key` is left empty (or omitted), ELIDA looks it up automatically, in order:
+
+1. `<NAME>_API_KEY` — the backend's own name, upper-cased, with non-alphanumerics replaced by
+   `_` (e.g. backend `eu-llm` → `EU_LLM_API_KEY`).
+2. The conventional variable for the backend's `type`: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+   `MISTRAL_API_KEY`.
+
+An explicit `api_key` (literal or `${VAR}`-expanded) always wins over both.
+
+### Recommended pattern: keys in env, config in git
+
+Keep `elida.yaml` free of secrets and safe to commit, with keys supplied entirely by the
+environment:
+
+```yaml
+# elida.yaml — safe to commit
+backends:
+  primary:
+    url: "https://api.openai.com"
+    type: openai
+    default: true
+    # no api_key: picked up automatically from OPENAI_API_KEY
+  nemotron:
+    url: "https://integrate.api.nvidia.com/v1"
+    type: openai
+    # no api_key: picked up automatically from NEMOTRON_API_KEY
+```
+
+```bash
+# .env / deployment secrets — never committed
+OPENAI_API_KEY=sk-...
+NEMOTRON_API_KEY=nvapi-...
+```
+
+See [`.env.example`](../.env.example) for the full list of variables ELIDA reads.
+
+## Failover
+
+**Disabled by default.** Failover was previously constructible only in tests and had no effect
+on real traffic; it is now wired up automatically from config at startup — set
+`failover.enabled: true` to turn it on.
+
+> **Limitation:** failover currently applies only to non-streaming requests; streaming (SSE)
+> responses are returned from the primary backend as-is, with no failover on error.
+
+```yaml
+failover:
+  enabled: true          # default: false
+  max_retries: 2         # default: 2 — max failover hops before giving up
+  retry_delay: 100ms     # default: 0 — delay before trying the next backend
+  fallback_order:        # order to try backends in; see recommendation below
+    - primary
+    - secondary
+  preserve_model: true   # default: true
+```
+
+When a request fails (5xx, timeout, connection error, or a 429 without `Retry-After`), ELIDA
+retries it against the next backend in `fallback_order`. The retry preserves the original
+request's conversation (its messages, and any system prompt) so the fallback backend sees the
+same content the client sent — not just an empty prompt. When the session has recorded
+conversation history (via the session APIs), that recorded history is used instead, giving the
+fallback backend the fuller context accumulated across the session rather than just the single
+failed request.
+
+**Recommendation: always set `fallback_order` explicitly.** Backends not listed in
+`fallback_order` are still eligible — they're simply tried last, in unspecified (map iteration)
+order. For predictable failover, list every backend you want considered, in priority order.
+
+### `backends.<name>.model` — failover-only model rewrite
+
+```yaml
+backends:
+  primary:
+    url: "https://api.mymodel.com"
+    type: openai
+    models: ["gemma"]
+    default: true
+  fallback:
+    url: "https://api.openai.com"
+    type: openai
+    model: "gpt-4"   # substituted in on failover only; normal routing is untouched
+```
+
+`backends.<name>.model` only takes effect when a request fails over onto that backend — it never
+changes normal (non-failover) routing, nor the model a directly-addressed backend receives.
+
+Different backends/providers use disjoint model catalogs (a `gemma` request can't be sent to an
+Anthropic backend as-is), so failover must resolve a compatible model id for the target before
+forwarding. Decision order:
+
+1. **Explicit substitution** — `backends.<name>.model`, if set, always wins.
+2. **Glob-compatible passthrough** — if the target's `models` globs match the original model id
+   unchanged, it's forwarded as-is.
+3. **Remap table** — otherwise, ELIDA's built-in model-family remap table (e.g. `gpt-4` ↔
+   `claude-3-opus-20240229`) is consulted; the result is only accepted if it also matches the
+   target's `models` globs, or the target declares no `models` at all (nothing to validate
+   against).
+4. **Skip loudly** — if nothing above resolves to a valid model for the target, that backend is
+   skipped entirely (no request is ever sent to it), and failover moves on to the next candidate
+   in `fallback_order`. This prevents forwarding an untranslated model id to a backend that
+   can't understand it (previously a 400 from the target backend).
+
+If every candidate is skipped or fails, the client receives a `502` with a JSON body
+(`{"error":"failover_exhausted","message":"All backends unavailable"}`) instead of the last
+attempted backend's raw response.
+
 ## Proxy Authentication
 
 ELIDA supports optional API key authentication on the proxy endpoint to prevent unauthorized access.
@@ -189,6 +337,29 @@ proxy:
 - **Constant-time comparison** — Uses `crypto/subtle.ConstantTimeCompare` to prevent timing attacks
 - **Header stripping** — `X-Elida-API-Key` is stripped before forwarding to backend (not leaked)
 - **Health bypass** — `/health`, `/healthz`, `/ready`, `/readyz` bypass auth for load balancer probes
+
+### Trusted Networks (`proxy.auth.trusted_networks`)
+
+A CIDR allowlist whose **direct peers** skip the API-key check entirely. This lets un-keyed auxiliary agent calls (compression, title generation) work on a trusted network while the wider LAN still needs the key.
+
+```yaml
+proxy:
+  auth:
+    enabled: true
+    api_key: "your-proxy-api-key"
+    trusted_networks:
+      - "127.0.0.1/32"    # loopback
+      - "::1/128"         # loopback (IPv6)
+      - "172.16.0.0/12"   # e.g. a private/container network
+```
+
+- **Direct peer only** — the trust decision looks at the TCP connection's remote address only. It never consults `X-Forwarded-For` or `X-Real-IP`, so a client can't spoof its way past auth by setting those headers.
+- **Fail closed at startup** — an invalid CIDR in `trusted_networks` fails config validation rather than being silently skipped.
+- **Empty list = no bypass** — if `trusted_networks` is unset or empty, nobody is exempt; auth behaves exactly as if the feature didn't exist.
+- **Docker gateway gotcha** — a containerized ELIDA sees requests from a host-side client through the Docker bridge, so `r.RemoteAddr` is the bridge gateway (typically `172.17.0.1`), not the real client. Include the bridge subnet (e.g. `172.17.0.0/16`) if you want host-side calls exempted — but that also exempts every other container on the same bridge network.
+- **Reverse-proxy deployment caveat** — trust is decided by the *direct* peer. If ELIDA sits behind a local reverse proxy (nginx, Envoy, a load balancer), all external traffic arrives at ELIDA with the reverse proxy's source IP — trusting loopback (or that proxy's IP) would exempt every external client, not just internal callers. Only use `trusted_networks` when ELIDA itself is the network-facing listener; behind a reverse proxy, rely on `proxy.auth.api_key` instead (and have the proxy enforce access control upstream).
+
+A per-request `slog.Debug` line (`"proxy auth bypassed for trusted network client"`) is emitted whenever a request actually uses the bypass, so the effect is visible when debug logging is enabled.
 
 ### Backend API Key Injection (Keyless Clients)
 
@@ -368,7 +539,11 @@ Tools like `Bash` are intentionally excluded — they can execute dangerous comm
 
 ## Session ID Behavior
 
-Sessions are identified by the `X-Session-ID` header. If not provided, ELIDA generates one automatically.
+ELIDA resolves a session ID per request, in order of precedence:
+
+1. **`X-Session-ID` header** — if present, used verbatim.
+2. **Body-derived identity** (`session.derive_from`) — see below.
+3. **Client-IP + backend fallback** — `client-<hash>-<backend>`; requests from the same client to the same backend are grouped into one session automatically when neither of the above applies.
 
 ```bash
 # Use explicit session ID
@@ -378,7 +553,28 @@ curl -H "X-Session-ID: my-agent-task-123" http://localhost:8080/api/generate ...
 < X-Session-ID: my-agent-task-123
 ```
 
-For Claude Code, ELIDA uses client IP-based session tracking, so all requests from the same IP are grouped into a single session automatically.
+### Body-Derived Session Identity (`session.derive_from`)
+
+When no `X-Session-ID` header is sent, ELIDA can derive a stable session ID from the JSON request body, so one conversation keeps one session even if routing sends its requests to different backends (failover, load balancing, retries). Derived IDs deliberately contain no backend component — failover never splits a conversation into separate sessions, and the kill-switch stays per-conversation instead of per-host.
+
+```yaml
+session:
+  derive_from:
+    openai_user: true   # derive from the OpenAI `user` field (default: true)
+    body_path: ""       # optional dot-path, e.g. "metadata.conversation_id"
+```
+
+Precedence when deriving from the body:
+
+1. `session.derive_from.body_path`, if configured and the path resolves to a non-empty string in the body — takes precedence over the `user` field.
+2. `session.derive_from.openai_user` — the standard OpenAI `user` field, on by default.
+3. Neither applies (or both are disabled) — falls through to the client-IP + backend fallback above.
+
+Derived values are formatted as `user-<value>` when the value is short and contains only `[A-Za-z0-9._:-]`, or `user-<16 hex chars>` (a SHA-256-based hash) otherwise — so arbitrary or long `user`/body values never leak verbatim into the session ID.
+
+Set `openai_user: false` and leave `body_path` empty to disable body-derived identity entirely and always use the client-IP + backend fallback when no `X-Session-ID` header is sent.
+
+**Security note:** the OpenAI `user` field is client-controlled input — ELIDA trusts whatever value the caller puts in the request body. Session identity is not a cosmetic label: it's the key the kill-switch, risk ladder, and forensic capture all index by. In a single-tenant deployment — one trusted agent stack talking to its own ELIDA instance, ELIDA's common case — this is fine, and it's the whole point of the feature: the agent's own conversation ID keeps its session coherent across failover. In a multi-tenant, shared-key, or unauthenticated deployment, it's a liability: any client that knows or guesses another client's `user` value joins that client's session, and can then trigger a targeted session-kill, poison its risk score toward (or away from) enforcement, or pollute its forensic capture with noise. If clients are mutually untrusted, set `derive_from: {openai_user: false}` and either leave `body_path` empty or point it at a value the clients cannot guess or set for each other.
 
 ## Settings Hierarchy (Layered Configuration)
 

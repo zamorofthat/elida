@@ -7,13 +7,19 @@ import (
 	"io"
 	"net/http"
 
+	"elida/internal/router"
 	"elida/internal/session"
 )
 
 // Rehydrator converts session state to a backend-specific request format
 type Rehydrator interface {
-	// Rehydrate creates a new request with full conversation history
-	Rehydrate(state *session.SessionState, originalReq *http.Request) (*http.Request, error)
+	// Rehydrate creates a new request with full conversation history.
+	// targetModel, when non-empty, is the model the caller has already
+	// resolved (via ResolveFailoverModel) for the destination backend and
+	// must be used verbatim instead of re-deriving one internally. When
+	// empty, the rehydrator falls back to its own original-request-derived
+	// model selection (used outside the failover path).
+	Rehydrate(state *session.SessionState, originalReq *http.Request, targetModel string) (*http.Request, error)
 
 	// BackendType returns the target backend type (e.g., "openai", "anthropic")
 	BackendType() string
@@ -26,7 +32,7 @@ func (r *OpenAIRehydrator) BackendType() string {
 	return "openai"
 }
 
-func (r *OpenAIRehydrator) Rehydrate(state *session.SessionState, originalReq *http.Request) (*http.Request, error) {
+func (r *OpenAIRehydrator) Rehydrate(state *session.SessionState, originalReq *http.Request, targetModel string) (*http.Request, error) {
 	// Parse original request to get model and other params
 	var originalBody map[string]any
 	if originalReq.Body != nil {
@@ -40,23 +46,34 @@ func (r *OpenAIRehydrator) Rehydrate(state *session.SessionState, originalReq *h
 		}
 	}
 
-	// Build messages array
-	messages := make([]map[string]string, 0, len(state.Messages)+1)
-
-	// Add system prompt if exists
-	if state.SystemPrompt != "" {
-		messages = append(messages, map[string]string{
-			"role":    "system",
-			"content": state.SystemPrompt,
-		})
-	}
-
-	// Add conversation history
-	for _, msg := range state.Messages {
-		messages = append(messages, map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
-		})
+	// Build messages array. state.Messages/state.SystemPrompt only ever get
+	// populated by Session.RecordMessage/SetSystemPrompt, which today have no
+	// production callers - so on the real failover path the session history
+	// is always empty. Overwriting the outgoing request with that empty
+	// history would silently drop the user's conversation, so when there's
+	// no recorded history, fall back to the original request's own messages
+	// (chat-completions requests are stateless: the full conversation,
+	// including any system message, already lives in the original body).
+	var messages any
+	if len(state.Messages) > 0 {
+		msgs := make([]map[string]string, 0, len(state.Messages)+1)
+		if state.SystemPrompt != "" {
+			msgs = append(msgs, map[string]string{
+				"role":    "system",
+				"content": state.SystemPrompt,
+			})
+		}
+		for _, msg := range state.Messages {
+			msgs = append(msgs, map[string]string{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
+		}
+		messages = msgs
+	} else if orig, ok := originalBody["messages"]; ok {
+		messages = orig
+	} else {
+		messages = []map[string]string{}
 	}
 
 	// Build new request body
@@ -65,8 +82,11 @@ func (r *OpenAIRehydrator) Rehydrate(state *session.SessionState, originalReq *h
 		"stream":   true,
 	}
 
-	// Select model - try to preserve compatibility
-	if model, ok := originalBody["model"].(string); ok {
+	// Select model - use the caller-resolved target model when given
+	// (failover path), otherwise fall back to prior best-effort behavior.
+	if targetModel != "" {
+		body["model"] = targetModel
+	} else if model, ok := originalBody["model"].(string); ok {
 		body["model"] = SelectCompatibleModel(model, "openai")
 	} else {
 		body["model"] = "gpt-4"
@@ -89,7 +109,7 @@ func (r *AnthropicRehydrator) BackendType() string {
 	return "anthropic"
 }
 
-func (r *AnthropicRehydrator) Rehydrate(state *session.SessionState, originalReq *http.Request) (*http.Request, error) {
+func (r *AnthropicRehydrator) Rehydrate(state *session.SessionState, originalReq *http.Request, targetModel string) (*http.Request, error) {
 	// Parse original request
 	var originalBody map[string]any
 	if originalReq.Body != nil {
@@ -103,18 +123,29 @@ func (r *AnthropicRehydrator) Rehydrate(state *session.SessionState, originalReq
 		}
 	}
 
-	// Build messages array (Anthropic doesn't include system in messages)
-	messages := make([]map[string]string, 0, len(state.Messages))
-
-	for _, msg := range state.Messages {
-		// Skip system messages - Anthropic uses separate system field
-		if msg.Role == "system" {
-			continue
+	// Build messages array (Anthropic doesn't include system in messages).
+	// As in the OpenAI rehydrator, state.Messages/state.SystemPrompt are
+	// always empty in production (no caller ever records session history),
+	// so fall back to the original request's own messages/system fields
+	// instead of replaying an empty conversation to the fallback backend.
+	var messages any
+	if len(state.Messages) > 0 {
+		msgs := make([]map[string]string, 0, len(state.Messages))
+		for _, msg := range state.Messages {
+			// Skip system messages - Anthropic uses separate system field
+			if msg.Role == "system" {
+				continue
+			}
+			msgs = append(msgs, map[string]string{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
 		}
-		messages = append(messages, map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
-		})
+		messages = msgs
+	} else if orig, ok := originalBody["messages"]; ok {
+		messages = orig
+	} else {
+		messages = []map[string]string{}
 	}
 
 	// Build new request body
@@ -124,12 +155,19 @@ func (r *AnthropicRehydrator) Rehydrate(state *session.SessionState, originalReq
 	}
 
 	// Add system prompt as separate field
-	if state.SystemPrompt != "" {
-		body["system"] = state.SystemPrompt
+	if len(state.Messages) > 0 {
+		if state.SystemPrompt != "" {
+			body["system"] = state.SystemPrompt
+		}
+	} else if system, ok := originalBody["system"]; ok {
+		body["system"] = system
 	}
 
-	// Select model
-	if model, ok := originalBody["model"].(string); ok {
+	// Select model - use the caller-resolved target model when given
+	// (failover path), otherwise fall back to prior best-effort behavior.
+	if targetModel != "" {
+		body["model"] = targetModel
+	} else if model, ok := originalBody["model"].(string); ok {
 		body["model"] = SelectCompatibleModel(model, "anthropic")
 	} else {
 		body["model"] = "claude-3-sonnet-20240229"
@@ -159,7 +197,7 @@ func (r *OllamaRehydrator) BackendType() string {
 	return "ollama"
 }
 
-func (r *OllamaRehydrator) Rehydrate(state *session.SessionState, originalReq *http.Request) (*http.Request, error) {
+func (r *OllamaRehydrator) Rehydrate(state *session.SessionState, originalReq *http.Request, targetModel string) (*http.Request, error) {
 	// Parse original request
 	var originalBody map[string]any
 	if originalReq.Body != nil {
@@ -173,23 +211,31 @@ func (r *OllamaRehydrator) Rehydrate(state *session.SessionState, originalReq *h
 		}
 	}
 
-	// Build messages array for Ollama chat format
-	messages := make([]map[string]string, 0, len(state.Messages)+1)
-
-	// Add system prompt
-	if state.SystemPrompt != "" {
-		messages = append(messages, map[string]string{
-			"role":    "system",
-			"content": state.SystemPrompt,
-		})
-	}
-
-	// Add conversation history
-	for _, msg := range state.Messages {
-		messages = append(messages, map[string]string{
-			"role":    msg.Role,
-			"content": msg.Content,
-		})
+	// Build messages array for Ollama chat format. As in the other
+	// rehydrators, state.Messages/state.SystemPrompt are always empty in
+	// production (no caller ever records session history), so fall back to
+	// the original request's own messages instead of replaying an empty
+	// conversation to the fallback backend.
+	var messages any
+	if len(state.Messages) > 0 {
+		msgs := make([]map[string]string, 0, len(state.Messages)+1)
+		if state.SystemPrompt != "" {
+			msgs = append(msgs, map[string]string{
+				"role":    "system",
+				"content": state.SystemPrompt,
+			})
+		}
+		for _, msg := range state.Messages {
+			msgs = append(msgs, map[string]string{
+				"role":    msg.Role,
+				"content": msg.Content,
+			})
+		}
+		messages = msgs
+	} else if orig, ok := originalBody["messages"]; ok {
+		messages = orig
+	} else {
+		messages = []map[string]string{}
 	}
 
 	// Build request body
@@ -198,8 +244,11 @@ func (r *OllamaRehydrator) Rehydrate(state *session.SessionState, originalReq *h
 		"stream":   true,
 	}
 
-	// Get model from original request or use default
-	if model, ok := originalBody["model"].(string); ok {
+	// Get model - use the caller-resolved target model when given
+	// (failover path), otherwise fall back to prior best-effort behavior.
+	if targetModel != "" {
+		body["model"] = targetModel
+	} else if model, ok := originalBody["model"].(string); ok {
 		body["model"] = model
 	} else {
 		body["model"] = "llama3.2"
@@ -307,4 +356,110 @@ func SelectCompatibleModel(originalModel, targetProvider string) string {
 
 	// Last resort: return original model
 	return originalModel
+}
+
+// ResolveFailoverModel decides which model string to send to target when a
+// request fails over to it, per the binding decision order (feedback #8):
+//
+//  1. target.Model (explicit substitution) always wins.
+//  2. If target declares Models globs and originalModel matches one, keep it
+//     unchanged - it's already known-compatible with this backend.
+//  3. Otherwise consult the remap table (SelectCompatibleModel); the result
+//     is accepted only if it matches target's Models globs, or target has no
+//     globs to validate against.
+//  4. If none of the above produce a model we can trust for this backend,
+//     the model is unmappable: the caller must skip this backend rather than
+//     send a request with a model the backend doesn't understand.
+//
+// A target with neither an explicit Model nor Models globs is the trickiest
+// case: there's nothing to validate against, so the remap table's result is
+// normally accepted at face value. The one exception is when the remap table
+// couldn't do anything for this target type (it has no known family mapping
+// or default, so SelectCompatibleModel returns originalModel unchanged as a
+// last resort) - blindly forwarding an untranslated model name to a backend
+// of a different type is exactly how a "gemma" request ends up 400ing
+// against a Mistral endpoint. In that situation we treat the model as
+// unmappable instead of guessing.
+func ResolveFailoverModel(originalModel string, target *router.Backend) (string, bool) {
+	// Step 1: explicit substitution always wins.
+	if target.Model != "" {
+		return target.Model, true
+	}
+
+	remapped := SelectCompatibleModel(originalModel, target.Type)
+
+	if len(target.Models) > 0 {
+		// Step 2: original already matches this backend's declared models.
+		if router.ModelMatches(target.Models, originalModel) {
+			return originalModel, true
+		}
+		// Step 3: accept the remap only if it matches the declared globs.
+		if router.ModelMatches(target.Models, remapped) {
+			return remapped, true
+		}
+		// Step 4: nothing validates - unmappable.
+		return "", false
+	}
+
+	// No globs to validate against. Accept the remap table's result unless
+	// it's an unchanged pass-through for a target type the remap table has
+	// no real knowledge of (see doc comment above).
+	if remapped != originalModel {
+		return remapped, true
+	}
+	if _, knownTargetType := defaultModels[target.Type]; knownTargetType {
+		return remapped, true
+	}
+	return "", false
+}
+
+// originalModelFromRequest extracts the "model" field from originalReq's
+// JSON body without consuming it - the body is restored via a fresh reader
+// so later callers (e.g. Rehydrate) can still read it in full.
+//
+// In the failover path, originalReq is the request that was just sent to
+// the failed backend via Transport.RoundTrip, which drains and closes its
+// Body. When originalReq.GetBody is available (net/http populates it
+// automatically for bodies built from *bytes.Reader/*bytes.Buffer/
+// *strings.Reader, which is exactly how createBackendRequest builds it),
+// prefer it to get a fresh, undrained copy of the real original bytes
+// rather than reading the now-empty drained Body.
+func originalModelFromRequest(originalReq *http.Request) (string, error) {
+	if originalReq == nil {
+		return "", nil
+	}
+
+	var bodyBytes []byte
+	switch {
+	case originalReq.GetBody != nil:
+		rc, err := originalReq.GetBody()
+		if err != nil {
+			return "", fmt.Errorf("failed to get original request body: %w", err)
+		}
+		bodyBytes, err = io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read original request: %w", err)
+		}
+	case originalReq.Body != nil:
+		var err error
+		bodyBytes, err = io.ReadAll(originalReq.Body)
+		if err != nil {
+			return "", fmt.Errorf("failed to read original request: %w", err)
+		}
+	default:
+		return "", nil
+	}
+	originalReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+		// Malformed/absent JSON body - treat as "no model specified" rather
+		// than failing the whole failover attempt.
+		return "", nil
+	}
+
+	return payload.Model, nil
 }

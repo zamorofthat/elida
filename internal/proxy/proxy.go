@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"regexp"
@@ -70,6 +71,7 @@ type Proxy struct {
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 	redactor                redaction.Redactor    // Redaction provider for sensitive data
+	trustedNets             []*net.IPNet          // proxy.auth.trusted_networks parsed at startup
 }
 
 // ProxyOption configures a Proxy.
@@ -107,6 +109,12 @@ func New(cfg *config.Config, store session.Store, manager *session.Manager, opts
 		store:   store,
 		manager: manager,
 	}
+
+	nets, err := parseTrustedNetworks(cfg.Proxy.Auth.TrustedNetworks)
+	if err != nil {
+		return nil, fmt.Errorf("parsing proxy.auth.trusted_networks: %w", err)
+	}
+	p.trustedNets = nets
 
 	for _, opt := range opts {
 		opt(p)
@@ -278,7 +286,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Proxy authentication check (skip health endpoints)
 	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
-		if !p.validateProxyAuth(r) {
+		if p.isTrustedClient(r) {
+			slog.Debug("proxy auth bypassed for trusted network client", "remote_addr", r.RemoteAddr)
+		} else if !p.validateProxyAuth(r) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
@@ -313,16 +323,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create session
-	sessionID := r.Header.Get(p.config.Session.Header)
+	// Get or create session.
+	// Identity precedence: X-Session-ID header -> body-derived (OpenAI user
+	// field / configured path; backend-independent so failover doesn't split
+	// a conversation) -> per-(client,backend) IP-hash fallback.
+	sessionID := p.resolveSessionID(r, requestBody)
 
 	var sess *session.Session
 	if sessionID != "" {
-		// Explicit session ID provided - use it
 		sess = p.manager.GetOrCreate(sessionID, backend.URL.String(), r.RemoteAddr)
 	} else if p.config.Session.GenerateIfMissing {
-		// No session ID - use client IP + backend based session tracking
-		// Each (client, backend) pair gets its own session for granular control
+		// No derivable identity - use client IP + backend based session tracking
 		sess = p.manager.GetOrCreateByClient(session.RealClientAddr(r), backend.Name, backend.URL.String())
 	}
 
@@ -626,6 +637,18 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 	}
 }
 
+// resolveSessionID returns the session ID for a request: the session header
+// if present, else an ID derived from the request body (OpenAI `user` field
+// or session.derive_from.body_path). Returns "" when neither applies, which
+// selects the per-(client,backend) fallback in the caller.
+func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
+	if id := r.Header.Get(p.config.Session.Header); id != "" {
+		return id
+	}
+	df := p.config.Session.DeriveFrom
+	return session.DeriveIDFromBody(body, df.OpenAIUser, df.BodyPath)
+}
+
 // isStreamingRequest determines if the request expects a streaming response
 func (p *Proxy) isStreamingRequest(r *http.Request, body []byte) bool {
 	// Parse the stream field from the JSON body (handles any valid JSON whitespace)
@@ -700,7 +723,22 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 		if retried {
 			return statusCode, bytesOut
 		}
-		// Failover failed or not possible, continue with error handling
+		// Failover was attempted but never produced a usable response: every
+		// candidate was exhausted, skipped as model-incompatible (see
+		// ResolveFailoverModel), or an internal failover step failed. Do NOT
+		// fall through to forward the original failed backend's raw
+		// response - that would be byte-for-byte indistinguishable from
+		// failover being disabled and would silently hide that failover was
+		// attempted and gave up. Tell the client plainly instead.
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		slog.Warn("failover exhausted: no backend could serve the request",
+			"session_id", sess.ID,
+			"original_backend", backend.Name,
+			"failed_backends", sess.GetFailedBackends(),
+		)
+		return p.writeFailoverExhaustedResponse(w)
 	}
 
 	if err != nil {
@@ -1367,6 +1405,26 @@ func (p *Proxy) writeBlockedResponse(w http.ResponseWriter, message string, term
 	return http.StatusForbidden, int64(len(body))
 }
 
+// writeFailoverExhaustedResponse writes a JSON 502 response indicating that
+// failover was attempted for this request but no backend could serve it -
+// either the retry-depth safety valve tripped, or the failover controller
+// ran out of viable candidates (including candidates skipped for having no
+// compatible model, see ResolveFailoverModel). Callers use this instead of
+// forwarding the last-attempted backend's raw response, which would
+// otherwise be indistinguishable from failover being disabled entirely.
+func (p *Proxy) writeFailoverExhaustedResponse(w http.ResponseWriter) (int, int64) {
+	w.Header().Set("Content-Type", "application/json")
+	body, _ := json.Marshal(map[string]string{
+		"error":   "failover_exhausted",
+		"message": "All backends unavailable",
+	})
+	w.WriteHeader(http.StatusBadGateway)
+	if _, err := w.Write(body); err != nil {
+		slog.Warn("write failed", "context", "failover_exhausted_response", "error", err)
+	}
+	return http.StatusBadGateway, int64(len(body))
+}
+
 // ReverseProxy creates a standard reverse proxy using the default backend
 func (p *Proxy) ReverseProxy() *httputil.ReverseProxy {
 	defaultBackend := p.router.GetDefaultBackend()
@@ -1392,8 +1450,8 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 			"max_retries", maxFailoverRetries,
 			"last_backend", failedBackend.Name,
 		)
-		http.Error(w, "All backends unavailable", http.StatusBadGateway)
-		return http.StatusBadGateway, 0, true
+		statusCode, bytesOut := p.writeFailoverExhaustedResponse(w)
+		return statusCode, bytesOut, true
 	}
 	ctx := originalReq.Context()
 
@@ -1418,14 +1476,38 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 		return 0, 0, false
 	}
 
+	// Resolve which model to send to the target backend before doing
+	// anything else - never send a request the backend can't understand.
+	originalModel, err := originalModelFromRequest(originalReq)
+	if err != nil {
+		slog.Error("failed to read original request for failover model resolution",
+			"session_id", sess.ID,
+			"target_backend", fallbackBackend.Name,
+			"error", err,
+		)
+		return 0, 0, false
+	}
+
+	newModel, ok := ResolveFailoverModel(originalModel, fallbackBackend)
+	if !ok {
+		slog.Error("failover skipped backend: no compatible model",
+			"session_id", sess.ID,
+			"original_model", originalModel,
+			"backend", fallbackBackend.Name,
+		)
+		sess.AddFailedBackend(fallbackBackend.Name)
+		return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
+	}
+
 	// Get session state for rehydration
 	state := sess.Serialize()
 
 	// Get the appropriate rehydrator for the target backend
 	rehydrator := GetRehydrator(fallbackInfo.Type)
 
-	// Rehydrate the request with full conversation history
-	newReq, err := rehydrator.Rehydrate(state, originalReq)
+	// Rehydrate the request with full conversation history, carrying the
+	// resolved target model
+	newReq, err := rehydrator.Rehydrate(state, originalReq, newModel)
 	if err != nil {
 		slog.Error("failed to rehydrate request for failover",
 			"session_id", sess.ID,
@@ -1466,6 +1548,17 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 		)
 		http.Error(w, "Backend unavailable after failover", http.StatusBadGateway)
 		return http.StatusBadGateway, 0, true
+	}
+
+	// A fallback that responds without a transport error can still fail at
+	// the HTTP layer (5xx, or 429 without Retry-After) - the same failure
+	// modes DetectFailure already checks for the initial backend and for
+	// fallback transport errors above. Forwarding it straight to the client
+	// would be inconsistent with how transport errors are handled (they
+	// recurse to the next backend); chain to the next fallback instead.
+	if failureType := DetectFailure(resp, nil); failureType != FailureNone {
+		_ = resp.Body.Close()
+		return p.attemptFailoverWithDepth(w, originalReq, sess, fallbackBackend, failureType, depth+1)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1544,6 +1637,44 @@ func (p *Proxy) validateProxyAuth(r *http.Request) bool {
 // secureCompare performs constant-time string comparison to prevent timing attacks
 func secureCompare(provided, expected string) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+// parseTrustedNetworks parses CIDR strings; any invalid entry is an error
+// (fail closed at startup rather than silently skipping).
+func parseTrustedNetworks(cidrs []string) ([]*net.IPNet, error) {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", c, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+// isTrustedClient reports whether the request's DIRECT peer is inside a
+// trusted network. Deliberately ignores X-Forwarded-For / X-Real-IP: those
+// headers are client-controlled, and consulting them here would let any
+// client spoof its way past auth (feedback #4b security invariant).
+func (p *Proxy) isTrustedClient(r *http.Request) bool {
+	if len(p.trustedNets) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr // no port component
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range p.trustedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // persistFlaggedSession saves a flagged session to storage immediately

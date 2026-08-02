@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (local-overrides-default) instead of coexisting with them. (#feedback-1)
 - `mode: audit` is now a true dry run: the risk ladder is clamped to
   observe/warn and can no longer block or terminate. (#feedback-2)
+- Failover now forwards a compatible model id to the target backend, or
+  skips that backend entirely, instead of forwarding the original model
+  unchanged and getting a 400 from a cross-provider backend. (#feedback-8)
+- Failover is now actually wired up from config at startup
+  (`failover.enabled: true`) — previously the failover controller was
+  constructible only in tests and had no effect on real traffic. Applies to
+  non-streaming requests only; streaming (SSE) responses have no failover
+  on error.
+- When failover is attempted but exhausts every candidate (all skipped or
+  failed), the client now receives a `502` with a JSON
+  `{"error":"failover_exhausted",...}` body instead of the last attempted
+  backend's raw response, which was indistinguishable from failover being
+  disabled entirely.
 
 ### Added
 
@@ -32,6 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `observe: true` on a rule: flag + capture without feeding the risk ladder.
 - `coding-agent` policy preset: structural rules enforce, content and
   statistical heuristics run in observe. (#feedback-3)
+- `failover:` config section (`enabled`, `max_retries`, `retry_delay`,
+  `fallback_order`, `preserve_model`) — disabled by default. (#feedback-9)
+- `backends.<name>.model`: model id substituted in only when failover lands
+  on that backend; normal routing is unaffected. (#feedback-9)
+- `${VAR}` environment variable expansion in `backend`, `backends.<name>.url`,
+  `backends.<name>.api_key`, `proxy.auth.api_key`, and `control.auth.api_key`
+  — unset variables stay literal and log a warning. (#feedback-9)
+- Auto provider keys: an empty `backends.<name>.api_key` is now looked up
+  from `<NAME>_API_KEY`, then the conventional `OPENAI_API_KEY` /
+  `ANTHROPIC_API_KEY` / `MISTRAL_API_KEY` for its type. (#feedback-9)
 - **Statistical Anomaly Detection**: Three new rule types for detecting session anomalies that evade static thresholds:
   - `rate_anomaly` — Poisson-based end-of-session retrospective check. Splits request timestamps into baseline/test windows, flags when observed rate is statistically abnormal (p-value threshold).
   - `content_entropy` — Shannon entropy of request/response content. Detects base64-encoded, compressed, or encrypted payloads that evade regex pattern matching. Strict preset only (code content can naturally reach 5.0-5.5).
@@ -40,6 +63,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-Session Compound Detector** (`internal/policy/detector.go`): `SessionDetector` with adaptive CUSUM, incremental entropy, burst boundary detection, and ring buffer burst history. All operations O(1) per request.
 - **CLI `-listen` Flag**: Override listen address from the command line (e.g. `elida -listen :8082`). Priority: CLI flag > `ELIDA_LISTEN` env > config file.
 - **`ThresholdFloat` and `MinSamples` Rule Fields**: New optional fields on policy rules for probability thresholds (0-1), entropy thresholds (bits/byte), and minimum data points before evaluation.
+- Session identity can now derive from the OpenAI `user` field (default on)
+  or a configurable `session.derive_from.body_path` — one conversation keeps
+  one session across backend failover, and the kill-switch becomes
+  per-conversation instead of per-host; see the security note in
+  docs/configuration.md for multi-tenant deployments. (#feedback-4)
+- `proxy.auth.trusted_networks`: CIDR allowlist whose direct peers skip
+  inference-path auth, so un-keyed auxiliary agent calls (compression,
+  title generation) work on trusted networks while the LAN still needs the
+  key. Trust never consults X-Forwarded-For. (#feedback-4b)
+- Startup warning when the inference proxy listens on a non-loopback
+  address without authentication (symmetric with the control-API warning).
 
 ### Changed
 

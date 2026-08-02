@@ -24,6 +24,7 @@ type Backend struct {
 	Models    []string // glob patterns for model matching
 	Default   bool
 	APIKey    string // API key to inject for keyless clients
+	Model     string // model id to substitute when FAILOVER lands on this backend (feedback #8); normal routing never rewrites
 	Transport *http.Transport
 }
 
@@ -72,6 +73,7 @@ func NewRouter(backends map[string]config.BackendConfig, routing config.RoutingC
 			Models:  bcfg.Models,
 			Default: bcfg.Default,
 			APIKey:  bcfg.APIKey,
+			Model:   bcfg.Model,
 			Transport: &http.Transport{
 				MaxIdleConns:          100,
 				MaxIdleConnsPerHost:   100,
@@ -250,6 +252,23 @@ func (r *Router) matchByHeader(req *http.Request) *Backend {
 	}
 
 	return backend
+}
+
+// ModelMatches reports whether model matches any of the given glob patterns.
+// Exported so callers outside this package (e.g. failover model resolution)
+// can reuse the same matching semantics as normal routing.
+func ModelMatches(patterns []string, model string) bool {
+	for _, pattern := range patterns {
+		matched, err := filepath.Match(pattern, model)
+		if err != nil {
+			slog.Warn("invalid model pattern", "pattern", pattern, "error", err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // matchByModel extracts model from request body and matches against backend patterns
