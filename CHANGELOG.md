@@ -312,53 +312,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **External Risk Points**: `AddExternalRiskPoints()` method on policy engine allows external scorers (M3-lite) to contribute risk points to the session risk ladder without creating violation events.
 - **OCSF 2004 Anomaly Detection Findings**: Notable+ fingerprint anomalies emit Detection Finding events via OCSF native transport for SIEM correlation.
 - **OCSF Native Transport**: Independent event delivery via stdout (JSONL for log shippers), webhook (with mTLS), and syslog (UDP/TCP/TCP+TLS). Not coupled to OTEL pipeline.
-- **MCP Security Preset**: OWASP MCP Top 10 policy rules for Model Context Protocol security.
-- **Tool Call Policy Rules**: `tool_blocked` and `tool_argument_pattern` rule types for blocking specific tools or scanning tool call arguments.
-- **Trusted Tags**: XML-style tags (e.g. `<system-reminder>`) can be stripped before scanning to prevent false positives on framework-injected content.
-- **Tool Allowlist**: Requests containing only allowlisted tools skip request-side content scanning.
-- **Proxy-Level API Key Authentication**: Optional API key injection for keyless client support.
-- **Frontend Authentication**: Login page and auth gating for dashboard UI.
-- **Graceful Shutdown**: Session drain on SIGINT/SIGTERM — invokes session end callbacks for all active sessions before exiting.
-- **Dashboard Pagination**: Session history list supports pagination.
-- **GoReleaser Pipeline**: Cross-platform builds with SLSA provenance attestation.
-- **OTEL Logs & GenAI Metrics**: Security events (violations, blocks, killed sessions) emit structured OTEL log records. Token usage and operation duration recorded as histograms per GenAI semantic conventions.
-- **MkDocs Documentation Site**: Material theme with dark/light mode, search, auto-deploy to GitHub Pages. New integrations page covering LiteLLM, Portkey, Aperture, Oso, OTEL/SIEM.
-- **Helm Deployment Template**: Health checks, config mount, Redis integration for Kubernetes deployments.
-- **Startup Auth Warning**: Control API logs warning when authentication is disabled.
 - Fingerprinting enabled by default in shadow mode (ingest-only, no scoring until baselines are warm)
-- Extracted 575-line `main()` god function into `app` struct with focused init methods
-- Control API and proxy constructors use functional options pattern instead of telescoping chains
-- Streaming request detection uses JSON unmarshal instead of fragile string matching
-- Dashboard polling reduced from 2s to 5s, polls skip when tab is hidden
-- CORS restricted to same-origin via hostname comparison (was wildcard `*`)
-- SQLite `MaxOpenConns=1` to prevent "database is locked" under concurrent load
-- CI lint job now includes `go mod tidy` check to catch dependency drift
-- Dynamic version via `git describe` instead of hardcoded `0.1.0`
-- CI workflow permissions tightened from `read-all` to workflow-level scopes
 
 ### Fixed
 
-- Fixed unbounded failover recursion that could stack overflow when all backends fail (max 3 retries)
-- Fixed Redis-backed deployments showing stale active sessions — session completed state now persisted to store
-- Fixed dashboard CSS variable references (`--warning` → `--color-warning`, `--border` → `--border-color`)
-- Fixed nil channel block in session `Snapshot()` — closed `killChan` now initialized
-- Fixed concurrent dashboard `useEffect` leaks — added `AbortController` to all fetch calls
-- Fixed SQLite stats queries — `GetStats`, `GetVoiceStats`, `GetTTSStats`, `GetEventStats` wrapped in read transactions for consistent snapshots
-- Removed dead `parseNDJSONContent` and deduplicated streaming response log paths
 - `P2Quantile` initial buffer now preserved across JSON round-trip.
 
 ### Security
 
-- Control API auth uses constant-time comparison to prevent timing side-channel attacks
-- Request body capped at 10MB (proxy) and 1MB (control API) to prevent OOM via large payloads
-- Risk ladder now enforced in request path — `ShouldBlockByRisk` and `ShouldThrottle` wired in (was observe-only)
-- Async `asyncScanResponse` receives session snapshot instead of live pointer (race fix)
-- `persistFlaggedSession` uses `sess.Snapshot()` instead of unlocked field reads (race fix)
-- `TouchAndRecord()` batches session updates under single lock (race fix)
-- Trusted tag regex pre-compiled at startup instead of per-request
-- X-Forwarded-For/X-Real-IP support so NAT/shared-IP clients get distinct sessions
-- GoReleaser pipeline with SLSA Level 3 provenance attestation for supply chain security
-- Aikido security scanner integrated into CI
+- Aikido security scanner integrated into CI (unable to identify the
+  introducing commit — see report).
 - Dependencies: GitHub Actions group bumped (2 updates, then 4 updates);
   go-dependencies group bumped across 1 directory (10 updates).
 
@@ -387,7 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `calculateMaxSeverity` now uses effective severity (source-weighted) instead of raw rule severity
 - Risk score calculation uses per-event time-series with decay instead of simple count × weight formula
 - Policy violation logs now include `source_role`, `message_index`, `effective_severity`, `event_category`, `framework_ref`, and `source_content` fields
-- GoReleaser pipeline: added SLSA provenance attestation.
+- GoReleaser pipeline: cross-platform builds with SLSA Level 3 provenance
+  attestation for supply chain security.
 
 ### Fixed
 
@@ -417,8 +381,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dashboard polling reduced from 2s to 5s, and skipped when the tab is
   hidden.
 - SQLite `MaxOpenConns=1` set to prevent "database is locked" errors.
-- Added X-Forwarded-For/X-Real-IP support for session identity.
-- Initialized closed `killChan` in `Snapshot()`.
+- Added X-Forwarded-For/X-Real-IP support for session identity, so
+  NAT/shared-IP clients get distinct sessions.
+- Fixed a nil channel block in session `Snapshot()` — closed `killChan` is
+  now initialized.
 - Streaming request detection now uses JSON unmarshal instead of string
   matching.
 - Streaming tests moved to `test/unit`; control API route patterns fixed.
@@ -427,20 +393,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Hardened control API auth, request limits, and CORS.
+- Control API auth uses constant-time comparison to prevent timing
+  side-channel attacks.
+- Request body capped at 10MB (proxy) and 1MB (control API) to prevent OOM
+  via large payloads.
+- Risk ladder now enforced in the request path — `ShouldBlockByRisk` and
+  `ShouldThrottle` wired in (was observe-only).
+- CORS restricted to same-origin via hostname comparison (was wildcard
+  `*`).
+- Trusted tag regex pre-compiled at startup instead of per-request.
 
 ### Fixed
 
 - Eliminated a session race window and an async goroutine stale-pointer
-  bug.
+  bug: `TouchAndRecord()` now batches session updates under a single lock;
+  `asyncScanResponse` receives a session snapshot instead of a live
+  pointer; `persistFlaggedSession` uses `sess.Snapshot()` instead of
+  unlocked field reads.
 
 ## [0.4.0] - 2026-03-13
 
 ### Added
 
-- Tool call policy: `tool_blocked` and `tool_argument_pattern` rule types;
-  tool call argument capture with a generic provider fallback.
-- Graceful shutdown: session drain on SIGINT/SIGTERM (T11).
+- Tool call policy: `tool_blocked` and `tool_argument_pattern` rule types
+  for blocking specific tools or scanning tool call arguments; tool call
+  argument capture with a generic provider fallback.
+- Graceful shutdown: session drain on SIGINT/SIGTERM (T11) — invokes
+  session end callbacks for all active sessions before exiting.
 
 ### Changed
 
@@ -453,7 +432,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Frontend authentication: login page, `apiFetch` wrapper with auth header
   and 401 handling, and auth gating for the dashboard.
 - Session history dashboard pagination.
-- Helm `deployment.yaml` for Kubernetes deployment.
+- Helm `deployment.yaml` for Kubernetes deployment, with health checks,
+  config mount, and Redis integration.
 
 ### Changed
 
@@ -463,28 +443,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Broken dashboard CSS variable references.
+- Broken dashboard CSS variable references (`--warning` → `--color-warning`,
+  `--border` → `--border-color`).
 - Duplicate `useEffect` hooks merged; `AbortController` added to dashboard
   fetches.
-- SQLite stats queries wrapped in read transactions for consistent
-  snapshots.
+- SQLite stats queries (`GetStats`, `GetVoiceStats`, `GetTTSStats`,
+  `GetEventStats`) wrapped in read transactions for consistent snapshots.
 - Missing HTTP transport timeouts added.
 - Silent `io.ReadAll` error in request body capture fixed.
 - Regex compilation moved off the write lock; unbounded risk score bug
   fixed.
 - Race condition in session kill check-and-delete fixed.
 - Auth-disabled startup warning added.
-- Session state now persisted on completion.
-- Failover recursion depth limit added.
+- Session state now persisted on completion — fixes Redis-backed
+  deployments showing stale active sessions.
+- Failover recursion depth limit added (max 3 retries) to prevent stack
+  overflow when all backends fail.
 - Dashboard login bug fixed.
 
 ## [0.3.0] - 2026-03-12
 
 ### Added
 
-- OTEL log and metric providers wired into the proxy (GenAI
-  semantic-convention histograms for tokens/duration).
+- OTEL log and metric providers wired into the proxy — security events
+  (violations, blocks, killed sessions) emit structured OTEL log records;
+  token usage and operation duration recorded as histograms per GenAI
+  semantic conventions.
 - `CaptureContent`/`MaxBodySize` fields on `TelemetryConfig`.
+- Tool allowlist: requests containing only allowlisted tools skip
+  request-side content scanning.
 
 ### Changed
 
@@ -496,7 +483,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Tool/content allowlist config and regex bug fixes.
+- Allowlist matching regex bug fixed.
 - CI coverage reporting: added `-coverpkg` for accurate coverage.
 
 ## [0.2.3] - 2026-03-11
@@ -505,11 +492,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Proxy-level API key authentication for keyless clients (injects backend
   API keys; strips `X-Elida-API-Key` before forwarding).
-- Trusted tags to skip scanning of system-injected content.
+- Trusted tags: XML-style tags (e.g. `<system-reminder>`) can be stripped
+  before scanning to prevent false positives on framework-injected
+  content.
 
 ### Changed
 
-- Control API auth uses constant-time comparison.
+- Proxy auth uses constant-time comparison to prevent timing attacks.
 
 ### Fixed
 
