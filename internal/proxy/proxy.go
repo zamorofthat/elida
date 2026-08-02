@@ -1738,8 +1738,8 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 	// Redact sensitive data before persistence
 	if p.redactor != nil {
 		for i := range record.CapturedContent {
-			record.CapturedContent[i].RequestBody = p.redactor.Redact(record.CapturedContent[i].RequestBody)
-			record.CapturedContent[i].ResponseBody = p.redactor.Redact(record.CapturedContent[i].ResponseBody)
+			record.CapturedContent[i].RequestBody = p.redactor.RedactBody(record.CapturedContent[i].RequestBody)
+			record.CapturedContent[i].ResponseBody = p.redactor.RedactBody(record.CapturedContent[i].ResponseBody)
 		}
 		for i := range record.Violations {
 			record.Violations[i].MatchedText = p.redactor.Redact(record.Violations[i].MatchedText)

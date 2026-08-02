@@ -222,7 +222,8 @@ func (a *app) initSQLiteStorage() {
 
 func (a *app) initRedactor() {
 	rcfg := redaction.Config{
-		Enabled: a.cfg.Storage.Redaction.Enabled,
+		Enabled:          a.cfg.Storage.Redaction.Enabled,
+		RedactPrivateIPs: a.cfg.Storage.Redaction.RedactPrivateIPs,
 	}
 	for _, p := range a.cfg.Storage.Redaction.CustomPatterns {
 		rcfg.CustomPatterns = append(rcfg.CustomPatterns, redaction.PatternConfig{
@@ -372,8 +373,8 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 		return
 	}
 	for i := range record.CapturedContent {
-		record.CapturedContent[i].RequestBody = a.redactor.Redact(record.CapturedContent[i].RequestBody)
-		record.CapturedContent[i].ResponseBody = a.redactor.Redact(record.CapturedContent[i].ResponseBody)
+		record.CapturedContent[i].RequestBody = a.redactor.RedactBody(record.CapturedContent[i].RequestBody)
+		record.CapturedContent[i].ResponseBody = a.redactor.RedactBody(record.CapturedContent[i].ResponseBody)
 	}
 	for i := range record.Violations {
 		record.Violations[i].MatchedText = a.redactor.Redact(record.Violations[i].MatchedText)

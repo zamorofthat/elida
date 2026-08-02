@@ -311,14 +311,21 @@ Automatically redact sensitive data (PII, credentials, API keys) from audit logs
 |---------|---------------|-----------------|
 | Email | `user@example.com` | `[REDACTED_EMAIL]` |
 | SSN | `123-45-6789` | `[REDACTED_SSN]` |
-| Credit Card | `4111 1111 1111 1111` | `[REDACTED_CC]` |
-| Phone (US) | `(555) 123-4567` | `[REDACTED_PHONE]` |
+| Credit Card (Luhn-valid) | `4111 1111 1111 1111` | `[REDACTED_CC]` |
+| Phone (US, formatted) | `(555) 123-4567` | `[REDACTED_PHONE]` |
 | API Key (sk-*) | `sk-abc123...` | `[REDACTED_API_KEY]` |
 | Bearer Token | `Bearer eyJ...` | `Bearer [REDACTED_TOKEN]` |
 | JWT | `eyJhbG...` | `[REDACTED_JWT]` |
 | AWS Key | `AKIAIOSFODNN7EXAMPLE` | `[REDACTED_AWS_KEY]` |
 | Password | `password: secret123` | `password=[REDACTED_PASSWORD]` |
-| IP Address | `192.168.1.100` | `[REDACTED_IP]` |
+| IP Address (public) | `203.0.113.42` | `[REDACTED_IP]` |
+
+Credit card matches must pass a Luhn checksum and phone matches must carry
+phone formatting (separators/parens/`+1`) — see
+[docs/configuration.md#redaction](configuration.md#redaction) for details.
+Loopback, RFC1918, and link-local IPs (e.g. `192.168.1.100`) are **not**
+redacted by default; set `storage.redaction.redact_private_ips: true` to
+redact them too.
 
 ### Configuration
 

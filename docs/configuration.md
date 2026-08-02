@@ -103,6 +103,10 @@ storage:
   capture_mode: "flagged_only"    # "flagged_only" or "all"
   max_capture_size: 10000         # Max bytes per request/response body
   max_captured_per_session: 100   # Max captured pairs per session
+  redaction:
+    enabled: true                 # PII/secret redaction on captured bodies (default true)
+    redact_private_ips: false     # also redact loopback/RFC1918/link-local IPs (default false)
+    patterns: []                  # custom patterns, appended after the built-in set
 
 # WebSocket / Voice
 websocket:
@@ -377,6 +381,72 @@ This is useful for:
 - Public demos with rate limiting
 - Internal services without credential distribution
 - Multi-tenant setups with per-backend keys
+
+## Redaction
+
+ELIDA redacts sensitive data out of captured request/response bodies before
+they're written to session history or emitted as OCSF events. Redaction is
+on by default (`storage.redaction.enabled: true`).
+
+### JSON-Aware Body Redaction
+
+Captured bodies are redacted structurally, not by scanning raw bytes:
+
+- **JSON object/array**: parsed, then only *string values* are scanned for
+  sensitive patterns — numeric fields (`created`, `n_params`, token counts,
+  etc.) are left untouched. Parsing uses `json.Number` so large integers
+  (e.g. 19-digit snowflake IDs) survive byte-exact instead of being rounded
+  through `float64`.
+- **SSE streams**: each `data: ` line's JSON payload is redacted the same
+  way; non-JSON payloads (`data: [DONE]`) and non-`data:` lines (`event:`,
+  `id:`, `retry:`, blank lines) pass through unredacted-structure but still
+  redacted with the raw-text redactor; original CRLF line endings are
+  preserved.
+- **Anything else** (non-JSON, non-SSE body): falls back to raw-text
+  redaction, same as before.
+
+**Guarantee**: a body that was valid JSON (whole-body or per SSE `data:`
+line) comes out as valid JSON. Re-marshaling compacts whitespace and may
+reorder object keys — the guarantee is *parseable and semantically intact*,
+not byte-identical formatting.
+
+Free-text fields that are never JSON documents — policy violation
+`matched_text`, voice transcript text, TTS text, instruction-registry
+content — are intentionally redacted with the raw-text redactor instead,
+since there's no structure to preserve.
+
+### Built-in Pattern Changes
+
+Two of the built-in patterns were tightened to cut false positives observed
+in production capture:
+
+- **Credit card**: a 13-16 digit candidate is only redacted if it passes
+  the Luhn checksum. Non-Luhn digit runs (order numbers, phone-adjacent
+  digits, etc.) are left alone.
+- **Phone (US)**: only matches when the digits carry phone formatting —
+  parens, dashes, dots, or a `+1` prefix (e.g. `(555) 123-4567`,
+  `555-123-4567`). A bare 10-digit number embedded in other text (a unix
+  timestamp, an ID) is no longer treated as a phone number.
+
+### Private IP Handling
+
+By default, loopback (`127.0.0.1`), RFC1918 private (`10.0.0.0/8`,
+`172.16.0.0/12`, `192.168.0.0/16`), and link-local (`169.254.0.0/16`) IPs
+are **not** redacted — in practice these are dev/internal addresses, not
+PII. Set `storage.redaction.redact_private_ips: true` to restore the old
+behavior (redact every IP-shaped match) for deployments where internal
+addressing is itself sensitive.
+
+```yaml
+storage:
+  redaction:
+    redact_private_ips: true
+```
+
+Custom patterns (`storage.redaction.patterns`) are unaffected by any of the
+above — they're appended after the built-in set and applied with the raw
+regex/replacement you configure. See [docs/telco-controls.md](telco-controls.md#4-pii-redaction)
+for the full built-in pattern table and custom-pattern examples.
 
 ## Policy Direction Split
 

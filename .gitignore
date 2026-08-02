@@ -76,3 +76,7 @@ site/
 # Superpowers planning/scratch artifacts
 docs/superpowers/
 .superpowers/
+
+# Local AI-tool state
+.codex/
+.entire/

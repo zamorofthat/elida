@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Body redaction is now JSON-aware: only string values are scanned, numeric
+  fields (`created`, `n_params`) are untouched, and captured bodies —
+  including every SSE `data:` line — stay valid JSON. Previously ~59% of
+  captured pairs were corrupted with ~zero true positives. Applied at all
+  four redaction call sites: proxy capture (`CapturedContent` bodies), the
+  OCSF event emitter payload, session-record redaction on capture
+  (`cmd/elida`'s `redactRecord`), and the OTEL content log
+  (`emitContentRecord` and `ExportSessionRecord`'s captured-content span
+  events). (#feedback-10)
+- Credit-card redaction requires a Luhn-valid number; phone redaction
+  requires phone formatting (separators/parens); loopback and RFC1918 IPs
+  are no longer redacted by default (`storage.redaction.redact_private_ips:
+  true` restores the old behavior for public deployments).
 - Custom policy rules now **replace** same-named preset rules
   (local-overrides-default) instead of coexisting with them. (#feedback-1)
 - `mode: audit` is now a true dry run: the risk ladder is clamped to

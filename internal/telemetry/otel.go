@@ -462,8 +462,8 @@ func (p *Provider) emitContentRecord(ctx context.Context, sessionID, requestBody
 		otellog.String("gen_ai.provider.name", providerName),
 		otellog.String("gen_ai.operation.name", "chat"),
 		otellog.String("gen_ai.request.model", model),
-		otellog.String("elida.capture.request_body", truncateBody(p.redact(requestBody), maxSize)),
-		otellog.String("elida.capture.response_body", truncateBody(p.redact(responseBody), maxSize)),
+		otellog.String("elida.capture.request_body", truncateBody(p.redactBody(requestBody), maxSize)),
+		otellog.String("elida.capture.response_body", truncateBody(p.redactBody(responseBody), maxSize)),
 		otellog.Bool("elida.capture.flagged", flagged),
 	)
 
@@ -536,6 +536,19 @@ func (p *Provider) redact(s string) string {
 		return s
 	}
 	return r.Redact(s)
+}
+
+// redactBody applies the provider's JSON-aware body redaction to s, or
+// returns s unchanged if no redactor is set. Use this (not redact) for
+// full request/response bodies — see redaction.PatternRedactor.RedactBody.
+func (p *Provider) redactBody(s string) string {
+	p.redactorMu.RLock()
+	r := p.redactor
+	p.redactorMu.RUnlock()
+	if r == nil {
+		return s
+	}
+	return r.RedactBody(s)
 }
 
 // truncateBody truncates a string to maxLen bytes
@@ -784,8 +797,8 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 				attribute.String("capture.timestamp", c.Timestamp),
 				attribute.String("capture.method", c.Method),
 				attribute.String("capture.path", c.Path),
-				attribute.String("capture.request_body", p.redact(c.RequestBody)),
-				attribute.String("capture.response_body", p.redact(c.ResponseBody)),
+				attribute.String("capture.request_body", p.redactBody(c.RequestBody)),
+				attribute.String("capture.response_body", p.redactBody(c.ResponseBody)),
 				attribute.Int("capture.status_code", c.StatusCode),
 			),
 		)
