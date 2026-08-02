@@ -116,6 +116,37 @@ Each policy violation includes source attribution and SIEM classification:
 | `event_category` | string | SIEM category: `prompt_injection`, `data_exfil`, `rate_limit`, `dangerous_command`, `sensitive_data`, `resource_abuse`, `data_volume`, `denial_of_service`, `model_abuse` |
 | `framework_ref` | string | Framework reference: `OWASP-LLM01` through `OWASP-LLM10`, `ELIDA-FIREWALL` |
 
+## Redaction of Captured Content
+
+When `storage.redaction.enabled` is true (the default), `request_body` and
+`response_body` are redacted before a session record is written — the raw
+bytes sent by the client or returned by the backend are never persisted.
+
+Redaction is JSON-aware rather than a raw find-and-replace over the body
+text:
+
+- If the body is a JSON object or array, it's parsed and only *string*
+  values are scanned for sensitive patterns; numeric fields (timestamps,
+  token counts, IDs) are left untouched, including integers too large for
+  a `float64` to represent exactly.
+- If the body is a Server-Sent Events stream, each `data: ` line's JSON
+  payload is redacted the same way; `data: [DONE]` and non-`data:` lines
+  pass through with CRLF line endings preserved.
+- Anything else falls back to raw-text redaction.
+
+The output is guaranteed to still be valid JSON (or a valid SSE stream)
+whenever the input was — a captured body that used to fail to parse after
+redaction now round-trips. Re-marshaling compacts whitespace and may
+reorder object keys; downstream tooling that reads `request_body` /
+`response_body` should not depend on exact formatting or key order.
+
+`matched_text` in violations, and other free-text fields outside captured
+bodies (voice transcripts, TTS text), are redacted with the plain raw-text
+redactor since they're never JSON documents.
+
+See [docs/configuration.md#redaction](configuration.md#redaction) for the
+full set of patterns and the `redact_private_ips` option.
+
 ## API Endpoints
 
 ### List Session History
@@ -252,7 +283,11 @@ storage:
 
 ## Security Considerations
 
-- Session records may contain sensitive data (API keys, PII)
+- Captured request/response bodies are redacted before persistence (see
+  [Redaction of Captured Content](#redaction-of-captured-content) above);
+  disabling `storage.redaction.enabled` stores raw bodies instead
+- Session records may still contain sensitive data (API keys, PII) that
+  fell outside the built-in redaction patterns
 - Secure the SQLite database file with appropriate permissions
 - Consider encryption at rest for production deployments
 - Implement access controls for the `/control/history` endpoint
