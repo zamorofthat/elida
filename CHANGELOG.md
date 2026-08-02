@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields (`created`, `n_params`) are untouched, and captured bodies —
   including every SSE `data:` line — stay valid JSON. Previously ~59% of
   captured pairs were corrupted with ~zero true positives. Applied at all
-  three redaction call sites: proxy capture (`CapturedContent` bodies),
-  the OCSF event emitter payload, and session-record redaction on capture
-  (`cmd/elida`'s `redactRecord`). (#feedback-10)
+  four redaction call sites: proxy capture (`CapturedContent` bodies), the
+  OCSF event emitter payload, session-record redaction on capture
+  (`cmd/elida`'s `redactRecord`), and the OTEL content log
+  (`emitContentRecord` and `ExportSessionRecord`'s captured-content span
+  events). (#feedback-10)
 - Credit-card redaction requires a Luhn-valid number; phone redaction
   requires phone formatting (separators/parens); loopback and RFC1918 IPs
   are no longer redacted by default (`storage.redaction.redact_private_ips:
