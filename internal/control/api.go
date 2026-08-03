@@ -245,7 +245,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check authentication for /control/* endpoints
-	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") {
+	// Feedback #5: /control/health is exempt (liveness/readiness probes can't carry credentials)
+	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") && r.URL.Path != "/control/health" {
 		if !h.checkAuth(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ELIDA Control API"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
