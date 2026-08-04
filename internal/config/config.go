@@ -137,6 +137,7 @@ type StorageConfig struct {
 	CaptureMode           string          `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
 	MaxCaptureSize        int             `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
 	MaxCapturedPerSession int             `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
+	MaxCapturedChunks     int             `yaml:"max_captured_chunks"`      // Max streaming chunks to capture per session (default 100); values <= 0 normalize to 100 (0 does not mean unlimited)
 	Events                EventsConfig    `yaml:"events"`                   // Immutable event stream config
 	Redaction             RedactionConfig `yaml:"redaction"`                // PII redaction config
 }
@@ -469,6 +470,11 @@ func Load(path string) (*Config, error) {
 	// Apply policy preset if specified
 	cfg.ApplyPolicyPreset()
 
+	// Normalize storage.max_captured_chunks: values <= 0 become 100
+	if cfg.Storage.MaxCapturedChunks <= 0 {
+		cfg.Storage.MaxCapturedChunks = 100
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
@@ -536,6 +542,7 @@ func defaults() *Config {
 			CaptureMode:           "flagged_only", // "flagged_only" (default) or "all" (CDR-style full audit)
 			MaxCaptureSize:        10000,          // 10KB per body
 			MaxCapturedPerSession: 100,            // Max 100 request/response pairs per session
+			MaxCapturedChunks:     100,            // Max 100 streaming chunks per session
 			Redaction:             RedactionConfig{Enabled: true},
 		},
 		OCSF: OCSFConfig{

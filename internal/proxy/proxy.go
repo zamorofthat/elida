@@ -32,10 +32,6 @@ const (
 	// Prevents OOM from malicious payloads.
 	maxRequestBodySize = 10 * 1024 * 1024
 
-	// maxStreamingChunks is the maximum number of streaming response chunks to store
-	// for logging, async scanning, and capture. Beyond this, chunks are dropped.
-	maxStreamingChunks = 100
-
 	// streamReadBufSize is the buffer size for reading streaming response chunks.
 	streamReadBufSize = 4096
 
@@ -1083,12 +1079,13 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 			}
 
 			// Store chunk for logging (limit stored chunks)
-			if len(chunks) < maxStreamingChunks {
+			if len(chunks) < p.config.Storage.MaxCapturedChunks {
 				chunks = append(chunks, string(chunk))
-			} else if len(chunks) == maxStreamingChunks {
+			} else if len(chunks) == p.config.Storage.MaxCapturedChunks {
 				slog.Warn("streaming chunk limit reached, further chunks will not be captured",
 					"session_id", sess.ID,
-					"limit", maxStreamingChunks,
+					"limit", p.config.Storage.MaxCapturedChunks,
+					"config_key", "storage.max_captured_chunks",
 				)
 				chunks = append(chunks, "") // sentinel to prevent repeated warnings
 			}
@@ -1206,12 +1203,13 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 			chunk := buf[:n]
 
 			// Store chunk for logging and async scanning (limit stored chunks)
-			if len(chunks) < maxStreamingChunks {
+			if len(chunks) < p.config.Storage.MaxCapturedChunks {
 				chunks = append(chunks, string(chunk))
-			} else if len(chunks) == maxStreamingChunks {
+			} else if len(chunks) == p.config.Storage.MaxCapturedChunks {
 				slog.Warn("streaming chunk limit reached, further chunks will not be captured",
 					"session_id", sess.ID,
-					"limit", maxStreamingChunks,
+					"limit", p.config.Storage.MaxCapturedChunks,
+					"config_key", "storage.max_captured_chunks",
 				)
 				chunks = append(chunks, "") // sentinel to prevent repeated warnings
 			}
