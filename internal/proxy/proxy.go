@@ -184,6 +184,16 @@ func (p *Proxy) GetCaptureBuffer() *CaptureBuffer {
 	return p.captureBuffer
 }
 
+// maxCapturedChunks returns the configured max streaming chunks to capture,
+// defaulting to 100 if unset or <= 0. Defends against programmatically-built
+// configs (non-Load paths) that bypass Load()'s normalization.
+func (p *Proxy) maxCapturedChunks() int {
+	if v := p.config.Storage.MaxCapturedChunks; v > 0 {
+		return v
+	}
+	return 100
+}
+
 // SetFailoverController sets the failover controller for session-aware failover
 func (p *Proxy) SetFailoverController(fc *FailoverController) {
 	p.failover = fc
@@ -1079,12 +1089,13 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 			}
 
 			// Store chunk for logging (limit stored chunks)
-			if len(chunks) < p.config.Storage.MaxCapturedChunks {
+			maxChunks := p.maxCapturedChunks()
+			if len(chunks) < maxChunks {
 				chunks = append(chunks, string(chunk))
-			} else if len(chunks) == p.config.Storage.MaxCapturedChunks {
+			} else if len(chunks) == maxChunks {
 				slog.Warn("streaming chunk limit reached, further chunks will not be captured",
 					"session_id", sess.ID,
-					"limit", p.config.Storage.MaxCapturedChunks,
+					"limit", maxChunks,
 					"config_key", "storage.max_captured_chunks",
 				)
 				chunks = append(chunks, "") // sentinel to prevent repeated warnings
@@ -1203,12 +1214,13 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 			chunk := buf[:n]
 
 			// Store chunk for logging and async scanning (limit stored chunks)
-			if len(chunks) < p.config.Storage.MaxCapturedChunks {
+			maxChunks := p.maxCapturedChunks()
+			if len(chunks) < maxChunks {
 				chunks = append(chunks, string(chunk))
-			} else if len(chunks) == p.config.Storage.MaxCapturedChunks {
+			} else if len(chunks) == maxChunks {
 				slog.Warn("streaming chunk limit reached, further chunks will not be captured",
 					"session_id", sess.ID,
-					"limit", p.config.Storage.MaxCapturedChunks,
+					"limit", maxChunks,
 					"config_key", "storage.max_captured_chunks",
 				)
 				chunks = append(chunks, "") // sentinel to prevent repeated warnings
