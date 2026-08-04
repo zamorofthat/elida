@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `/control/health` no longer requires control-API auth — liveness and
+  readiness probes work without credentials; all other `/control/*`
+  endpoints still require the key. (#feedback-5)
+- README quickstart now pulls the public Docker Hub image
+  (`zamorofthat/elida`) instead of the private ghcr package. (#feedback-6)
 - Body redaction is now JSON-aware: only string values are scanned, numeric
   fields (`created`, `n_params`) are untouched, and captured bodies —
   including every SSE `data:` line — stay valid JSON. Previously ~59% of
@@ -41,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GET /v1/models` now aggregates every configured backend's models in
+  multi-backend mode (single-backend passthrough unchanged). (#feedback-minor)
+- `storage.max_captured_chunks`: configurable streaming-capture cap
+  (default 100, previously hard-coded).
 - `policy.suppress_rules`: drop preset, custom, or generated rules by name.
 - `observe: true` on a rule: flag + capture without feeding the risk ladder.
 - `coding-agent` policy preset: structural rules enforce, content and
@@ -77,6 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documented that `allowlisted_tools` defaults are Claude Code's tool
+  names; other agents must configure their own.
 - `compound_anomaly` description no longer claims an "exfiltration
   pattern" for a bare rate/entropy signal.
 - Standard preset now includes `rate_anomaly` (p<0.01, warning) and `compound_anomaly` (threshold 0.15, flag) rules
