@@ -566,15 +566,14 @@ func (s *Session) Serialize() *SessionState {
 	}
 }
 
-// Snapshot returns a copy of the session for safe reading.
-// Note: Returns a new Session with a fresh zero-value mutex, not copying s.mu.
-//
-//nolint:govet // mutex field is zero-initialized, not copied from source
-func (s *Session) Snapshot() Session {
+// Snapshot returns a deep copy of the session state, safe to read without
+// holding the session lock. Returns a pointer to a freshly constructed
+// Session so no mutex is ever copied by value (go vet copylocks).
+func (s *Session) Snapshot() *Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	snap := Session{
+	snap := &Session{
 		ID:           s.ID,
 		State:        s.State,
 		StartTime:    s.StartTime,

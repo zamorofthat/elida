@@ -344,7 +344,7 @@ func (h *Handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	for _, s := range sessions {
 		snap := s.Snapshot()
-		info := h.buildSessionInfo(&snap, s)
+		info := h.buildSessionInfo(snap, s)
 		response.Sessions = append(response.Sessions, info)
 	}
 
@@ -402,7 +402,7 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	}
 
 	snap := sess.Snapshot()
-	info := h.buildSessionInfo(&snap, sess)
+	info := h.buildSessionInfo(snap, sess)
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -664,7 +664,7 @@ func (h *Handler) getSessionBehavior(w http.ResponseWriter, id string) {
 	}
 
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	features := make([]map[string]interface{}, fingerprint.NumFeatures)
 	for i := 0; i < fingerprint.NumFeatures; i++ {
@@ -676,7 +676,7 @@ func (h *Handler) getSessionBehavior(w http.ResponseWriter, id string) {
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": id,
-		"class":      fingerprint.SessionClass(&snap),
+		"class":      fingerprint.SessionClass(snap),
 		"features":   features,
 	})
 }

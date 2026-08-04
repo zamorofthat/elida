@@ -306,9 +306,9 @@ func (a *app) initSessionEndCallback() {
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
-		a.scoreFingerprint(&snap)
+		a.scoreFingerprint(snap)
 		integrity := a.persistToSQLite(&record, sess, endTime)
-		a.exportToTelemetry(&record, &snap, endTime, integrity)
+		a.exportToTelemetry(&record, snap, endTime, integrity)
 	})
 }
 

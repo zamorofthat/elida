@@ -194,7 +194,7 @@ func TestFingerprintIntegration_MultiClass(t *testing.T) {
 		}
 		sess.RecordMessage("user", "go", "backend-b")
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
@@ -218,7 +218,7 @@ func TestFingerprintIntegration_MultiClass(t *testing.T) {
 		oddSess.RecordToolCall("tool-"+string(rune('a'+j%10)), "function", "req", "")
 	}
 	oddSnap := oddSess.Snapshot()
-	distOdd, bucketOdd, _, err := scorer.Score(&oddSnap)
+	distOdd, bucketOdd, _, err := scorer.Score(oddSnap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,8 +248,7 @@ func buildRealisticSession(t *testing.T, backend, model string, seed int, anomal
 			sess.RecordToolCall("unusual-tool-"+string(rune('a'+j%26)), "function", "req", "")
 		}
 		sess.RecordMessage("user", "execute attack plan", backend)
-		snap := sess.Snapshot()
-		return &snap
+		return sess.Snapshot()
 	}
 
 	// Normal: ~10 turns, balanced tokens, 2 tools, regular cadence
@@ -268,6 +267,5 @@ func buildRealisticSession(t *testing.T, backend, model string, seed int, anomal
 	sess.RecordMessage("user", "thanks", backend)
 	sess.RecordMessage("assistant", "you're welcome", backend)
 
-	snap := sess.Snapshot()
-	return &snap
+	return sess.Snapshot()
 }

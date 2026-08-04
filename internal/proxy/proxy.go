@@ -1186,7 +1186,7 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 				}
 			}
 			abortSnap := sess.Snapshot()
-			go p.asyncScanResponse(sess.ID, &abortSnap, backend, chunks, resp.StatusCode)
+			go p.asyncScanResponse(sess.ID, abortSnap, backend, chunks, resp.StatusCode)
 			return resp.StatusCode, totalBytes
 		default:
 		}
@@ -1256,7 +1256,7 @@ func (p *Proxy) handleStreamingDirect(w http.ResponseWriter, resp *http.Response
 	// accessing a session that may be cleaned up by the manager
 	sessionID := sess.ID
 	sessSnap := sess.Snapshot()
-	go p.asyncScanResponse(sessionID, &sessSnap, backend, chunks, resp.StatusCode)
+	go p.asyncScanResponse(sessionID, sessSnap, backend, chunks, resp.StatusCode)
 
 	return resp.StatusCode, totalBytes
 }

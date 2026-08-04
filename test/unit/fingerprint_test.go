@@ -212,7 +212,7 @@ func TestExtract_BasicSession(t *testing.T) {
 	sess.RecordMessage("user", "do something", "anthropic")
 
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	// Turn count: log(1+10) ≈ 2.40
 	if fv[fingerprint.FeatTurnCount] < 2.0 || fv[fingerprint.FeatTurnCount] > 3.0 {
@@ -239,7 +239,7 @@ func TestExtract_ZeroTokens(t *testing.T) {
 	sess := session.NewSession("test-2", "http://backend", "127.0.0.1")
 	sess.Touch()
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	// Token ratio should be 0 when tokens are zero
 	if fv[fingerprint.FeatTokenRatio] != 0 {
@@ -251,7 +251,7 @@ func TestExtract_SingleMessage(t *testing.T) {
 	sess := session.NewSession("test-3", "http://backend", "127.0.0.1")
 	sess.RecordMessage("user", "hello", "backend")
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	// With 1 message, cadence features should be 0
 	if fv[fingerprint.FeatCadenceMedian] != 0 {
@@ -268,7 +268,7 @@ func TestExtract_NoToolCalls(t *testing.T) {
 		sess.Touch()
 	}
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	if fv[fingerprint.FeatToolCallRatio] != 0 {
 		t.Errorf("tool call ratio = %f, expected 0", fv[fingerprint.FeatToolCallRatio])
@@ -283,13 +283,13 @@ func TestExtract_NoToolCalls(t *testing.T) {
 func TestSessionClass(t *testing.T) {
 	sess := session.NewSession("test", "anthropic", "127.0.0.1")
 	snap := sess.Snapshot()
-	if c := fingerprint.SessionClass(&snap); c != "anthropic" {
+	if c := fingerprint.SessionClass(snap); c != "anthropic" {
 		t.Errorf("class = %q, want 'anthropic'", c)
 	}
 
 	sess.SetMetadata("model", "claude-3-opus-20240229")
 	snap = sess.Snapshot()
-	c := fingerprint.SessionClass(&snap)
+	c := fingerprint.SessionClass(snap)
 	if c != "anthropic/claude-3-opus" {
 		t.Errorf("class = %q, want 'anthropic/claude-3-opus'", c)
 	}
@@ -419,7 +419,7 @@ func TestScorer_ShadowMode(t *testing.T) {
 	sess := session.NewSession("test-1", "http://backend", "127.0.0.1")
 	snap := sess.Snapshot()
 
-	distance, bucket, features, err := scorer.Score(&snap)
+	distance, bucket, features, err := scorer.Score(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,14 +447,14 @@ func TestScorer_WarmUpSentinel(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		sess := makeTestSession(t, i)
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
 
 	sess := makeTestSession(t, 999)
 	snap := sess.Snapshot()
-	_, bucket, _, err := scorer.Score(&snap)
+	_, bucket, _, err := scorer.Score(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +476,7 @@ func TestScorer_NormalSession(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		sess := makeNormalSession(i)
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
@@ -484,7 +484,7 @@ func TestScorer_NormalSession(t *testing.T) {
 	// Score a similar session
 	sess := makeNormalSession(101)
 	snap := sess.Snapshot()
-	distance, bucket, _, err := scorer.Score(&snap)
+	distance, bucket, _, err := scorer.Score(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +509,7 @@ func TestScorer_AnomalousSession(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		sess := makeNormalSession(i)
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
@@ -517,7 +517,7 @@ func TestScorer_AnomalousSession(t *testing.T) {
 	// Score a wildly different session
 	sess := makeAnomalousSession()
 	snap := sess.Snapshot()
-	distance, _, _, err := scorer.Score(&snap)
+	distance, _, _, err := scorer.Score(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestScorer_AnomalousSession(t *testing.T) {
 	// Anomalous session should have higher distance than normal
 	normalSess := makeNormalSession(200)
 	normalSnap := normalSess.Snapshot()
-	normalDist, _, _, _ := scorer.Score(&normalSnap)
+	normalDist, _, _, _ := scorer.Score(normalSnap)
 
 	if distance <= normalDist {
 		t.Errorf("anomalous distance (%f) should be > normal distance (%f)", distance, normalDist)
@@ -549,7 +549,7 @@ func TestScorer_ClassFallback(t *testing.T) {
 		}
 		sess.AddTokens(1000, 2000)
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
@@ -564,7 +564,7 @@ func TestScorer_ClassFallback(t *testing.T) {
 	sess.AddTokens(1000, 2000)
 	snap := sess.Snapshot()
 
-	_, bucket, _, err := scorer.Score(&snap)
+	_, bucket, _, err := scorer.Score(snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +657,7 @@ func TestFingerprint_EndToEnd(t *testing.T) {
 	for i := 0; i < 120; i++ {
 		sess := makeNormalSession(i)
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
@@ -665,7 +665,7 @@ func TestFingerprint_EndToEnd(t *testing.T) {
 	// Score a normal session
 	normalSess := makeNormalSession(999)
 	normalSnap := normalSess.Snapshot()
-	normalDist, normalBucket, _, err := scorer.Score(&normalSnap)
+	normalDist, normalBucket, _, err := scorer.Score(normalSnap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +673,7 @@ func TestFingerprint_EndToEnd(t *testing.T) {
 	// Score an outlier
 	outlier := makeAnomalousSession()
 	outlierSnap := outlier.Snapshot()
-	outlierDist, outlierBucket, features, err := scorer.Score(&outlierSnap)
+	outlierDist, outlierBucket, features, err := scorer.Score(outlierSnap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +733,7 @@ func TestScorer_FlushRetryOnError(t *testing.T) {
 	// Ingest to mark dirty
 	sess := makeNormalSession(1)
 	snap := sess.Snapshot()
-	if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+	if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 		t.Fatal(ingestErr)
 	}
 
@@ -778,7 +778,7 @@ func TestDistanceToBucket_AllBuckets(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		sess := makeNormalSession(i)
 		snap := sess.Snapshot()
-		_ = scorer.Ingest(&snap)
+		_ = scorer.Ingest(snap)
 	}
 
 	// Just verify BucketRiskPoints covers all buckets
@@ -807,7 +807,7 @@ func TestExtract_MultipleBackends(t *testing.T) {
 	}
 
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	// With mixed backends (3 A, 1 B), continuity should be 0.75
 	if fv[fingerprint.FeatBackendContinuity] >= 1.0 {
@@ -828,7 +828,7 @@ func TestExtract_MultipleCadenceGaps(t *testing.T) {
 	}
 
 	snap := sess.Snapshot()
-	fv := fingerprint.Extract(&snap)
+	fv := fingerprint.Extract(snap)
 
 	// Should have non-zero cadence values
 	if fv[fingerprint.FeatCadenceMedian] == 0 {
@@ -851,7 +851,7 @@ func TestModelFamily_Variants(t *testing.T) {
 		sess := session.NewSession("test", "backend", "127.0.0.1")
 		sess.SetMetadata("model", tt.model)
 		snap := sess.Snapshot()
-		got := fingerprint.SessionClass(&snap)
+		got := fingerprint.SessionClass(snap)
 		if got != tt.class {
 			t.Errorf("SessionClass(model=%q) = %q, want %q", tt.model, got, tt.class)
 		}
@@ -861,7 +861,7 @@ func TestModelFamily_Variants(t *testing.T) {
 func TestSessionClass_NoBackend(t *testing.T) {
 	sess := session.NewSession("test", "", "127.0.0.1")
 	snap := sess.Snapshot()
-	if c := fingerprint.SessionClass(&snap); c != "global" {
+	if c := fingerprint.SessionClass(snap); c != "global" {
 		t.Errorf("class = %q, want 'global'", c)
 	}
 }
@@ -989,7 +989,7 @@ func TestScorer_PeriodicFlush(t *testing.T) {
 	// Ingest a session to mark dirty
 	sess := makeNormalSession(1)
 	snap := sess.Snapshot()
-	if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+	if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 		t.Fatal(ingestErr)
 	}
 
@@ -1064,7 +1064,7 @@ func TestScorer_CrashRecovery(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		sess := makeNormalSession(i)
 		snap := sess.Snapshot()
-		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
 			t.Fatal(ingestErr)
 		}
 	}
@@ -1092,7 +1092,7 @@ func TestScorer_CrashRecovery(t *testing.T) {
 	sess := makeNormalSession(999)
 	snap := sess.Snapshot()
 
-	_, bucket, _, scoreErr := scorer2.Score(&snap)
+	_, bucket, _, scoreErr := scorer2.Score(snap)
 	if scoreErr != nil {
 		t.Fatal(scoreErr)
 	}
