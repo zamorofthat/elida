@@ -298,6 +298,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Multi-backend model discovery: answer /v1/models from configuration so
+	// clients can see every routable model, not just the default backend's
+	// (integration feedback: model-picker UIs broke). Single-backend mode
+	// passes through untouched.
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" && p.router.MultiBackend() {
+		writeModelList(w, p.router.AggregatedModels())
+		return
+	}
+
 	startTime := time.Now()
 	ctx := r.Context()
 
@@ -1606,6 +1615,37 @@ func (p *Proxy) attemptFailoverWithDepth(w http.ResponseWriter, originalReq *htt
 // isHealthEndpoint returns true if the path is a health check endpoint
 func isHealthEndpoint(path string) bool {
 	return path == "/health" || path == "/healthz" || path == "/ready" || path == "/readyz"
+}
+
+// modelListResponse is the OpenAI /v1/models list response shape.
+type modelListResponse struct {
+	Object string           `json:"object"`
+	Data   []modelListEntry `json:"data"`
+}
+
+// modelListEntry is a single entry in modelListResponse.Data.
+type modelListEntry struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	OwnedBy string `json:"owned_by"`
+}
+
+// writeModelList writes the aggregated model list in OpenAI /v1/models
+// list format.
+func writeModelList(w http.ResponseWriter, models []router.ModelInfo) {
+	resp := modelListResponse{
+		Object: "list",
+		Data:   make([]modelListEntry, len(models)),
+	}
+	for i, m := range models {
+		resp.Data[i] = modelListEntry{ID: m.ID, Object: "model", OwnedBy: m.OwnedBy}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("write failed", "error", err)
+	}
 }
 
 // validateProxyAuth checks if the request has valid proxy authentication
