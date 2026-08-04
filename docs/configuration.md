@@ -523,7 +523,7 @@ policy:
 
 Tools that bypass request-side content scanning. When the latest assistant message contains only allowlisted tools, the request skips policy checks entirely.
 
-> **Note:** The defaults listed below are Claude Code's built-in tool names. Other agents (Hermes, Cursor, custom agents) must supply their own `allowlisted_tools` list matching their available tools.
+> **Note:** This key ships empty by default — no tools bypass scanning unless explicitly configured. The example below uses Claude Code's tool names; other agents (Hermes, Cursor, custom agents) must supply their own `allowlisted_tools` list matching their available tools. An empty allowlist is the secure default.
 
 ```yaml
 policy:
