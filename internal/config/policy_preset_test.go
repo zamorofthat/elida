@@ -48,6 +48,34 @@ func TestCustomRuleOverridesPresetRule(t *testing.T) {
 	}
 }
 
+// Duplicate custom rule names silently over-merge (same-name observe
+// exclusion, ambiguous overrides) — warn at startup so operators notice.
+func TestDuplicateRuleNamesWarn(t *testing.T) {
+	cfg := &Config{}
+	cfg.Policy.Rules = []PolicyRule{
+		{Name: "dup", Type: "content_match", Patterns: []string{"a"}, Action: "flag"},
+		{Name: "dup", Type: "content_match", Patterns: []string{"b"}, Action: "block"},
+	}
+	cfg.ApplyPolicyPreset()
+	// Behavior: both rules retained (unchanged semantics) — the check only
+	// warns. Assert the duplicate detection helper reports it:
+	dups := duplicateRuleNames(cfg.Policy.Rules)
+	if len(dups) != 1 || dups[0] != "dup" {
+		t.Errorf("duplicateRuleNames = %v, want [dup]", dups)
+	}
+}
+
+func TestNoDuplicateWarningsForPresets(t *testing.T) {
+	for _, preset := range []string{"minimal", "standard", "strict", "mcp", "coding-agent"} {
+		cfg := &Config{}
+		cfg.Policy.Preset = preset
+		cfg.ApplyPolicyPreset()
+		if dups := duplicateRuleNames(cfg.Policy.Rules); len(dups) != 0 {
+			t.Errorf("preset %s has duplicate rule names: %v", preset, dups)
+		}
+	}
+}
+
 // Custom rules with unique names are still appended alongside preset rules.
 func TestUniqueCustomRulesStillAppended(t *testing.T) {
 	cfg := &Config{}

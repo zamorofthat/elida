@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"sync"
 	"testing"
 
 	"elida/internal/config"
@@ -45,4 +46,28 @@ func TestBuildFailoverControllerRegistersAllBackends(t *testing.T) {
 	if local.Priority >= nemo.Priority || nemo.Priority >= mist.Priority {
 		t.Errorf("priorities wrong: local=%d nemotron=%d mistral=%d", local.Priority, nemo.Priority, mist.Priority)
 	}
+}
+
+// The backends map must be safe for concurrent health-marking vs selection
+// (Mark* methods are about to gain callers; today this races).
+func TestFailoverControllerConcurrentAccess(t *testing.T) {
+	fc := BuildFailoverController(config.FailoverConfig{
+		Enabled: true, MaxRetries: 2, FallbackOrder: []string{"local", "nemotron"},
+	}, buildTestRouter(t))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if n%2 == 0 {
+					fc.MarkBackendUnhealthy("nemotron")
+					fc.MarkBackendHealthy("nemotron")
+				} else {
+					fc.GetBackend("nemotron")
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }

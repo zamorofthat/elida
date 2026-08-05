@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1127,6 +1128,24 @@ func GetDefaultRoutingMethods() []string {
 	return []string{"header", "model", "path", "default"}
 }
 
+// duplicateRuleNames returns a sorted slice of rule names that appear more
+// than once in the rule list (each name once in the output).
+func duplicateRuleNames(rules []PolicyRule) []string {
+	seen := make(map[string]int)
+	for _, r := range rules {
+		seen[r.Name]++
+	}
+	var dups []string
+	for name, count := range seen {
+		if count > 1 {
+			dups = append(dups, name)
+		}
+	}
+	// Sort for deterministic output
+	sort.Strings(dups)
+	return dups
+}
+
 // ApplyPolicyPreset applies a policy preset with local-overrides-default
 // layering: a custom rule with the same name as a preset rule REPLACES the
 // preset rule (like Splunk/Cribl local vs default configs). Rules named in
@@ -1233,6 +1252,12 @@ func (c *Config) ApplyPolicyPreset() {
 		if c.Policy.Rules[i].Observe {
 			c.Policy.Rules[i].Action = "flag"
 		}
+	}
+
+	// Warn if any rule names are duplicated (overrides and observe-exclusion
+	// apply per NAME and will affect all rules sharing it).
+	if dups := duplicateRuleNames(c.Policy.Rules); len(dups) > 0 {
+		slog.Warn("duplicate policy rule names — overrides and observe-exclusion apply per NAME and will affect all rules sharing it", "rules", dups)
 	}
 }
 

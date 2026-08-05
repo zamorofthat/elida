@@ -38,9 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{"error":"failover_exhausted",...}` body instead of the last attempted
   backend's raw response, which was indistinguishable from failover being
   disabled entirely.
+- `Session.Snapshot` and `VoiceSession.Snapshot` no longer copy their
+  mutexes (`go vet` is now fully clean); snapshots are returned by pointer.
+- `FailoverController` is now safe for concurrent health-marking.
 
 ### Added
 
+- Startup warning when policy rules share a name (overrides and
+  observe-exclusion apply per name).
 - `policy.suppress_rules`: drop preset, custom, or generated rules by name.
 - `observe: true` on a rule: flag + capture without feeding the risk ladder.
 - `coding-agent` policy preset: structural rules enforce, content and

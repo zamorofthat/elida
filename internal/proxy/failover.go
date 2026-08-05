@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"elida/internal/config"
@@ -130,17 +131,17 @@ func DefaultFailoverConfig() FailoverConfig {
 
 // FailoverController handles backend failover logic.
 //
-// backends is populated exclusively via RegisterBackend at startup (see
-// BuildFailoverController) and is otherwise only read from - by
-// SelectFallback/HandleFailover on the request path and by GetBackend.
-// MarkBackendUnhealthy/MarkBackendHealthy mutate an entry's Healthy field
-// and are currently uncalled by any production code path, but if health
-// marking is ever wired up (e.g. from a background health checker), note
-// that the backends map is NOT safe for concurrent mutation: RegisterBackend
-// and the Mark* methods write to the map/struct fields with no locking. A
-// mutex (or a sync.Map) needs to guard backends before Mark* calls can
-// safely run concurrently with request-path reads.
+// Locking contract: mu guards backends and the Healthy field of each
+// Backend it holds. RegisterBackend and MarkBackendUnhealthy/
+// MarkBackendHealthy take the write lock (they add entries or mutate
+// Healthy in place); GetBackend, SelectFallback, and IsEnabled take the
+// read lock. Backend.Healthy is mutated under the controller's lock rather
+// than via a per-Backend lock, so callers must re-read Healthy through
+// GetBackend/SelectFallback rather than caching a *Backend and reading its
+// fields later unsynchronized; if callers ever need to read Healthy outside
+// those accessors, promote it to an atomic.Bool or add per-Backend locking.
 type FailoverController struct {
+	mu       sync.RWMutex
 	config   FailoverConfig
 	backends map[string]*Backend
 }
@@ -164,6 +165,8 @@ func NewFailoverController(config FailoverConfig) *FailoverController {
 
 // RegisterBackend adds a backend to the failover pool
 func (fc *FailoverController) RegisterBackend(name, url, backendType string, priority int) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	fc.backends[name] = &Backend{
 		Name:     name,
 		URL:      url,
@@ -176,6 +179,9 @@ func (fc *FailoverController) RegisterBackend(name, url, backendType string, pri
 // SelectFallback chooses the next available backend
 func (fc *FailoverController) SelectFallback(sess *session.Session, failedBackend string) (*Backend, error) {
 	failedBackends := sess.GetFailedBackends()
+
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
 
 	// If explicit fallback order is configured, use it
 	if len(fc.config.FallbackOrder) > 0 {
@@ -270,6 +276,8 @@ func (fc *FailoverController) HandleFailover(
 
 // MarkBackendUnhealthy marks a backend as unhealthy
 func (fc *FailoverController) MarkBackendUnhealthy(name string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	if backend, ok := fc.backends[name]; ok {
 		backend.Healthy = false
 		slog.Warn("backend marked unhealthy", "backend", name)
@@ -278,6 +286,8 @@ func (fc *FailoverController) MarkBackendUnhealthy(name string) {
 
 // MarkBackendHealthy marks a backend as healthy
 func (fc *FailoverController) MarkBackendHealthy(name string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	if backend, ok := fc.backends[name]; ok {
 		backend.Healthy = true
 		slog.Info("backend marked healthy", "backend", name)
@@ -286,12 +296,16 @@ func (fc *FailoverController) MarkBackendHealthy(name string) {
 
 // GetBackend returns a backend by name
 func (fc *FailoverController) GetBackend(name string) (*Backend, bool) {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
 	b, ok := fc.backends[name]
 	return b, ok
 }
 
 // IsEnabled returns whether failover is enabled
 func (fc *FailoverController) IsEnabled() bool {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
 	return fc.config.Enabled
 }
 
