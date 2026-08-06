@@ -222,7 +222,12 @@ func (fc *FailoverController) SelectFallback(sess *session.Session, failedBacken
 	return bestBackend, nil
 }
 
-// HandleFailover attempts to failover to another backend
+// HandleFailover attempts to failover to another backend.
+//
+// fc.config is read here without fc.mu: it is assigned once in
+// NewFailoverController and never mutated afterwards — only `backends` and
+// Backend.Healthy are written post-construction (under fc.mu). If config
+// ever becomes mutable, these reads must move under the lock.
 func (fc *FailoverController) HandleFailover(
 	ctx context.Context,
 	sess *session.Session,
