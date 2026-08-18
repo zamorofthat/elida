@@ -597,22 +597,32 @@ type TimeSeriesPoint struct {
 
 // GetTimeSeries retrieves time series data for the dashboard
 func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSeriesPoint, error) {
+	// start_time is persisted in a format SQLite's own date functions cannot parse
+	// directly: legacy rows use Go's time.Time.String() ("... -0400 EDT m=+<mono>")
+	// and current rows use the modernc driver's RFC3339 ("...T...-04:00"); datetime()
+	// returns NULL on both, which previously made every bucket 'unknown' and dropped
+	// all rows via the HAVING clause. Normalize to a bare "YYYY-MM-DD HH:MM:SS" — take
+	// the first 19 chars (drops fractional seconds, tz, and any monotonic-clock tail)
+	// and unify the T/space date separator — so strftime() can bucket every format,
+	// with no data migration required. See .kerno/FINDINGS.md (F-4).
+	const normStart = "replace(substr(start_time, 1, 19), 'T', ' ')"
+
 	// SQLite date truncation based on interval
-	// Use datetime() to normalize the timestamp format first
 	var dateTrunc string
 	switch interval {
 	case "hour":
-		dateTrunc = "strftime('%Y-%m-%d %H:00:00', datetime(start_time))"
+		dateTrunc = "strftime('%Y-%m-%d %H:00:00', " + normStart + ")"
 	case "day":
-		dateTrunc = "strftime('%Y-%m-%d', datetime(start_time))"
+		dateTrunc = "strftime('%Y-%m-%d', " + normStart + ")"
 	case "minute":
-		dateTrunc = "strftime('%Y-%m-%d %H:%M:00', datetime(start_time))"
+		dateTrunc = "strftime('%Y-%m-%d %H:%M:00', " + normStart + ")"
 	default:
-		dateTrunc = "strftime('%Y-%m-%d %H:00:00', datetime(start_time))" // default to hourly
+		dateTrunc = "strftime('%Y-%m-%d %H:00:00', " + normStart + ")" // default to hourly
 	}
 
-	// #nosec G201 -- dateTrunc is safe, only set from hardcoded switch cases above, never user input
-	query := fmt.Sprintf(` // nosemgrep: string-formatted-query
+	// #nosec G201 -- dateTrunc and normStart are built only from hardcoded literals above, never user input
+	// nosemgrep: string-formatted-query
+	query := fmt.Sprintf(`
 		SELECT
 			COALESCE(%s, 'unknown') as bucket,
 			COUNT(*) as session_count,
@@ -620,12 +630,13 @@ func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSer
 			COALESCE(SUM(bytes_in), 0) as bytes_in,
 			COALESCE(SUM(bytes_out), 0) as bytes_out
 		FROM sessions
-		WHERE start_time >= ?
+		WHERE %s >= ?
 		GROUP BY bucket
 		HAVING bucket != 'unknown'
-		ORDER BY bucket ASC`, dateTrunc)
+		ORDER BY bucket ASC`, dateTrunc, normStart)
 
-	rows, err := s.db.Query(query, since)
+	// Bind `since` in the same normalized wall-clock form the WHERE compares against.
+	rows, err := s.db.Query(query, since.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get time series: %w", err)
 	}
