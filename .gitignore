@@ -80,3 +80,8 @@ docs/superpowers/
 # Local AI-tool state
 .codex/
 .entire/
+
+# Kerno endpoint-testing workspace (local state: config w/ API key,
+# generated scenarios, analysis cache, job logs)
+.kerno/
+web/.kerno/
