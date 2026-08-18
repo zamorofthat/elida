@@ -605,38 +605,38 @@ func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSer
 	// the first 19 chars (drops fractional seconds, tz, and any monotonic-clock tail)
 	// and unify the T/space date separator — so strftime() can bucket every format,
 	// with no data migration required. See .kerno/FINDINGS.md (F-4).
-	const normStart = "replace(substr(start_time, 1, 19), 'T', ' ')"
-
-	// SQLite date truncation based on interval
-	var dateTrunc string
-	switch interval {
-	case "hour":
-		dateTrunc = "strftime('%Y-%m-%d %H:00:00', " + normStart + ")"
-	case "day":
-		dateTrunc = "strftime('%Y-%m-%d', " + normStart + ")"
-	case "minute":
-		dateTrunc = "strftime('%Y-%m-%d %H:%M:00', " + normStart + ")"
-	default:
-		dateTrunc = "strftime('%Y-%m-%d %H:00:00', " + normStart + ")" // default to hourly
-	}
-
-	// #nosec G201 -- dateTrunc and normStart are built only from hardcoded literals above, never user input
-	// nosemgrep: string-formatted-query
-	query := fmt.Sprintf(`
+	//
+	// The SQL below is a single static statement: the bucket granularity is
+	// supplied as strftime()'s format via a bind parameter, so no part of the
+	// query is assembled from Go values.
+	const query = `
 		SELECT
-			COALESCE(%s, 'unknown') as bucket,
+			COALESCE(strftime(?, replace(substr(start_time, 1, 19), 'T', ' ')), 'unknown') as bucket,
 			COUNT(*) as session_count,
 			COALESCE(SUM(request_count), 0) as request_count,
 			COALESCE(SUM(bytes_in), 0) as bytes_in,
 			COALESCE(SUM(bytes_out), 0) as bytes_out
 		FROM sessions
-		WHERE %s >= ?
+		WHERE replace(substr(start_time, 1, 19), 'T', ' ') >= ?
 		GROUP BY bucket
 		HAVING bucket != 'unknown'
-		ORDER BY bucket ASC`, dateTrunc, normStart)
+		ORDER BY bucket ASC`
+
+	// Bucket granularity, chosen from a fixed set — never taken from the caller verbatim.
+	var bucketFormat string
+	switch interval {
+	case "day":
+		bucketFormat = "%Y-%m-%d"
+	case "minute":
+		bucketFormat = "%Y-%m-%d %H:%M:00"
+	case "hour":
+		bucketFormat = "%Y-%m-%d %H:00:00"
+	default:
+		bucketFormat = "%Y-%m-%d %H:00:00" // default to hourly
+	}
 
 	// Bind `since` in the same normalized wall-clock form the WHERE compares against.
-	rows, err := s.db.Query(query, since.Format("2006-01-02 15:04:05"))
+	rows, err := s.db.Query(query, bucketFormat, since.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get time series: %w", err)
 	}
