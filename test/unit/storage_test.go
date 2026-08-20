@@ -2,6 +2,7 @@ package unit
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -929,5 +930,159 @@ func TestSQLiteStore_CountSessions(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected 1 since 3m ago, got %d", count)
+	}
+}
+
+// newTimeSeriesStore creates a temp-file store seeded with sessions at the
+// given start times (1 request, 100 bytes in, 200 bytes out each).
+func newTimeSeriesStore(t *testing.T, starts ...time.Time) *storage.SQLiteStore {
+	t.Helper()
+
+	tmpFile, err := os.CreateTemp("", "elida-timeseries-*.db")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+	tmpFile.Close()
+
+	store, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	for i, start := range starts {
+		record := storage.SessionRecord{
+			ID:           fmt.Sprintf("ts-session-%d", i),
+			State:        "completed",
+			StartTime:    start,
+			EndTime:      start.Add(time.Minute),
+			DurationMs:   60000,
+			RequestCount: 1,
+			BytesIn:      100,
+			BytesOut:     200,
+			Backend:      "http://localhost:11434",
+			ClientAddr:   "127.0.0.1:12345",
+		}
+		if err := store.SaveSession(record); err != nil {
+			t.Fatalf("failed to save session %d: %v", i, err)
+		}
+	}
+	return store
+}
+
+// TestSQLiteStore_GetTimeSeries covers the two defects that made
+// /control/history/timeseries unusable: the query erroring outright, and the
+// query succeeding but silently dropping every row because stored timestamps
+// could not be parsed by SQLite's date functions.
+func TestSQLiteStore_GetTimeSeries(t *testing.T) {
+	// Two sessions in the 10:00 hour, one in the 12:00 hour.
+	base := time.Date(2026, 3, 15, 10, 30, 0, 0, time.Local)
+	store := newTimeSeriesStore(t,
+		base,
+		base.Add(15*time.Minute),
+		base.Add(105*time.Minute), // 12:15
+	)
+
+	points, err := store.GetTimeSeries(base.Add(-time.Hour), "hour")
+	if err != nil {
+		t.Fatalf("GetTimeSeries returned an error: %v", err)
+	}
+
+	// Regression: sessions exist in range, so buckets must not be empty.
+	if len(points) == 0 {
+		t.Fatal("expected populated buckets, got none — stored timestamps are not being parsed")
+	}
+	if len(points) != 2 {
+		t.Fatalf("expected 2 hourly buckets, got %d: %+v", len(points), points)
+	}
+
+	first, second := points[0], points[1]
+	if got, want := first.Timestamp.Format("2006-01-02 15:04:05"), "2026-03-15 10:00:00"; got != want {
+		t.Errorf("first bucket = %q, want %q", got, want)
+	}
+	if first.SessionCount != 2 {
+		t.Errorf("first bucket session_count = %d, want 2", first.SessionCount)
+	}
+	// Aggregates must sum across the sessions in the bucket.
+	if first.RequestCount != 2 || first.BytesIn != 200 || first.BytesOut != 400 {
+		t.Errorf("first bucket aggregates = req:%d in:%d out:%d, want 2/200/400",
+			first.RequestCount, first.BytesIn, first.BytesOut)
+	}
+
+	if got, want := second.Timestamp.Format("2006-01-02 15:04:05"), "2026-03-15 12:00:00"; got != want {
+		t.Errorf("second bucket = %q, want %q", got, want)
+	}
+	if second.SessionCount != 1 {
+		t.Errorf("second bucket session_count = %d, want 1", second.SessionCount)
+	}
+}
+
+func TestSQLiteStore_GetTimeSeriesIntervals(t *testing.T) {
+	base := time.Date(2026, 3, 15, 10, 30, 0, 0, time.Local)
+	store := newTimeSeriesStore(t,
+		base,
+		base.Add(15*time.Minute), // same hour + same day, different minute
+		base.Add(25*time.Hour),   // next day
+	)
+	since := base.Add(-time.Hour)
+
+	tests := []struct {
+		interval    string
+		wantBuckets int
+		wantFirst   string
+	}{
+		// 10:30 and 10:45 collapse into one hourly bucket; the +25h session forms a second.
+		{"hour", 2, "2026-03-15 10:00:00"},
+		{"day", 2, "2026-03-15 00:00:00"},
+		// Minute granularity keeps 10:30 and 10:45 apart.
+		{"minute", 3, "2026-03-15 10:30:00"},
+		{"week", 2, "2026-03-15 10:00:00"}, // unrecognized -> hourly fallback
+		{"", 2, "2026-03-15 10:00:00"},     // empty -> hourly fallback
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.interval, func(t *testing.T) {
+			points, err := store.GetTimeSeries(since, tc.interval)
+			if err != nil {
+				t.Fatalf("GetTimeSeries(%q) returned an error: %v", tc.interval, err)
+			}
+			if len(points) != tc.wantBuckets {
+				t.Fatalf("interval %q: got %d buckets, want %d: %+v",
+					tc.interval, len(points), tc.wantBuckets, points)
+			}
+			got := points[0].Timestamp.Format("2006-01-02 15:04:05")
+			if got != tc.wantFirst {
+				t.Errorf("interval %q: first bucket = %q, want %q", tc.interval, got, tc.wantFirst)
+			}
+		})
+	}
+}
+
+func TestSQLiteStore_GetTimeSeriesSinceFilter(t *testing.T) {
+	base := time.Date(2026, 3, 15, 10, 30, 0, 0, time.Local)
+	store := newTimeSeriesStore(t,
+		base.Add(-48*time.Hour), // well before the window
+		base,
+	)
+
+	points, err := store.GetTimeSeries(base.Add(-time.Hour), "hour")
+	if err != nil {
+		t.Fatalf("GetTimeSeries returned an error: %v", err)
+	}
+	if len(points) != 1 {
+		t.Fatalf("expected 1 bucket inside the since window, got %d: %+v", len(points), points)
+	}
+	if got, want := points[0].Timestamp.Format("2006-01-02 15:04:05"), "2026-03-15 10:00:00"; got != want {
+		t.Errorf("bucket = %q, want %q", got, want)
+	}
+
+	// A window that starts after every session yields no buckets, without erroring.
+	empty, err := store.GetTimeSeries(base.Add(24*time.Hour), "hour")
+	if err != nil {
+		t.Fatalf("GetTimeSeries (future window) returned an error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected no buckets for a future window, got %d: %+v", len(empty), empty)
 	}
 }

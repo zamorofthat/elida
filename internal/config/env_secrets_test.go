@@ -110,3 +110,36 @@ func TestExplicitKeyBeatsAutoKey(t *testing.T) {
 		t.Errorf("explicit key overridden: %q", got)
 	}
 }
+
+// TestMaxCapturedChunksDefaultAndLoad verifies StorageConfig.MaxCapturedChunks:
+// - defaults to 100
+// - loads from YAML correctly
+// - normalizes <= 0 values to 100
+func TestMaxCapturedChunksDefaultAndLoad(t *testing.T) {
+	// Test default value
+	cfg := DefaultConfig()
+	if cfg.Storage.MaxCapturedChunks != 100 {
+		t.Errorf("default = %d, want 100", cfg.Storage.MaxCapturedChunks)
+	}
+
+	// Test load from YAML with explicit value 500
+	cfg = loadYAML(t, "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\n"+
+		"storage:\n  enabled: true\n  max_captured_chunks: 500\n")
+	if cfg.Storage.MaxCapturedChunks != 500 {
+		t.Errorf("loaded 500: got %d, want 500", cfg.Storage.MaxCapturedChunks)
+	}
+
+	// Test load from YAML with zero (should normalize to 100)
+	cfg = loadYAML(t, "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\n"+
+		"storage:\n  enabled: true\n  max_captured_chunks: 0\n")
+	if cfg.Storage.MaxCapturedChunks != 100 {
+		t.Errorf("loaded 0 (should normalize): got %d, want 100", cfg.Storage.MaxCapturedChunks)
+	}
+
+	// Test load from YAML with negative value (should normalize to 100)
+	cfg = loadYAML(t, "listen: \"127.0.0.1:0\"\nbackend: \"http://127.0.0.1:1\"\n"+
+		"storage:\n  enabled: true\n  max_captured_chunks: -50\n")
+	if cfg.Storage.MaxCapturedChunks != 100 {
+		t.Errorf("loaded -50 (should normalize): got %d, want 100", cfg.Storage.MaxCapturedChunks)
+	}
+}

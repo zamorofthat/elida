@@ -125,7 +125,7 @@ helm install elida ./deploy/helm/elida \
 replicaCount: 3
 
 image:
-  repository: ghcr.io/zamorofthat/elida
+  repository: zamorofthat/elida
   tag: latest
   pullPolicy: IfNotPresent
 
@@ -227,7 +227,7 @@ spec:
             - name: ANTHROPIC_BASE_URL
               value: "http://localhost:8080"
         - name: elida
-          image: ghcr.io/zamorofthat/elida:latest
+          image: zamorofthat/elida:latest
           ports:
             - containerPort: 8080
             - containerPort: 9090
@@ -274,7 +274,7 @@ docker compose up -d
 version: "3.8"
 services:
   elida:
-    image: ghcr.io/zamorofthat/elida:latest
+    image: zamorofthat/elida:latest
     ports:
       - "8080:8080"   # Proxy
       - "9090:9090"   # Control API + Dashboard

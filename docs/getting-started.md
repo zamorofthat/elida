@@ -24,7 +24,7 @@ make build
 ### Option B: Docker
 
 ```bash
-docker pull ghcr.io/zamorofthat/elida:latest
+docker pull zamorofthat/elida:latest
 ```
 
 ### Option C: Docker Compose (with Redis)

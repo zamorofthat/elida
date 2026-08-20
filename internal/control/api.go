@@ -245,7 +245,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check authentication for /control/* endpoints
-	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") {
+	// Feedback #5: /control/health is exempt (liveness/readiness probes can't carry credentials)
+	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") && r.URL.Path != "/control/health" {
 		if !h.checkAuth(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ELIDA Control API"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
@@ -291,17 +292,17 @@ func secureCompare(a, b string) bool {
 }
 
 // handleHealth handles GET /control/health
+// Returns minimal payload (status + timestamp) for liveness probes.
+// Version/CaptureMode available only via authenticated endpoints (/control/stats, /control/settings).
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	response := HealthResponse{
-		Status:      "ok",
-		Timestamp:   time.Now(),
-		Version:     "0.2.1",
-		CaptureMode: h.captureMode,
+	response := map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now(),
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -462,14 +463,6 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Error("failed to encode response", "error", err)
 	}
-}
-
-// HealthResponse represents a health check response
-type HealthResponse struct {
-	Status      string    `json:"status"`
-	Timestamp   time.Time `json:"timestamp"`
-	Version     string    `json:"version"`
-	CaptureMode string    `json:"capture_mode"`
 }
 
 // SessionsResponse represents a list of sessions

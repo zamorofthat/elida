@@ -66,7 +66,26 @@ jobs:
 
       - name: Run govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # Pinned like every other tool in this workflow: @latest is neither
+          # reproducible nor supply-chain safe.
+          #
+          # The install is retried and its failure is downgraded to a warning:
+          # this step is advisory (findings below are reported, not fatal), but
+          # under `bash -e` a transient proxy/TLS blip while fetching the tool
+          # would otherwise fail the whole job.
+          for attempt in 1 2 3; do
+            if go install golang.org/x/vuln/cmd/govulncheck@v1.7.0; then
+              break
+            fi
+            echo "::warning::govulncheck install attempt ${attempt} failed; retrying"
+            sleep $((attempt * 10))
+          done
+
+          if ! command -v govulncheck >/dev/null 2>&1; then
+            echo "::warning::govulncheck could not be installed; skipping vulnerability scan"
+            exit 0
+          fi
+
           govulncheck ./... || echo "::warning::govulncheck found vulnerabilities (may be stdlib issues)"
 
       - name: Run gosec

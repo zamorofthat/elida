@@ -17,7 +17,7 @@ Session-aware reverse proxy for AI agent governance. Think Session Border Contro
 ```bash
 docker run -p 8080:8080 -p 9090:9090 \
   -e ELIDA_BACKEND=https://api.groq.com/openai/v1 \
-  ghcr.io/zamorofthat/elida:latest
+  zamorofthat/elida:latest
 ```
 
 Point your client at it:

@@ -10,7 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.18.0] - 2026-08-02
 
 ### Fixed
-
+- `/control/health` no longer requires control-API auth — liveness and
+  readiness probes work without credentials; all other `/control/*`
+  endpoints still require the key. (#feedback-5)
+- README quickstart now pulls the public Docker Hub image
+  (`zamorofthat/elida`) instead of the private ghcr package. (#feedback-6)
 - Body redaction is now JSON-aware: only string values are scanned, numeric
   fields (`created`, `n_params`) are untouched, and captured bodies —
   including every SSE `data:` line — stay valid JSON. Previously ~59% of
@@ -60,6 +64,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GET /v1/models` now aggregates every configured backend's models in
+  multi-backend mode (single-backend passthrough unchanged). (#feedback-minor)
+- `storage.max_captured_chunks`: configurable streaming-capture cap
+  (default 100, previously hard-coded).
+- `policy.suppress_rules`: drop preset, custom, or generated rules by name.
+- `observe: true` on a rule: flag + capture without feeding the risk ladder.
+- `coding-agent` policy preset: structural rules enforce, content and
+  statistical heuristics run in observe. (#feedback-3)
+- `failover:` config section (`enabled`, `max_retries`, `retry_delay`,
+  `fallback_order`, `preserve_model`) — disabled by default. (#feedback-9)
+- `backends.<name>.model`: model id substituted in only when failover lands
+  on that backend; normal routing is unaffected. (#feedback-9)
+- `${VAR}` environment variable expansion in `backend`, `backends.<name>.url`,
+  `backends.<name>.api_key`, `proxy.auth.api_key`, and `control.auth.api_key`
+  — unset variables stay literal and log a warning. (#feedback-9)
+- Auto provider keys: an empty `backends.<name>.api_key` is now looked up
+  from `<NAME>_API_KEY`, then the conventional `OPENAI_API_KEY` /
+  `ANTHROPIC_API_KEY` / `MISTRAL_API_KEY` for its type. (#feedback-9)
+- **Statistical Anomaly Detection**: Three new rule types for detecting session anomalies that evade static thresholds:
+  - `rate_anomaly` — Poisson-based end-of-session retrospective check. Splits request timestamps into baseline/test windows, flags when observed rate is statistically abnormal (p-value threshold).
+  - `content_entropy` — Shannon entropy of request/response content. Detects base64-encoded, compressed, or encrypted payloads that evade regex pattern matching. Strict preset only (code content can naturally reach 5.0-5.5).
+  - `compound_anomaly` — Agent-first real-time detection using adaptive CUSUM + Shannon entropy compound scoring. Only alarms when both rate and entropy are elevated simultaneously, eliminating false positives from normal agent execution bursts. Uses time-weighted EMA for phase-tolerant rate tracking, CUSUM for evidence accumulation, and incremental byte-frequency entropy (O(1) per request, ~2KB per session).
+- **Math Primitives** (`internal/policy/stats.go`): `poissonSurvival()` (log-space Poisson CDF) and `shannonEntropy()` (bits-per-byte) as standalone functions.
+- **Per-Session Compound Detector** (`internal/policy/detector.go`): `SessionDetector` with adaptive CUSUM, incremental entropy, burst boundary detection, and ring buffer burst history. All operations O(1) per request.
+- **CLI `-listen` Flag**: Override listen address from the command line (e.g. `elida -listen :8082`). Priority: CLI flag > `ELIDA_LISTEN` env > config file.
+- **`ThresholdFloat` and `MinSamples` Rule Fields**: New optional fields on policy rules for probability thresholds (0-1), entropy thresholds (bits/byte), and minimum data points before evaluation.
 - Session identity can now derive from the OpenAI `user` field (default on)
   or a configurable `session.derive_from.body_path` — one conversation keeps
   one session across backend failover, and the kill-switch becomes
@@ -83,6 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documented that `allowlisted_tools` defaults are Claude Code's tool
+  names; other agents must configure their own.
 - `compound_anomaly` description no longer claims an "exfiltration
   pattern" for a bare rate/entropy signal.
 

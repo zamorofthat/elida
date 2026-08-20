@@ -23,7 +23,7 @@ Think Session Border Controller (SBC) from telecom — but instead of managing V
 ```bash
 docker run -p 8080:8080 -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.groq.com/openai/v1 \
-  ghcr.io/zamorofthat/elida:latest
+  zamorofthat/elida:latest
 ```
 
 Point your client at it:
