@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -366,4 +367,51 @@ func (r *Router) GetDefaultBackend() *Backend {
 // Backends returns all configured backends
 func (r *Router) Backends() map[string]*Backend {
 	return r.backends
+}
+
+// MultiBackend reports whether the router has more than one configured
+// backend. Used to decide whether /v1/models should be answered directly
+// from configuration (multi-backend) or passed through untouched
+// (single-backend — preserves a real backend's own model list).
+func (r *Router) MultiBackend() bool {
+	return len(r.backends) > 1
+}
+
+// ModelInfo describes a single model entry for the aggregated /v1/models
+// response, in OpenAI list format ({"id", "object":"model", "owned_by"}).
+type ModelInfo struct {
+	ID      string
+	OwnedBy string
+}
+
+// AggregatedModels returns the union of every backend's concrete configured
+// model names — glob patterns (containing "*" or "?") are skipped, since
+// they aren't valid model ids — plus each backend's explicit failover
+// Model value. Results are deduped by ID (first backend wins) and sorted by
+// ID for a stable response.
+func (r *Router) AggregatedModels() []ModelInfo {
+	seen := make(map[string]bool)
+	models := make([]ModelInfo, 0, len(r.backends))
+
+	add := func(id, ownedBy string) {
+		if id == "" || strings.ContainsAny(id, "*?") || seen[id] {
+			return
+		}
+		seen[id] = true
+		models = append(models, ModelInfo{ID: id, OwnedBy: ownedBy})
+	}
+
+	names := r.backendNames()
+	sort.Strings(names) // deterministic dedupe precedence, independent of map iteration order
+
+	for _, name := range names {
+		backend := r.backends[name]
+		for _, id := range backend.Models {
+			add(id, backend.Name)
+		}
+		add(backend.Model, backend.Name)
+	}
+
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models
 }

@@ -26,7 +26,7 @@ litellm --model gpt-4 --port 4000
 # Start ELIDA in front of it
 docker run -p 8080:8080 -p 9090:9090 \
   -e ELIDA_BACKEND=http://host.docker.internal:4000 \
-  ghcr.io/zamorofthat/elida:latest
+  zamorofthat/elida:latest
 
 # Point your agent at ELIDA
 OPENAI_BASE_URL=http://localhost:8080 your-agent
@@ -65,7 +65,7 @@ backend: "https://api.portkey.ai"
 # Point ELIDA at Portkey
 docker run -p 8080:8080 -p 9090:9090 \
   -e ELIDA_BACKEND=https://api.portkey.ai \
-  ghcr.io/zamorofthat/elida:latest
+  zamorofthat/elida:latest
 
 # Agent talks to ELIDA, which proxies through Portkey
 OPENAI_BASE_URL=http://localhost:8080 your-agent

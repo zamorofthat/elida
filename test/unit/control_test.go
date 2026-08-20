@@ -33,16 +33,23 @@ func TestHandler_Health(t *testing.T) {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
 
-	var health control.HealthResponse
+	var health map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if health.Status != "ok" {
-		t.Errorf("expected status 'ok', got %s", health.Status)
+	if status, ok := health["status"]; !ok || status != "ok" {
+		t.Errorf("expected status 'ok', got %v", status)
 	}
-	if health.Version != "0.2.1" {
-		t.Errorf("expected version '0.2.1', got %s", health.Version)
+	if _, ok := health["timestamp"]; !ok {
+		t.Errorf("expected timestamp in health response")
+	}
+	// Verify sensitive fields are not exposed
+	if _, ok := health["version"]; ok {
+		t.Errorf("version should not be exposed in unauthenticated health response")
+	}
+	if _, ok := health["capture_mode"]; ok {
+		t.Errorf("capture_mode should not be exposed in unauthenticated health response")
 	}
 }
 
@@ -368,13 +375,22 @@ func newTestHandlerWithAuth(apiKey string) *control.Handler { //nolint:unparam /
 func TestHandler_Auth_Unauthorized(t *testing.T) {
 	handler := newTestHandlerWithAuth("secret-key-123")
 
-	// Request without auth header should return 401
+	// /control/health is exempt from auth (Feedback #5)
 	req := httptest.NewRequest("GET", "/control/health", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
+	if w.Code != http.StatusOK {
+		t.Errorf("expected /control/health exempt from auth (200), got %d", w.Code)
+	}
+
+	// Other endpoints require auth
+	req = httptest.NewRequest("GET", "/control/stats", nil)
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected status 401, got %d", w.Code)
+		t.Errorf("expected /control/stats to require auth (401), got %d", w.Code)
 	}
 
 	// Check WWW-Authenticate header
@@ -386,8 +402,8 @@ func TestHandler_Auth_Unauthorized(t *testing.T) {
 func TestHandler_Auth_WrongKey(t *testing.T) {
 	handler := newTestHandlerWithAuth("secret-key-123")
 
-	// Request with wrong key should return 401
-	req := httptest.NewRequest("GET", "/control/health", nil)
+	// Request with wrong key should return 401 on protected endpoints
+	req := httptest.NewRequest("GET", "/control/stats", nil)
 	req.Header.Set("Authorization", "Bearer wrong-key")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -442,9 +458,8 @@ func TestHandler_Auth_DashboardNoAuth(t *testing.T) {
 func TestHandler_Auth_AllControlEndpoints(t *testing.T) {
 	handler := newTestHandlerWithAuth("secret-key-123")
 
-	// All /control/* endpoints should require auth
-	endpoints := []string{
-		"/control/health",
+	// All /control/* endpoints except /control/health require auth
+	protectedEndpoints := []string{
 		"/control/stats",
 		"/control/sessions",
 		"/control/sessions/test-123",
@@ -453,7 +468,7 @@ func TestHandler_Auth_AllControlEndpoints(t *testing.T) {
 		"/control/voice",
 	}
 
-	for _, ep := range endpoints {
+	for _, ep := range protectedEndpoints {
 		req := httptest.NewRequest("GET", ep, nil)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
@@ -461,6 +476,15 @@ func TestHandler_Auth_AllControlEndpoints(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s: expected status 401 without auth, got %d", ep, w.Code)
 		}
+	}
+
+	// /control/health is exempt from auth (Feedback #5: health probes can't carry credentials)
+	req := httptest.NewRequest("GET", "/control/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("/control/health: expected status 200 without auth, got %d", w.Code)
 	}
 }
 
