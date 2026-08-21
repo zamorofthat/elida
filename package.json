@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "ws": "^8.19.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "semantic-release": "^25.0.0",
