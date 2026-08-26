@@ -312,7 +312,11 @@ func (a *app) initSessionEndCallback() {
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
-		a.scoreFingerprint(&snap)
+		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
+			record.FingerprintDistance = distance
+			record.FingerprintBucket = bucket
+			record.FingerprintClass = class
+		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
 	})
@@ -387,9 +391,9 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 	}
 }
 
-func (a *app) scoreFingerprint(snap *session.Session) {
+func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket, class string, scored bool) {
 	if a.fingerprinter == nil {
-		return
+		return 0, "", "", false
 	}
 
 	// Always ingest to update baselines
@@ -398,45 +402,47 @@ func (a *app) scoreFingerprint(snap *session.Session) {
 	}
 
 	// Score (computed even in shadow mode; enforcement below is gated on IsShadow)
-	distance, bucket, features, err := a.fingerprinter.Score(snap)
+	dist, bkt, features, err := a.fingerprinter.Score(snap)
 	if err != nil {
 		slog.Error("fingerprint scoring failed", "session_id", snap.ID, "error", err)
-		return
+		return 0, "", "", false
 	}
 
-	if bucket == fingerprint.BucketWarmUp {
-		return // not enough data yet
+	if bkt == fingerprint.BucketWarmUp {
+		return 0, "", "", false // not enough data yet
 	}
 
-	class := fingerprint.SessionClass(snap)
+	cls := fingerprint.SessionClass(snap)
 
 	slog.Info("fingerprint score",
 		"session_id", snap.ID,
-		"class", class,
-		"distance", distance,
-		"bucket", bucket,
+		"class", cls,
+		"distance", dist,
+		"bucket", bkt,
 		"shadow", a.fingerprinter.IsShadow(),
 	)
 
 	if a.fingerprinter.IsShadow() {
-		return // shadow: score is logged (and persisted in Task 3) but never enforced
+		return dist, bkt, cls, true // shadow: score is persisted but never enforced
 	}
 
 	// Add risk points for notable+ scores
-	riskPoints := fingerprint.BucketRiskPoints(bucket)
+	riskPoints := fingerprint.BucketRiskPoints(bkt)
 	if riskPoints > 0 && a.policyEngine != nil {
 		a.policyEngine.AddExternalRiskPoints(snap.ID, riskPoints, "m3-lite")
 	}
 
 	// Emit OCSF 2004 for notable+ scores
-	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor {
+	if bkt != fingerprint.BucketNormal && bkt != fingerprint.BucketMinor {
 		if a.ocsfEmitter != nil {
-			finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
+			finding := telemetry.BuildAnomalyDetection(snap.ID, dist, bkt, cls)
 			finding.Unmapped.Backend = snap.Backend
 			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
 		}
 		_ = features // available for future dashboard integration
 	}
+
+	return dist, bkt, cls, true
 }
 
 func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) *storage.SDRIntegrity {
