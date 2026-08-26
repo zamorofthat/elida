@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { apiFetch } from '../apiFetch'
 import { formatBytes, formatDuration, formatDurationStr, truncateId } from '../utils'
-import { StateBadge, SeverityBadge } from './shared/Badge'
+import { StateBadge, SeverityBadge, FingerprintBadge } from './shared/Badge'
 import { IconX } from './shared/Icons'
 import { SessionTurns } from './SessionTurns'
 
@@ -514,7 +514,16 @@ export function SessionDetailModal({ session, onClose, onKill }) {
 
           {/* Behavioral Fingerprint */}
           {behavior && behavior.features && behavior.features.length > 0 && (
-            <Section title="Behavior" defaultOpen={false} badge={behavior.class}>
+            <Section
+              title="Behavior"
+              defaultOpen={false}
+              badge={
+                <>
+                  {behavior.class}
+                  <FingerprintBadge bucket={s.fingerprint_bucket} distance={s.fingerprint_distance} />
+                </>
+              }
+            >
               <div class="behavior-container">
                 <BehaviorRadar features={behavior.features} />
                 <div class="behavior-features">
