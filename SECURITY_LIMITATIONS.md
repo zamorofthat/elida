@@ -59,3 +59,54 @@ Running ELIDA introduces its own failure modes. Plan for them.
 - **SQLite is single-writer.** Session Detail Records persist to SQLite, which serializes writes. At high session churn this becomes a bottleneck. For horizontal scale, put the **session store on Redis** (`ELIDA_SESSION_STORE=redis`); SQLite remains fine for the audit log on a single node.
 - **The instruction-scan queue can drop under load.** Instruction files are persisted via a bounded async queue. When the queue is full, ELIDA logs a warning and drops the persistence job — the inline scan still ran, but that first-seen record may not land. Size the queue for your peak or accept occasional gaps in the instruction audit trail.
 - **Fail-open vs fail-closed.** Decide explicitly what happens when ELIDA is down or overloaded. If agents fail *open* (reach the model directly), an outage is a security gap; if they fail *closed* (blocked), an outage is an availability incident. The network topology you choose in [Compensating Controls](#5-compensating-controls) decides this.
+
+---
+
+## 5. Compensating Controls
+
+ELIDA is one layer. It is strongest as part of a defense-in-depth stack. Run these alongside it:
+
+- **Model-level safety.** Provider guardrails (Anthropic, OpenAI safety systems) catch semantic attacks ELIDA's regex cannot. ELIDA does not replace them; it adds a control point *you* own and can kill.
+- **Network segmentation / egress control.** The single most important control: ensure agents can *only* reach the model API through ELIDA. Lock down egress so there is no direct path to `api.anthropic.com` / `api.openai.com`. Without this, "not using the proxy" (§3) is a trivial bypass.
+- **Least-privilege tool access.** Scope what tools an agent can call (MCP allowlists, restricted shells). ELIDA's tool thresholds are a backstop, not the primary boundary.
+- **Code review of instruction files.** Treat `CLAUDE.md`, `.cursorrules`, and agent system prompts as code. ELIDA tracks *changes* to them; human review decides whether a change is legitimate.
+- **Identity layer.** ELIDA knows *what* an agent did, not *who* it is. Pair it with an identity-aware layer (e.g. Tailscale Aperture) so a Session Detail Record carries a real principal. See [docs/integrations.md](docs/integrations.md).
+- **SIEM correlation.** Export ELIDA's structured violations via OTLP (`telemetry.capture_content: flagged`) to your SIEM and correlate across signals. A single flagged request is weak evidence; a flagged request plus an anomalous egress plus an off-hours identity is strong.
+
+---
+
+## 6. Performance Notes
+
+The figures below are **indicative measurements, not guarantees**. They depend on hardware, payload size, backend latency, and the active preset. Reproduce them in your own environment with:
+
+```bash
+./scripts/benchmark.sh --overhead     # direct vs proxied, chunked vs buffered
+./scripts/benchmark.sh --dry-run      # print the exact commands without running them
+```
+
+| Path | Indicative added latency | Why |
+|---|---|---|
+| **Chunked streaming** (default) | ~2 ms | Incremental scan as chunks arrive; no full-response hold. |
+| **Buffered streaming** (`block` response rules) | ~100 ms | Full response is held, scanned, then delivered. The cost buys pre-delivery blocking. |
+| **Redaction per write** | ~0.5 ms | Regex `DefaultPatterns()` applied to the body before persistence/export. |
+| **Instruction hash lookup** | O(1) | In-memory map read under `RLock`; a known file adds no scan cost. |
+
+Notes:
+- **Direct (non-streaming) requests** add the least overhead — a single scan pass. **Blocked** requests are *faster* than allowed ones: ELIDA rejects before making the backend call.
+- Numbers scale with body size. A 4 KB prompt and a 400 KB context are not the same scan.
+- The benchmark's `--overhead` mode measures ELIDA against a direct-to-backend baseline so you can attribute latency to the proxy rather than the model.
+
+---
+
+## 7. Roadmap
+
+Known gaps we intend to close (see [docs/](docs/) and the project roadmap for status):
+
+- **Active token throttling.** Turning the `throttle` rung of the risk ladder into live token-rate shaping, not just log/flag/block.
+- **Cross-session correlation.** Detecting attacks and actor patterns that only emerge across many sessions, beyond today's per-session counters.
+- **Identity integration.** First-class Aperture/Tailscale identity on every Session Detail Record, closing the "what, not who" gap in §5.
+- **Full-audit content to telemetry.** Ensuring capture-all body content flows to OTEL exports, not only policy-flagged captures.
+
+---
+
+*Security is a moving target. This document reflects known limitations as of the current release and will be updated as bypasses are found and controls are added. Responsible disclosure: see [SECURITY.md](SECURITY.md).*
