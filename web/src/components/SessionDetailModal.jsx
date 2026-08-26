@@ -375,6 +375,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
             {currentAction && currentAction !== 'observe' && (
               <span class="detail-action-badge">{currentAction}</span>
             )}
+            <FingerprintBadge bucket={s.fingerprint_bucket} distance={s.fingerprint_distance} />
           </div>
           <div class="detail-header-right">
             {s.state === 'active' && onKill && (
