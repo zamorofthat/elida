@@ -792,6 +792,76 @@ func TestScorer_IsShadow(t *testing.T) {
 	}
 }
 
+func TestScorer_BaselineInfos(t *testing.T) {
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 10}
+	scorer, err := fingerprint.NewM3LiteScorer(store, false, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	// Class backend-a: below warm-up threshold
+	for i := 0; i < 5; i++ {
+		snap := buildRealisticSession(t, "backend-a", "", i, false)
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	// Class backend-b: above warm-up threshold
+	for i := 0; i < 12; i++ {
+		snap := buildRealisticSession(t, "backend-b", "", i, false)
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	// Ingest also rolls each session up into a "global" baseline (ParentClass),
+	// so we expect 3 baselines total: backend-a, backend-b, global.
+	infos := scorer.BaselineInfos()
+	if len(infos) != 3 {
+		t.Fatalf("expected 3 baselines, got %d", len(infos))
+	}
+
+	// Sorted by Class: "backend-a" < "backend-b" < "global"
+	if infos[0].Class != "backend-a" {
+		t.Errorf("expected first class backend-a, got %s", infos[0].Class)
+	}
+	if infos[0].Count != 5 {
+		t.Errorf("expected count 5 for backend-a, got %d", infos[0].Count)
+	}
+	if infos[0].Warm {
+		t.Error("expected backend-a to not be warm (5 < warmup 10)")
+	}
+
+	if infos[1].Class != "backend-b" {
+		t.Errorf("expected second class backend-b, got %s", infos[1].Class)
+	}
+	if infos[1].Count != 12 {
+		t.Errorf("expected count 12 for backend-b, got %d", infos[1].Count)
+	}
+	if !infos[1].Warm {
+		t.Error("expected backend-b to be warm (12 >= warmup 10)")
+	}
+
+	if infos[2].Class != "global" {
+		t.Errorf("expected third class global, got %s", infos[2].Class)
+	}
+	if infos[2].Count != 17 {
+		t.Errorf("expected count 17 for global, got %d", infos[2].Count)
+	}
+	if !infos[2].Warm {
+		t.Error("expected global to be warm (17 >= warmup 10)")
+	}
+
+	for _, info := range infos {
+		if info.UpdatedAt.IsZero() {
+			t.Errorf("expected non-zero UpdatedAt for class %s", info.Class)
+		}
+	}
+}
+
 func TestScorer_FlushRetryOnError(t *testing.T) {
 	store := newFailingStore(1) // fail first save, succeed after
 	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 10}

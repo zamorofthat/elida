@@ -21,6 +21,13 @@ import (
 	"elida/internal/websocket"
 )
 
+// FingerprintProvider exposes baseline warm-up status for the control API,
+// decoupling it from the concrete *fingerprint.M3LiteScorer type.
+type FingerprintProvider interface {
+	BaselineInfos() []fingerprint.BaselineInfo
+	IsShadow() bool
+}
+
 // Handler handles control API requests
 type Handler struct {
 	store         session.Store
@@ -30,6 +37,7 @@ type Handler struct {
 	wsHandler     *websocket.Handler
 	dashboard     *dashboard.Handler
 	settingsStore *config.SettingsStore
+	fingerprinter FingerprintProvider
 	mux           *http.ServeMux
 
 	// Authentication
@@ -128,6 +136,9 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	h.mux.HandleFunc("/control/instructions", h.handleInstructionFiles)
 	h.mux.HandleFunc("/control/instructions/{hash}", h.handleInstructionFile)
 
+	// Fingerprint baseline visibility
+	h.mux.HandleFunc("/control/fingerprint/baselines", h.handleFingerprintBaselines)
+
 	return h
 }
 
@@ -144,6 +155,11 @@ func (h *Handler) SetCaptureMode(mode string) {
 // SetSettingsStore sets the settings store for the handler
 func (h *Handler) SetSettingsStore(store *config.SettingsStore) {
 	h.settingsStore = store
+}
+
+// SetFingerprinter sets the fingerprint provider used to report baseline warm-up status.
+func (h *Handler) SetFingerprinter(fp FingerprintProvider) {
+	h.fingerprinter = fp
 }
 
 // reloadPolicyEngine applies current settings to the policy engine without restart
@@ -671,6 +687,27 @@ func (h *Handler) getSessionBehavior(w http.ResponseWriter, id string) {
 		"session_id": id,
 		"class":      fingerprint.SessionClass(&snap),
 		"features":   features,
+	})
+}
+
+// handleFingerprintBaselines handles GET /control/fingerprint/baselines
+// Returns warm-up status for each fingerprint baseline class.
+func (h *Handler) handleFingerprintBaselines(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.fingerprinter == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "fingerprinting disabled",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"shadow":    h.fingerprinter.IsShadow(),
+		"baselines": h.fingerprinter.BaselineInfos(),
 	})
 }
 

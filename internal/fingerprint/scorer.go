@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -226,6 +227,36 @@ func (s *M3LiteScorer) Close() error {
 // IsShadow returns whether the scorer is in shadow mode.
 func (s *M3LiteScorer) IsShadow() bool {
 	return s.shadow
+}
+
+// BaselineInfo summarizes a baseline's warm-up status for external visibility.
+type BaselineInfo struct {
+	Class     string    `json:"class"`
+	Count     int       `json:"count"`
+	Warm      bool      `json:"warm"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BaselineInfos returns a snapshot of all baselines' warm-up status, sorted by Class.
+func (s *M3LiteScorer) BaselineInfos() []BaselineInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	infos := make([]BaselineInfo, 0, len(s.baselines))
+	for class, b := range s.baselines {
+		infos = append(infos, BaselineInfo{
+			Class:     class,
+			Count:     b.GetCount(),
+			Warm:      b.IsWarm(),
+			UpdatedAt: b.UpdatedAt,
+		})
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].Class < infos[j].Class
+	})
+
+	return infos
 }
 
 // bucketFor maps a Mahalanobis distance to a risk bucket using the scorer's

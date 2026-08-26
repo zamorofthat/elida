@@ -885,6 +885,9 @@ func (a *app) initControlAPI() {
 	if a.cfg.Storage.Enabled {
 		a.controlHandler.SetCaptureMode(a.cfg.Storage.CaptureMode)
 	}
+	if a.fingerprinter != nil {
+		a.controlHandler.SetFingerprinter(a.fingerprinter)
+	}
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
