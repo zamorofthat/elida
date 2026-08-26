@@ -108,7 +108,7 @@ type SessionRecord struct {
 	Violations      []Violation       `json:"violations,omitempty"`
 	Integrity       *SDRIntegrity     `json:"integrity,omitempty"`
 
-	FingerprintDistance float64 `json:"fingerprint_distance,omitempty"`
+	FingerprintDistance float64 `json:"fingerprint_distance"`
 	FingerprintBucket   string  `json:"fingerprint_bucket,omitempty"`
 	FingerprintClass    string  `json:"fingerprint_class,omitempty"`
 }
