@@ -24,9 +24,9 @@ export function FingerprintBadge({ bucket, distance }) {
     <span
       class="fingerprint-badge"
       style={{ color: FINGERPRINT_BUCKET_COLORS[bucket] || FINGERPRINT_BUCKET_COLORS.normal }}
-      title={distance ? `Mahalanobis distance ${distance.toFixed(2)}` : bucket}
+      title={distance != null ? `Mahalanobis distance ${distance.toFixed(2)}` : bucket}
     >
-      {bucket}{distance ? ` ${distance.toFixed(1)}` : ''}
+      {bucket}{distance != null ? ` ${distance.toFixed(1)}` : ''}
     </span>
   )
 }
