@@ -408,6 +408,9 @@ func TestBaseline_Winsorization(t *testing.T) {
 // --- Scorer Tests ---
 
 func TestScorer_ShadowMode(t *testing.T) {
+	// Shadow mode no longer short-circuits Score: a cold baseline still
+	// reports warm_up (the ordinary warm-up path), and IsShadow() reflects
+	// the mode so callers can gate enforcement themselves.
 	store := newMemoryStore()
 	cfg := fingerprint.DefaultBaselineConfig()
 	scorer, err := fingerprint.NewM3LiteScorer(store, true, cfg)
@@ -415,6 +418,10 @@ func TestScorer_ShadowMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer scorer.Close()
+
+	if !scorer.IsShadow() {
+		t.Error("expected IsShadow() = true")
+	}
 
 	sess := session.NewSession("test-1", "http://backend", "127.0.0.1")
 	snap := sess.Snapshot()
@@ -424,13 +431,13 @@ func TestScorer_ShadowMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if distance != 0 {
-		t.Errorf("shadow mode distance = %f, want 0", distance)
+		t.Errorf("cold baseline distance = %f, want 0", distance)
 	}
 	if bucket != fingerprint.BucketWarmUp {
-		t.Errorf("shadow mode bucket = %q, want %q", bucket, fingerprint.BucketWarmUp)
+		t.Errorf("cold baseline bucket = %q, want %q", bucket, fingerprint.BucketWarmUp)
 	}
 	if features != nil {
-		t.Error("shadow mode should return nil features")
+		t.Error("cold baseline should return nil features")
 	}
 }
 
@@ -460,6 +467,39 @@ func TestScorer_WarmUpSentinel(t *testing.T) {
 	}
 	if bucket != fingerprint.BucketWarmUp {
 		t.Errorf("under warm-up bucket = %q, want %q", bucket, fingerprint.BucketWarmUp)
+	}
+}
+
+func TestScorer_ShadowModeComputesScore(t *testing.T) {
+	// Same arrangement as TestScorer_WarmUpSentinel, but shadow=true and
+	// the baseline warmed past cfg.WarmUp before scoring.
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 5}
+	scorer, err := fingerprint.NewM3LiteScorer(store, true /* shadow */, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	for i := 0; i < 10; i++ {
+		sess := makeTestSession(t, i)
+		snap := sess.Snapshot()
+		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	sess := makeTestSession(t, 3)
+	snap := sess.Snapshot()
+	distance, bucket, features, err := scorer.Score(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucket == fingerprint.BucketWarmUp {
+		t.Fatalf("shadow mode must compute a real bucket once warm, got %q", bucket)
+	}
+	if distance <= 0 || features == nil {
+		t.Fatalf("expected real distance and feature contributions, got d=%v features=%v", distance, features)
 	}
 }
 

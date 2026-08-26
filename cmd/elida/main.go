@@ -391,7 +391,7 @@ func (a *app) scoreFingerprint(snap *session.Session) {
 		slog.Error("fingerprint ingest failed", "session_id", snap.ID, "error", err)
 	}
 
-	// Score (returns immediately in shadow mode)
+	// Score (computed even in shadow mode; enforcement below is gated on IsShadow)
 	distance, bucket, features, err := a.fingerprinter.Score(snap)
 	if err != nil {
 		slog.Error("fingerprint scoring failed", "session_id", snap.ID, "error", err)
@@ -399,7 +399,7 @@ func (a *app) scoreFingerprint(snap *session.Session) {
 	}
 
 	if bucket == fingerprint.BucketWarmUp {
-		return // not enough data or shadow mode
+		return // not enough data yet
 	}
 
 	class := fingerprint.SessionClass(snap)
@@ -409,7 +409,12 @@ func (a *app) scoreFingerprint(snap *session.Session) {
 		"class", class,
 		"distance", distance,
 		"bucket", bucket,
+		"shadow", a.fingerprinter.IsShadow(),
 	)
+
+	if a.fingerprinter.IsShadow() {
+		return // shadow: score is logged (and persisted in Task 3) but never enforced
+	}
 
 	// Add risk points for notable+ scores
 	riskPoints := fingerprint.BucketRiskPoints(bucket)

@@ -78,12 +78,9 @@ func NewM3LiteScorerWithFlush(store BaselineStore, shadow bool, cfg BaselineConf
 }
 
 // Score computes the Mahalanobis distance for a session.
-// In shadow mode, returns immediately without scoring.
+// Shadow mode still computes a real score; callers decide whether to
+// enforce it (see M3LiteScorer.IsShadow).
 func (s *M3LiteScorer) Score(snap *session.Session) (float64, string, map[string]float64, error) {
-	if s.shadow {
-		return 0, BucketWarmUp, nil, nil
-	}
-
 	fv := Extract(snap)
 	class := SessionClass(snap)
 
