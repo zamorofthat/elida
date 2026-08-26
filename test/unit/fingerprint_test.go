@@ -503,6 +503,39 @@ func TestScorer_ShadowModeComputesScore(t *testing.T) {
 	}
 }
 
+func TestScorer_ConfigurableThresholds(t *testing.T) {
+	// Same arrangement as TestScorer_ShadowModeComputesScore, but with
+	// absurdly low thresholds so any real distance lands in severe.
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{
+		NEff: 50, RidgeLambda: 1e-6, WarmUp: 5,
+		Thresholds: fingerprint.Thresholds{Minor: 0.1, Notable: 0.2, Anomalous: 0.3, Severe: 0.4},
+	}
+	scorer, err := fingerprint.NewM3LiteScorer(store, false, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	for i := 0; i < 10; i++ {
+		sess := makeTestSession(t, i)
+		snap := sess.Snapshot()
+		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	sess := makeTestSession(t, 3)
+	snap := sess.Snapshot()
+	_, bucket, _, err := scorer.Score(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucket != fingerprint.BucketSevere {
+		t.Fatalf("with severe threshold 0.4 every real distance should bucket severe, got %q", bucket)
+	}
+}
+
 func TestScorer_NormalSession(t *testing.T) {
 	store := newMemoryStore()
 	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 10}

@@ -389,12 +389,22 @@ type OCSFSyslogConfig struct {
 
 // FingerprintConfig holds behavioral fingerprint configuration
 type FingerprintConfig struct {
-	Enabled       bool          `yaml:"enabled"`        // Enable behavioral fingerprinting (default: false)
-	Shadow        bool          `yaml:"shadow"`         // Shadow mode: ingest only, no scoring (default: true)
-	NEff          int           `yaml:"n_eff"`          // EWMA effective window size (default: 900)
-	RidgeLambda   float64       `yaml:"ridge_lambda"`   // Ridge regularization parameter (default: 1e-6)
-	WarmUp        int           `yaml:"warm_up"`        // Min sessions before scoring (default: 100)
-	FlushInterval time.Duration `yaml:"flush_interval"` // How often to persist dirty baselines (default: 5m)
+	Enabled       bool                  `yaml:"enabled"`        // Enable behavioral fingerprinting (default: false)
+	Shadow        bool                  `yaml:"shadow"`         // Shadow mode: ingest only, no scoring (default: true)
+	NEff          int                   `yaml:"n_eff"`          // EWMA effective window size (default: 900)
+	RidgeLambda   float64               `yaml:"ridge_lambda"`   // Ridge regularization parameter (default: 1e-6)
+	WarmUp        int                   `yaml:"warm_up"`        // Min sessions before scoring (default: 100)
+	FlushInterval time.Duration         `yaml:"flush_interval"` // How often to persist dirty baselines (default: 5m)
+	Thresholds    FingerprintThresholds `yaml:"thresholds"`     // Score bucket thresholds (default: 3.3/4.1/5.0/6.0)
+}
+
+// FingerprintThresholds holds the bucket boundaries for the fingerprint
+// anomaly score (sqrt of Mahalanobis D²). The zero value means "use defaults".
+type FingerprintThresholds struct {
+	Minor     float64 `yaml:"minor"`
+	Notable   float64 `yaml:"notable"`
+	Anomalous float64 `yaml:"anomalous"`
+	Severe    float64 `yaml:"severe"`
 }
 
 // FailoverConfig holds failover configuration
@@ -563,6 +573,12 @@ func defaults() *Config {
 			RidgeLambda:   1e-6,
 			WarmUp:        100,
 			FlushInterval: 5 * time.Minute,
+			Thresholds: FingerprintThresholds{
+				Minor:     3.3,
+				Notable:   4.1,
+				Anomalous: 5.0,
+				Severe:    6.0,
+			},
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -1012,6 +1028,25 @@ func (c *Config) Validate() *ValidationResult {
 			Message: fmt.Sprintf("%q is invalid", c.Storage.CaptureMode),
 			Hint:    "must be \"all\" or \"flagged_only\"",
 		})
+	}
+
+	// Fingerprint score bucket thresholds: zero value means "use defaults";
+	// otherwise all four must be positive and strictly increasing.
+	if ft := c.Fingerprint.Thresholds; ft != (FingerprintThresholds{}) {
+		if ft.Minor <= 0 || ft.Notable <= 0 || ft.Anomalous <= 0 || ft.Severe <= 0 {
+			errors = append(errors, ValidationError{
+				Field:   "fingerprint.thresholds",
+				Message: "minor, notable, anomalous, and severe must all be positive when set",
+				Hint:    "omit the thresholds block to use the defaults",
+			})
+		} else if !(ft.Minor < ft.Notable && ft.Notable < ft.Anomalous && ft.Anomalous < ft.Severe) {
+			errors = append(errors, ValidationError{
+				Field: "fingerprint.thresholds",
+				Message: fmt.Sprintf("thresholds must be strictly increasing, got minor=%v notable=%v anomalous=%v severe=%v",
+					ft.Minor, ft.Notable, ft.Anomalous, ft.Severe),
+				Hint: "minor < notable < anomalous < severe",
+			})
+		}
 	}
 
 	// Policy config

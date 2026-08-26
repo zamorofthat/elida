@@ -62,6 +62,10 @@ func NewM3LiteScorer(store BaselineStore, shadow bool, cfg BaselineConfig) (*M3L
 
 // NewM3LiteScorerWithFlush creates a new M3-lite anomaly scorer with a custom flush interval.
 func NewM3LiteScorerWithFlush(store BaselineStore, shadow bool, cfg BaselineConfig, flushInterval time.Duration) (*M3LiteScorer, error) {
+	if cfg.Thresholds == (Thresholds{}) {
+		cfg.Thresholds = DefaultThresholds()
+	}
+
 	baselines, err := store.Load(cfg)
 	if err != nil {
 		slog.Warn("failed to load baselines, starting fresh", "error", err)
@@ -108,7 +112,7 @@ func (s *M3LiteScorer) scoreAgainstBaseline(class string, fv FeatureVector) (*Ba
 	for c := class; c != ""; c = ParentClass(c) {
 		if b, ok := s.baselines[c]; ok && b.IsWarm() {
 			distance, contributions := s.computeDistance(b, fv)
-			bucket := distanceToBucket(distance)
+			bucket := s.bucketFor(distance)
 			return b, distance, bucket, contributions
 		}
 	}
@@ -224,16 +228,18 @@ func (s *M3LiteScorer) IsShadow() bool {
 	return s.shadow
 }
 
-// distanceToBucket maps a Mahalanobis distance to a risk bucket.
-func distanceToBucket(d float64) string {
+// bucketFor maps a Mahalanobis distance to a risk bucket using the scorer's
+// configured thresholds.
+func (s *M3LiteScorer) bucketFor(d float64) string {
+	t := s.cfg.Thresholds
 	switch {
-	case d >= ThresholdSevere:
+	case d >= t.Severe:
 		return BucketSevere
-	case d >= ThresholdAnomalous:
+	case d >= t.Anomalous:
 		return BucketAnomalous
-	case d >= ThresholdNotable:
+	case d >= t.Notable:
 		return BucketNotable
-	case d >= ThresholdMinor:
+	case d >= t.Minor:
 		return BucketMinor
 	default:
 		return BucketNormal

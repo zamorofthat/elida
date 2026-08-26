@@ -254,6 +254,12 @@ func (a *app) initFingerprint() {
 		NEff:        a.cfg.Fingerprint.NEff,
 		RidgeLambda: a.cfg.Fingerprint.RidgeLambda,
 		WarmUp:      a.cfg.Fingerprint.WarmUp,
+		Thresholds: fingerprint.Thresholds{
+			Minor:     a.cfg.Fingerprint.Thresholds.Minor,
+			Notable:   a.cfg.Fingerprint.Thresholds.Notable,
+			Anomalous: a.cfg.Fingerprint.Thresholds.Anomalous,
+			Severe:    a.cfg.Fingerprint.Thresholds.Severe,
+		},
 	}
 
 	store, err := fingerprint.NewSQLiteBaselineStore(a.sqliteStore.DB())
