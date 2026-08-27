@@ -28,6 +28,22 @@ NC='\033[0m'
 PROXY_URL="${ELIDA_PROXY_URL:-http://localhost:8080}"
 CONTROL_URL="${ELIDA_CONTROL_URL:-http://localhost:9090}"
 
+# Direct-to-backend baseline URL for --overhead (bypasses ELIDA).
+# Defaults to ELIDA_BACKEND if set, else a placeholder the user must override.
+DIRECT_URL="${ELIDA_BACKEND:-http://localhost:9999}"
+
+# Dry-run: when 1, run_cmd prints commands instead of executing them.
+DRY_RUN=0
+
+# run_cmd echoes a command in dry-run mode, otherwise executes it.
+run_cmd() {
+    if [ "$DRY_RUN" = "1" ]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} $*"
+    else
+        eval "$@"
+    fi
+}
+
 # Cross-platform milliseconds (macOS date doesn't support %N)
 get_ms() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -519,6 +535,74 @@ compare_modes() {
     start_elida "audit"
 }
 
+# Proxy overhead: direct-to-backend baseline vs through-ELIDA, and chunked vs buffered.
+benchmark_overhead() {
+    print_header "Proxy Overhead (direct vs proxied)"
+
+    local payload='{"model": "test", "messages": [{"role": "user", "content": "benchmark overhead probe"}], "stream": true}'
+    local duration="10s"
+    local conns=10
+    local threads=2
+
+    echo "Baseline (direct):  ${DIRECT_URL}"
+    echo "Proxied (ELIDA):    ${PROXY_URL}"
+    echo "Load: ${threads} threads, ${conns} connections, ${duration}"
+    echo ""
+    if [ "$DIRECT_URL" = "http://localhost:9999" ]; then
+        echo -e "  ${YELLOW}Note:${NC} set ELIDA_BACKEND to your real backend URL for a meaningful direct baseline."
+    fi
+    echo ""
+
+    if command -v wrk &> /dev/null; then
+        echo "Tool: wrk"
+        echo ""
+        echo "-- Direct baseline --"
+        run_cmd "wrk -t${threads} -c${conns} -d${duration} --latency '${DIRECT_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (chunked, default) --"
+        run_cmd "wrk -t${threads} -c${conns} -d${duration} --latency '${PROXY_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (buffered) --"
+        echo "  Restart ELIDA with ELIDA_POLICY_STREAMING_MODE=buffered and a response block rule, then:"
+        run_cmd "wrk -t${threads} -c${conns} -d${duration} --latency '${PROXY_URL}/v1/chat/completions'"
+    elif command -v hey &> /dev/null; then
+        echo "Tool: hey"
+        echo ""
+        echo "-- Direct baseline --"
+        run_cmd "hey -z ${duration} -c ${conns} -m POST -T 'application/json' -d '${payload}' '${DIRECT_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (chunked, default) --"
+        run_cmd "hey -z ${duration} -c ${conns} -m POST -T 'application/json' -d '${payload}' '${PROXY_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (buffered) --"
+        echo "  Restart ELIDA with ELIDA_POLICY_STREAMING_MODE=buffered and a response block rule, then re-run against the proxy."
+    else
+        echo -e "  ${YELLOW}Neither 'wrk' nor 'hey' found — falling back to a curl latency loop.${NC}"
+        echo "  Install wrk (brew install wrk) or hey (go install github.com/rakyll/hey@latest) for distribution stats."
+        echo ""
+        local iterations=30
+        for label in "Direct baseline:${DIRECT_URL}" "Through ELIDA:${PROXY_URL}"; do
+            local name="${label%%:*}"
+            local url="${label#*:}"
+            local total_ms=0
+            local start_ms end_ms
+            for i in $(seq 1 $iterations); do
+                start_ms=$(get_ms)
+                run_cmd "curl -s -X POST '${url}/v1/chat/completions' -H 'Content-Type: application/json' -H 'X-Session-ID: overhead-${i}' -d '${payload}' > /dev/null 2>&1 || true"
+                end_ms=$(get_ms)
+                total_ms=$((total_ms + (end_ms - start_ms)))
+            done
+            if [ "$DRY_RUN" != "1" ]; then
+                print_metric "${name} avg latency (${iterations} req)" "$((total_ms / iterations))" "" "ms"
+            fi
+        done
+    fi
+
+    echo ""
+    echo "Interpretation: proxied-minus-direct is ELIDA's added latency."
+    echo "Expected: ~2ms for chunked streaming, ~100ms for buffered (holds full response)."
+}
+
 # Summary
 print_summary() {
     print_header "Benchmark Summary"
@@ -542,9 +626,22 @@ print_summary() {
 
 # Main
 main() {
-    check_elida
+    # Consume a leading --dry-run flag (may precede the mode).
+    if [ "${1:-}" = "--dry-run" ]; then
+        DRY_RUN=1
+        shift
+        echo -e "${YELLOW}Dry-run mode: printing commands without executing.${NC}"
+    fi
+
+    # In dry-run we don't require ELIDA to be running.
+    if [ "$DRY_RUN" != "1" ]; then
+        check_elida
+    fi
 
     case "${1:-all}" in
+        --overhead)
+            benchmark_overhead
+            ;;
         --memory)
             benchmark_memory
             ;;
@@ -572,7 +669,12 @@ main() {
             echo "  --sessions       Session creation throughput"
             echo "  --policy         Policy evaluation overhead"
             echo "  --compare-modes  Compare no-policy vs audit vs enforce modes"
+            echo "  --overhead       Direct-vs-proxied overhead (wrk/hey, chunked vs buffered)"
             echo "  --help, -h       Show this help"
+            echo ""
+            echo "Global flag:"
+            echo "  --dry-run        Print commands without executing (works with no ELIDA running)"
+            echo "                   e.g. ./scripts/benchmark.sh --dry-run --overhead"
             ;;
         all|*)
             benchmark_memory
