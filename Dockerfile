@@ -1,5 +1,5 @@
 # Build stage - Dashboard
-FROM oven/bun:1.3.14-alpine AS dashboard-builder
+FROM oven/bun:1.4.0-alpine AS dashboard-builder
 
 WORKDIR /app/web
 COPY web/package.json web/bun.lock ./
@@ -8,7 +8,7 @@ COPY web/ ./
 RUN bun run build
 
 # Build stage - Go binary
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 
