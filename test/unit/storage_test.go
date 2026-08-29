@@ -71,6 +71,67 @@ func TestSQLiteStore_SaveAndGet(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_SaveAndGet_FingerprintFields(t *testing.T) {
+	// Create temp database
+	tmpFile, err := os.CreateTemp("", "elida-test-*.db")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	store, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	// Create test record
+	record := storage.SessionRecord{
+		ID:                  "test-session-1",
+		State:               "completed",
+		StartTime:           time.Now().Add(-10 * time.Minute),
+		EndTime:             time.Now(),
+		DurationMs:          600000,
+		RequestCount:        5,
+		BytesIn:             1024,
+		BytesOut:            2048,
+		Backend:             "http://localhost:11434",
+		ClientAddr:          "127.0.0.1:12345",
+		Metadata:            map[string]string{"key": "value"},
+		FingerprintDistance: 4.2,
+		FingerprintBucket:   "notable",
+		FingerprintClass:    "anthropic/claude-opus",
+	}
+
+	// Save
+	err = store.SaveSession(record)
+	if err != nil {
+		t.Fatalf("failed to save session: %v", err)
+	}
+
+	// Get
+	retrieved, err := store.GetSession("test-session-1")
+	if err != nil {
+		t.Fatalf("failed to get session: %v", err)
+	}
+
+	if retrieved == nil {
+		t.Fatal("retrieved session is nil")
+		return
+	}
+
+	if retrieved.FingerprintDistance != record.FingerprintDistance {
+		t.Errorf("expected fingerprint distance %v, got %v", record.FingerprintDistance, retrieved.FingerprintDistance)
+	}
+	if retrieved.FingerprintBucket != record.FingerprintBucket {
+		t.Errorf("expected fingerprint bucket %s, got %s", record.FingerprintBucket, retrieved.FingerprintBucket)
+	}
+	if retrieved.FingerprintClass != record.FingerprintClass {
+		t.Errorf("expected fingerprint class %s, got %s", record.FingerprintClass, retrieved.FingerprintClass)
+	}
+}
+
 func TestSQLiteStore_ListSessions(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "elida-test-*.db")
 	if err != nil {
