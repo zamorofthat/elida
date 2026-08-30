@@ -3,6 +3,8 @@
 // Verdict that feeds the policy risk-ladder. The panel informs; it never enforces.
 package panel
 
+import "elida/internal/session"
+
 // TurnFeature is one per-turn record; the Trajectory slot stays empty until a
 // trajectory member exists (Phase 2).
 type TurnFeature struct {
@@ -17,7 +19,15 @@ type SessionFeatures struct {
 	Aggregate  []float64
 	Trajectory []TurnFeature
 	Class      string
+
+	// snap carries the raw session snapshot for members (like M3-lite) that
+	// still score against *session.Session directly rather than Aggregate.
+	// Populated by a later task's SessionFeatures constructor.
+	snap *session.Session
 }
+
+// snapshot returns the raw session snapshot and whether one is set.
+func (f SessionFeatures) snapshot() (*session.Session, bool) { return f.snap, f.snap != nil }
 
 // MemberOpinion is one detector's judgement. A member emits an anomaly score,
 // a class, or both. Veto floors the panel RiskScore to 1.0.
