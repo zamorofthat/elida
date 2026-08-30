@@ -340,7 +340,7 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		otellog.String("gen_ai.conversation.id", sessionID),
 		otellog.String("gen_ai.provider.name", providerName),
 		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", model),
+		otellog.String("gen_ai.request.model", modelOrUnknown(model)),
 		// ELIDA-specific
 		otellog.String("elida.violation.rule", v.RuleName),
 		otellog.String("elida.violation.severity", v.Severity),
@@ -368,7 +368,7 @@ func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, 
 		otellog.String("gen_ai.conversation.id", sessionID),
 		otellog.String("gen_ai.provider.name", backend),
 		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", model),
+		otellog.String("gen_ai.request.model", modelOrUnknown(model)),
 		otellog.String("elida.session.state", "killed"),
 		otellog.String("elida.session.kill_reason", reason),
 		otellog.Int64("elida.duration.ms", durationMs),
@@ -390,7 +390,7 @@ func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matche
 			otellog.String("gen_ai.conversation.id", sessionID),
 			otellog.String("gen_ai.provider.name", backend),
 			otellog.String("gen_ai.operation.name", "chat"),
-			otellog.String("gen_ai.request.model", model),
+			otellog.String("gen_ai.request.model", modelOrUnknown(model)),
 			otellog.String("elida.violation.rule", ruleName),
 			otellog.String("elida.violation.matched_text", truncateBody(p.redact(matchedText), 200)),
 			otellog.String("elida.violation.action", "block"),
@@ -440,6 +440,20 @@ func (p *Provider) ShouldCaptureFlagged() bool {
 	return mode == "flagged" || mode == "all"
 }
 
+// unknownModel is the fallback stamped on gen_ai.request.model when the model
+// is unknown (e.g. a request that omitted it, or a path that never captured it).
+// Per the OTel GenAI semconv the attribute should be present; emitting an empty
+// string pollutes dashboards with an empty-string series.
+const unknownModel = "unknown"
+
+// modelOrUnknown returns model, or unknownModel when model is empty.
+func modelOrUnknown(model string) string {
+	if model == "" {
+		return unknownModel
+	}
+	return model
+}
+
 func (p *Provider) emitContentRecord(ctx context.Context, sessionID, requestBody, responseBody, model, providerName string, flagged bool) {
 	maxSize := p.config.MaxBodySize
 	if maxSize == 0 {
@@ -461,7 +475,7 @@ func (p *Provider) emitContentRecord(ctx context.Context, sessionID, requestBody
 		otellog.String("gen_ai.conversation.id", sessionID),
 		otellog.String("gen_ai.provider.name", providerName),
 		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", model),
+		otellog.String("gen_ai.request.model", modelOrUnknown(model)),
 		otellog.String("elida.capture.request_body", truncateBody(p.redactBody(requestBody), maxSize)),
 		otellog.String("elida.capture.response_body", truncateBody(p.redactBody(responseBody), maxSize)),
 		otellog.Bool("elida.capture.flagged", flagged),
@@ -480,7 +494,7 @@ func (p *Provider) RecordTokenUsage(ctx context.Context, inputTokens, outputToke
 	}
 
 	commonAttrs := []attribute.KeyValue{
-		attribute.String("gen_ai.request.model", model),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
 		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.operation.name", "chat"),
 	}
@@ -502,7 +516,7 @@ func (p *Provider) RecordOperationDuration(ctx context.Context, durationSec floa
 	}
 
 	attrs := []attribute.KeyValue{
-		attribute.String("gen_ai.request.model", model),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
 		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.operation.name", "chat"),
 	}
