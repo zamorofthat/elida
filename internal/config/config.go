@@ -1037,7 +1037,7 @@ func (c *Config) Validate() *ValidationResult {
 	// only when storage is enabled with capture_mode="all". Any other combination
 	// silently emits empty content. Non-fatal (the deployment is still valid) —
 	// warn so the operator can reconcile the two keys.
-	if c.Telemetry.CaptureContent == "all" && !(c.Storage.Enabled && c.Storage.CaptureMode == "all") {
+	if c.Telemetry.CaptureContent == "all" && (!c.Storage.Enabled || c.Storage.CaptureMode != "all") {
 		warnings = append(warnings, ValidationError{
 			Field:   "telemetry.capture_content",
 			Message: "\"all\" emits captured content, but storage.capture_mode is not \"all\" (or storage is disabled), so no content is buffered to emit",

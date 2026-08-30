@@ -18,7 +18,7 @@ func TestValidate_CaptureContentAllWithoutCaptureModeAll_Warns(t *testing.T) {
 
 	res := c.Validate()
 
-	if !hasWarning(res, "capture_content") {
+	if !hasCaptureContentWarning(res) {
 		t.Fatalf("expected a coherence warning for capture_content=all + capture_mode=flagged_only; warnings=%v", res.Warnings)
 	}
 }
@@ -31,7 +31,7 @@ func TestValidate_CaptureContentAllWithStorageDisabled_Warns(t *testing.T) {
 
 	res := c.Validate()
 
-	if !hasWarning(res, "capture_content") {
+	if !hasCaptureContentWarning(res) {
 		t.Fatalf("expected a coherence warning when storage is disabled; warnings=%v", res.Warnings)
 	}
 }
@@ -45,7 +45,7 @@ func TestValidate_CaptureContentAllWithCaptureModeAll_NoWarn(t *testing.T) {
 
 	res := c.Validate()
 
-	if hasWarning(res, "capture_content") {
+	if hasCaptureContentWarning(res) {
 		t.Errorf("did not expect a coherence warning when coherent; warnings=%v", res.Warnings)
 	}
 }
@@ -59,14 +59,14 @@ func TestValidate_CaptureContentNone_NoWarn(t *testing.T) {
 
 	res := c.Validate()
 
-	if hasWarning(res, "capture_content") {
+	if hasCaptureContentWarning(res) {
 		t.Errorf("did not expect a coherence warning for capture_content=none; warnings=%v", res.Warnings)
 	}
 }
 
-func hasWarning(res *ValidationResult, fieldSubstr string) bool {
+func hasCaptureContentWarning(res *ValidationResult) bool {
 	for _, w := range res.Warnings {
-		if strings.Contains(w.Field, fieldSubstr) {
+		if strings.Contains(w.Field, "capture_content") {
 			return true
 		}
 	}
