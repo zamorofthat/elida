@@ -170,3 +170,61 @@ func TestExportSessionRecordCapturedEventsUseJSONAwareRedaction(t *testing.T) {
 		}
 	}
 }
+
+// T13: gen_ai.request.model must never be emitted as an empty string. A request
+// that omits the model or is streamed can reach the emit path with model == "";
+// emitting "" pollutes GenAI dashboards with an empty-string series. An empty
+// model must fall back to a non-empty sentinel.
+func TestEmitContentRecord_EmptyModelFallsBackToUnknown(t *testing.T) {
+	fl := &fakeLogger{}
+	p := &Provider{
+		config: Config{Enabled: true, CaptureContent: "all", MaxBodySize: 4096},
+		logger: fl,
+	}
+	p.SetRedactor(redaction.NewPatternRedactor())
+
+	p.EmitCapturedContentLog(context.Background(), "sess-1", "{}", "{}", "", "anthropic")
+
+	if len(fl.records) != 1 {
+		t.Fatalf("expected 1 emitted log record, got %d", len(fl.records))
+	}
+	got := attrString(fl.records[0], "gen_ai.request.model")
+	if got == "" {
+		t.Fatal("gen_ai.request.model was emitted empty; expected a non-empty fallback")
+	}
+	if got != "unknown" {
+		t.Errorf("gen_ai.request.model = %q, want %q", got, "unknown")
+	}
+}
+
+// A known model must pass through unchanged — the sentinel only replaces empty.
+func TestEmitContentRecord_KnownModelPassesThrough(t *testing.T) {
+	fl := &fakeLogger{}
+	p := &Provider{
+		config: Config{Enabled: true, CaptureContent: "all", MaxBodySize: 4096},
+		logger: fl,
+	}
+	p.SetRedactor(redaction.NewPatternRedactor())
+
+	p.EmitCapturedContentLog(context.Background(), "sess-1", "{}", "{}", "claude-3", "anthropic")
+
+	if got := attrString(fl.records[0], "gen_ai.request.model"); got != "claude-3" {
+		t.Errorf("gen_ai.request.model = %q, want %q", got, "claude-3")
+	}
+}
+
+// The empty-model fallback must apply at every emit site, not just the content
+// log — here the session-killed log, which stamps gen_ai.request.model too.
+func TestEmitSessionKilledLog_EmptyModelFallsBackToUnknown(t *testing.T) {
+	fl := &fakeLogger{}
+	p := &Provider{config: Config{Enabled: true}, logger: fl}
+
+	p.EmitSessionKilledLog(context.Background(), "sess-1", "manual", "anthropic", "", 100, 3)
+
+	if len(fl.records) != 1 {
+		t.Fatalf("expected 1 emitted log record, got %d", len(fl.records))
+	}
+	if got := attrString(fl.records[0], "gen_ai.request.model"); got != "unknown" {
+		t.Errorf("gen_ai.request.model = %q, want %q", got, "unknown")
+	}
+}
