@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"elida/internal/fingerprint"
 	"elida/internal/instruction"
 	"elida/internal/instructionstore"
+	"elida/internal/panel"
 	"elida/internal/policy"
 	"elida/internal/proxy"
 	"elida/internal/redaction"
@@ -53,6 +55,7 @@ type app struct {
 	policyEngine        *policy.Engine
 	instructionRegistry *instruction.Registry
 	fingerprinter       *fingerprint.M3LiteScorer
+	panel               *panel.Panel
 	tp                  *telemetry.Provider
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
@@ -121,6 +124,7 @@ func main() {
 	a.initSQLiteStorage()
 	a.initRedactor()
 	a.initFingerprint()
+	a.initPanel()
 	a.initSessionEndCallback()
 	a.initOCSF()
 	a.initTelemetry()
@@ -282,6 +286,17 @@ func (a *app) initFingerprint() {
 	)
 }
 
+// initPanel seats the M3-lite scorer as the (currently sole) live member of
+// the behavioral panel. Phase 1: panel-of-one, weight 1.0, not shadowed —
+// this reproduces today's fingerprint scoring exactly (see scoreFingerprint).
+func (a *app) initPanel() {
+	if a.fingerprinter == nil {
+		return
+	}
+	a.panel = panel.NewPanel()
+	a.panel.Seat(panel.NewM3LiteMember(a.fingerprinter), false, 1.0)
+}
+
 func (a *app) initSessionEndCallback() {
 	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil {
 		return
@@ -391,58 +406,70 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 	}
 }
 
+// scoreFingerprint routes session scoring through the behavioral panel.
+// Phase 1 seats only the M3-lite member, so this reconstructs exactly the
+// outputs the pre-panel implementation computed directly from
+// a.fingerprinter: same warm-up no-op, same shadow persist-without-enforce,
+// same risk points ("m3-lite" source label, unchanged for Phase 1), same
+// OCSF emit condition.
 func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket, class string, scored bool) {
-	if a.fingerprinter == nil {
+	if a.panel == nil {
 		return 0, "", "", false
 	}
 
-	// Always ingest to update baselines
+	// Always ingest to update baselines (unchanged).
 	if err := a.fingerprinter.Ingest(snap); err != nil {
 		slog.Error("fingerprint ingest failed", "session_id", snap.ID, "error", err)
 	}
 
-	// Score (computed even in shadow mode; enforcement below is gated on IsShadow)
-	dist, bkt, features, err := a.fingerprinter.Score(snap)
-	if err != nil {
-		slog.Error("fingerprint scoring failed", "session_id", snap.ID, "error", err)
-		return 0, "", "", false
+	v := a.panel.Assess(panel.BuildFeatures(snap))
+
+	// Find the M3-lite member's opinion (panel-of-one today).
+	var op *panel.MemberOpinion
+	for i := range v.Members {
+		if v.Members[i].Member == "m3-lite" {
+			op = &v.Members[i]
+		}
+	}
+	if op == nil || op.Detail == nil {
+		return 0, "", "", false // warm-up: not enough data yet (unchanged)
 	}
 
-	if bkt == fingerprint.BucketWarmUp {
-		return 0, "", "", false // not enough data yet
-	}
+	bucket, _ = op.Detail["bucket"].(string)
+	distance, _ = op.Detail["distance"].(float64)
+	shadow, _ := op.Detail["shadow"].(bool)
 
-	cls := fingerprint.SessionClass(snap)
+	class = v.Class // "" today; M3-lite doesn't set Class, so this falls through
+	if class == "" {
+		class = fingerprint.SessionClass(snap)
+	}
 
 	slog.Info("fingerprint score",
 		"session_id", snap.ID,
-		"class", cls,
-		"distance", dist,
-		"bucket", bkt,
-		"shadow", a.fingerprinter.IsShadow(),
+		"class", class,
+		"distance", distance,
+		"bucket", bucket,
+		"shadow", shadow,
 	)
 
-	if a.fingerprinter.IsShadow() {
-		return dist, bkt, cls, true // shadow: score is persisted but never enforced
+	if shadow {
+		return distance, bucket, class, true // shadow: score is persisted but never enforced
 	}
 
 	// Add risk points for notable+ scores
-	riskPoints := fingerprint.BucketRiskPoints(bkt)
-	if riskPoints > 0 && a.policyEngine != nil {
-		a.policyEngine.AddExternalRiskPoints(snap.ID, riskPoints, "m3-lite")
+	points := int(math.Round(v.RiskScore * float64(fingerprint.RiskNotable)))
+	if points > 0 && a.policyEngine != nil {
+		a.policyEngine.AddExternalRiskPoints(snap.ID, points, "m3-lite")
 	}
 
 	// Emit OCSF 2004 for notable+ scores
-	if bkt != fingerprint.BucketNormal && bkt != fingerprint.BucketMinor {
-		if a.ocsfEmitter != nil {
-			finding := telemetry.BuildAnomalyDetection(snap.ID, dist, bkt, cls)
-			finding.Unmapped.Backend = snap.Backend
-			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
-		}
-		_ = features // available for future dashboard integration
+	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor && a.ocsfEmitter != nil {
+		finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
+		finding.Unmapped.Backend = snap.Backend
+		a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
 	}
 
-	return dist, bkt, cls, true
+	return distance, bucket, class, true
 }
 
 func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) *storage.SDRIntegrity {
