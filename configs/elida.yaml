@@ -157,6 +157,13 @@ fingerprint:
   # How often to persist dirty baselines to SQLite (default 5m)
   # Protects against data loss on crash — at most flush_interval of updates lost
   flush_interval: 5m
+  # Score bucket thresholds (sqrt of Mahalanobis D²). Defaults are chi²-derived
+  # starting points — replace with empirical values after shadow-mode calibration.
+  # thresholds:
+  #   minor: 3.3
+  #   notable: 4.1
+  #   anomalous: 5.0
+  #   severe: 6.0
 
 # Storage configuration (for dashboard history)
 storage:

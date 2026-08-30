@@ -144,20 +144,28 @@ func TestFingerprintIntegration_FullPipeline(t *testing.T) {
 	}
 	defer shadowScorer.Close()
 
+	// Shadow mode computes a real score from the warm baselines loaded above;
+	// only enforcement (by callers, via IsShadow) is skipped, not scoring.
 	shadowDist, shadowBucket, shadowFeatures, err := shadowScorer.Score(normalSnap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shadowDist != 0 || shadowBucket != fingerprint.BucketWarmUp || shadowFeatures != nil {
-		t.Errorf("shadow mode should return 0/warm_up/nil, got %.2f/%s/%v",
+	if shadowBucket == fingerprint.BucketWarmUp {
+		t.Error("shadow mode should compute a real bucket from warm baselines, got warm_up")
+	}
+	if shadowDist <= 0 || shadowFeatures == nil {
+		t.Errorf("shadow mode should return a real distance and features, got %.2f/%s/%v",
 			shadowDist, shadowBucket, shadowFeatures)
 	}
+	if !shadowScorer.IsShadow() {
+		t.Error("expected IsShadow() = true")
+	}
 
-	// But ingest should still work
+	// Ingest should still work
 	if ingestErr := shadowScorer.Ingest(normalSnap); ingestErr != nil {
 		t.Fatal(ingestErr)
 	}
-	t.Log("  Shadow mode: ingest OK, scoring skipped as expected")
+	t.Log("  Shadow mode: ingest OK, real score computed, enforcement left to caller")
 
 	t.Log("All phases passed.")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -62,6 +63,10 @@ func NewM3LiteScorer(store BaselineStore, shadow bool, cfg BaselineConfig) (*M3L
 
 // NewM3LiteScorerWithFlush creates a new M3-lite anomaly scorer with a custom flush interval.
 func NewM3LiteScorerWithFlush(store BaselineStore, shadow bool, cfg BaselineConfig, flushInterval time.Duration) (*M3LiteScorer, error) {
+	if cfg.Thresholds == (Thresholds{}) {
+		cfg.Thresholds = DefaultThresholds()
+	}
+
 	baselines, err := store.Load(cfg)
 	if err != nil {
 		slog.Warn("failed to load baselines, starting fresh", "error", err)
@@ -78,12 +83,9 @@ func NewM3LiteScorerWithFlush(store BaselineStore, shadow bool, cfg BaselineConf
 }
 
 // Score computes the Mahalanobis distance for a session.
-// In shadow mode, returns immediately without scoring.
+// Shadow mode still computes a real score; callers decide whether to
+// enforce it (see M3LiteScorer.IsShadow).
 func (s *M3LiteScorer) Score(snap *session.Session) (float64, string, map[string]float64, error) {
-	if s.shadow {
-		return 0, BucketWarmUp, nil, nil
-	}
-
 	fv := Extract(snap)
 	class := SessionClass(snap)
 
@@ -111,7 +113,7 @@ func (s *M3LiteScorer) scoreAgainstBaseline(class string, fv FeatureVector) (*Ba
 	for c := class; c != ""; c = ParentClass(c) {
 		if b, ok := s.baselines[c]; ok && b.IsWarm() {
 			distance, contributions := s.computeDistance(b, fv)
-			bucket := distanceToBucket(distance)
+			bucket := s.bucketFor(distance)
 			return b, distance, bucket, contributions
 		}
 	}
@@ -227,16 +229,48 @@ func (s *M3LiteScorer) IsShadow() bool {
 	return s.shadow
 }
 
-// distanceToBucket maps a Mahalanobis distance to a risk bucket.
-func distanceToBucket(d float64) string {
+// BaselineInfo summarizes a baseline's warm-up status for external visibility.
+type BaselineInfo struct {
+	Class     string    `json:"class"`
+	Count     int       `json:"count"`
+	Warm      bool      `json:"warm"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BaselineInfos returns a snapshot of all baselines' warm-up status, sorted by Class.
+func (s *M3LiteScorer) BaselineInfos() []BaselineInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	infos := make([]BaselineInfo, 0, len(s.baselines))
+	for class, b := range s.baselines {
+		infos = append(infos, BaselineInfo{
+			Class:     class,
+			Count:     b.GetCount(),
+			Warm:      b.IsWarm(),
+			UpdatedAt: b.UpdatedAt,
+		})
+	}
+
+	sort.Slice(infos, func(i, j int) bool {
+		return infos[i].Class < infos[j].Class
+	})
+
+	return infos
+}
+
+// bucketFor maps a Mahalanobis distance to a risk bucket using the scorer's
+// configured thresholds.
+func (s *M3LiteScorer) bucketFor(d float64) string {
+	t := s.cfg.Thresholds
 	switch {
-	case d >= ThresholdSevere:
+	case d >= t.Severe:
 		return BucketSevere
-	case d >= ThresholdAnomalous:
+	case d >= t.Anomalous:
 		return BucketAnomalous
-	case d >= ThresholdNotable:
+	case d >= t.Notable:
 		return BucketNotable
-	case d >= ThresholdMinor:
+	case d >= t.Minor:
 		return BucketMinor
 	default:
 		return BucketNormal
