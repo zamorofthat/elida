@@ -15,6 +15,7 @@ import (
 	"elida/internal/config"
 	"elida/internal/dashboard"
 	"elida/internal/fingerprint"
+	"elida/internal/panel"
 	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
@@ -28,6 +29,11 @@ type FingerprintProvider interface {
 	IsShadow() bool
 }
 
+// PanelProvider exposes the seated behavioral panel members for the control API.
+type PanelProvider interface {
+	Members() []panel.MemberInfo
+}
+
 // Handler handles control API requests
 type Handler struct {
 	store         session.Store
@@ -38,6 +44,7 @@ type Handler struct {
 	dashboard     *dashboard.Handler
 	settingsStore *config.SettingsStore
 	fingerprinter FingerprintProvider
+	panelProvider PanelProvider
 	mux           *http.ServeMux
 
 	// Authentication
@@ -139,6 +146,9 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	// Fingerprint baseline visibility
 	h.mux.HandleFunc("/control/fingerprint/baselines", h.handleFingerprintBaselines)
 
+	// Behavioral panel roster (read-only)
+	h.mux.HandleFunc("/control/panel", h.handlePanel)
+
 	return h
 }
 
@@ -160,6 +170,11 @@ func (h *Handler) SetSettingsStore(store *config.SettingsStore) {
 // SetFingerprinter sets the fingerprint provider used to report baseline warm-up status.
 func (h *Handler) SetFingerprinter(fp FingerprintProvider) {
 	h.fingerprinter = fp
+}
+
+// SetPanel sets the panel provider used to report the seated behavioral panel roster.
+func (h *Handler) SetPanel(p PanelProvider) {
+	h.panelProvider = p
 }
 
 // reloadPolicyEngine applies current settings to the policy engine without restart
@@ -709,6 +724,37 @@ func (h *Handler) handleFingerprintBaselines(w http.ResponseWriter, r *http.Requ
 		"shadow":    h.fingerprinter.IsShadow(),
 		"baselines": h.fingerprinter.BaselineInfos(),
 	})
+}
+
+// panelMemberOut is the JSON shape for one panel member in the
+// GET /control/panel response.
+type panelMemberOut struct {
+	Name    string  `json:"name"`
+	Version string  `json:"version"`
+	Shadow  bool    `json:"shadow"`
+	Weight  float64 `json:"weight"`
+}
+
+// handlePanel handles GET /control/panel
+// Returns the read-only roster of seated behavioral panel members.
+func (h *Handler) handlePanel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.panelProvider == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"members": []panelMemberOut{}})
+		return
+	}
+
+	members := h.panelProvider.Members()
+	out := make([]panelMemberOut, 0, len(members))
+	for _, m := range members {
+		out = append(out, panelMemberOut{Name: m.Name, Version: m.Version, Shadow: m.Shadow, Weight: m.Weight})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"members": out})
 }
 
 // getSessionRiskCurve handles GET /control/sessions/{id}/risk-curve

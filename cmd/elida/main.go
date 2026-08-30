@@ -915,6 +915,9 @@ func (a *app) initControlAPI() {
 	if a.fingerprinter != nil {
 		a.controlHandler.SetFingerprinter(a.fingerprinter)
 	}
+	if a.panel != nil {
+		a.controlHandler.SetPanel(a.panel)
+	}
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
