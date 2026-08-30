@@ -1,6 +1,11 @@
 package panel
 
-import "testing"
+import (
+	"testing"
+
+	"elida/internal/fingerprint"
+	"elida/internal/session"
+)
 
 type stubMember struct {
 	name string
@@ -52,5 +57,24 @@ func TestPanel_ClassFromHighestConfidenceLiveMember(t *testing.T) {
 	p.Seat(stubMember{"b", MemberOpinion{Member: "b", Class: "attack", Confidence: 0.8}}, false, 1.0)
 	if v := p.Assess(SessionFeatures{}); v.Class != "attack" {
 		t.Fatalf("Class = %q, want attack (highest confidence)", v.Class)
+	}
+}
+
+func TestBuildFeatures_PopulatesAggregateAndClass(t *testing.T) {
+	snap := session.NewSession("sess-x", "backend-a", "127.0.0.1")
+	f := BuildFeatures(snap)
+	if len(f.Aggregate) != fingerprint.NumFeatures {
+		t.Fatalf("Aggregate len = %d, want %d", len(f.Aggregate), fingerprint.NumFeatures)
+	}
+	wantClass := fingerprint.SessionClass(snap)
+	if f.Class != wantClass {
+		t.Fatalf("Class = %q, want %q", f.Class, wantClass)
+	}
+	if f.Trajectory != nil {
+		t.Fatalf("Trajectory = %v, want nil (Phase 1)", f.Trajectory)
+	}
+	got, ok := f.snapshot()
+	if !ok || got != snap {
+		t.Fatalf("snapshot() did not return the source session")
 	}
 }
