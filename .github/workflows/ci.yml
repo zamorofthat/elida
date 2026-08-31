@@ -100,7 +100,7 @@ jobs:
           gosec -exclude=G104,G117,G118,G704,G706 -fmt sarif -out gosec.sarif ./...
 
       - name: Upload gosec SARIF
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -111,13 +111,13 @@ jobs:
           semgrep scan --config p/golang --config p/security-audit --config p/secrets --sarif --output semgrep.sarif
 
       - name: Upload Semgrep SARIF
-        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: semgrep.sarif
           category: semgrep
 
       - name: Run TruffleHog (secrets in git history)
-        uses: trufflesecurity/trufflehog@bcfcf73aaf4759d4dadc2783177c245a02792318 # main
+        uses: trufflesecurity/trufflehog@20652fbbdefffcdaa493a5bf57ab2ac6b1db715b # main
         with:
           extra_args: --only-verified
 
