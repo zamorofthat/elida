@@ -12,11 +12,14 @@ import (
 	"elida/internal/session"
 )
 
+// testControlAPIKey is the API key newTestAPIWithAuth configures.
+const testControlAPIKey = "control-key"
+
 // newTestAPIWithAuth creates a test Handler with auth enabled
-func newTestAPIWithAuth(_ *testing.T, apiKey string) *Handler {
+func newTestAPIWithAuth(_ *testing.T) *Handler {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 30*time.Second)
-	return New(store, manager, WithAuth(apiKey))
+	return New(store, manager, WithAuth(testControlAPIKey))
 }
 
 // TestHealthExemptFromControlAuth verifies that /control/health is accessible
@@ -26,7 +29,7 @@ func newTestAPIWithAuth(_ *testing.T, apiKey string) *Handler {
 // path stays locked. Health response must not disclose version/capture_mode
 // (use authenticated endpoints for that).
 func TestHealthExemptFromControlAuth(t *testing.T) {
-	h := newTestAPIWithAuth(t, "control-key")
+	h := newTestAPIWithAuth(t)
 
 	// Health: no credentials -> 200 with minimal payload.
 	rec := httptest.NewRecorder()
@@ -78,7 +81,7 @@ func (s stubPanel) Members() []panel.MemberInfo { return s.members }
 // TestHandlePanel_RequiresAuth verifies GET /control/panel is auth-gated like
 // every other /control/* endpoint (except /control/health).
 func TestHandlePanel_RequiresAuth(t *testing.T) {
-	h := newTestAPIWithAuth(t, "control-key")
+	h := newTestAPIWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
 	rec := httptest.NewRecorder()
@@ -92,7 +95,7 @@ func TestHandlePanel_RequiresAuth(t *testing.T) {
 // TestHandlePanel_ReturnsMembers verifies GET /control/panel returns the
 // seated panel members as JSON when authenticated.
 func TestHandlePanel_ReturnsMembers(t *testing.T) {
-	h := newTestAPIWithAuth(t, "control-key")
+	h := newTestAPIWithAuth(t)
 	h.SetPanel(stubPanel{members: []panel.MemberInfo{{Name: "m3-lite", Version: "1", Shadow: false, Weight: 1}}})
 
 	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
@@ -123,7 +126,7 @@ func TestHandlePanel_ReturnsMembers(t *testing.T) {
 // TestHandlePanel_NilProviderReturnsEmpty verifies the endpoint degrades
 // gracefully to an empty roster when no panel has been wired in.
 func TestHandlePanel_NilProviderReturnsEmpty(t *testing.T) {
-	h := newTestAPIWithAuth(t, "control-key")
+	h := newTestAPIWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
 	req.Header.Set("Authorization", "Bearer control-key")
@@ -147,7 +150,7 @@ func TestHandlePanel_NilProviderReturnsEmpty(t *testing.T) {
 
 // TestHandlePanel_MethodNotAllowed verifies non-GET requests are rejected.
 func TestHandlePanel_MethodNotAllowed(t *testing.T) {
-	h := newTestAPIWithAuth(t, "control-key")
+	h := newTestAPIWithAuth(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/control/panel", nil)
 	req.Header.Set("Authorization", "Bearer control-key")
