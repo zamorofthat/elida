@@ -898,9 +898,10 @@ func (e ValidationError) String() string {
 
 // ValidationResult holds the result of config validation
 type ValidationResult struct {
-	Valid   bool
-	Errors  []ValidationError
-	Summary ConfigSummary
+	Valid    bool
+	Errors   []ValidationError
+	Warnings []ValidationError // non-fatal advisories (e.g. incoherent-but-valid combos)
+	Summary  ConfigSummary
 }
 
 // ConfigSummary provides a quick overview of the configuration
@@ -939,6 +940,7 @@ func (c *Config) validate() error {
 func (c *Config) Validate() *ValidationResult {
 	result := &ValidationResult{Valid: true}
 	var errors []ValidationError
+	var warnings []ValidationError
 
 	// Required: listen address
 	if c.Listen == "" {
@@ -1027,6 +1029,19 @@ func (c *Config) Validate() *ValidationResult {
 			Field:   "storage.capture_mode",
 			Message: fmt.Sprintf("%q is invalid", c.Storage.CaptureMode),
 			Hint:    "must be \"all\" or \"flagged_only\"",
+		})
+	}
+
+	// Capture-config coherence: telemetry.capture_content="all" emits only the
+	// bodies the proxy buffered, and the buffer is populated for every session
+	// only when storage is enabled with capture_mode="all". Any other combination
+	// silently emits empty content. Non-fatal (the deployment is still valid) —
+	// warn so the operator can reconcile the two keys.
+	if c.Telemetry.CaptureContent == "all" && (!c.Storage.Enabled || c.Storage.CaptureMode != "all") {
+		warnings = append(warnings, ValidationError{
+			Field:   "telemetry.capture_content",
+			Message: "\"all\" emits captured content, but storage.capture_mode is not \"all\" (or storage is disabled), so no content is buffered to emit",
+			Hint:    "set storage.enabled: true and storage.capture_mode: \"all\", or lower telemetry.capture_content",
 		})
 	}
 
@@ -1133,6 +1148,7 @@ func (c *Config) Validate() *ValidationResult {
 
 	// Build result
 	result.Errors = errors
+	result.Warnings = warnings
 	result.Valid = len(errors) == 0
 
 	// Build summary

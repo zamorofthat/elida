@@ -113,6 +113,11 @@ func main() {
 
 	initLogging(cfg)
 
+	// Surface non-fatal config advisories (e.g. capture-config incoherence).
+	for _, w := range cfg.Validate().Warnings {
+		slog.Warn("config advisory", "field", w.Field, "message", w.Message, "hint", w.Hint)
+	}
+
 	slog.Info("starting ELIDA",
 		"version", Version,
 		"listen", cfg.Listen,
@@ -1153,6 +1158,13 @@ func printValidationResult(configPath string, result *config.ValidationResult) {
 			} else {
 				fmt.Fprintf(os.Stderr, "  - %s: %s\n", e.Field, e.Message)
 			}
+		}
+	}
+	for _, w := range result.Warnings {
+		if w.Hint != "" {
+			fmt.Fprintf(os.Stderr, "  ⚠ %s: %s\n    hint: %s\n", w.Field, w.Message, w.Hint)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ⚠ %s: %s\n", w.Field, w.Message)
 		}
 	}
 }
