@@ -71,6 +71,17 @@ type app struct {
 }
 
 func main() {
+	// Subcommands live before the top-level flag set: `elida export-sessions
+	// ...` dispatches to its own flag.FlagSet and exits, rather than going
+	// through the server startup path below.
+	if len(os.Args) > 1 && os.Args[1] == "export-sessions" {
+		if err := runExportSessions(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "export-sessions: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	configPath := flag.String("config", "configs/elida.yaml", "path to config file")
 	listenAddr := flag.String("listen", "", "override listen address (e.g. :8082)")
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
