@@ -311,6 +311,20 @@ func (a *app) initPanel() {
 	}
 	a.panel = panel.NewPanel()
 	a.panel.Seat(panel.NewM3LiteMember(a.fingerprinter), false, 1.0)
+
+	// Phase 2a: shadow-seat the tool-chain member C, if configured. Shadow
+	// members are assessed and reported but never affect RiskScore/Class, so
+	// this is behavior-preserving. Log-and-skip on a bad/missing artifact —
+	// panel seating must never hard-fail startup (spec §8).
+	if p := a.cfg.Panel.ToolChainArtifact; p != "" {
+		art, err := panel.LoadToolChainArtifact(p)
+		if err != nil {
+			slog.Warn("tool-chain artifact not loaded; member not seated", "path", p, "error", err)
+		} else {
+			a.panel.Seat(panel.NewToolChainMember(art), true, 0)
+			slog.Info("panel: tool-chain member seated (shadow)", "version", art.GeneratedBy)
+		}
+	}
 }
 
 func (a *app) initSessionEndCallback() {

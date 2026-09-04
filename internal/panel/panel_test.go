@@ -61,6 +61,27 @@ func TestPanel_ClassFromHighestConfidenceLiveMember(t *testing.T) {
 	}
 }
 
+func TestPanel_ShadowToolChainDoesNotAffectRisk(t *testing.T) {
+	p := NewPanel()
+	// live M3-lite-like member at notable → RiskScore driven by it
+	p.Seat(stubMember{"m3-lite", MemberOpinion{Member: "m3-lite", Anomaly: 1.0}}, false, 1.0)
+	// shadow tool-chain member screaming anomaly
+	p.Seat(NewToolChainMember(loadGolden(t)), true, 0)
+	v := p.Assess(traj("read", "deploy")) // OOV → high tool-chain anomaly
+	if v.RiskScore != 1.0 {
+		t.Fatalf("RiskScore = %v, want 1.0 (shadow tool-chain excluded)", v.RiskScore)
+	}
+	found := false
+	for _, op := range v.Members {
+		if op.Member == "tool-chain" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("shadow tool-chain opinion must still be reported in Members")
+	}
+}
+
 func TestBuildFeatures_PopulatesAggregateAndClass(t *testing.T) {
 	snap := session.NewSession("sess-x", "backend-a", "127.0.0.1")
 	f := BuildFeatures(snap)
