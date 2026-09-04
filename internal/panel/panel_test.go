@@ -2,6 +2,7 @@ package panel
 
 import (
 	"testing"
+	"time"
 
 	"elida/internal/fingerprint"
 	"elida/internal/session"
@@ -76,5 +77,24 @@ func TestBuildFeatures_PopulatesAggregateAndClass(t *testing.T) {
 	got, ok := f.snapshot()
 	if !ok || got != snap {
 		t.Fatalf("snapshot() did not return the source session")
+	}
+}
+
+func TestBuildFeatures_PopulatesTrajectoryFromToolHistory(t *testing.T) {
+	snap := session.NewSession("sess-c", "backend-a", "127.0.0.1")
+	base := time.Now()
+	snap.ToolCallHistory = []session.ToolCallRecord{
+		{ToolName: "read", Timestamp: base},
+		{ToolName: "edit", Timestamp: base.Add(150 * time.Millisecond)},
+	}
+	f := BuildFeatures(snap)
+	if len(f.Trajectory) != 2 {
+		t.Fatalf("Trajectory len = %d, want 2", len(f.Trajectory))
+	}
+	if f.Trajectory[0].Tool != "read" || f.Trajectory[1].Tool != "edit" {
+		t.Fatalf("tools = %q,%q", f.Trajectory[0].Tool, f.Trajectory[1].Tool)
+	}
+	if f.Trajectory[0].DtMs != 0 || f.Trajectory[1].DtMs != 150 {
+		t.Errorf("DtMs = %d,%d, want 0,150", f.Trajectory[0].DtMs, f.Trajectory[1].DtMs)
 	}
 }
