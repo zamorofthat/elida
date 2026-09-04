@@ -8,8 +8,8 @@ import (
 	"elida/internal/session"
 )
 
-// TurnFeature is one per-turn record; the Trajectory slot stays empty until a
-// trajectory member exists (Phase 2).
+// TurnFeature is one per-turn record; Trajectory is populated by
+// BuildFeatures from the session's tool-call history.
 type TurnFeature struct {
 	Tool      string
 	DtMs      int64

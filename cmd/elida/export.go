@@ -82,10 +82,10 @@ func runExportSessions(args []string) error {
 	sinceStr := fs.String("since", "", "only export sessions started at or after this RFC3339 timestamp (e.g. 2026-01-01T00:00:00Z)")
 	outPath := fs.String("out", "", "output jsonl file path (required)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: elida export-sessions --out <path> [--since <RFC3339>] [--config <path>]\n\n")
-		fmt.Fprintf(fs.Output(), "Walks the SQLite history store for ended sessions and writes each\n")
-		fmt.Fprintf(fs.Output(), "session's tool-call trajectory as synthspine agent_turn jsonl records.\n\n")
-		fmt.Fprintf(fs.Output(), "CAVEAT: %s\n\n", orderCaveat)
+		_, _ = fmt.Fprintf(fs.Output(), "Usage: elida export-sessions --out <path> [--since <RFC3339>] [--config <path>]\n\n")
+		_, _ = fmt.Fprintf(fs.Output(), "Walks the SQLite history store for ended sessions and writes each\n")
+		_, _ = fmt.Fprintf(fs.Output(), "session's tool-call trajectory as synthspine agent_turn jsonl records.\n\n")
+		_, _ = fmt.Fprintf(fs.Output(), "CAVEAT: %s\n\n", orderCaveat)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -110,7 +110,8 @@ func runExportSessions(args []string) error {
 
 	var since *time.Time
 	if *sinceStr != "" {
-		t, err := time.Parse(time.RFC3339, *sinceStr)
+		var t time.Time
+		t, err = time.Parse(time.RFC3339, *sinceStr)
 		if err != nil {
 			return fmt.Errorf("invalid --since %q: %w", *sinceStr, err)
 		}
