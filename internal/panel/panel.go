@@ -8,8 +8,8 @@ import (
 	"elida/internal/session"
 )
 
-// TurnFeature is one per-turn record; the Trajectory slot stays empty until a
-// trajectory member exists (Phase 2).
+// TurnFeature is one per-turn record; Trajectory is populated by
+// BuildFeatures from the session's tool-call history.
 type TurnFeature struct {
 	Tool      string
 	DtMs      int64
@@ -33,16 +33,32 @@ type SessionFeatures struct {
 func (f SessionFeatures) snapshot() (*session.Session, bool) { return f.snap, f.snap != nil }
 
 // BuildFeatures projects a session snapshot into the feature contract handed
-// to panel members. Trajectory stays nil until a trajectory member exists
-// (Phase 2).
+// to panel members. Trajectory is built from snap.ToolCallHistory: one
+// TurnFeature per tool call record, with DtMs the elapsed milliseconds since
+// the previous call (0 for the first). TokensIn/TokensOut are left 0 (spec
+// §8) until a later task fills them in.
 func BuildFeatures(snap *session.Session) SessionFeatures {
 	fv := fingerprint.Extract(snap)
 	agg := make([]float64, fingerprint.NumFeatures)
 	copy(agg, fv[:])
+
+	var traj []TurnFeature
+	if len(snap.ToolCallHistory) > 0 {
+		traj = make([]TurnFeature, len(snap.ToolCallHistory))
+		for i, rec := range snap.ToolCallHistory {
+			tf := TurnFeature{Tool: rec.ToolName}
+			if i > 0 {
+				tf.DtMs = rec.Timestamp.Sub(snap.ToolCallHistory[i-1].Timestamp).Milliseconds()
+			}
+			traj[i] = tf
+		}
+	}
+
 	return SessionFeatures{
-		Aggregate: agg,
-		Class:     fingerprint.SessionClass(snap),
-		snap:      snap,
+		Aggregate:  agg,
+		Trajectory: traj,
+		Class:      fingerprint.SessionClass(snap),
+		snap:       snap,
 	}
 }
 

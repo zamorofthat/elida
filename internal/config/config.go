@@ -69,6 +69,7 @@ type Config struct {
 	WebSocket       WebSocketConfig          `yaml:"websocket"`        // WebSocket proxy configuration
 	OCSF            OCSFConfig               `yaml:"ocsf"`             // OCSF native transport configuration
 	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
+	Panel           PanelConfig              `yaml:"panel"`            // Behavioral panel configuration
 	Failover        FailoverConfig           `yaml:"failover"`         // Failover configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
@@ -398,6 +399,14 @@ type FingerprintConfig struct {
 	Thresholds    FingerprintThresholds `yaml:"thresholds"`     // Score bucket thresholds (default: 3.3/4.1/5.0/6.0)
 }
 
+// PanelConfig holds behavioral panel configuration.
+type PanelConfig struct {
+	// ToolChainArtifact is the filesystem path to a tool-chain artifact JSON
+	// file (see internal/panel.LoadToolChainArtifact). Empty (default) means
+	// the tool-chain member is not seated — panel behavior is unchanged.
+	ToolChainArtifact string `yaml:"tool_chain_artifact"`
+}
+
 // FingerprintThresholds holds the bucket boundaries for the fingerprint
 // anomaly score (sqrt of Mahalanobis D²). The zero value means "use defaults".
 type FingerprintThresholds struct {
@@ -579,6 +588,9 @@ func defaults() *Config {
 				Anomalous: 5.0,
 				Severe:    6.0,
 			},
+		},
+		Panel: PanelConfig{
+			ToolChainArtifact: "", // not seated by default (unchanged behavior)
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
