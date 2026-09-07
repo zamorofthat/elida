@@ -1,17 +1,18 @@
 // Package main's `export-sessions` subcommand (this file) implements
 // synthspine seam ① export.
 //
-// CAVEAT — tool ORDER in this export is NOT reliable: the SQLite history
-// store persists only session-end AGGREGATE tool counts per session (one
-// "tool_called" event per distinct tool name, with a CallCount, taken from a
-// Go map — see toolCallHistory below), not per-call ordered history. Cross-
-// tool sequence in the output reflects Go map-iteration order, not real
-// chronology, and repeated calls of the same tool collapse to duration_ms=0.
-// The output is usable for tool VOCABULARY/FREQUENCY but NOT for
-// transition-order fitting (e.g. a tool-Markov-chain fit), pending per-call
-// tool-history persistence (tracked as a separate follow-on; out of scope
-// here — see toolCallHistory's doc comment). This caveat is also surfaced at
-// runtime (runExportSessions) and in --help.
+// FIDELITY — tool order in this export is faithful for sessions ended by a
+// build that persists per-call history: those carry a "tool_sequence" event
+// (storage.ToolSequenceData) with true call order and timestamps, so exported
+// turn order and inter-call durations are exact. Sessions recorded BEFORE
+// per-call persistence existed have no such event and fall back to expanding
+// the session-end AGGREGATE "tool_called" counts (one event per distinct tool
+// name, iterated from a Go map): for those, cross-tool order is
+// nondeterministic and inter-call durations are lost (repeated calls collapse
+// to duration_ms=0) — usable for tool VOCABULARY/FREQUENCY but NOT for
+// transition-order fitting (e.g. a tool-Markov-chain fit). See toolCallHistory
+// for the two sources. This caveat is also surfaced at runtime
+// (runExportSessions) and in --help.
 package main
 
 import (
@@ -29,13 +30,14 @@ import (
 )
 
 // orderCaveat is the standing caveat about tool-sequence fidelity in this
-// export (see the package doc comment above and toolCallHistory below for
-// the root cause). Surfaced in three places: that doc comment, --help/usage
-// text, and a runtime warning on every invocation.
-const orderCaveat = "tool ORDER in this export is NOT reliable: the SQLite store keeps only " +
-	"session-end AGGREGATE tool counts (nondeterministic order), not per-call ordered history. " +
-	"Output is usable for tool VOCABULARY/FREQUENCY but NOT for transition-order fitting, " +
-	"pending per-call tool-history persistence."
+// export (see the package doc comment above and toolCallHistory below for the
+// two sources). Surfaced in three places: that doc comment, --help/usage
+// text, and a runtime note on every invocation.
+const orderCaveat = "tool order is faithful for sessions recorded with per-call history " +
+	"(a 'tool_sequence' event). Sessions recorded before per-call persistence fall back to " +
+	"session-end AGGREGATE tool counts, whose cross-tool order is nondeterministic and whose " +
+	"inter-call durations are lost — usable for tool VOCABULARY/FREQUENCY but NOT for " +
+	"transition-order fitting."
 
 // AgentTurn is a synthspine seam ① projection record: one per tool call in a
 // session's trajectory. See docs/superpowers/specs/2026-09-02-panel-member-c-toolchain-design.md §4.
@@ -85,7 +87,7 @@ func runExportSessions(args []string) error {
 		_, _ = fmt.Fprintf(fs.Output(), "Usage: elida export-sessions --out <path> [--since <RFC3339>] [--config <path>]\n\n")
 		_, _ = fmt.Fprintf(fs.Output(), "Walks the SQLite history store for ended sessions and writes each\n")
 		_, _ = fmt.Fprintf(fs.Output(), "session's tool-call trajectory as synthspine agent_turn jsonl records.\n\n")
-		_, _ = fmt.Fprintf(fs.Output(), "CAVEAT: %s\n\n", orderCaveat)
+		_, _ = fmt.Fprintf(fs.Output(), "NOTE: %s\n\n", orderCaveat)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -97,8 +99,8 @@ func runExportSessions(args []string) error {
 		return fmt.Errorf("--out is required")
 	}
 
-	fmt.Fprintf(os.Stderr, "export-sessions: WARNING: %s\n", orderCaveat)
-	slog.Warn("export-sessions: tool order not reliable in this export", "reason", orderCaveat)
+	fmt.Fprintf(os.Stderr, "export-sessions: NOTE: %s\n", orderCaveat)
+	slog.Info("export-sessions: tool-order fidelity depends on per-call history", "reason", orderCaveat)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -174,25 +176,21 @@ func listEndedSessions(store *storage.SQLiteStore, since *time.Time) ([]storage.
 }
 
 // toolCallHistory reconstructs a session's ordered tool-call history from the
-// persisted event log. See orderCaveat / the package doc comment above:
-// this is the root cause of that caveat.
+// persisted event log, preferring the faithful per-call source when available.
 //
-// NOTE on fidelity: the SQLite history store does not persist individual,
-// per-call ToolCallRecord entries for ended sessions — that detail exists
-// only on the live in-memory session.Session (ToolCallHistory), which is
-// discarded once a session ends and is evicted from session.Manager. The
-// closest surviving signal is the "tool_called" event: recorded once per
-// distinct tool name at session end with an AGGREGATE count, iterated from
-// a Go map (storage.ToolCalledData{ToolName, CallCount}, from
-// sess.GetToolCallCounts()), see cmd/elida/main.go's
-// initSessionEndCallback (~line 497-504). Cross-tool order here is
-// therefore Go map-iteration order, not true chronology. This expands each
-// such event back into CallCount individual records at the event's
-// persisted timestamp, ordered by event id (insertion order) — a stable
-// but NOT reliable turn sequence: tool identity and per-tool frequency are
-// exact, but cross-tool order is arbitrary and inter-call durations are not
-// recoverable from persisted data
-// (repeated calls of the same tool collapse to duration_ms=0).
+//  1. If the session has a "tool_sequence" event (storage.ToolSequenceData),
+//     it carries the true per-call order and timestamps — return it directly.
+//     Sessions ended by a build that persists per-call history (see
+//     persistToSQLite) have this, so their exported turn order and inter-call
+//     durations are exact.
+//  2. Otherwise fall back to expanding the aggregate "tool_called" events
+//     (pre-migration sessions). Each such event records a distinct tool name
+//     with an AGGREGATE count iterated from a Go map, so cross-tool order is
+//     map-iteration order — NOT true chronology — and inter-call durations are
+//     not recoverable (repeated calls collapse to duration_ms=0). Tool
+//     identity and per-tool frequency are still exact. This is the source of
+//     orderCaveat, and now applies only to sessions recorded before per-call
+//     persistence existed.
 func toolCallHistory(store *storage.SQLiteStore, sessionID string) ([]session.ToolCallRecord, error) {
 	events, err := store.GetSessionEvents(sessionID)
 	if err != nil {
@@ -200,6 +198,28 @@ func toolCallHistory(store *storage.SQLiteStore, sessionID string) ([]session.To
 	}
 	sort.Slice(events, func(i, j int) bool { return events[i].ID < events[j].ID })
 
+	// Preferred source: the faithful per-call ordered sequence.
+	for _, evt := range events {
+		if evt.Type != storage.EventToolSequence {
+			continue
+		}
+		var data storage.ToolSequenceData
+		if err := json.Unmarshal(evt.Data, &data); err != nil {
+			continue
+		}
+		history := make([]session.ToolCallRecord, 0, len(data.Calls))
+		for _, c := range data.Calls {
+			history = append(history, session.ToolCallRecord{
+				Timestamp: c.Timestamp,
+				ToolName:  c.ToolName,
+				ToolType:  c.ToolType,
+				RequestID: c.RequestID,
+			})
+		}
+		return history, nil
+	}
+
+	// Fallback: expand aggregate tool_called events (pre-migration sessions).
 	var history []session.ToolCallRecord
 	for _, evt := range events {
 		if evt.Type != storage.EventToolCalled {

@@ -555,6 +555,26 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 		}
 	}
 
+	// Persist the faithful per-call ordered tool trajectory alongside the
+	// aggregate counts above. This preserves true call order and inter-call
+	// timing (the most-recent <=100 calls, per the live ring buffer) for
+	// transition-order consumers such as export-sessions; the aggregate
+	// tool_called events remain for counts/stats/UI.
+	if history := sess.GetToolCallHistory(); len(history) > 0 {
+		calls := make([]storage.ToolCall, len(history))
+		for i, rec := range history {
+			calls[i] = storage.ToolCall{
+				ToolName:  rec.ToolName,
+				ToolType:  rec.ToolType,
+				RequestID: rec.RequestID,
+				Timestamp: rec.Timestamp,
+			}
+		}
+		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventToolSequence, snap.ID, "", storage.ToolSequenceData{Calls: calls}); eventErr != nil {
+			slog.Error("failed to record tool_sequence event", "session_id", snap.ID, "error", eventErr)
+		}
+	}
+
 	integrity, err := a.sqliteStore.ComputeAndStoreSDRIntegrity(eventCtx, snap.ID)
 	if err != nil {
 		slog.Error("failed to compute SDR integrity metadata", "session_id", snap.ID, "error", err)
