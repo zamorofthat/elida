@@ -1,3 +1,5 @@
+
+
 # ELIDA
 
 **Session-aware reverse proxy for AI agents**
@@ -153,6 +155,9 @@ curl http://localhost:8080/v1/chat/completions \
 ## Control API
 
 ```bash
+# Health check
+curl http://localhost:9090/control/health
+
 # List active sessions
 curl http://localhost:9090/control/sessions
 
