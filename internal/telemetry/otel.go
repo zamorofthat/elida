@@ -334,19 +334,19 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 	var rec otellog.Record
 	rec.SetTimestamp(time.Now())
 	rec.SetSeverity(otelSeverity(v.Severity))
-	rec.SetBody(otellog.StringValue("policy violation: " + v.RuleName))
+	rec.SetBody(attribute.StringValue("policy violation: " + v.RuleName))
 	rec.AddAttributes(
 		// GenAI semconv
-		otellog.String("gen_ai.conversation.id", sessionID),
-		otellog.String("gen_ai.provider.name", providerName),
-		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.String("gen_ai.conversation.id", sessionID),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
 		// ELIDA-specific
-		otellog.String("elida.violation.rule", v.RuleName),
-		otellog.String("elida.violation.severity", v.Severity),
-		otellog.String("elida.violation.matched_text", truncateBody(p.redact(v.MatchedText), 200)),
-		otellog.String("elida.violation.action", v.Action),
-		otellog.String("elida.violation.description", v.Description),
+		attribute.String("elida.violation.rule", v.RuleName),
+		attribute.String("elida.violation.severity", v.Severity),
+		attribute.String("elida.violation.matched_text", truncateBody(p.redact(v.MatchedText), 200)),
+		attribute.String("elida.violation.action", v.Action),
+		attribute.String("elida.violation.description", v.Description),
 	)
 
 	// Trace correlation
@@ -363,16 +363,16 @@ func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, 
 	var rec otellog.Record
 	rec.SetTimestamp(time.Now())
 	rec.SetSeverity(otellog.SeverityError)
-	rec.SetBody(otellog.StringValue("session killed: " + reason))
+	rec.SetBody(attribute.StringValue("session killed: " + reason))
 	rec.AddAttributes(
-		otellog.String("gen_ai.conversation.id", sessionID),
-		otellog.String("gen_ai.provider.name", backend),
-		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", modelOrUnknown(model)),
-		otellog.String("elida.session.state", "killed"),
-		otellog.String("elida.session.kill_reason", reason),
-		otellog.Int64("elida.duration.ms", durationMs),
-		otellog.Int("elida.request.count", requestCount),
+		attribute.String("gen_ai.conversation.id", sessionID),
+		attribute.String("gen_ai.provider.name", backend),
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.String("elida.session.state", "killed"),
+		attribute.String("elida.session.kill_reason", reason),
+		attribute.Int64("elida.duration.ms", durationMs),
+		attribute.Int("elida.request.count", requestCount),
 	)
 
 	setTraceContext(&rec, ctx)
@@ -385,15 +385,15 @@ func (p *Provider) EmitBlockLog(ctx context.Context, sessionID, ruleName, matche
 		var rec otellog.Record
 		rec.SetTimestamp(time.Now())
 		rec.SetSeverity(otellog.SeverityWarn)
-		rec.SetBody(otellog.StringValue("request blocked: " + ruleName))
+		rec.SetBody(attribute.StringValue("request blocked: " + ruleName))
 		rec.AddAttributes(
-			otellog.String("gen_ai.conversation.id", sessionID),
-			otellog.String("gen_ai.provider.name", backend),
-			otellog.String("gen_ai.operation.name", "chat"),
-			otellog.String("gen_ai.request.model", modelOrUnknown(model)),
-			otellog.String("elida.violation.rule", ruleName),
-			otellog.String("elida.violation.matched_text", truncateBody(p.redact(matchedText), 200)),
-			otellog.String("elida.violation.action", "block"),
+			attribute.String("gen_ai.conversation.id", sessionID),
+			attribute.String("gen_ai.provider.name", backend),
+			attribute.String("gen_ai.operation.name", "chat"),
+			attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+			attribute.String("elida.violation.rule", ruleName),
+			attribute.String("elida.violation.matched_text", truncateBody(p.redact(matchedText), 200)),
+			attribute.String("elida.violation.action", "block"),
 		)
 
 		setTraceContext(&rec, ctx)
@@ -470,15 +470,15 @@ func (p *Provider) emitContentRecord(ctx context.Context, sessionID, requestBody
 	var rec otellog.Record
 	rec.SetTimestamp(time.Now())
 	rec.SetSeverity(severity)
-	rec.SetBody(otellog.StringValue(body))
+	rec.SetBody(attribute.StringValue(body))
 	rec.AddAttributes(
-		otellog.String("gen_ai.conversation.id", sessionID),
-		otellog.String("gen_ai.provider.name", providerName),
-		otellog.String("gen_ai.operation.name", "chat"),
-		otellog.String("gen_ai.request.model", modelOrUnknown(model)),
-		otellog.String("elida.capture.request_body", truncateBody(p.redactBody(requestBody), maxSize)),
-		otellog.String("elida.capture.response_body", truncateBody(p.redactBody(responseBody), maxSize)),
-		otellog.Bool("elida.capture.flagged", flagged),
+		attribute.String("gen_ai.conversation.id", sessionID),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.String("elida.capture.request_body", truncateBody(p.redactBody(requestBody), maxSize)),
+		attribute.String("elida.capture.response_body", truncateBody(p.redactBody(responseBody), maxSize)),
+		attribute.Bool("elida.capture.flagged", flagged),
 	)
 
 	setTraceContext(&rec, ctx)
@@ -533,10 +533,10 @@ func (p *Provider) RecordOperationDuration(ctx context.Context, durationSec floa
 func setTraceContext(rec *otellog.Record, ctx context.Context) {
 	spanCtx := trace.SpanFromContext(ctx).SpanContext()
 	if spanCtx.HasTraceID() {
-		rec.AddAttributes(otellog.String("trace_id", spanCtx.TraceID().String()))
+		rec.AddAttributes(attribute.String("trace_id", spanCtx.TraceID().String()))
 	}
 	if spanCtx.HasSpanID() {
-		rec.AddAttributes(otellog.String("span_id", spanCtx.SpanID().String()))
+		rec.AddAttributes(attribute.String("span_id", spanCtx.SpanID().String()))
 	}
 }
 
