@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/embedded"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -34,8 +35,8 @@ func (f *fakeLogger) Enabled(_ context.Context, _ otellog.EnabledParameters) boo
 // if absent.
 func attrString(rec otellog.Record, key string) string {
 	var out string
-	rec.WalkAttributes(func(kv otellog.KeyValue) bool {
-		if kv.Key == key {
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		if string(kv.Key) == key {
 			out = kv.Value.AsString()
 			return false
 		}
