@@ -182,6 +182,9 @@ func registry() []transform {
 		{name: TransformHTML, apply: func(s string, _ Budget) (string, []string, bool) {
 			return DecodeHTMLEntities(s)
 		}},
+		{name: TransformUnicodeEsc, apply: func(s string, _ Budget) (string, []string, bool) {
+			return DecodeUnicodeEscapes(s)
+		}},
 	}
 }
 
