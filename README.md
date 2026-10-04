@@ -182,7 +182,7 @@ See the [API Reference](docs/API.md) for all endpoints.
 | [Voice Sessions](docs/VOICE.md) | WebSocket and voice session support |
 | [Deployment](docs/DEPLOYMENT.md) | Deployment strategies |
 | [Enterprise Deployment](docs/ENTERPRISE_DEPLOYMENT.md) | Kubernetes, Helm, fleet management |
-| [Security Controls](docs/SECURITY_CONTROLS.md) | OWASP/NIST mappings for auditors |
+| [Security Controls](docs/security-controls.md) | OWASP/NIST mappings for auditors |
 | [Security Limitations](SECURITY_LIMITATIONS.md) | What ELIDA can't catch, known bypasses, compensating controls |
 | [Docker](docs/DOCKER_README.md) | Docker-specific documentation |
 

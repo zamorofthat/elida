@@ -240,7 +240,7 @@ OPENAI_API_KEY=sk-...
 NEMOTRON_API_KEY=nvapi-...
 ```
 
-See [`.env.example`](../.env.example) for the full list of variables ELIDA reads.
+See [`.env.example`](https://github.com/zamorofthat/elida/blob/main/.env.example) for the full list of variables ELIDA reads.
 
 ## Failover
 
