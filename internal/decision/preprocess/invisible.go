@@ -1,6 +1,9 @@
 package preprocess
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // isZeroWidth reports whether r is a zero-width or otherwise
 // non-rendering formatting character that can split a word without
@@ -8,8 +11,7 @@ import "strings"
 //
 // Ordinary whitespace is deliberately excluded: removing spaces, tabs and
 // newlines would change the text a classifier sees in ways that are not
-// evasion. Non-breaking space is also excluded here because NFKC already
-// folds it to a plain space.
+// evasion.
 func isZeroWidth(r rune) bool {
 	switch r {
 	case '\u00ad', // SOFT HYPHEN
@@ -60,6 +62,15 @@ func isBidiControl(r rune) bool {
 // StripInvisible removes zero-width and bidirectional-control characters and
 // reports which classes were present.
 //
+// Non-breaking space is intentionally left untouched here: NFKC already
+// folds it to a plain space earlier in the pipeline, so treating it as
+// zero-width in this transform too would be redundant.
+//
+// Invalid UTF-8 in s is preserved byte-for-byte rather than replaced with
+// U+FFFD: decoding s to scan it must not corrupt bytes this transform does
+// not otherwise touch, and the untouched fast path below already returns s
+// unchanged, so the changed path has to match that behavior exactly.
+//
 // The signals matter as much as the output: the mere presence of these
 // characters in user content or a tool result is grounds for admitting the
 // message to the inline fast lane, whatever the stripped text then scores.
@@ -82,11 +93,19 @@ func StripInvisible(s string) (string, []string, bool) {
 
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range s {
-		if isZeroWidth(r) || isBidiControl(r) {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// Invalid byte: not decodable, so it cannot be one of the runes
+			// we strip. Keep it exactly as it was.
+			b.WriteByte(s[i])
+			i++
 			continue
 		}
-		b.WriteRune(r)
+		if !isZeroWidth(r) && !isBidiControl(r) {
+			b.WriteRune(r)
+		}
+		i += size
 	}
 
 	// Signal order is fixed so tests and stored evidence are deterministic.

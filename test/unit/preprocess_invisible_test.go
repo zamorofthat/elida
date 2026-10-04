@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"bytes"
 	"testing"
 
 	"elida/internal/decision/preprocess"
@@ -106,6 +107,46 @@ func TestStripInvisible(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStripInvisible_InvalidUTF8 confirms that a byte StripInvisible cannot
+// decode is preserved exactly, whether or not the rest of the input also
+// contains runes that get stripped. The fast path (nothing to strip) already
+// returns s unchanged byte-for-byte; the changed path must match that
+// behavior for bytes it never touches, not replace them with U+FFFD.
+func TestStripInvisible_InvalidUTF8(t *testing.T) {
+	t.Run("invalid byte plus zero width is stripped and the invalid byte is preserved", func(t *testing.T) {
+		in := string([]byte{'a', 0xff, 'b', 0xe2, 0x80, 0x8b, 'c'})
+		want := []byte{'a', 0xff, 'b', 'c'}
+
+		got, signals, changed := preprocess.StripInvisible(in)
+
+		if !bytes.Equal([]byte(got), want) {
+			t.Fatalf("StripInvisible(% x) = % x, want % x", []byte(in), []byte(got), want)
+		}
+		if !changed {
+			t.Fatal("changed = false, want true")
+		}
+		if len(signals) != 1 || signals[0] != preprocess.SignalZeroWidthRemoved {
+			t.Fatalf("signals = %v, want [%s]", signals, preprocess.SignalZeroWidthRemoved)
+		}
+	})
+
+	t.Run("invalid byte alone is untouched", func(t *testing.T) {
+		in := string([]byte{'a', 0xff, 'b'})
+
+		got, signals, changed := preprocess.StripInvisible(in)
+
+		if !bytes.Equal([]byte(got), []byte(in)) {
+			t.Fatalf("StripInvisible(% x) = % x, want byte-identical", []byte(in), []byte(got))
+		}
+		if changed {
+			t.Fatal("changed = true, want false")
+		}
+		if len(signals) != 0 {
+			t.Fatalf("signals = %v, want none", signals)
+		}
+	})
 }
 
 func TestRun_StripInvisibleProducesRepresentationAndSignal(t *testing.T) {
