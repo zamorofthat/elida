@@ -176,6 +176,12 @@ func registry() []transform {
 		{name: TransformSkeleton, apply: func(s string, _ Budget) (string, []string, bool) {
 			return ConfusableSkeleton(s)
 		}},
+		{name: TransformURL, apply: func(s string, _ Budget) (string, []string, bool) {
+			return DecodeURL(s)
+		}},
+		{name: TransformHTML, apply: func(s string, _ Budget) (string, []string, bool) {
+			return DecodeHTMLEntities(s)
+		}},
 	}
 }
 
