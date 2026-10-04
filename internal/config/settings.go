@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,6 +24,7 @@ type Settings struct {
 	Policy   PolicySettings   `json:"policy" yaml:"policy"`
 	Failover FailoverSettings `json:"failover" yaml:"failover"`
 	Capture  CaptureSettings  `json:"capture" yaml:"capture"`
+	Decision DecisionSettings `json:"decision" yaml:"decision"`
 }
 
 // PolicySettings holds policy-related settings
@@ -80,6 +82,117 @@ type CaptureSettings struct {
 	Mode           *string `json:"mode,omitempty" yaml:"mode,omitempty"` // "flagged_only" or "all"
 	MaxCaptureSize *int    `json:"max_capture_size,omitempty" yaml:"max_capture_size,omitempty"`
 	MaxPerSession  *int    `json:"max_per_session,omitempty" yaml:"max_per_session,omitempty"`
+}
+
+// DecisionSettings holds the runtime-editable subset of DecisionConfig.
+//
+// Deliberately absent: enabled, required, require_inline, provider,
+// model_path and endpoint are restart-required (they load model assets,
+// gate startup, or move the network boundary) and live only in elida.yaml;
+// inline_queue_wait is absent because Phase 1 requires it to be zero, so it
+// is read-only and reported at /control/decision. Thresholds themselves are
+// never edited here — threshold_set selects an installed versioned artifact.
+type DecisionSettings struct {
+	Mode              *string                        `json:"mode,omitempty" yaml:"mode,omitempty"`
+	ThresholdSet      *string                        `json:"threshold_set,omitempty" yaml:"threshold_set,omitempty"`
+	ElevatedThreshold *float64                       `json:"elevated_threshold,omitempty" yaml:"elevated_threshold,omitempty"`
+	InlineTimeoutMs   *int                           `json:"inline_timeout_ms,omitempty" yaml:"inline_timeout_ms,omitempty"`
+	MaxConcurrency    *int                           `json:"max_concurrency,omitempty" yaml:"max_concurrency,omitempty"`
+	MaxInlineTokens   *int                           `json:"max_inline_tokens,omitempty" yaml:"max_inline_tokens,omitempty"`
+	MaxInlineWindows  *int                           `json:"max_inline_windows,omitempty" yaml:"max_inline_windows,omitempty"`
+	MaxAsyncWindows   *int                           `json:"max_async_windows,omitempty" yaml:"max_async_windows,omitempty"`
+	AsyncQueueSize    *int                           `json:"async_queue_size,omitempty" yaml:"async_queue_size,omitempty"`
+	Preprocessing     *DecisionPreprocessingSettings `json:"preprocessing,omitempty" yaml:"preprocessing,omitempty"`
+}
+
+// DecisionPreprocessingSettings holds the runtime-editable preprocessing bounds.
+type DecisionPreprocessingSettings struct {
+	MaxInputBytes      *int `json:"max_input_bytes,omitempty" yaml:"max_input_bytes,omitempty"`
+	MaxAnalysisBytes   *int `json:"max_analysis_bytes,omitempty" yaml:"max_analysis_bytes,omitempty"`
+	MaxRepresentations *int `json:"max_representations,omitempty" yaml:"max_representations,omitempty"`
+	MaxDecodeDepth     *int `json:"max_decode_depth,omitempty" yaml:"max_decode_depth,omitempty"`
+	MaxExpansionRatio  *int `json:"max_expansion_ratio,omitempty" yaml:"max_expansion_ratio,omitempty"`
+}
+
+// ApplyTo folds the edited settings onto a base DecisionConfig and returns
+// the effective config plus a reason for every edit that was refused.
+//
+// A refused edit leaves the base value in place: the config this returns is
+// always within its ceilings, so a dashboard edit cannot loosen a bound or
+// enable enforcement that policy.mode forbids. policyMode is the effective
+// policy mode ("enforce" or "audit").
+func (s DecisionSettings) ApplyTo(d DecisionConfig, policyMode string) (DecisionConfig, []string) {
+	var rejected []string
+
+	applyInt := func(dst *int, v *int, field string, min, ceiling int) {
+		if v == nil {
+			return
+		}
+		switch {
+		case *v < min:
+			rejected = append(rejected, fmt.Sprintf("decision.%s: %d is below the minimum of %d", field, *v, min))
+		case *v > ceiling:
+			rejected = append(rejected, fmt.Sprintf("decision.%s: %d exceeds the ceiling of %d", field, *v, ceiling))
+		default:
+			*dst = *v
+		}
+	}
+
+	if s.Mode != nil {
+		switch *s.Mode {
+		case DecisionModeDisabled, DecisionModeShadow, DecisionModeAudit:
+			d.Mode = *s.Mode
+		case DecisionModeEnforce:
+			if policyMode == "audit" {
+				d.Mode = DecisionModeAudit
+				rejected = append(rejected, "decision.mode: enforce capped to audit because policy.mode is audit")
+			} else {
+				d.Mode = DecisionModeEnforce
+			}
+		default:
+			rejected = append(rejected, fmt.Sprintf("decision.mode: unknown mode %q", *s.Mode))
+		}
+	}
+	if s.ThresholdSet != nil {
+		if *s.ThresholdSet == "" {
+			rejected = append(rejected, "decision.threshold_set: must name an installed threshold-set version")
+		} else {
+			d.ThresholdSet = *s.ThresholdSet
+		}
+	}
+	if s.ElevatedThreshold != nil {
+		if *s.ElevatedThreshold < 0 || *s.ElevatedThreshold > 1 {
+			rejected = append(rejected, fmt.Sprintf("decision.elevated_threshold: %v is outside 0..1", *s.ElevatedThreshold))
+		} else {
+			d.ElevatedThreshold = *s.ElevatedThreshold
+		}
+	}
+	if s.InlineTimeoutMs != nil {
+		if *s.InlineTimeoutMs <= 0 {
+			rejected = append(rejected, fmt.Sprintf("decision.inline_timeout_ms: %d must be greater than zero", *s.InlineTimeoutMs))
+		} else {
+			d.InlineTimeout = time.Duration(*s.InlineTimeoutMs) * time.Millisecond
+		}
+	}
+	applyInt(&d.MaxConcurrency, s.MaxConcurrency, "max_concurrency", 1, MaxConcurrencyCeiling)
+	applyInt(&d.MaxInlineTokens, s.MaxInlineTokens, "max_inline_tokens", 1, MaxInlineTokensCeiling)
+	applyInt(&d.MaxInlineWindows, s.MaxInlineWindows, "max_inline_windows", 1, MaxInlineWindowsCeiling)
+	applyInt(&d.MaxAsyncWindows, s.MaxAsyncWindows, "max_async_windows", 0, MaxAsyncWindowsCeiling)
+	applyInt(&d.AsyncQueueSize, s.AsyncQueueSize, "async_queue_size", 1, AsyncQueueSizeCeiling)
+
+	if p := s.Preprocessing; p != nil {
+		applyInt(&d.Preprocessing.MaxInputBytes, p.MaxInputBytes, "preprocessing.max_input_bytes", 1, MaxInputBytesCeiling)
+		applyInt(&d.Preprocessing.MaxAnalysisBytes, p.MaxAnalysisBytes, "preprocessing.max_analysis_bytes", 1, MaxAnalysisBytesCeiling)
+		applyInt(&d.Preprocessing.MaxRepresentations, p.MaxRepresentations, "preprocessing.max_representations", 1, MaxRepresentationsCeiling)
+		applyInt(&d.Preprocessing.MaxDecodeDepth, p.MaxDecodeDepth, "preprocessing.max_decode_depth", 0, MaxDecodeDepthCeiling)
+		applyInt(&d.Preprocessing.MaxExpansionRatio, p.MaxExpansionRatio, "preprocessing.max_expansion_ratio", 1, MaxExpansionRatioCeiling)
+	}
+
+	// Phase 1 invariant: inline inference never waits for worker capacity.
+	// Enforced here as well as in validation, so a settings edit cannot
+	// reach a nonzero value by any route.
+	d.InlineQueueWait = 0
+	return d, rejected
 }
 
 // SettingsStore manages settings with layered configuration
@@ -188,7 +301,49 @@ func settingsFromConfig(cfg *Config) Settings {
 	// Failover settings - not directly in Config yet, use defaults
 	// Future: could add failover section to Config
 
+	// Decision settings — the runtime-editable subset mirrors Config so the
+	// dashboard shows the values elida.yaml actually loaded.
+	settings.Decision = decisionSettingsFromConfig(cfg.Decision)
+
 	return settings
+}
+
+// decisionSettingsFromConfig projects a DecisionConfig onto the
+// runtime-editable settings surface.
+func decisionSettingsFromConfig(d DecisionConfig) DecisionSettings {
+	mode := d.Mode
+	thresholdSet := d.ThresholdSet
+	elevated := d.ElevatedThreshold
+	inlineMs := int(d.InlineTimeout / time.Millisecond)
+	maxConc := d.MaxConcurrency
+	inlineTokens := d.MaxInlineTokens
+	inlineWindows := d.MaxInlineWindows
+	asyncWindows := d.MaxAsyncWindows
+	queueSize := d.AsyncQueueSize
+	inputBytes := d.Preprocessing.MaxInputBytes
+	analysisBytes := d.Preprocessing.MaxAnalysisBytes
+	reps := d.Preprocessing.MaxRepresentations
+	depth := d.Preprocessing.MaxDecodeDepth
+	ratio := d.Preprocessing.MaxExpansionRatio
+
+	return DecisionSettings{
+		Mode:              &mode,
+		ThresholdSet:      &thresholdSet,
+		ElevatedThreshold: &elevated,
+		InlineTimeoutMs:   &inlineMs,
+		MaxConcurrency:    &maxConc,
+		MaxInlineTokens:   &inlineTokens,
+		MaxInlineWindows:  &inlineWindows,
+		MaxAsyncWindows:   &asyncWindows,
+		AsyncQueueSize:    &queueSize,
+		Preprocessing: &DecisionPreprocessingSettings{
+			MaxInputBytes:      &inputBytes,
+			MaxAnalysisBytes:   &analysisBytes,
+			MaxRepresentations: &reps,
+			MaxDecodeDepth:     &depth,
+			MaxExpansionRatio:  &ratio,
+		},
+	}
 }
 
 // getDefaultSettings returns ELIDA's built-in defaults
@@ -242,6 +397,7 @@ func getDefaultSettings() Settings {
 			MaxCaptureSize: &maxCaptureSize,
 			MaxPerSession:  &maxPerSession,
 		},
+		Decision: decisionSettingsFromConfig(defaults().Decision),
 	}
 }
 
@@ -446,6 +602,110 @@ func diffSettings(defaults, local Settings) map[string]SettingDiff {
 		}
 	}
 
+	// Decision diffs
+	if local.Decision.Mode != nil && *local.Decision.Mode != *defaults.Decision.Mode {
+		diffs["decision.mode"] = SettingDiff{
+			Path:         "decision.mode",
+			DefaultValue: *defaults.Decision.Mode,
+			LocalValue:   *local.Decision.Mode,
+		}
+	}
+	if local.Decision.ThresholdSet != nil && *local.Decision.ThresholdSet != *defaults.Decision.ThresholdSet {
+		diffs["decision.threshold_set"] = SettingDiff{
+			Path:         "decision.threshold_set",
+			DefaultValue: *defaults.Decision.ThresholdSet,
+			LocalValue:   *local.Decision.ThresholdSet,
+		}
+	}
+	if local.Decision.ElevatedThreshold != nil && *local.Decision.ElevatedThreshold != *defaults.Decision.ElevatedThreshold {
+		diffs["decision.elevated_threshold"] = SettingDiff{
+			Path:         "decision.elevated_threshold",
+			DefaultValue: *defaults.Decision.ElevatedThreshold,
+			LocalValue:   *local.Decision.ElevatedThreshold,
+		}
+	}
+	if local.Decision.InlineTimeoutMs != nil && *local.Decision.InlineTimeoutMs != *defaults.Decision.InlineTimeoutMs {
+		diffs["decision.inline_timeout_ms"] = SettingDiff{
+			Path:         "decision.inline_timeout_ms",
+			DefaultValue: *defaults.Decision.InlineTimeoutMs,
+			LocalValue:   *local.Decision.InlineTimeoutMs,
+		}
+	}
+	if local.Decision.MaxConcurrency != nil && *local.Decision.MaxConcurrency != *defaults.Decision.MaxConcurrency {
+		diffs["decision.max_concurrency"] = SettingDiff{
+			Path:         "decision.max_concurrency",
+			DefaultValue: *defaults.Decision.MaxConcurrency,
+			LocalValue:   *local.Decision.MaxConcurrency,
+		}
+	}
+	if local.Decision.MaxInlineTokens != nil && *local.Decision.MaxInlineTokens != *defaults.Decision.MaxInlineTokens {
+		diffs["decision.max_inline_tokens"] = SettingDiff{
+			Path:         "decision.max_inline_tokens",
+			DefaultValue: *defaults.Decision.MaxInlineTokens,
+			LocalValue:   *local.Decision.MaxInlineTokens,
+		}
+	}
+	if local.Decision.MaxInlineWindows != nil && *local.Decision.MaxInlineWindows != *defaults.Decision.MaxInlineWindows {
+		diffs["decision.max_inline_windows"] = SettingDiff{
+			Path:         "decision.max_inline_windows",
+			DefaultValue: *defaults.Decision.MaxInlineWindows,
+			LocalValue:   *local.Decision.MaxInlineWindows,
+		}
+	}
+	if local.Decision.MaxAsyncWindows != nil && *local.Decision.MaxAsyncWindows != *defaults.Decision.MaxAsyncWindows {
+		diffs["decision.max_async_windows"] = SettingDiff{
+			Path:         "decision.max_async_windows",
+			DefaultValue: *defaults.Decision.MaxAsyncWindows,
+			LocalValue:   *local.Decision.MaxAsyncWindows,
+		}
+	}
+	if local.Decision.AsyncQueueSize != nil && *local.Decision.AsyncQueueSize != *defaults.Decision.AsyncQueueSize {
+		diffs["decision.async_queue_size"] = SettingDiff{
+			Path:         "decision.async_queue_size",
+			DefaultValue: *defaults.Decision.AsyncQueueSize,
+			LocalValue:   *local.Decision.AsyncQueueSize,
+		}
+	}
+	if local.Decision.Preprocessing != nil && defaults.Decision.Preprocessing != nil {
+		lp := local.Decision.Preprocessing
+		dp := defaults.Decision.Preprocessing
+		if lp.MaxInputBytes != nil && dp.MaxInputBytes != nil && *lp.MaxInputBytes != *dp.MaxInputBytes {
+			diffs["decision.preprocessing.max_input_bytes"] = SettingDiff{
+				Path:         "decision.preprocessing.max_input_bytes",
+				DefaultValue: *dp.MaxInputBytes,
+				LocalValue:   *lp.MaxInputBytes,
+			}
+		}
+		if lp.MaxAnalysisBytes != nil && dp.MaxAnalysisBytes != nil && *lp.MaxAnalysisBytes != *dp.MaxAnalysisBytes {
+			diffs["decision.preprocessing.max_analysis_bytes"] = SettingDiff{
+				Path:         "decision.preprocessing.max_analysis_bytes",
+				DefaultValue: *dp.MaxAnalysisBytes,
+				LocalValue:   *lp.MaxAnalysisBytes,
+			}
+		}
+		if lp.MaxRepresentations != nil && dp.MaxRepresentations != nil && *lp.MaxRepresentations != *dp.MaxRepresentations {
+			diffs["decision.preprocessing.max_representations"] = SettingDiff{
+				Path:         "decision.preprocessing.max_representations",
+				DefaultValue: *dp.MaxRepresentations,
+				LocalValue:   *lp.MaxRepresentations,
+			}
+		}
+		if lp.MaxDecodeDepth != nil && dp.MaxDecodeDepth != nil && *lp.MaxDecodeDepth != *dp.MaxDecodeDepth {
+			diffs["decision.preprocessing.max_decode_depth"] = SettingDiff{
+				Path:         "decision.preprocessing.max_decode_depth",
+				DefaultValue: *dp.MaxDecodeDepth,
+				LocalValue:   *lp.MaxDecodeDepth,
+			}
+		}
+		if lp.MaxExpansionRatio != nil && dp.MaxExpansionRatio != nil && *lp.MaxExpansionRatio != *dp.MaxExpansionRatio {
+			diffs["decision.preprocessing.max_expansion_ratio"] = SettingDiff{
+				Path:         "decision.preprocessing.max_expansion_ratio",
+				DefaultValue: *dp.MaxExpansionRatio,
+				LocalValue:   *lp.MaxExpansionRatio,
+			}
+		}
+	}
+
 	return diffs
 }
 
@@ -536,6 +796,60 @@ func mergeSettings(defaults, local Settings) Settings {
 	}
 	if local.Capture.MaxPerSession != nil {
 		merged.Capture.MaxPerSession = local.Capture.MaxPerSession
+	}
+
+	// Merge decision settings
+	if local.Decision.Mode != nil {
+		merged.Decision.Mode = local.Decision.Mode
+	}
+	if local.Decision.ThresholdSet != nil {
+		merged.Decision.ThresholdSet = local.Decision.ThresholdSet
+	}
+	if local.Decision.ElevatedThreshold != nil {
+		merged.Decision.ElevatedThreshold = local.Decision.ElevatedThreshold
+	}
+	if local.Decision.InlineTimeoutMs != nil {
+		merged.Decision.InlineTimeoutMs = local.Decision.InlineTimeoutMs
+	}
+	if local.Decision.MaxConcurrency != nil {
+		merged.Decision.MaxConcurrency = local.Decision.MaxConcurrency
+	}
+	if local.Decision.MaxInlineTokens != nil {
+		merged.Decision.MaxInlineTokens = local.Decision.MaxInlineTokens
+	}
+	if local.Decision.MaxInlineWindows != nil {
+		merged.Decision.MaxInlineWindows = local.Decision.MaxInlineWindows
+	}
+	if local.Decision.MaxAsyncWindows != nil {
+		merged.Decision.MaxAsyncWindows = local.Decision.MaxAsyncWindows
+	}
+	if local.Decision.AsyncQueueSize != nil {
+		merged.Decision.AsyncQueueSize = local.Decision.AsyncQueueSize
+	}
+	if lp := local.Decision.Preprocessing; lp != nil {
+		if merged.Decision.Preprocessing != nil {
+			cp := *merged.Decision.Preprocessing
+			merged.Decision.Preprocessing = &cp
+		}
+		if merged.Decision.Preprocessing == nil {
+			merged.Decision.Preprocessing = &DecisionPreprocessingSettings{}
+		}
+		mp := merged.Decision.Preprocessing
+		if lp.MaxInputBytes != nil {
+			mp.MaxInputBytes = lp.MaxInputBytes
+		}
+		if lp.MaxAnalysisBytes != nil {
+			mp.MaxAnalysisBytes = lp.MaxAnalysisBytes
+		}
+		if lp.MaxRepresentations != nil {
+			mp.MaxRepresentations = lp.MaxRepresentations
+		}
+		if lp.MaxDecodeDepth != nil {
+			mp.MaxDecodeDepth = lp.MaxDecodeDepth
+		}
+		if lp.MaxExpansionRatio != nil {
+			mp.MaxExpansionRatio = lp.MaxExpansionRatio
+		}
 	}
 
 	return merged
