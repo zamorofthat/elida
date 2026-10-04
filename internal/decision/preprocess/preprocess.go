@@ -173,6 +173,9 @@ func registry() []transform {
 		{name: TransformInvisible, apply: func(s string, _ Budget) (string, []string, bool) {
 			return StripInvisible(s)
 		}},
+		{name: TransformSkeleton, apply: func(s string, _ Budget) (string, []string, bool) {
+			return ConfusableSkeleton(s)
+		}},
 	}
 }
 
