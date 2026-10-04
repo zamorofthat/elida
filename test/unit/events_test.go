@@ -2,6 +2,7 @@ package unit
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -107,6 +108,61 @@ func TestEventStore_ListEvents(t *testing.T) {
 	}
 	if len(events) != 1 {
 		t.Errorf("expected 1 warning event, got %d", len(events))
+	}
+}
+
+func TestEventStore_ToolSequenceRoundTrip(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "elida-events-test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	store, err := storage.NewSQLiteStore(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	sessionID := "test-session-toolseq"
+	base := time.Now().UTC().Truncate(time.Millisecond)
+
+	want := storage.ToolSequenceData{Calls: []storage.ToolCall{
+		{ToolName: "read", ToolType: "function", RequestID: "r1", Timestamp: base},
+		{ToolName: "edit", Timestamp: base.Add(150 * time.Millisecond)},
+		{ToolName: "read", Timestamp: base.Add(400 * time.Millisecond)},
+	}}
+	if err = store.RecordEvent(ctx, storage.EventToolSequence, sessionID, "", want); err != nil {
+		t.Fatalf("RecordEvent: %v", err)
+	}
+
+	events, err := store.GetSessionEvents(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != storage.EventToolSequence {
+		t.Fatalf("type = %q, want %q", events[0].Type, storage.EventToolSequence)
+	}
+
+	var got storage.ToolSequenceData
+	if err := json.Unmarshal(events[0].Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Calls) != len(want.Calls) {
+		t.Fatalf("calls len = %d, want %d", len(got.Calls), len(want.Calls))
+	}
+	for i, c := range got.Calls {
+		if c.ToolName != want.Calls[i].ToolName {
+			t.Errorf("call %d name = %q, want %q", i, c.ToolName, want.Calls[i].ToolName)
+		}
+		if !c.Timestamp.Equal(want.Calls[i].Timestamp) {
+			t.Errorf("call %d ts = %v, want %v", i, c.Timestamp, want.Calls[i].Timestamp)
+		}
 	}
 }
 

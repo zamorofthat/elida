@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"elida/internal/control"
+	"elida/internal/fingerprint"
 	"elida/internal/policy"
 	"elida/internal/session"
 	"elida/internal/storage"
@@ -764,6 +765,81 @@ func TestHandler_SessionBehavior_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+type stubFingerprintProvider struct {
+	shadow    bool
+	baselines []fingerprint.BaselineInfo
+}
+
+func (s *stubFingerprintProvider) BaselineInfos() []fingerprint.BaselineInfo {
+	return s.baselines
+}
+
+func (s *stubFingerprintProvider) IsShadow() bool {
+	return s.shadow
+}
+
+func TestHandler_FingerprintBaselines(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	stub := &stubFingerprintProvider{
+		shadow: true,
+		baselines: []fingerprint.BaselineInfo{
+			{Class: "backend-a", Count: 5, Warm: false, UpdatedAt: time.Now()},
+			{Class: "backend-b", Count: 120, Warm: true, UpdatedAt: time.Now()},
+		},
+	}
+	handler.SetFingerprinter(stub)
+
+	req := httptest.NewRequest("GET", "/control/fingerprint/baselines", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp struct {
+		Shadow    bool                       `json:"shadow"`
+		Baselines []fingerprint.BaselineInfo `json:"baselines"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if !resp.Shadow {
+		t.Error("expected shadow=true")
+	}
+	if len(resp.Baselines) != 2 {
+		t.Fatalf("expected 2 baselines, got %d", len(resp.Baselines))
+	}
+	if resp.Baselines[0].Class != "backend-a" || resp.Baselines[0].Count != 5 || resp.Baselines[0].Warm {
+		t.Errorf("unexpected baseline[0]: %+v", resp.Baselines[0])
+	}
+	if resp.Baselines[1].Class != "backend-b" || resp.Baselines[1].Count != 120 || !resp.Baselines[1].Warm {
+		t.Errorf("unexpected baseline[1]: %+v", resp.Baselines[1])
+	}
+}
+
+func TestHandler_FingerprintBaselines_Disabled(t *testing.T) {
+	handler, _ := newTestHandler()
+
+	req := httptest.NewRequest("GET", "/control/fingerprint/baselines", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp["error"] != "fingerprinting disabled" {
+		t.Errorf("expected error 'fingerprinting disabled', got %q", resp["error"])
 	}
 }
 

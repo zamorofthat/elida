@@ -37,6 +37,7 @@ type BaselineConfig struct {
 	NEff        int
 	RidgeLambda float64
 	WarmUp      int
+	Thresholds  Thresholds
 }
 
 // DefaultBaselineConfig returns the default configuration.
@@ -45,6 +46,23 @@ func DefaultBaselineConfig() BaselineConfig {
 		NEff:        DefaultNEff,
 		RidgeLambda: DefaultRidgeLambda,
 		WarmUp:      DefaultWarmUp,
+		Thresholds:  DefaultThresholds(),
+	}
+}
+
+// Thresholds are the bucket boundaries for sqrt(D²) (Mahalanobis distance).
+// The zero value means "use defaults" — see NewM3LiteScorerWithFlush.
+type Thresholds struct {
+	Minor, Notable, Anomalous, Severe float64
+}
+
+// DefaultThresholds returns the built-in chi²-derived bucket thresholds.
+func DefaultThresholds() Thresholds {
+	return Thresholds{
+		Minor:     ThresholdMinor,
+		Notable:   ThresholdNotable,
+		Anomalous: ThresholdAnomalous,
+		Severe:    ThresholdSevere,
 	}
 }
 

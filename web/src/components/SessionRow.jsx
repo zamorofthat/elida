@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { formatBytes, formatDuration, formatDurationStr, truncateId } from '../utils'
-import { StateBadge } from './shared/Badge'
+import { StateBadge, FingerprintBadge } from './shared/Badge'
 import { SessionTurns } from './SessionTurns'
 
 function DurationTicker({ startTime, durationMs, duration, state }) {
@@ -77,6 +77,7 @@ export function SessionRow({ session, onKill, onViewDetail }) {
               {riskScore}
             </span>
           )}
+          <FingerprintBadge bucket={session.fingerprint_bucket} distance={session.fingerprint_distance} />
           <button
             class="btn btn-secondary btn-sm"
             onClick={(e) => { e.stopPropagation(); onViewDetail(session); }}

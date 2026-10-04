@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"elida/internal/fingerprint"
 	"elida/internal/instruction"
 	"elida/internal/instructionstore"
+	"elida/internal/panel"
 	"elida/internal/policy"
 	"elida/internal/proxy"
 	"elida/internal/redaction"
@@ -53,6 +55,7 @@ type app struct {
 	policyEngine        *policy.Engine
 	instructionRegistry *instruction.Registry
 	fingerprinter       *fingerprint.M3LiteScorer
+	panel               *panel.Panel
 	tp                  *telemetry.Provider
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
@@ -68,6 +71,17 @@ type app struct {
 }
 
 func main() {
+	// Subcommands live before the top-level flag set: `elida export-sessions
+	// ...` dispatches to its own flag.FlagSet and exits, rather than going
+	// through the server startup path below.
+	if len(os.Args) > 1 && os.Args[1] == "export-sessions" {
+		if err := runExportSessions(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "export-sessions: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	configPath := flag.String("config", "configs/elida.yaml", "path to config file")
 	listenAddr := flag.String("listen", "", "override listen address (e.g. :8082)")
 	validateOnly := flag.Bool("validate", false, "validate config and exit")
@@ -110,6 +124,11 @@ func main() {
 
 	initLogging(cfg)
 
+	// Surface non-fatal config advisories (e.g. capture-config incoherence).
+	for _, w := range cfg.Validate().Warnings {
+		slog.Warn("config advisory", "field", w.Field, "message", w.Message, "hint", w.Hint)
+	}
+
 	slog.Info("starting ELIDA",
 		"version", Version,
 		"listen", cfg.Listen,
@@ -121,6 +140,7 @@ func main() {
 	a.initSQLiteStorage()
 	a.initRedactor()
 	a.initFingerprint()
+	a.initPanel()
 	a.initSessionEndCallback()
 	a.initOCSF()
 	a.initTelemetry()
@@ -254,6 +274,12 @@ func (a *app) initFingerprint() {
 		NEff:        a.cfg.Fingerprint.NEff,
 		RidgeLambda: a.cfg.Fingerprint.RidgeLambda,
 		WarmUp:      a.cfg.Fingerprint.WarmUp,
+		Thresholds: fingerprint.Thresholds{
+			Minor:     a.cfg.Fingerprint.Thresholds.Minor,
+			Notable:   a.cfg.Fingerprint.Thresholds.Notable,
+			Anomalous: a.cfg.Fingerprint.Thresholds.Anomalous,
+			Severe:    a.cfg.Fingerprint.Thresholds.Severe,
+		},
 	}
 
 	store, err := fingerprint.NewSQLiteBaselineStore(a.sqliteStore.DB())
@@ -274,6 +300,31 @@ func (a *app) initFingerprint() {
 		"warm_up", cfg.WarmUp,
 		"flush_interval", a.cfg.Fingerprint.FlushInterval,
 	)
+}
+
+// initPanel seats the M3-lite scorer as the (currently sole) live member of
+// the behavioral panel. Phase 1: panel-of-one, weight 1.0, not shadowed —
+// this reproduces today's fingerprint scoring exactly (see scoreFingerprint).
+func (a *app) initPanel() {
+	if a.fingerprinter == nil {
+		return
+	}
+	a.panel = panel.NewPanel()
+	a.panel.Seat(panel.NewM3LiteMember(a.fingerprinter), false, 1.0)
+
+	// Phase 2a: shadow-seat the tool-chain member C, if configured. Shadow
+	// members are assessed and reported but never affect RiskScore/Class, so
+	// this is behavior-preserving. Log-and-skip on a bad/missing artifact —
+	// panel seating must never hard-fail startup (spec §8).
+	if p := a.cfg.Panel.ToolChainArtifact; p != "" {
+		art, err := panel.LoadToolChainArtifact(p)
+		if err != nil {
+			slog.Warn("tool-chain artifact not loaded; member not seated", "path", p, "error", err)
+		} else {
+			a.panel.Seat(panel.NewToolChainMember(art), true, 0)
+			slog.Info("panel: tool-chain member seated (shadow)", "version", art.GeneratedBy)
+		}
+	}
 }
 
 func (a *app) initSessionEndCallback() {
@@ -306,7 +357,11 @@ func (a *app) initSessionEndCallback() {
 		a.enrichRecordFromPolicy(&record, snap.ID)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
-		a.scoreFingerprint(&snap)
+		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
+			record.FingerprintDistance = distance
+			record.FingerprintBucket = bucket
+			record.FingerprintClass = class
+		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
 	})
@@ -381,51 +436,70 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 	}
 }
 
-func (a *app) scoreFingerprint(snap *session.Session) {
-	if a.fingerprinter == nil {
-		return
+// scoreFingerprint routes session scoring through the behavioral panel.
+// Phase 1 seats only the M3-lite member, so this reconstructs exactly the
+// outputs the pre-panel implementation computed directly from
+// a.fingerprinter: same warm-up no-op, same shadow persist-without-enforce,
+// same risk points ("m3-lite" source label, unchanged for Phase 1), same
+// OCSF emit condition.
+func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket, class string, scored bool) {
+	if a.panel == nil {
+		return 0, "", "", false
 	}
 
-	// Always ingest to update baselines
+	// Always ingest to update baselines (unchanged).
 	if err := a.fingerprinter.Ingest(snap); err != nil {
 		slog.Error("fingerprint ingest failed", "session_id", snap.ID, "error", err)
 	}
 
-	// Score (returns immediately in shadow mode)
-	distance, bucket, features, err := a.fingerprinter.Score(snap)
-	if err != nil {
-		slog.Error("fingerprint scoring failed", "session_id", snap.ID, "error", err)
-		return
+	v := a.panel.Assess(panel.BuildFeatures(snap))
+
+	// Find the M3-lite member's opinion (panel-of-one today).
+	var op *panel.MemberOpinion
+	for i := range v.Members {
+		if v.Members[i].Member == "m3-lite" {
+			op = &v.Members[i]
+		}
+	}
+	if op == nil || op.Detail == nil {
+		return 0, "", "", false // warm-up: not enough data yet (unchanged)
 	}
 
-	if bucket == fingerprint.BucketWarmUp {
-		return // not enough data or shadow mode
-	}
+	bucket, _ = op.Detail["bucket"].(string)
+	distance, _ = op.Detail["distance"].(float64)
+	shadow, _ := op.Detail["shadow"].(bool)
 
-	class := fingerprint.SessionClass(snap)
+	class = v.Class // "" today; M3-lite doesn't set Class, so this falls through
+	if class == "" {
+		class = fingerprint.SessionClass(snap)
+	}
 
 	slog.Info("fingerprint score",
 		"session_id", snap.ID,
 		"class", class,
 		"distance", distance,
 		"bucket", bucket,
+		"shadow", shadow,
 	)
 
+	if shadow {
+		return distance, bucket, class, true // shadow: score is persisted but never enforced
+	}
+
 	// Add risk points for notable+ scores
-	riskPoints := fingerprint.BucketRiskPoints(bucket)
-	if riskPoints > 0 && a.policyEngine != nil {
-		a.policyEngine.AddExternalRiskPoints(snap.ID, riskPoints, "m3-lite")
+	points := int(math.Round(v.RiskScore * float64(fingerprint.RiskNotable)))
+	if points > 0 && a.policyEngine != nil {
+		a.policyEngine.AddExternalRiskPoints(snap.ID, points, "m3-lite")
 	}
 
 	// Emit OCSF 2004 for notable+ scores
-	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor {
-		if a.ocsfEmitter != nil {
-			finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
-			finding.Unmapped.Backend = snap.Backend
-			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
-		}
-		_ = features // available for future dashboard integration
+	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor && a.ocsfEmitter != nil {
+		finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
+		finding.Unmapped.Backend = snap.Backend
+		a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
 	}
+
+	return distance, bucket, class, true
 }
 
 func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) *storage.SDRIntegrity {
@@ -478,6 +552,26 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 			CallCount: count,
 		}); eventErr != nil {
 			slog.Error("failed to record tool_called event", "session_id", snap.ID, "error", eventErr)
+		}
+	}
+
+	// Persist the faithful per-call ordered tool trajectory alongside the
+	// aggregate counts above. This preserves true call order and inter-call
+	// timing (the most-recent <=100 calls, per the live ring buffer) for
+	// transition-order consumers such as export-sessions; the aggregate
+	// tool_called events remain for counts/stats/UI.
+	if history := sess.GetToolCallHistory(); len(history) > 0 {
+		calls := make([]storage.ToolCall, len(history))
+		for i, rec := range history {
+			calls[i] = storage.ToolCall{
+				ToolName:  rec.ToolName,
+				ToolType:  rec.ToolType,
+				RequestID: rec.RequestID,
+				Timestamp: rec.Timestamp,
+			}
+		}
+		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventToolSequence, snap.ID, "", storage.ToolSequenceData{Calls: calls}); eventErr != nil {
+			slog.Error("failed to record tool_sequence event", "session_id", snap.ID, "error", eventErr)
 		}
 	}
 
@@ -868,6 +962,12 @@ func (a *app) initControlAPI() {
 	if a.cfg.Storage.Enabled {
 		a.controlHandler.SetCaptureMode(a.cfg.Storage.CaptureMode)
 	}
+	if a.fingerprinter != nil {
+		a.controlHandler.SetFingerprinter(a.fingerprinter)
+	}
+	if a.panel != nil {
+		a.controlHandler.SetPanel(a.panel)
+	}
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
@@ -1103,6 +1203,13 @@ func printValidationResult(configPath string, result *config.ValidationResult) {
 			} else {
 				fmt.Fprintf(os.Stderr, "  - %s: %s\n", e.Field, e.Message)
 			}
+		}
+	}
+	for _, w := range result.Warnings {
+		if w.Hint != "" {
+			fmt.Fprintf(os.Stderr, "  ⚠ %s: %s\n    hint: %s\n", w.Field, w.Message, w.Hint)
+		} else {
+			fmt.Fprintf(os.Stderr, "  ⚠ %s: %s\n", w.Field, w.Message)
 		}
 	}
 }

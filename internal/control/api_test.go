@@ -8,14 +8,18 @@ import (
 	"testing"
 	"time"
 
+	"elida/internal/panel"
 	"elida/internal/session"
 )
 
+// testControlAPIKey is the API key newTestAPIWithAuth configures.
+const testControlAPIKey = "control-key"
+
 // newTestAPIWithAuth creates a test Handler with auth enabled
-func newTestAPIWithAuth(_ *testing.T, apiKey string) *Handler {
+func newTestAPIWithAuth(_ *testing.T) *Handler {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 30*time.Second)
-	return New(store, manager, WithAuth(apiKey))
+	return New(store, manager, WithAuth(testControlAPIKey))
 }
 
 // TestHealthExemptFromControlAuth verifies that /control/health is accessible
@@ -25,7 +29,7 @@ func newTestAPIWithAuth(_ *testing.T, apiKey string) *Handler {
 // path stays locked. Health response must not disclose version/capture_mode
 // (use authenticated endpoints for that).
 func TestHealthExemptFromControlAuth(t *testing.T) {
-	h := newTestAPIWithAuth(t, "control-key")
+	h := newTestAPIWithAuth(t)
 
 	// Health: no credentials -> 200 with minimal payload.
 	rec := httptest.NewRecorder()
@@ -66,5 +70,94 @@ func TestHealthExemptFromControlAuth(t *testing.T) {
 	h.ServeHTTP(pathTraversalRec, httptest.NewRequest("GET", "/control/health/../sessions", nil))
 	if pathTraversalRec.Code == http.StatusOK && strings.Contains(pathTraversalRec.Body.String(), "sessions") {
 		t.Error("path traversal past the health exemption")
+	}
+}
+
+// stubPanel is a minimal PanelProvider for testing handlePanel.
+type stubPanel struct{ members []panel.MemberInfo }
+
+func (s stubPanel) Members() []panel.MemberInfo { return s.members }
+
+// TestHandlePanel_RequiresAuth verifies GET /control/panel is auth-gated like
+// every other /control/* endpoint (except /control/health).
+func TestHandlePanel_RequiresAuth(t *testing.T) {
+	h := newTestAPIWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 without auth", rec.Code)
+	}
+}
+
+// TestHandlePanel_ReturnsMembers verifies GET /control/panel returns the
+// seated panel members as JSON when authenticated.
+func TestHandlePanel_ReturnsMembers(t *testing.T) {
+	h := newTestAPIWithAuth(t)
+	h.SetPanel(stubPanel{members: []panel.MemberInfo{{Name: "m3-lite", Version: "1", Shadow: false, Weight: 1}}})
+
+	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
+	req.Header.Set("Authorization", "Bearer control-key")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body struct {
+		Members []struct {
+			Name    string  `json:"name"`
+			Version string  `json:"version"`
+			Shadow  bool    `json:"shadow"`
+			Weight  float64 `json:"weight"`
+		} `json:"members"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(body.Members) != 1 || body.Members[0].Name != "m3-lite" {
+		t.Fatalf("members = %+v, want one m3-lite", body.Members)
+	}
+}
+
+// TestHandlePanel_NilProviderReturnsEmpty verifies the endpoint degrades
+// gracefully to an empty roster when no panel has been wired in.
+func TestHandlePanel_NilProviderReturnsEmpty(t *testing.T) {
+	h := newTestAPIWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
+	req.Header.Set("Authorization", "Bearer control-key")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body struct {
+		Members []struct{} `json:"members"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(body.Members) != 0 {
+		t.Fatalf("members = %+v, want empty", body.Members)
+	}
+}
+
+// TestHandlePanel_MethodNotAllowed verifies non-GET requests are rejected.
+func TestHandlePanel_MethodNotAllowed(t *testing.T) {
+	h := newTestAPIWithAuth(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/control/panel", nil)
+	req.Header.Set("Authorization", "Bearer control-key")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }

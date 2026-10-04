@@ -408,6 +408,9 @@ func TestBaseline_Winsorization(t *testing.T) {
 // --- Scorer Tests ---
 
 func TestScorer_ShadowMode(t *testing.T) {
+	// Shadow mode no longer short-circuits Score: a cold baseline still
+	// reports warm_up (the ordinary warm-up path), and IsShadow() reflects
+	// the mode so callers can gate enforcement themselves.
 	store := newMemoryStore()
 	cfg := fingerprint.DefaultBaselineConfig()
 	scorer, err := fingerprint.NewM3LiteScorer(store, true, cfg)
@@ -415,6 +418,10 @@ func TestScorer_ShadowMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer scorer.Close()
+
+	if !scorer.IsShadow() {
+		t.Error("expected IsShadow() = true")
+	}
 
 	sess := session.NewSession("test-1", "http://backend", "127.0.0.1")
 	snap := sess.Snapshot()
@@ -424,13 +431,13 @@ func TestScorer_ShadowMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if distance != 0 {
-		t.Errorf("shadow mode distance = %f, want 0", distance)
+		t.Errorf("cold baseline distance = %f, want 0", distance)
 	}
 	if bucket != fingerprint.BucketWarmUp {
-		t.Errorf("shadow mode bucket = %q, want %q", bucket, fingerprint.BucketWarmUp)
+		t.Errorf("cold baseline bucket = %q, want %q", bucket, fingerprint.BucketWarmUp)
 	}
 	if features != nil {
-		t.Error("shadow mode should return nil features")
+		t.Error("cold baseline should return nil features")
 	}
 }
 
@@ -460,6 +467,72 @@ func TestScorer_WarmUpSentinel(t *testing.T) {
 	}
 	if bucket != fingerprint.BucketWarmUp {
 		t.Errorf("under warm-up bucket = %q, want %q", bucket, fingerprint.BucketWarmUp)
+	}
+}
+
+func TestScorer_ShadowModeComputesScore(t *testing.T) {
+	// Same arrangement as TestScorer_WarmUpSentinel, but shadow=true and
+	// the baseline warmed past cfg.WarmUp before scoring.
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 5}
+	scorer, err := fingerprint.NewM3LiteScorer(store, true /* shadow */, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	for i := 0; i < 10; i++ {
+		sess := makeTestSession(t, i)
+		snap := sess.Snapshot()
+		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	sess := makeTestSession(t, 3)
+	snap := sess.Snapshot()
+	distance, bucket, features, err := scorer.Score(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucket == fingerprint.BucketWarmUp {
+		t.Fatalf("shadow mode must compute a real bucket once warm, got %q", bucket)
+	}
+	if distance <= 0 || features == nil {
+		t.Fatalf("expected real distance and feature contributions, got d=%v features=%v", distance, features)
+	}
+}
+
+func TestScorer_ConfigurableThresholds(t *testing.T) {
+	// Same arrangement as TestScorer_ShadowModeComputesScore, but with
+	// absurdly low thresholds so any real distance lands in severe.
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{
+		NEff: 50, RidgeLambda: 1e-6, WarmUp: 5,
+		Thresholds: fingerprint.Thresholds{Minor: 0.1, Notable: 0.2, Anomalous: 0.3, Severe: 0.4},
+	}
+	scorer, err := fingerprint.NewM3LiteScorer(store, false, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	for i := 0; i < 10; i++ {
+		sess := makeTestSession(t, i)
+		snap := sess.Snapshot()
+		if ingestErr := scorer.Ingest(&snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	sess := makeTestSession(t, 3)
+	snap := sess.Snapshot()
+	_, bucket, _, err := scorer.Score(&snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bucket != fingerprint.BucketSevere {
+		t.Fatalf("with severe threshold 0.4 every real distance should bucket severe, got %q", bucket)
 	}
 }
 
@@ -716,6 +789,76 @@ func TestScorer_IsShadow(t *testing.T) {
 	defer active.Close()
 	if active.IsShadow() {
 		t.Error("expected shadow=false")
+	}
+}
+
+func TestScorer_BaselineInfos(t *testing.T) {
+	store := newMemoryStore()
+	cfg := fingerprint.BaselineConfig{NEff: 50, RidgeLambda: 1e-6, WarmUp: 10}
+	scorer, err := fingerprint.NewM3LiteScorer(store, false, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scorer.Close()
+
+	// Class backend-a: below warm-up threshold
+	for i := 0; i < 5; i++ {
+		snap := buildRealisticSession(t, "backend-a", "", i, false)
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	// Class backend-b: above warm-up threshold
+	for i := 0; i < 12; i++ {
+		snap := buildRealisticSession(t, "backend-b", "", i, false)
+		if ingestErr := scorer.Ingest(snap); ingestErr != nil {
+			t.Fatal(ingestErr)
+		}
+	}
+
+	// Ingest also rolls each session up into a "global" baseline (ParentClass),
+	// so we expect 3 baselines total: backend-a, backend-b, global.
+	infos := scorer.BaselineInfos()
+	if len(infos) != 3 {
+		t.Fatalf("expected 3 baselines, got %d", len(infos))
+	}
+
+	// Sorted by Class: "backend-a" < "backend-b" < "global"
+	if infos[0].Class != "backend-a" {
+		t.Errorf("expected first class backend-a, got %s", infos[0].Class)
+	}
+	if infos[0].Count != 5 {
+		t.Errorf("expected count 5 for backend-a, got %d", infos[0].Count)
+	}
+	if infos[0].Warm {
+		t.Error("expected backend-a to not be warm (5 < warmup 10)")
+	}
+
+	if infos[1].Class != "backend-b" {
+		t.Errorf("expected second class backend-b, got %s", infos[1].Class)
+	}
+	if infos[1].Count != 12 {
+		t.Errorf("expected count 12 for backend-b, got %d", infos[1].Count)
+	}
+	if !infos[1].Warm {
+		t.Error("expected backend-b to be warm (12 >= warmup 10)")
+	}
+
+	if infos[2].Class != "global" {
+		t.Errorf("expected third class global, got %s", infos[2].Class)
+	}
+	if infos[2].Count != 17 {
+		t.Errorf("expected count 17 for global, got %d", infos[2].Count)
+	}
+	if !infos[2].Warm {
+		t.Error("expected global to be warm (17 >= warmup 10)")
+	}
+
+	for _, info := range infos {
+		if info.UpdatedAt.IsZero() {
+			t.Errorf("expected non-zero UpdatedAt for class %s", info.Class)
+		}
 	}
 }
 

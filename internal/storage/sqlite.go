@@ -107,6 +107,10 @@ type SessionRecord struct {
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
 	Violations      []Violation       `json:"violations,omitempty"`
 	Integrity       *SDRIntegrity     `json:"integrity,omitempty"`
+
+	FingerprintDistance float64 `json:"fingerprint_distance"`
+	FingerprintBucket   string  `json:"fingerprint_bucket,omitempty"`
+	FingerprintClass    string  `json:"fingerprint_class,omitempty"`
 }
 
 // SQLiteStore provides persistent storage for session history
@@ -161,6 +165,9 @@ func (s *SQLiteStore) migrate() error {
 		metadata TEXT,
 		captured_content TEXT,
 		violations TEXT,
+		fingerprint_distance REAL DEFAULT 0,
+		fingerprint_bucket TEXT DEFAULT '',
+		fingerprint_class TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -280,6 +287,11 @@ func (s *SQLiteStore) migrate() error {
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN instruction_hash TEXT")
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN instruction_file_type TEXT")
 
+	// Add fingerprint columns to sessions table (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_distance REAL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_bucket TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_class TEXT DEFAULT ''")
+
 	return nil
 }
 
@@ -302,8 +314,8 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 
 	_, err = s.db.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -317,6 +329,9 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		string(metadata),
 		string(capturedContent),
 		string(violations),
+		record.FingerprintDistance,
+		record.FingerprintBucket,
+		record.FingerprintClass,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
@@ -339,11 +354,13 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 // GetSessionCtx retrieves a session by ID using the provided context.
 func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
 	var metadataStr, capturedStr, violationsStr sql.NullString
+	var fingerprintDistance sql.NullFloat64
+	var fingerprintBucket, fingerprintClass sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -358,12 +375,24 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 		&metadataStr,
 		&capturedStr,
 		&violationsStr,
+		&fingerprintDistance,
+		&fingerprintBucket,
+		&fingerprintClass,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
+	}
+	if fingerprintDistance.Valid {
+		record.FingerprintDistance = fingerprintDistance.Float64
+	}
+	if fingerprintBucket.Valid {
+		record.FingerprintBucket = fingerprintBucket.String
+	}
+	if fingerprintClass.Valid {
+		record.FingerprintClass = fingerprintClass.String
 	}
 
 	unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
@@ -422,7 +451,7 @@ func (s *SQLiteStore) CountSessions(opts ListSessionsOptions) (int, error) {
 // ListSessions retrieves sessions with filtering and pagination
 func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, error) {
 	query := `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class
 		FROM sessions WHERE 1=1`
 
 	args := []interface{}{}
@@ -465,6 +494,8 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 	for rows.Next() {
 		var record SessionRecord
 		var metadataStr, capturedStr, violationsStr sql.NullString
+		var fingerprintDistance sql.NullFloat64
+		var fingerprintBucket, fingerprintClass sql.NullString
 		err := rows.Scan(
 			&record.ID,
 			&record.State,
@@ -479,6 +510,9 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 			&metadataStr,
 			&capturedStr,
 			&violationsStr,
+			&fingerprintDistance,
+			&fingerprintBucket,
+			&fingerprintClass,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", err)
@@ -487,6 +521,15 @@ func (s *SQLiteStore) ListSessions(opts ListSessionsOptions) ([]SessionRecord, e
 		unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
 		unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
 		unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
+		if fingerprintDistance.Valid {
+			record.FingerprintDistance = fingerprintDistance.Float64
+		}
+		if fingerprintBucket.Valid {
+			record.FingerprintBucket = fingerprintBucket.String
+		}
+		if fingerprintClass.Valid {
+			record.FingerprintClass = fingerprintClass.String
+		}
 
 		records = append(records, record)
 	}

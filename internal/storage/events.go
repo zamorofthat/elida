@@ -21,6 +21,7 @@ const (
 	EventTerminateRequested EventType = "terminate_requested"
 	EventRiskEscalated      EventType = "risk_escalated"
 	EventToolCalled         EventType = "tool_called"
+	EventToolSequence       EventType = "tool_sequence"
 	EventTokensUsed         EventType = "tokens_used"
 	EventGracefulDrain      EventType = "graceful_drain"
 )
@@ -79,6 +80,26 @@ type ToolCalledData struct {
 	ToolType  string `json:"tool_type,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	CallCount int    `json:"call_count,omitempty"`
+}
+
+// ToolCall is a single ordered tool invocation within a session's trajectory.
+// It carries only the fields needed to reconstruct a faithful call sequence —
+// name, type, request id, and timestamp — never arguments or results.
+type ToolCall struct {
+	ToolName  string    `json:"tool_name"`
+	ToolType  string    `json:"tool_type,omitempty"`
+	RequestID string    `json:"request_id,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// ToolSequenceData contains data for tool_sequence events: the ordered,
+// per-call tool trajectory of a session (the most-recent <=100 calls, matching
+// the live session's in-memory ring buffer). Unlike the aggregate tool_called
+// event, this preserves true call order and inter-call timing, which is what
+// transition-order consumers (e.g. the tool-chain panel member's synthspine
+// export) require.
+type ToolSequenceData struct {
+	Calls []ToolCall `json:"calls"`
 }
 
 // TokensUsedData contains data for tokens_used events
