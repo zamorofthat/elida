@@ -170,6 +170,9 @@ func registry() []transform {
 			out, changed := NormalizeNFKC(s)
 			return out, nil, changed
 		}},
+		{name: TransformInvisible, apply: func(s string, _ Budget) (string, []string, bool) {
+			return StripInvisible(s)
+		}},
 	}
 }
 
