@@ -35,7 +35,7 @@ spec:
 
     # ELIDA sidecar — inspects traffic, proxies to the real backend
     - name: elida
-      image: ghcr.io/zamorofthat/elida:latest
+      image: zamorofthat/elida:latest
       ports:
         - name: proxy
           containerPort: 8080
@@ -99,7 +99,7 @@ On Kubernetes 1.29+ you can declare ELIDA as a native sidecar (a restartable ini
 spec:
   initContainers:
     - name: elida
-      image: ghcr.io/zamorofthat/elida:latest
+      image: zamorofthat/elida:latest
       restartPolicy: Always   # makes this a native sidecar
       ports:
         - name: proxy
@@ -109,6 +109,11 @@ spec:
       env:
         - name: ELIDA_BACKEND
           value: "https://api.anthropic.com"
+        - name: ELIDA_CONTROL_API_KEY   # still required — see "Why this works"
+          valueFrom:
+            secretKeyRef:
+              name: elida-control
+              key: api-key
 ```
 
 ## Verify

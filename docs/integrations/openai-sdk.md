@@ -11,10 +11,15 @@ Your app (OpenAI SDK) → ELIDA (:8080) → api.openai.com (or any OpenAI-compat
 Start ELIDA pointed at your backend:
 
 ```bash
+export ELIDA_CONTROL_API_KEY="$(openssl rand -hex 24)"
+
 docker run -p 8080:8080 -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.openai.com/v1 \
-  ghcr.io/zamorofthat/elida:latest
+  -e ELIDA_CONTROL_API_KEY \
+  zamorofthat/elida:latest
 ```
+
+The control API key is required, not optional. Inside the container ELIDA binds the control port to all interfaces, and it refuses to start on a non-loopback control bind with no authentication — without a key the container exits immediately. Setting `ELIDA_CONTROL_API_KEY` enables auth automatically, and control API calls then need that key as a `Bearer` token.
 
 ### Option A: environment variable (no code change)
 
@@ -79,7 +84,8 @@ for chunk in stream:
 ## Verify it's working
 
 ```bash
-curl -s http://localhost:9090/control/sessions | jq '.sessions'
+curl -s -H "Authorization: Bearer $ELIDA_CONTROL_API_KEY" \
+  http://localhost:9090/control/sessions | jq '.sessions'
 ```
 
 You should see your `X-Session-ID` (or a derived/fallback one) among the active sessions. The endpoint returns `{total, sessions[]}`, so index into `.sessions`, not the top-level value.
