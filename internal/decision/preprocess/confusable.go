@@ -118,9 +118,10 @@ func latinDiacriticBase(r rune) (rune, bool) {
 	return first, true
 }
 
-// ConfusableSkeleton folds visually confusable code points, and Latin
-// letters carrying diacritics, onto ASCII, producing a "skeleton" that a
-// classifier can read as plain text.
+// ConfusableSkeleton folds visually confusable code points, Latin letters
+// carrying diacritics, and stray combining marks left on an ASCII letter,
+// onto ASCII, producing a "skeleton" that a classifier can read as plain
+// text.
 //
 // Limitations: the table covers the Latin-lookalike code points from the
 // scripts that supply them (Cyrillic, Greek, Armenian, Cherokee, fullwidth,
@@ -130,6 +131,23 @@ func latinDiacriticBase(r rune) (rune, bool) {
 // would produce noise, not evidence. See latinDiacriticBase for why
 // diacritic folding is done rune-by-rune instead of as one NFKD pass over
 // the whole string.
+//
+// A standalone nonspacing mark (Unicode category Mn) that was not already
+// consumed by latinDiacriticBase -- because it arrived as its own rune
+// rather than inside a single precomposed character -- is dropped when the
+// most recently emitted rune was ASCII, and kept otherwise. This closes an
+// evasion path the precomposed-only check leaves open: a mark like U+0334
+// (COMBINING TILDE OVERLAY) has no precomposed form to fold via
+// latinDiacriticBase, so "ign" + U+0334 + "ore" would otherwise survive
+// unmodified even though it reads as "ignore" with an invisible rider. The
+// rule is keyed off the emitted rune, not the original input rune, so a
+// chain of several marks after one ASCII letter is handled one at a time
+// correctly. It is also keyed off ASCII specifically, not "folded by this
+// function": a mark stacked on a base this function legitimately leaves
+// alone -- Hebrew niqqud on a Hebrew letter, a Devanagari nukta or virama on
+// a Devanagari letter, Arabic harakat on an Arabic letter -- sees a
+// non-ASCII emitted rune immediately before it and is kept, because that
+// base was never ASCII to begin with.
 //
 // Invalid UTF-8 in s is preserved byte-for-byte rather than replaced with
 // U+FFFD: the scan walks s by byte index with utf8.DecodeRuneInString, and
@@ -145,6 +163,7 @@ func ConfusableSkeleton(s string) (string, []string, bool) {
 
 	var b strings.Builder
 	b.Grow(len(s))
+	lastEmittedASCII := false
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if r == utf8.RuneError && size == 1 {
@@ -152,25 +171,40 @@ func ConfusableSkeleton(s string) (string, []string, bool) {
 			// rune or a diacritic. Keep it exactly as it was.
 			b.WriteByte(s[i])
 			i++
+			lastEmittedASCII = false
 			continue
 		}
 		i += size
 
 		if ascii, ok := confusables[r]; ok {
 			b.WriteRune(ascii)
+			lastEmittedASCII = true
 			continue
 		}
 		if folded, ok := foldLatinRange(r); ok {
 			b.WriteRune(folded)
+			lastEmittedASCII = true
 			continue
 		}
 		if r >= utf8.RuneSelf {
 			if base, ok := latinDiacriticBase(r); ok {
 				b.WriteRune(base)
+				lastEmittedASCII = true
+				continue
+			}
+			if unicode.Is(unicode.Mn, r) {
+				if lastEmittedASCII {
+					// Stray combining mark riding on an ASCII letter: no
+					// precomposed form routed it through latinDiacriticBase,
+					// so catch it here instead of letting it survive.
+					continue
+				}
+				b.WriteRune(r) // mark on a non-Latin base: real text, keep it
 				continue
 			}
 		}
 		b.WriteRune(r)
+		lastEmittedASCII = r < utf8.RuneSelf
 	}
 
 	out := b.String()

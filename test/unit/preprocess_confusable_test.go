@@ -58,6 +58,26 @@ func TestConfusableSkeleton(t *testing.T) {
 			want:    "step 40",
 			changed: true,
 		},
+		{
+			// Regression check: a single precomposed rune (not a stray
+			// mark) whose own decomposition is an ASCII base plus Mn-only
+			// marks was already handled by latinDiacriticBase before the
+			// stray-mark rule existed.
+			name:    "precomposed latin letter with acute folds",
+			in:      "\u01F5",
+			want:    "g",
+			changed: true,
+		},
+		{
+			// A combining mark with no precomposed form (U+0334) riding on
+			// an ASCII letter: latinDiacriticBase cannot see it, because it
+			// never operates on single-rune non-letter marks; only the
+			// stray-mark rule in ConfusableSkeleton catches this.
+			name:    "stray combining mark on ascii base is dropped",
+			in:      "ign\u0334ore",
+			want:    "ignore",
+			changed: true,
+		},
 		{"empty", "", "", false},
 	}
 	for _, tc := range cases {
@@ -82,17 +102,59 @@ func TestConfusableSkeleton(t *testing.T) {
 
 func TestConfusableSkeleton_DoesNotDestroyRealText(t *testing.T) {
 	// Non-Latin scripts that are not lookalikes must survive: folding real
-	// Japanese or Arabic to ASCII would make the skeleton useless.
+	// Japanese, Arabic, Chinese, Hebrew or Devanagari to ASCII would make
+	// the skeleton useless. The Devanagari fixture also carries a real
+	// combining mark (a virama) mid-word, exercising the same nonspacing-
+	// mark path the stray-mark rule uses, on a non-ASCII base.
 	for _, in := range []string{
 		"\u3053\u308C\u306F\u30C6\u30B9\u30C8\u3067\u3059",
 		"\u0645\u0631\u062D\u0628\u0627\u0020\u0628\u0627\u0644\u0639\u0627\u0644\u0645",
 		"\u4F60\u597D\u4E16\u754C",
+		"\u05E9\u05DC\u05D5\u05DD",
+		"\u0928\u092E\u0938\u094D\u0924\u0947",
 	} {
 		got, _, changed := preprocess.ConfusableSkeleton(in)
 		if changed {
 			t.Errorf("ConfusableSkeleton(%q) = %q; real non-Latin text must not be folded", in, got)
 		}
 	}
+}
+
+// TestConfusableSkeleton_StrayCombiningMarks covers fix round 1: a
+// combining mark with no precomposed form can ride on an ASCII letter to
+// survive latinDiacriticBase (which only inspects single precomposed
+// runes), so ConfusableSkeleton must also drop a standalone Mn mark when
+// the rune emitted immediately before it was ASCII -- and must keep one
+// when the preceding emitted rune belongs to a script that legitimately
+// uses its own combining marks (Devanagari nukta, pointed Hebrew).
+func TestConfusableSkeleton_StrayCombiningMarks(t *testing.T) {
+	t.Run("devanagari nukta on a devanagari base is preserved", func(t *testing.T) {
+		in := "\u0915\u093C"
+		got, signals, changed := preprocess.ConfusableSkeleton(in)
+		if got != in {
+			t.Errorf("ConfusableSkeleton(%q) = %q, want byte-identical", in, got)
+		}
+		if changed {
+			t.Error("changed = true, want false")
+		}
+		if len(signals) != 0 {
+			t.Errorf("signals = %v, want none", signals)
+		}
+	})
+
+	t.Run("pointed hebrew marks on a hebrew base are preserved", func(t *testing.T) {
+		in := "\u05E9\u05B8\u05C1"
+		got, signals, changed := preprocess.ConfusableSkeleton(in)
+		if got != in {
+			t.Errorf("ConfusableSkeleton(%q) = %q, want byte-identical", in, got)
+		}
+		if changed {
+			t.Error("changed = true, want false")
+		}
+		if len(signals) != 0 {
+			t.Errorf("signals = %v, want none", signals)
+		}
+	})
 }
 
 func TestConfusableSkeleton_InvalidUTF8(t *testing.T) {
