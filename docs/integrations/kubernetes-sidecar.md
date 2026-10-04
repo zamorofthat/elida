@@ -88,7 +88,7 @@ kubectl create secret generic elida-control \
 ## Why this works
 
 - **Shared network namespace.** The agent and ELIDA share `localhost`, so `http://localhost:8080` from the agent hits the ELIDA sidecar directly — no Service, no cross-pod hop.
-- **Control port stays in-pod.** `:9090` is not exposed outside the pod by default. Reach it with `kubectl exec` or `kubectl port-forward`, and always set `ELIDA_CONTROL_API_KEY` (as above) before exposing it anywhere.
+- **The control port is reachable cluster-wide, so the API key is mandatory.** `ELIDA_CONTROL_LISTEN: ":9090"` binds every interface in the pod's namespace, which is what the kubelet probes need. The `containerPort` entry is informational only and blocks nothing, so under a default CNI any pod in the cluster can reach `<podIP>:9090` without a Service. That is why `ELIDA_CONTROL_API_KEY` is set above rather than left out, and ELIDA will refuse to start on a non-loopback control bind with no authentication. To actually restrict reachability, apply a `NetworkPolicy` that denies ingress to port 9090 except from the namespaces or pods that operate ELIDA; `kubectl exec` and `kubectl port-forward` then remain your normal access paths.
 - **Egress lock-down still matters.** A sidecar only governs traffic the agent *sends to it*. Use a `NetworkPolicy` to block the agent container from reaching model APIs directly, so `localhost:8080` is its only path out. See [Security Limitations §5](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md#5-compensating-controls).
 
 ## Native sidecar (init container)

@@ -1,6 +1,6 @@
 # Claude Code
 
-Route [Claude Code](https://docs.claude.com/claude-code) through ELIDA to get session tracking, policy enforcement on tool calls, a kill switch, and a full audit trail of everything the agent does in your codebase — without changing how you use the CLI.
+Route [Claude Code](https://docs.claude.com/claude-code) through ELIDA to get session tracking, policy enforcement on tool calls, a kill switch, and an audit trail of the agent's API traffic — without changing how you use the CLI. ELIDA sees what crosses the wire to Anthropic, not what happens on your filesystem, and it records request and response bodies only when storage capture is turned on (see [Capture the full session for audit](#capture-the-full-session-for-audit)).
 
 ## How it works
 
@@ -48,19 +48,21 @@ Claude Code runs tools (Bash, file edits). Enable a policy preset to inspect and
 docker run -p 8080:8080 -p 127.0.0.1:9090:9090 \
   -e ELIDA_BACKEND=https://api.anthropic.com \
   -e ELIDA_POLICY_ENABLED=true \
-  -e ELIDA_POLICY_PRESET=standard \
+  -e ELIDA_POLICY_PRESET=coding-agent \
   ghcr.io/zamorofthat/elida:latest
 ```
 
-Start in audit mode (`ELIDA_POLICY_MODE=audit`) first to observe flag rates before enforcing — see [Security Limitations](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md#4-operational-risks).
+Use the `coding-agent` preset here. It is tuned for exactly this client: deterministic structural rules (dangerous tool calls, credential-reading tools) enforce, while content and statistical heuristics run in observe mode, flagged and captured but never blocking. A coding agent legitimately emits `bash -c`, `sudo`, `rm -rf` and `curl | sh` in its own output, and its rapid tool loops look like a high-rate, high-entropy burst to an anomaly detector. The `standard` (32 rules) and `strict` (50 rules) presets are the stricter options, and both will false-fire on normal Claude Code traffic.
+
+Whichever preset you pick, start in audit mode (`ELIDA_POLICY_MODE=audit`) to observe flag rates before enforcing — see [Security Limitations](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md#4-operational-risks).
 
 ## Kill a runaway session
 
 If an agent starts doing something it shouldn't, kill it:
 
 ```bash
-# Find the session ID
-curl -s http://localhost:9090/control/sessions | jq -r '.[0].id'
+# Find the session ID — /control/sessions returns {total, sessions[]}
+curl -s http://localhost:9090/control/sessions | jq -r '.sessions[0].id'
 
 # Kill it — the next request from that session is refused
 curl -X POST http://localhost:9090/control/sessions/<id>/kill
@@ -75,12 +77,18 @@ To record every request and response body (compliance/audit), enable capture-all
 -e ELIDA_STORAGE_CAPTURE_MODE=all
 ```
 
-Session Detail Records are then available via `GET /control/sessions/{id}`.
+Persisted Session Detail Records, including the captured bodies, are served from the history endpoint:
+
+```bash
+curl -s http://localhost:9090/control/history/<id> | jq
+```
+
+`GET /control/sessions/{id}` is a different thing: it reports live metrics for an in-flight session and carries no bodies, and it returns `404` once the session has ended.
 
 ## Troubleshooting
 
 - **`connection refused`** — ELIDA isn't listening on `:8080`, or Docker didn't publish the port. Check `curl http://localhost:8080` returns something.
-- **`401` from Anthropic** — your API key isn't set in the Claude Code environment; ELIDA forwards whatever auth header it receives, it does not inject one.
+- **`401` from Anthropic** — your API key isn't set in the Claude Code environment. ELIDA forwards whatever auth header it receives and does not inject one, *unless* a backend `api_key` is configured — in which case it overwrites `x-api-key` (Anthropic) or `Authorization` (OpenAI-style) with that key. A backend with an empty `api_key` is also auto-filled from the environment (`<BACKEND_NAME>_API_KEY`, else `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` by backend type), so check for a stale key in ELIDA's own environment before blaming the client.
 - **HTTPS backends** — `ELIDA_BACKEND=https://api.anthropic.com` is correct; ELIDA terminates the client's plaintext HTTP and makes its own TLS connection to Anthropic.
 
 ## Related

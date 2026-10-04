@@ -42,7 +42,15 @@ print(resp.choices[0].message.content)
 
 ## Correlate requests into a session
 
-ELIDA groups requests by the `X-Session-ID` header (generated per-connection if absent). To tie a whole agent run to one Session Detail Record, send a stable session ID via `default_headers`:
+ELIDA resolves a session identity in a fixed order, and only the first step is under your explicit control:
+
+1. the `X-Session-ID` header, if present;
+2. otherwise an ID derived from the request body — a configured dot-path first (`session.derive_from.body_path`), then the standard OpenAI `user` field (`session.derive_from.openai_user`, on by default);
+3. otherwise, while `session.generate_if_missing` is on (the default), a fallback keyed on **client IP plus backend**.
+
+Two consequences are worth knowing. The IP fallback is not per-connection or per-process, so several agent processes behind one source IP talking to the same backend are collapsed into a single session. And if you set `user` in the request body for your own accounting, that value silently becomes the session identity whenever no header is sent.
+
+To tie a whole agent run to one Session Detail Record, send a stable session ID via `default_headers` and stop relying on either fallback:
 
 ```python
 client = OpenAI(
@@ -71,10 +79,10 @@ for chunk in stream:
 ## Verify it's working
 
 ```bash
-curl -s http://localhost:9090/control/sessions | jq
+curl -s http://localhost:9090/control/sessions | jq '.sessions'
 ```
 
-You should see your `X-Session-ID` (or a generated one) among the active sessions.
+You should see your `X-Session-ID` (or a derived/fallback one) among the active sessions. The endpoint returns `{total, sessions[]}`, so index into `.sessions`, not the top-level value.
 
 ## Other OpenAI-compatible backends
 
