@@ -214,3 +214,7 @@ We thank the security researchers who have helped improve ELIDA's security:
 ---
 
 *This security policy follows [OpenSSF Security Policies](https://github.com/ossf/oss-vulnerability-guide) and [GitHub's recommended format](https://docs.github.com/en/code-security/getting-started/adding-a-security-policy-to-your-repository).*
+
+## Known Limitations
+
+ELIDA is one layer of defense, not a guarantee. For an honest account of what it does not catch, known bypass classes, and the controls you should run alongside it, see [SECURITY_LIMITATIONS.md](../SECURITY_LIMITATIONS.md).
