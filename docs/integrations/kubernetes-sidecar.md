@@ -89,7 +89,7 @@ kubectl create secret generic elida-control \
 
 - **Shared network namespace.** The agent and ELIDA share `localhost`, so `http://localhost:8080` from the agent hits the ELIDA sidecar directly — no Service, no cross-pod hop.
 - **Control port stays in-pod.** `:9090` is not exposed outside the pod by default. Reach it with `kubectl exec` or `kubectl port-forward`, and always set `ELIDA_CONTROL_API_KEY` (as above) before exposing it anywhere.
-- **Egress lock-down still matters.** A sidecar only governs traffic the agent *sends to it*. Use a `NetworkPolicy` to block the agent container from reaching model APIs directly, so `localhost:8080` is its only path out. See [Security Limitations §5](../../SECURITY_LIMITATIONS.md#5-compensating-controls).
+- **Egress lock-down still matters.** A sidecar only governs traffic the agent *sends to it*. Use a `NetworkPolicy` to block the agent container from reaching model APIs directly, so `localhost:8080` is its only path out. See [Security Limitations §5](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md#5-compensating-controls).
 
 ## Native sidecar (init container)
 
@@ -126,4 +126,4 @@ kubectl exec agent-with-elida -c elida -- \
 - [Enterprise Deployment](../enterprise-deployment.md) — standalone Helm chart and fleet management
 - [Claude Code integration](claude-code.md)
 - [OpenAI SDK integration](openai-sdk.md)
-- [Security Limitations](../../SECURITY_LIMITATIONS.md)
+- [Security Limitations](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md)

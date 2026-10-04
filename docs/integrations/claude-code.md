@@ -52,7 +52,7 @@ docker run -p 8080:8080 -p 127.0.0.1:9090:9090 \
   ghcr.io/zamorofthat/elida:latest
 ```
 
-Start in audit mode (`ELIDA_POLICY_MODE=audit`) first to observe flag rates before enforcing — see [Security Limitations](../../SECURITY_LIMITATIONS.md#4-operational-risks).
+Start in audit mode (`ELIDA_POLICY_MODE=audit`) first to observe flag rates before enforcing — see [Security Limitations](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md#4-operational-risks).
 
 ## Kill a runaway session
 
@@ -88,4 +88,4 @@ Session Detail Records are then available via `GET /control/sessions/{id}`.
 - [OpenAI SDK integration](openai-sdk.md)
 - [Kubernetes sidecar](kubernetes-sidecar.md)
 - [Integrations overview](../integrations.md)
-- [Security Limitations](../../SECURITY_LIMITATIONS.md)
+- [Security Limitations](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md)

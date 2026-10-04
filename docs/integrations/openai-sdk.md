@@ -56,7 +56,7 @@ Every call this client makes now shares one session in the dashboard and CDR.
 
 ## Streaming
 
-Streaming works unchanged — ELIDA scans chunks incrementally in its default `chunked` mode (see [Security Limitations §6](../../SECURITY_LIMITATIONS.md#6-performance-notes)):
+Streaming works unchanged — ELIDA scans chunks incrementally in its default `chunked` mode (see [Security Limitations §6](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md#6-performance-notes)):
 
 ```python
 stream = client.chat.completions.create(
@@ -97,4 +97,4 @@ See the [Integrations overview](../integrations.md) for putting ELIDA in front o
 - [Claude Code integration](claude-code.md)
 - [Kubernetes sidecar](kubernetes-sidecar.md)
 - [Integrations overview](../integrations.md)
-- [Security Limitations](../../SECURITY_LIMITATIONS.md)
+- [Security Limitations](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md)
