@@ -11,6 +11,10 @@ builds:
     binary: elida
     env:
       - CGO_ENABLED=0
+      # GoMLX's SIMD kernels are gated to `amd64 && goexperiment.simd`.
+      # Every other target gets the scalar path and is async-only for
+      # semantic inference.
+      - GOEXPERIMENT={{ if and (eq .Os "linux") (eq .Arch "amd64") }}simd{{ end }}
     flags:
       - -trimpath
     ldflags:

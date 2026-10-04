@@ -27,7 +27,11 @@ COPY --from=dashboard-builder /app/web/../internal/dashboard/static ./internal/d
 
 # Build binary with embedded dashboard
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s -X main.Version=${VERSION}" -o elida ./cmd/elida
+# GOEXPERIMENT=simd turns GoMLX's scalar kernels into the SIMD kernels that
+# make inline semantic inference viable. It is gated to amd64 in GoMLX's
+# source, so the default is empty and buildx sets it per platform.
+ARG GOEXPERIMENT=
+RUN CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=${GOEXPERIMENT} go build -a -installsuffix cgo -ldflags="-w -s -X main.Version=${VERSION}" -o elida ./cmd/elida
 
 # Runtime stage
 FROM alpine:3.24
