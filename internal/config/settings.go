@@ -124,13 +124,13 @@ type DecisionPreprocessingSettings struct {
 func (s DecisionSettings) ApplyTo(d DecisionConfig, policyMode string) (DecisionConfig, []string) {
 	var rejected []string
 
-	applyInt := func(dst *int, v *int, field string, min, ceiling int) {
+	applyInt := func(dst *int, v *int, field string, minVal, ceiling int) {
 		if v == nil {
 			return
 		}
 		switch {
-		case *v < min:
-			rejected = append(rejected, fmt.Sprintf("decision.%s: %d is below the minimum of %d", field, *v, min))
+		case *v < minVal:
+			rejected = append(rejected, fmt.Sprintf("decision.%s: %d is below the minimum of %d", field, *v, minVal))
 		case *v > ceiling:
 			rejected = append(rejected, fmt.Sprintf("decision.%s: %d exceeds the ceiling of %d", field, *v, ceiling))
 		default:
@@ -181,8 +181,26 @@ func (s DecisionSettings) ApplyTo(d DecisionConfig, policyMode string) (Decision
 	applyInt(&d.AsyncQueueSize, s.AsyncQueueSize, "async_queue_size", 1, AsyncQueueSizeCeiling)
 
 	if p := s.Preprocessing; p != nil {
+		origInputBytes := d.Preprocessing.MaxInputBytes
+		origAnalysisBytes := d.Preprocessing.MaxAnalysisBytes
+
 		applyInt(&d.Preprocessing.MaxInputBytes, p.MaxInputBytes, "preprocessing.max_input_bytes", 1, MaxInputBytesCeiling)
 		applyInt(&d.Preprocessing.MaxAnalysisBytes, p.MaxAnalysisBytes, "preprocessing.max_analysis_bytes", 1, MaxAnalysisBytesCeiling)
+
+		// Cross-field invariant (mirrors validateDecision in config.go): the
+		// aggregate analysis budget must cover at least the original
+		// representation. A settings edit that would violate it is refused
+		// in full — both byte fields revert to their pre-edit values rather
+		// than landing in a state Validate() would reject.
+		if d.Preprocessing.MaxAnalysisBytes < d.Preprocessing.MaxInputBytes {
+			rejected = append(rejected, fmt.Sprintf(
+				"decision.preprocessing.max_analysis_bytes: %d must be >= decision.preprocessing.max_input_bytes: %d; both reverted to their previous values",
+				d.Preprocessing.MaxAnalysisBytes, d.Preprocessing.MaxInputBytes,
+			))
+			d.Preprocessing.MaxInputBytes = origInputBytes
+			d.Preprocessing.MaxAnalysisBytes = origAnalysisBytes
+		}
+
 		applyInt(&d.Preprocessing.MaxRepresentations, p.MaxRepresentations, "preprocessing.max_representations", 1, MaxRepresentationsCeiling)
 		applyInt(&d.Preprocessing.MaxDecodeDepth, p.MaxDecodeDepth, "preprocessing.max_decode_depth", 0, MaxDecodeDepthCeiling)
 		applyInt(&d.Preprocessing.MaxExpansionRatio, p.MaxExpansionRatio, "preprocessing.max_expansion_ratio", 1, MaxExpansionRatioCeiling)
