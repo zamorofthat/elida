@@ -28,7 +28,9 @@ const (
 type Direction string
 
 const (
-	DirectionRequest  Direction = "request"
+	// DirectionRequest is content flowing from the client toward the model.
+	DirectionRequest Direction = "request"
+	// DirectionResponse is content flowing from the model back to the client.
 	DirectionResponse Direction = "response"
 )
 
@@ -110,17 +112,48 @@ const (
 type AdmissionReason string
 
 const (
+	// AdmitUntrustedToolResult admits a window to the inline fast lane
+	// because its content came from a tool result rather than a human or
+	// assistant turn: tool output is untrusted by default and gets the
+	// synchronous check before anything forwards.
 	AdmitUntrustedToolResult AdmissionReason = "untrusted_tool_result"
+	// AdmitEncodedOrObfuscated admits a window inline because preprocessing
+	// found an encoded or obfuscated representation (for example base64 or
+	// unicode tricks) that a cheap check alone cannot clear.
 	AdmitEncodedOrObfuscated AdmissionReason = "encoded_or_obfuscated"
+	// AdmitWeakInjectionSignal admits a window inline because a fast, cheap
+	// pre-check already found a weak but non-zero injection signal, so the
+	// window gets a full answer rather than waiting on an async pass.
 	AdmitWeakInjectionSignal AdmissionReason = "weak_injection_signal"
+	// AdmitElevatedSessionRisk admits a window inline because the session
+	// already carries elevated risk, even though the window would not
+	// otherwise qualify on its own content alone.
 	AdmitElevatedSessionRisk AdmissionReason = "elevated_session_risk"
-	AdmitBroadStrictMode     AdmissionReason = "broad_strict_mode"
+	// AdmitBroadStrictMode admits a window inline because operator
+	// configuration runs in a broad or strict admission mode that inlines
+	// more windows than the default policy would.
+	AdmitBroadStrictMode AdmissionReason = "broad_strict_mode"
 
-	DenyNotEligible       AdmissionReason = "not_eligible"
+	// DenyNotEligible means the window never qualified for scoring at all
+	// (for example, content outside the signals' scope). It is not queued
+	// async either; it is simply never scored.
+	DenyNotEligible AdmissionReason = "not_eligible"
+	// DenyNoWorkerAvailable means the window qualified for async scoring
+	// but no worker was free to take it. The window goes unscored and
+	// Coverage reports it as short.
 	DenyNoWorkerAvailable AdmissionReason = "no_worker_available"
+	// DenyInlineBudgetSpent means this request's inline token or time
+	// budget was already spent by earlier windows. The window falls to the
+	// async queue if one accepts it, otherwise goes unscored.
 	DenyInlineBudgetSpent AdmissionReason = "inline_budget_spent"
-	DenyDeadlineSpent     AdmissionReason = "deadline_spent"
-	DenyQueueFull         AdmissionReason = "async_queue_full"
+	// DenyDeadlineSpent means the scheduler's global deadline had already
+	// elapsed before this window could be scored. The window is skipped
+	// rather than scored late.
+	DenyDeadlineSpent AdmissionReason = "deadline_spent"
+	// DenyQueueFull means the async queue was at capacity and could not
+	// accept the window. The window goes unscored and Coverage reports it
+	// as short.
+	DenyQueueFull AdmissionReason = "async_queue_full"
 )
 
 // Admission is the admission controller's record for one window.

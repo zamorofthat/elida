@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -103,8 +104,21 @@ func TestDecisionContract_CoverageIncompleteUnlessEverythingScored(t *testing.T)
 
 func TestDecisionContract_InputCarriesNoIdentifiers(t *testing.T) {
 	// Session and request IDs stay in the orchestration layer so an HTTP
-	// provider cannot receive internal identifiers. This test fails to
-	// compile if someone adds them to Input.
+	// provider cannot receive internal identifiers. A keyed struct literal
+	// below would still compile if someone added a SessionID or RequestID
+	// field, so this asserts the exact field set via reflection instead:
+	// that is what actually guards the privacy boundary.
+	wantFields := []string{"Content", "Direction", "SourceRole", "MessageIndex"}
+	typ := reflect.TypeOf(decision.Input{})
+	if typ.NumField() != len(wantFields) {
+		t.Fatalf("decision.Input has %d fields, want %d %v", typ.NumField(), len(wantFields), wantFields)
+	}
+	for i, name := range wantFields {
+		if got := typ.Field(i).Name; got != name {
+			t.Fatalf("decision.Input field %d = %q, want %q", i, got, name)
+		}
+	}
+
 	var in decision.Input
 	in = decision.Input{
 		Content:      "hello",
