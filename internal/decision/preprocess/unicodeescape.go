@@ -103,12 +103,22 @@ func DecodeUnicodeEscapes(s string) (string, []string, bool) {
 // readHexEscape parses exactly width hex digits from the front of s and
 // returns the rune they encode, how many bytes were consumed, and whether
 // the parse succeeded.
+//
+// The parsed value is checked against utf8.MaxRune before it is cast to
+// rune. v is parsed with a 32-bit bit size, so it can be as large as
+// 0xFFFFFFFF; casting a value of 0x80000000 or more straight to rune (a
+// signed int32) wraps it negative, and a negative rune satisfies a naive
+// "r <= utf8.MaxRune" check at the call site. Rejecting the out-of-range
+// value here, before the cast, closes that hole for every caller.
 func readHexEscape(s string, width int) (rune, int, bool) {
 	if len(s) < width {
 		return 0, 0, false
 	}
 	v, err := strconv.ParseUint(s[:width], 16, 32)
 	if err != nil {
+		return 0, 0, false
+	}
+	if v > utf8.MaxRune {
 		return 0, 0, false
 	}
 	return rune(v), width, true
