@@ -217,4 +217,4 @@ We thank the security researchers who have helped improve ELIDA's security:
 
 ## Known Limitations
 
-ELIDA is one layer of defense, not a guarantee. For an honest account of what it does not catch, known bypass classes, and the controls you should run alongside it, see [SECURITY_LIMITATIONS.md](../SECURITY_LIMITATIONS.md).
+ELIDA is one layer of defense, not a guarantee. For an honest account of what it does not catch, known bypass classes, and the controls you should run alongside it, see [SECURITY_LIMITATIONS.md](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md).
