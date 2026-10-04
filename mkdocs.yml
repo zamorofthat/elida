@@ -79,6 +79,10 @@ nav:
     - Session Records: session-records.md
     - Control API: api.md
     - Voice & WebSocket: voice.md
-  - Integrations: integrations.md
+  - Integrations:
+    - Overview: integrations.md
+    - Claude Code: integrations/claude-code.md
+    - OpenAI SDK: integrations/openai-sdk.md
+    - Kubernetes Sidecar: integrations/kubernetes-sidecar.md
   - Blog:
     - blog/index.md

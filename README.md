@@ -79,7 +79,7 @@ Every request flows through session tracking and policy evaluation before reachi
 - **PII and credential detection** (LLM06) — block sensitive data in responses
 - **Tool abuse prevention** (LLM07/08) — block dangerous tool calls
 - **Risk ladder** — progressive escalation: log → flag → throttle → block → kill
-- **Policy presets** — `minimal` (8 rules), `standard` (38), `strict` (46)
+- **Policy presets** — `minimal` (3 rules), `standard` (32), `strict` (50), plus `mcp` (52) and `coding-agent` (14)
 
 ### Observability
 - **OpenTelemetry** — traces, metrics, and logs via OTLP
@@ -106,7 +106,7 @@ session:
 
 policy:
   enabled: true
-  preset: standard  # minimal | standard | strict
+  preset: standard  # minimal | standard | strict | mcp | coding-agent
 ```
 
 Environment variables:
@@ -131,7 +131,7 @@ backends:
     models: ["gpt-*", "o*"]
 ```
 
-See the [Configuration Guide](docs/CONFIGURATION.md) for full options.
+See the [Configuration Guide](docs/configuration.md) for full options.
 
 ## Client Examples
 
@@ -166,24 +166,25 @@ curl http://localhost:9090/control/flagged
 curl http://localhost:9090/control/events
 ```
 
-See the [API Reference](docs/API.md) for all endpoints.
+See the [API Reference](docs/api.md) for all endpoints.
 
 ## Documentation
 
 | Guide | Description |
 |-------|-------------|
-| [Getting Started](docs/GETTING_STARTED.md) | Step-by-step tutorial |
-| [Configuration](docs/CONFIGURATION.md) | YAML and environment variable options |
-| [API Reference](docs/API.md) | Control API endpoints |
-| [Policy Rules](docs/POLICY_RULES_REFERENCE.md) | All 40+ built-in security rules |
-| [Architecture](docs/ARCHITECTURE.md) | Technical deep-dive and SBC analogy |
-| [Telco Controls](docs/TELCO_CONTROLS.md) | Risk ladder, token tracking, events |
-| [Session Records](docs/SESSION_RECORDS.md) | Session tracking and SDR format |
-| [Voice Sessions](docs/VOICE.md) | WebSocket and voice session support |
-| [Deployment](docs/DEPLOYMENT.md) | Deployment strategies |
-| [Enterprise Deployment](docs/ENTERPRISE_DEPLOYMENT.md) | Kubernetes, Helm, fleet management |
-| [Security Controls](docs/SECURITY_CONTROLS.md) | OWASP/NIST mappings for auditors |
-| [Docker](docs/DOCKER_README.md) | Docker-specific documentation |
+| [Getting Started](docs/getting-started.md) | Step-by-step tutorial |
+| [Configuration](docs/configuration.md) | YAML and environment variable options |
+| [API Reference](docs/api.md) | Control API endpoints |
+| [Policy Rules](docs/policy-rules-reference.md) | All 40+ built-in security rules |
+| [Architecture](docs/architecture.md) | Technical deep-dive and SBC analogy |
+| [Telco Controls](docs/telco-controls.md) | Risk ladder, token tracking, events |
+| [Session Records](docs/session-records.md) | Session tracking and SDR format |
+| [Voice Sessions](docs/voice.md) | WebSocket and voice session support |
+| [Deployment](docs/deployment.md) | Deployment strategies |
+| [Enterprise Deployment](docs/enterprise-deployment.md) | Kubernetes, Helm, fleet management |
+| [Security Controls](docs/security-controls.md) | OWASP/NIST mappings for auditors |
+| [Security Limitations](SECURITY_LIMITATIONS.md) | What ELIDA can't catch, known bypasses, compensating controls |
+| [Docker](docs/docker.md) | Docker-specific documentation |
 
 ## Development
 
