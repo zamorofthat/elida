@@ -128,6 +128,25 @@ func DecodeBase64(s string, b Budget) (string, []string, bool) {
 
 const hexRunChars = "0123456789abcdefABCDEF"
 
+// indexHexPrefix finds the first "0x"/"0X" marker in s, scanning byte by
+// byte so the returned index is always an offset into s itself.
+//
+// strings.ToLower(s) is not used for this: case-folding some runes changes
+// a string's byte length (an invalid UTF-8 byte is replaced by the 3-byte
+// U+FFFD; some letters, like Turkish 'I-dot' or German 'ẞ', also change
+// width), so an index found in a lowercased copy can land past the end of
+// the original, or mid-rune. "0" has no case, so comparing it directly
+// against s and only case-folding the single following byte is both
+// correct and immune to that drift.
+func indexHexPrefix(s string) int {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '0' && (s[i+1] == 'x' || s[i+1] == 'X') {
+			return i
+		}
+	}
+	return -1
+}
+
 // DecodeHex finds the longest hexadecimal run in s, decodes it, and keeps
 // the result only if it reads as text.
 //
@@ -138,7 +157,7 @@ func DecodeHex(s string, b Budget) (string, []string, bool) {
 		return s, nil, false
 	}
 	candidate := s
-	if idx := strings.Index(strings.ToLower(candidate), "0x"); idx >= 0 {
+	if idx := indexHexPrefix(candidate); idx >= 0 {
 		candidate = candidate[idx+2:]
 	}
 	run, _ := longestRun(candidate, hexRunChars)

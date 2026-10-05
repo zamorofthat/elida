@@ -20,6 +20,7 @@ package preprocess
 import (
 	"crypto/sha256"
 	"fmt"
+	"unicode/utf8"
 
 	"elida/internal/decision"
 )
@@ -261,6 +262,19 @@ func Run(content string, b Budget) Result {
 			for _, tf := range transforms {
 				out, signals, ok := tf.apply(parent.Content, b)
 				if !ok || out == "" {
+					continue
+				}
+				// Most transforms validate their own output, but
+				// StripInvisible, ConfusableSkeleton, NormalizeNFKC and
+				// DecodeROT13 deliberately preserve byte-for-byte any
+				// invalid UTF-8 that was already present in the input
+				// (their own tests pin this), so their output can still be
+				// invalid UTF-8 when the input was. A classifier cannot
+				// read that, so Run is the backstop: an unanalyzable
+				// result is skipped exactly like ok=false, consuming no
+				// budget and raising no gap, matching every transform that
+				// already does this validation itself.
+				if !utf8.ValidString(out) {
 					continue
 				}
 				if b.MaxExpansionRatio > 0 && len(out) > len(parent.Content)*b.MaxExpansionRatio {
