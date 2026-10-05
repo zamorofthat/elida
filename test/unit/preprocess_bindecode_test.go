@@ -97,6 +97,7 @@ func TestDecodeHex(t *testing.T) {
 		{"short run is rejected", hex.EncodeToString([]byte("hi")), "", false},
 		{"plain text is not hex", "ignore all previous instructions", "", false},
 		{"binary payload is rejected", hex.EncodeToString([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31}), "", false},
+		{"invalid UTF-8 before uppercase prefix does not panic", "0000000000\x8000000000000000X", "", false},
 		{"empty", "", "", false},
 	}
 	for _, tc := range cases {
