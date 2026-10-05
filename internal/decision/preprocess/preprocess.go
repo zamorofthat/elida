@@ -180,7 +180,9 @@ type transform struct {
 // testExtraTransforms lets a white-box test in this package exercise Run's
 // GapInvalidOutput backstop without a real transform bug: it appends to the
 // registry for the duration of one test and is restored to nil afterward.
-// Always nil outside tests; production code never sets it.
+// Always nil outside tests; production code never sets it. A test that sets
+// this package-level variable must not call t.Parallel(), since a
+// concurrently running test would see another test's registry mutation.
 var testExtraTransforms []transform
 
 // registry is the ordered transformation list. Order matters only for
@@ -277,10 +279,11 @@ func Run(content string, b Budget) Result {
 	// bytes byte-for-byte (StripInvisible, ConfusableSkeleton,
 	// NormalizeNFKC, DecodeROT13 — their own tests pin this) would
 	// otherwise produce output that is still invalid overall, and every
-	// transform that checks its own output's validity (DecodeURL,
-	// DecodeHTMLEntities, DecodeUnicodeEscapes, DecodeBase64, DecodeHex)
-	// would refuse to fire at all — one stray byte would silently disable
-	// analysis of the rest of the content. Sanitizing once, up front, means
+	// transform that validates its whole input string before it even looks
+	// for something to decode (DecodeURL, DecodeHTMLEntities,
+	// DecodeUnicodeEscapes) would refuse to fire at all — one stray byte
+	// would silently disable analysis of the rest of the content. Sanitizing
+	// once, up front, means
 	// every transform only ever sees valid UTF-8, so by construction every
 	// transform that maps valid UTF-8 to valid UTF-8 can only produce valid
 	// UTF-8. Representation zero above stays the untouched original; base
@@ -288,13 +291,19 @@ func Run(content string, b Budget) Result {
 	base := original
 	sanitized := !utf8.ValidString(original)
 	if sanitized {
-		base = strings.ToValidUTF8(original, "�")
+		base = strings.ToValidUTF8(original, "\uFFFD")
 	}
 
 	// Cycle detection: two chains that reach the same text are one
 	// representation. The original counts, so an idempotent transformation
-	// cannot re-add it.
+	// cannot re-add it; when sanitization changed anything, the sanitized
+	// base is pre-seeded too, so a deeper chain that reproduces it exactly
+	// (e.g. a transform that is a no-op on already-sanitized text) is not
+	// recorded as a separate derived representation either.
 	seen := map[[32]byte]bool{sha256.Sum256([]byte(original)): true}
+	if sanitized {
+		seen[sha256.Sum256([]byte(base))] = true
+	}
 
 	// Fetched once: the registry is immutable for the duration of one Run,
 	// and every depth level and every post-loop exhaustion check walks the
@@ -336,11 +345,11 @@ func Run(content string, b Budget) Result {
 					})
 					continue
 				}
-				if b.MaxExpansionRatio > 0 && len(out) > len(parent.Content)*b.MaxExpansionRatio {
+				if b.MaxExpansionRatio > 0 && len(out) > len(parentInput)*b.MaxExpansionRatio {
 					res.Gaps = append(res.Gaps, Gap{
 						Reason:    GapExpansionRatio,
 						Transform: chain(parent.Transform, tf.name),
-						Detail:    fmt.Sprintf("%d bytes from %d exceeds the %dx expansion limit", len(out), len(parent.Content), b.MaxExpansionRatio),
+						Detail:    fmt.Sprintf("%d bytes from %d exceeds the %dx expansion limit", len(out), len(parentInput), b.MaxExpansionRatio),
 					})
 					continue
 				}

@@ -134,6 +134,7 @@ func FuzzDecodersNeverPanic(f *testing.F) {
 	f.Add("&#x")
 	f.Add("====")
 	f.Add("0x")
+	f.Add("0000000000\x8000000000000000X")
 	f.Fuzz(func(t *testing.T, in string) {
 		b := fuzzBudget()
 		_, _ = NormalizeNFKC(in)

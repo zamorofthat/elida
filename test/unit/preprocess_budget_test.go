@@ -222,9 +222,9 @@ func TestPreprocessing_DerivedContentIsNeverForwarded(t *testing.T) {
 // base, prepending one invalid byte made every byte-preserving transform
 // (StripInvisible, ConfusableSkeleton, NormalizeNFKC, DecodeROT13) produce
 // still-invalid output that got silently dropped, and made every
-// self-validating decoder (DecodeURL, DecodeHTMLEntities, DecodeBase64,
-// DecodeHex, DecodeUnicodeEscapes) refuse to fire at all on the whole
-// string — a free bypass of the entire pipeline for the cost of one byte.
+// whole-string validator (DecodeURL, DecodeHTMLEntities,
+// DecodeUnicodeEscapes) refuse to fire at all on the whole string — a free
+// bypass of the entire pipeline for the cost of one byte.
 func TestRun_InvalidByteDoesNotDisablePreprocessing(t *testing.T) {
 	clean := obfuscatedPayload()
 	in := string([]byte{0xff}) + clean
@@ -240,6 +240,17 @@ func TestRun_InvalidByteDoesNotDisablePreprocessing(t *testing.T) {
 	if len(r.Representations) < len(cleanResult.Representations) {
 		t.Fatalf("the invalid byte reduced derived representations: got %d, want at least %d (clean input's count)",
 			len(r.Representations), len(cleanResult.Representations))
+	}
+
+	// The whole-string transforms must still have fired on the sanitized
+	// base, not just survived incidentally: confirm by name, not only by
+	// count, that NFKC normalization and invisible-character stripping each
+	// produced a representation.
+	if !hasRep(r, preprocess.TransformNFKC) {
+		t.Fatalf("expected an %q representation, got %+v", preprocess.TransformNFKC, r.Representations)
+	}
+	if !hasRep(r, preprocess.TransformInvisible) {
+		t.Fatalf("expected an %q representation, got %+v", preprocess.TransformInvisible, r.Representations)
 	}
 
 	// The base64 payload's decoded text must still surface somewhere.
