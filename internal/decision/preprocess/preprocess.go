@@ -187,6 +187,7 @@ func registry() []transform {
 		}},
 		{name: TransformBase64, apply: DecodeBase64},
 		{name: TransformHex, apply: DecodeHex},
+		{name: TransformROT13, apply: DecodeROT13},
 	}
 }
 
