@@ -20,6 +20,7 @@ package preprocess
 import (
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"elida/internal/decision"
@@ -48,6 +49,14 @@ const (
 	SignalBidiRemoved      = "bidi_removed"
 	SignalConfusables      = "confusables_present"
 	SignalEncodedPayload   = "encoded_payload"
+	// SignalInvalidUTF8Sanitized marks a representation derived from a
+	// sanitized analysis base: the original content had at least one byte
+	// that is not valid UTF-8, so Run replaced each invalid run with
+	// U+FFFD before running any transform on it. This is a signal, not a
+	// gap, because analysis of the sanitized text is complete; it tells
+	// the classifier path and telemetry that a placeholder stands in for
+	// bytes a model cannot read anyway.
+	SignalInvalidUTF8Sanitized = "invalid_utf8_sanitized"
 )
 
 // Representation is one analyzable view of a message.
@@ -109,6 +118,15 @@ const (
 	// reaches Run, so this is defense in depth: no transforms run and
 	// nothing is claimed to be fully analyzed.
 	GapBudgetUnset GapReason = "budget_unset"
+	// GapInvalidOutput marks a transform output that Run rejected because
+	// it was not valid UTF-8. Run sanitizes the analysis base before any
+	// transform runs (see SignalInvalidUTF8Sanitized), so every registered
+	// transform should only ever see valid UTF-8 input and, since each one
+	// maps valid UTF-8 to valid UTF-8, only ever produce valid UTF-8
+	// output; this gate should be unreachable in practice. It stays as
+	// defense in depth for a transform bug, and it is never silent: unlike
+	// ok=false, hitting it is a real, visible gap.
+	GapInvalidOutput GapReason = "invalid_output"
 )
 
 // Gap records one piece of content that was not analyzed. Gaps are coverage
@@ -159,6 +177,12 @@ type transform struct {
 	apply func(s string, b Budget) (out string, signals []string, ok bool)
 }
 
+// testExtraTransforms lets a white-box test in this package exercise Run's
+// GapInvalidOutput backstop without a real transform bug: it appends to the
+// registry for the duration of one test and is restored to nil afterward.
+// Always nil outside tests; production code never sets it.
+var testExtraTransforms []transform
+
 // registry is the ordered transformation list. Order matters only for
 // determinism of the output slice; every transformation is tried at every
 // depth below MaxDecodeDepth.
@@ -166,7 +190,7 @@ type transform struct {
 // Later tasks append to this list. Keep it in this order so test expectations
 // about representation ordering stay stable.
 func registry() []transform {
-	return []transform{
+	base := []transform{
 		{name: TransformNFKC, apply: func(s string, _ Budget) (string, []string, bool) {
 			out, changed := NormalizeNFKC(s)
 			return out, nil, changed
@@ -190,6 +214,10 @@ func registry() []transform {
 		{name: TransformHex, apply: DecodeHex},
 		{name: TransformROT13, apply: DecodeROT13},
 	}
+	if len(testExtraTransforms) > 0 {
+		return append(base, testExtraTransforms...)
+	}
+	return base
 }
 
 // Run produces the bounded representation set for content.
@@ -243,6 +271,26 @@ func Run(content string, b Budget) Result {
 		return res
 	}
 
+	// Transforms never see the byte-exact original directly: they see a
+	// sanitized analysis base instead. If content has even one invalid
+	// UTF-8 byte, every transform that deliberately preserves invalid
+	// bytes byte-for-byte (StripInvisible, ConfusableSkeleton,
+	// NormalizeNFKC, DecodeROT13 — their own tests pin this) would
+	// otherwise produce output that is still invalid overall, and every
+	// transform that checks its own output's validity (DecodeURL,
+	// DecodeHTMLEntities, DecodeUnicodeEscapes, DecodeBase64, DecodeHex)
+	// would refuse to fire at all — one stray byte would silently disable
+	// analysis of the rest of the content. Sanitizing once, up front, means
+	// every transform only ever sees valid UTF-8, so by construction every
+	// transform that maps valid UTF-8 to valid UTF-8 can only produce valid
+	// UTF-8. Representation zero above stays the untouched original; base
+	// only feeds the transforms.
+	base := original
+	sanitized := !utf8.ValidString(original)
+	if sanitized {
+		base = strings.ToValidUTF8(original, "�")
+	}
+
 	// Cycle detection: two chains that reach the same text are one
 	// representation. The original counts, so an idempotent transformation
 	// cannot re-add it.
@@ -259,22 +307,33 @@ func Run(content string, b Budget) Result {
 		var next []int
 		for _, parentIdx := range frontier {
 			parent := res.Representations[parentIdx]
+			// The original (depth 0) hands the sanitized base to
+			// transforms, never its own byte-exact, possibly-invalid
+			// Content; every deeper parent is itself already a
+			// representation that was built from valid UTF-8 (see below),
+			// so its Content is used directly.
+			parentInput := parent.Content
+			if parent.TransformDepth == 0 {
+				parentInput = base
+			}
 			for _, tf := range transforms {
-				out, signals, ok := tf.apply(parent.Content, b)
+				out, signals, ok := tf.apply(parentInput, b)
 				if !ok || out == "" {
 					continue
 				}
-				// Most transforms validate their own output, but
-				// StripInvisible, ConfusableSkeleton, NormalizeNFKC and
-				// DecodeROT13 deliberately preserve byte-for-byte any
-				// invalid UTF-8 that was already present in the input
-				// (their own tests pin this), so their output can still be
-				// invalid UTF-8 when the input was. A classifier cannot
-				// read that, so Run is the backstop: an unanalyzable
-				// result is skipped exactly like ok=false, consuming no
-				// budget and raising no gap, matching every transform that
-				// already does this validation itself.
+				// Defense in depth, not a normal path: with the sanitize
+				// step above, every transform only ever sees valid UTF-8,
+				// and every transform in this package maps valid UTF-8 to
+				// valid UTF-8, so this should be unreachable. If a future
+				// transform breaks that, it is a real, visible gap, not a
+				// silent drop: a classifier cannot read the result either
+				// way, but here that fact is recorded instead of hidden.
 				if !utf8.ValidString(out) {
+					res.Gaps = append(res.Gaps, Gap{
+						Reason:    GapInvalidOutput,
+						Transform: chain(parent.Transform, tf.name),
+						Detail:    "transform produced output that is not valid UTF-8; a classifier cannot read it",
+					})
 					continue
 				}
 				if b.MaxExpansionRatio > 0 && len(out) > len(parent.Content)*b.MaxExpansionRatio {
@@ -308,13 +367,17 @@ func Run(content string, b Budget) Result {
 
 				seen[h] = true
 				res.AnalysisBytes += len(out)
+				repSignals := append(append([]string(nil), parent.Signals...), signals...)
+				if sanitized && parent.TransformDepth == 0 {
+					repSignals = append(repSignals, SignalInvalidUTF8Sanitized)
+				}
 				res.Representations = append(res.Representations, Representation{
 					Content:        out,
 					Transform:      chain(parent.Transform, tf.name),
 					TransformDepth: depth,
 					StartByte:      parent.StartByte,
 					EndByte:        parent.EndByte,
-					Signals:        append(append([]string(nil), parent.Signals...), signals...),
+					Signals:        repSignals,
 				})
 				next = append(next, len(res.Representations)-1)
 			}
@@ -336,8 +399,12 @@ func Run(content string, b Budget) Result {
 			if rep.TransformDepth < b.MaxDecodeDepth {
 				continue
 			}
+			repInput := rep.Content
+			if rep.TransformDepth == 0 {
+				repInput = base
+			}
 			for _, tf := range transforms {
-				if _, _, ok := tf.apply(rep.Content, b); ok {
+				if _, _, ok := tf.apply(repInput, b); ok {
 					res.Gaps = append(res.Gaps, Gap{
 						Reason:    GapDecodeDepthSpent,
 						Transform: chain(rep.Transform, tf.name),

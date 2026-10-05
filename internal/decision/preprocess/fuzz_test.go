@@ -94,10 +94,30 @@ func FuzzRun(f *testing.F) {
 		}
 
 		// Every derived representation must be valid UTF-8: a classifier
-		// cannot read anything else, and the decoders all check.
+		// cannot read anything else, and Run sanitizes its analysis base
+		// before any transform runs so this holds regardless of what the
+		// original looked like. And when the original representation
+		// itself was not valid UTF-8, sanitization actually happened, so
+		// every derived representation must carry the signal that says so
+		// — the one case this check does not require the signal is an
+		// original that was already valid UTF-8 to begin with.
+		origValid := utf8.ValidString(orig.Content)
 		for _, rep := range r.Representations[1:] {
 			if !utf8.ValidString(rep.Content) {
 				t.Fatalf("derived representation %q is not valid UTF-8", rep.Transform)
+			}
+			if !origValid {
+				var sanitized bool
+				for _, sig := range rep.Signals {
+					if sig == SignalInvalidUTF8Sanitized {
+						sanitized = true
+						break
+					}
+				}
+				if !sanitized {
+					t.Fatalf("derived representation %q from an invalid-UTF-8 original is missing the %s signal",
+						rep.Transform, SignalInvalidUTF8Sanitized)
+				}
 			}
 		}
 	})
@@ -128,4 +148,40 @@ func FuzzDecodersNeverPanic(f *testing.F) {
 		_ = PrintableRatio(in)
 		_ = LexicalScore(in)
 	})
+}
+
+// TestRun_BackstopRecordsGapInvalidOutput forces Run's GapInvalidOutput
+// backstop with a throwaway transform that always returns invalid UTF-8,
+// registered only for this test via testExtraTransforms. With the sanitize
+// step in place, no real transform should ever reach this gate — this pins
+// that the gate is a visible gap, not a silent drop, if a future transform
+// ever does.
+func TestRun_BackstopRecordsGapInvalidOutput(t *testing.T) {
+	const fakeName = "test_invalid_output"
+	testExtraTransforms = []transform{{
+		name: fakeName,
+		apply: func(string, Budget) (string, []string, bool) {
+			return "\xff", nil, true
+		},
+	}}
+	t.Cleanup(func() { testExtraTransforms = nil })
+
+	b := Budget{
+		MaxInputBytes:      1024,
+		MaxAnalysisBytes:   1 << 16,
+		MaxRepresentations: 16,
+		MaxDecodeDepth:     1,
+		MaxExpansionRatio:  4,
+	}
+	r := Run("plain ascii text with nothing else to decode", b)
+
+	var found bool
+	for _, g := range r.Gaps {
+		if g.Reason == GapInvalidOutput && g.Transform == fakeName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a GapInvalidOutput gap naming %q, got %+v", fakeName, r.Gaps)
+	}
 }
