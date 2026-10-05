@@ -185,6 +185,8 @@ func registry() []transform {
 		{name: TransformUnicodeEsc, apply: func(s string, _ Budget) (string, []string, bool) {
 			return DecodeUnicodeEscapes(s)
 		}},
+		{name: TransformBase64, apply: DecodeBase64},
+		{name: TransformHex, apply: DecodeHex},
 	}
 }
 
