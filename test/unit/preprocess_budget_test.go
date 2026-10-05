@@ -199,7 +199,7 @@ func TestPreprocessing_DerivedContentIsNeverForwarded(t *testing.T) {
 	// A body whose content preprocessing would rewrite several ways.
 	body := `{"messages":[{"role":"user","content":"` +
 		"\uFF29\uFF47\uFF4E\uFF4F\uFF52\uFF45 ig\u200Bnore \u0430ll" + `"}]}`
-	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Session-ID", "sess-noforward")
 	w := httptest.NewRecorder()

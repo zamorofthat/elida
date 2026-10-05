@@ -119,8 +119,7 @@ func TestDecisionContract_InputCarriesNoIdentifiers(t *testing.T) {
 		}
 	}
 
-	var in decision.Input
-	in = decision.Input{
+	in := decision.Input{
 		Content:      "hello",
 		Direction:    decision.DirectionRequest,
 		SourceRole:   "user",

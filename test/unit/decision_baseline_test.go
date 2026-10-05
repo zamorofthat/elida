@@ -211,7 +211,7 @@ func TestBaseline_PreForwardBlockByRisk(t *testing.T) {
 
 	body := `{"messages":[{"role":"user","content":"hello world"}]}`
 	send := func() int {
-		req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/messages", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Session-ID", "sess-block")
 		w := httptest.NewRecorder()

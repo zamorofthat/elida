@@ -30,7 +30,7 @@ func LexicalScore(s string) int {
 	}
 	lower := strings.ToLower(s)
 	fields := strings.FieldsFunc(lower, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z')
+		return r < 'a' || r > 'z'
 	})
 	index := make(map[string]bool, len(functionWords))
 	for _, w := range functionWords {

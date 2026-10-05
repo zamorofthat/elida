@@ -51,8 +51,8 @@ func PrintableRatio(s string) float64 {
 const base64RunChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_="
 
 // longestRun returns the longest substring of s made only of characters in
-// allowed, together with its start offset.
-func longestRun(s, allowed string) (string, int) {
+// allowed.
+func longestRun(s, allowed string) string {
 	var bestStart, bestLen, start, length int
 	for i := 0; i < len(s); i++ {
 		if strings.IndexByte(allowed, s[i]) >= 0 {
@@ -68,9 +68,9 @@ func longestRun(s, allowed string) (string, int) {
 		length = 0
 	}
 	if bestLen == 0 {
-		return "", 0
+		return ""
 	}
-	return s[bestStart : bestStart+bestLen], bestStart
+	return s[bestStart : bestStart+bestLen]
 }
 
 // decodeBase64Run tries every base64 variant against one candidate run.
@@ -104,7 +104,7 @@ func DecodeBase64(s string, b Budget) (string, []string, bool) {
 	if len(s) < MinEncodedRunBytes {
 		return s, nil, false
 	}
-	run, _ := longestRun(s, base64RunChars)
+	run := longestRun(s, base64RunChars)
 	if len(run) < MinEncodedRunBytes {
 		return s, nil, false
 	}
@@ -160,7 +160,7 @@ func DecodeHex(s string, b Budget) (string, []string, bool) {
 	if idx := indexHexPrefix(candidate); idx >= 0 {
 		candidate = candidate[idx+2:]
 	}
-	run, _ := longestRun(candidate, hexRunChars)
+	run := longestRun(candidate, hexRunChars)
 	if len(run) < MinEncodedRunBytes || len(run)%2 != 0 {
 		return s, nil, false
 	}
