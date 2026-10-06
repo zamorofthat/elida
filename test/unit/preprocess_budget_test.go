@@ -24,6 +24,48 @@ func obfuscatedPayload() string {
 		base64.StdEncoding.EncodeToString([]byte(inner))
 }
 
+// TestBudgetFrom_MatchesConfigDefaults is the only place the operator-facing
+// config and the preprocessing Budget are checked against each other. The
+// expected values are written out as a literal rather than read back from the
+// config, so renaming a field, reordering the mapping, or changing a default
+// on either side fails here instead of silently loosening a bound.
+func TestBudgetFrom_MatchesConfigDefaults(t *testing.T) {
+	got := preprocess.BudgetFrom(config.DefaultConfig().Decision.Preprocessing)
+	want := preprocess.Budget{
+		MaxInputBytes:      262144,
+		MaxAnalysisBytes:   524288,
+		MaxRepresentations: 8,
+		MaxDecodeDepth:     2,
+		MaxExpansionRatio:  4,
+	}
+	if got != want {
+		t.Fatalf("BudgetFrom(defaults) = %+v, want %+v", got, want)
+	}
+}
+
+// TestBudgetFrom_DoesNotInventLimits pins that the mapping is a mapping. A
+// zero config field must arrive as a zero Budget field so Run's fail-safe
+// path sees it, rather than being quietly replaced with a default here.
+func TestBudgetFrom_DoesNotInventLimits(t *testing.T) {
+	got := preprocess.BudgetFrom(config.DecisionPreprocessingConfig{})
+	if got != (preprocess.Budget{}) {
+		t.Fatalf("BudgetFrom(zero config) = %+v, want the zero Budget", got)
+	}
+	r := preprocess.Run("some content \u200Bhere", got)
+	if len(r.Representations) != 1 {
+		t.Fatalf("a zero budget must analyze nothing, got %d representations", len(r.Representations))
+	}
+	var foundUnset bool
+	for _, g := range r.Gaps {
+		if g.Reason == preprocess.GapBudgetUnset {
+			foundUnset = true
+		}
+	}
+	if !foundUnset {
+		t.Fatalf("expected a budget_unset gap from a zero config, got %+v", r.Gaps)
+	}
+}
+
 func TestRun_RespectsMaxRepresentations(t *testing.T) {
 	for _, limit := range []int{1, 2, 3, 5, 8} {
 		b := testBudget()
