@@ -82,6 +82,81 @@ func TestDecisionContract_MaxProbabilityTakesTheMaximum(t *testing.T) {
 	}
 }
 
+// TestDecisionContract_ByWindowKeepsTheVetoPerWindow pins the accessor the
+// human_directed veto must use. The veto applies only to the injection score
+// from the same window, so the two signals have to stay paired per window: a
+// content-level maximum would pair an injecting window's 0.9 with a benign
+// window's 0.9 human_directed score and veto a real detection.
+func TestDecisionContract_ByWindowKeepsTheVetoPerWindow(t *testing.T) {
+	injecting := decision.Window{StartByte: 0, EndByte: 100}
+	benign := decision.Window{StartByte: 100, EndByte: 200}
+
+	a := decision.Assessment{Decisions: []decision.Decision{
+		{Signal: decision.SignalInjection, Probability: 0.9, Answered: true, Window: injecting},
+		{Signal: decision.SignalHumanDirected, Probability: 0.1, Answered: true, Window: injecting},
+		{Signal: decision.SignalInjection, Probability: 0.2, Answered: true, Window: benign},
+		{Signal: decision.SignalHumanDirected, Probability: 0.9, Answered: true, Window: benign},
+	}}
+
+	inj := a.ByWindow(decision.SignalInjection)
+	hd := a.ByWindow(decision.SignalHumanDirected)
+	if len(inj) != 2 || len(hd) != 2 {
+		t.Fatalf("expected both signals keyed by both windows, got %d injection and %d human_directed", len(inj), len(hd))
+	}
+	for _, tc := range []struct {
+		name      string
+		w         decision.Window
+		injection float64
+		human     float64
+	}{
+		{"injecting window", injecting, 0.9, 0.1},
+		{"benign window", benign, 0.2, 0.9},
+	} {
+		if got := inj[tc.w].Probability; got != tc.injection {
+			t.Errorf("%s: injection = %v, want %v", tc.name, got, tc.injection)
+		}
+		if got := hd[tc.w].Probability; got != tc.human {
+			t.Errorf("%s: human_directed = %v, want %v", tc.name, got, tc.human)
+		}
+	}
+
+	// The content-level view cannot express the pairing, which is why the
+	// veto may not be evaluated from it: both maxima are 0.9.
+	if p, _ := a.MaxProbability(decision.SignalInjection); p != 0.9 {
+		t.Fatalf("MaxProbability(injection) = %v, want 0.9", p)
+	}
+	if p, _ := a.MaxProbability(decision.SignalHumanDirected); p != 0.9 {
+		t.Fatalf("MaxProbability(human_directed) = %v, want 0.9", p)
+	}
+
+	// An unanswered decision is absent, never a zero probability.
+	a.Decisions = append(a.Decisions, decision.Decision{
+		Signal:   decision.SignalCompliance,
+		Window:   injecting,
+		Answered: false,
+	})
+	if got := a.ByWindow(decision.SignalCompliance); len(got) != 0 {
+		t.Fatalf("an unanswered decision must not appear in ByWindow, got %+v", got)
+	}
+
+	// Transform and TransformDepth are part of the key: the same byte range
+	// scored through a derived representation is a different window.
+	derived := decision.Window{StartByte: 0, EndByte: 100, Transform: "base64_decode", TransformDepth: 1}
+	a.Decisions = append(a.Decisions, decision.Decision{
+		Signal: decision.SignalInjection, Probability: 0.77, Answered: true, Window: derived,
+	})
+	inj = a.ByWindow(decision.SignalInjection)
+	if len(inj) != 3 {
+		t.Fatalf("a derived representation is its own window, got %d keys", len(inj))
+	}
+	if got := inj[derived].Probability; got != 0.77 {
+		t.Fatalf("derived window: injection = %v, want 0.77", got)
+	}
+	if got := inj[injecting].Probability; got != 0.9 {
+		t.Fatalf("the original window must be untouched, got %v", got)
+	}
+}
+
 func TestDecisionContract_CoverageIncompleteUnlessEverythingScored(t *testing.T) {
 	cases := []struct {
 		name string

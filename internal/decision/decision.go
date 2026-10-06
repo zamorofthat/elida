@@ -78,11 +78,20 @@ type Coverage struct {
 	QueuedAsync     int
 	EligibleBytes   int
 	ScoredBytes     int
-	Complete        bool
+	// Complete is the authoritative answer to "was this a clean full scan?"
+	// and is set only by the Scheduler, which is the one component that
+	// knows whether every eligible window actually produced a decision.
+	// Callers read this field; IsComplete is a validation aid, not a second
+	// source of truth.
+	Complete bool
 }
 
-// IsComplete reports whether every eligible window and byte was scored. It
-// is false when nothing was eligible: no analysis is not a clean scan.
+// IsComplete recomputes completeness from the counts, for validation. It is
+// not the authoritative answer — Coverage.Complete is — and the Scheduler
+// must set Complete equal to IsComplete(); a disagreement between the two is
+// a Scheduler bug, not a state callers are expected to reconcile.
+//
+// It is false when nothing was eligible: no analysis is not a clean scan.
 func (c Coverage) IsComplete() bool {
 	if c.EligibleWindows <= 0 || c.EligibleBytes <= 0 {
 		return false
@@ -197,11 +206,16 @@ type Assessment struct {
 }
 
 // MaxProbability returns the highest probability among answered decisions
-// for one signal, and whether anything answered at all.
+// for one signal, and whether anything answered at all. Returning answered
+// separately is what stops an unsupported, failed or timed-out signal from
+// being read as safe.
 //
-// This is the only supported way to read a signal from an Assessment:
-// returning answered separately is what stops an unsupported, failed or
-// timed-out signal from being read as safe.
+// MaxProbability is for content-level reporting: the single number that
+// describes a whole Input. It collapses every window, so it must NOT be used
+// to evaluate the human_directed veto. That veto applies only to the
+// injection score from the same invocation, window and representation, and a
+// cross-window maximum would let one benign window rescue a window that is
+// in fact injecting. Evaluate the veto per window via ByWindow.
 func (a Assessment) MaxProbability(s Signal) (float64, bool) {
 	var max float64
 	var answered bool
@@ -215,6 +229,33 @@ func (a Assessment) MaxProbability(s Signal) (float64, bool) {
 		answered = true
 	}
 	return max, answered
+}
+
+// ByWindow returns the answered decisions for one signal, keyed by the Window
+// each one covered. Window is a struct of ints and a string, so it is
+// comparable by value and is used as the map key directly.
+//
+// This is the accessor the human_directed veto must use. The veto applies
+// only to the injection score from the same invocation, window and
+// representation, so pairing the two signals per window is the only correct
+// way to evaluate it; MaxProbability cannot express that pairing.
+//
+// A window missing from the result was not answered for this signal, and an
+// absent window must never be read as a low probability — the same rule
+// MaxProbability's answered return enforces.
+//
+// If two decisions for the same signal share a window, the later one in
+// Decisions wins. That is a duplicate the Scheduler should not emit; last
+// wins only keeps this accessor total.
+func (a Assessment) ByWindow(sig Signal) map[Window]Decision {
+	out := make(map[Window]Decision)
+	for _, d := range a.Decisions {
+		if d.Signal != sig || !d.Answered {
+			continue
+		}
+		out[d.Window] = d
+	}
+	return out
 }
 
 // Scheduler splits content into windows, runs providers inside one global
