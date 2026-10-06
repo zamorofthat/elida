@@ -29,9 +29,12 @@ COPY --from=dashboard-builder /app/web/../internal/dashboard/static ./internal/d
 ARG VERSION=dev
 # GOEXPERIMENT=simd turns GoMLX's scalar kernels into the SIMD kernels that
 # make inline semantic inference viable. It is gated to amd64 in GoMLX's
-# source, so the default is empty and buildx sets it per platform.
-ARG GOEXPERIMENT=
-RUN CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=${GOEXPERIMENT} go build -a -installsuffix cgo -ldflags="-w -s -X main.Version=${VERSION}" -o elida ./cmd/elida
+# source, so it is derived here from TARGETARCH, which buildx sets
+# automatically for each platform it builds. It is not a build-arg: the
+# release workflows pass only VERSION, so an arg would be inert and every
+# amd64 image would ship scalar kernels.
+ARG TARGETARCH
+RUN GOEXPERIMENT=$([ "$TARGETARCH" = "amd64" ] && echo simd || true) CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s -X main.Version=${VERSION}" -o elida ./cmd/elida
 
 # Runtime stage
 FROM alpine:3.24

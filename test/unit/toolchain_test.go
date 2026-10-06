@@ -50,11 +50,24 @@ func TestToolchain_SIMDOnLinuxAmd64Releases(t *testing.T) {
 	}
 
 	df := repoFile(t, "Dockerfile")
-	if !strings.Contains(df, "GOEXPERIMENT=${GOEXPERIMENT}") {
-		t.Fatal("Dockerfile must thread GOEXPERIMENT into the go build command")
+	// The experiment must be DERIVED from buildx's per-platform TARGETARCH.
+	// A plain `ARG GOEXPERIMENT=` is inert: ci.yml and release.yml pass only
+	// VERSION as a build-arg while building linux/amd64,linux/arm64, so an
+	// arg-driven Dockerfile would ship scalar kernels on every amd64 image.
+	if !strings.Contains(df, "ARG TARGETARCH") {
+		t.Fatal("Dockerfile must declare buildx's automatic ARG TARGETARCH in the builder stage")
 	}
-	if !strings.Contains(df, "CGO_ENABLED=0") {
-		t.Fatal("Dockerfile must keep CGO_ENABLED=0 (release invariant)")
+	if strings.Contains(df, "ARG GOEXPERIMENT") {
+		t.Fatal("Dockerfile must not declare ARG GOEXPERIMENT: no workflow passes it, so it is inert")
+	}
+	buildLine := regexp.MustCompile(`(?m)^RUN .*go build .*-o elida\b.*$`).FindString(df)
+	if buildLine == "" {
+		t.Fatalf("Dockerfile has no `go build -o elida` RUN line:\n%s", df)
+	}
+	for _, want := range []string{"GOEXPERIMENT=", "TARGETARCH", "simd", "CGO_ENABLED=0"} {
+		if !strings.Contains(buildLine, want) {
+			t.Fatalf("Dockerfile build line must contain %q (CGO_ENABLED=0 is a release invariant; the rest is the per-arch SIMD derivation), got:\n%s", want, buildLine)
+		}
 	}
 
 	ci := repoFile(t, ".github/workflows/ci.yml")
