@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.26.6"
+  GO_VERSION: "1.27.0"
 
 jobs:
   lint:
@@ -45,7 +45,7 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.10.1
+          version: v2.14.0
 
   security:
     name: Security Scan
@@ -122,8 +122,21 @@ jobs:
           extra_args: --only-verified
 
   test:
-    name: Unit Tests
+    name: Unit Tests${{ matrix.suffix }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goexperiment: ""
+            suffix: ""
+            coverage: true
+          # GoMLX's accelerated kernels are gated to `amd64 &&
+          # goexperiment.simd` in source. Running the suite both ways on
+          # linux/amd64 is what keeps a kernel regression from hiding.
+          - goexperiment: "simd"
+            suffix: " (simd)"
+            coverage: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -139,8 +152,11 @@ jobs:
         # ./internal/... includes the in-package unit tests, which carry most
         # of the coverage; integration/chaos suites run in their own jobs.
         run: go test -v -race -coverpkg=./internal/... -coverprofile=coverage.out ./internal/... ./test/unit/...
+        env:
+          GOEXPERIMENT: ${{ matrix.goexperiment }}
 
       - name: Upload coverage
+        if: matrix.coverage
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.out
