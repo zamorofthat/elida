@@ -60,8 +60,12 @@ func TestFakeProvider_LatencyAndContextCancellation(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", err)
 	}
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("Decide must return when ctx expires, waited %v", elapsed)
+	// Relative to the configured latency, not to a wall-clock ceiling: the
+	// claim is that Decide abandons its wait when the context expires, and
+	// returning before the full latency elapsed is exactly that claim. A
+	// fixed millisecond ceiling only measures how loaded the machine is.
+	if elapsed >= f.Latency {
+		t.Fatalf("Decide must return when ctx expires, not after the full %v latency; waited %v", f.Latency, elapsed)
 	}
 }
 

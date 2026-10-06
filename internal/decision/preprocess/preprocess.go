@@ -224,9 +224,12 @@ func registry() []transform {
 
 // Run produces the bounded representation set for content.
 //
-// It reserves work before allocating output: each candidate transformation is
-// checked against the representation count, the aggregate analysis byte
-// budget, and the expansion ratio before its output is retained.
+// Every bound is enforced after a candidate transformation produces its
+// output and before that output is retained: the representation count, the
+// aggregate analysis byte budget, and the expansion ratio each reject a
+// result rather than pre-reserving space for it. Transient allocation is
+// therefore bounded by each transform's own intrinsic expansion, not by
+// MaxAnalysisBytes.
 //
 // If MaxInputBytes, MaxAnalysisBytes, MaxRepresentations or MaxExpansionRatio
 // is zero or negative, Run fails safe: it runs no transforms, returns only
@@ -345,6 +348,12 @@ func Run(content string, b Budget) Result {
 					})
 					continue
 				}
+				// The ratio is enforced on output that already exists, not
+				// predicted before the transform runs: out has been
+				// allocated by this point and is discarded if it is over
+				// the limit. What bounds the transient allocation is each
+				// transform's own intrinsic expansion, which is a small
+				// constant factor of its input.
 				if b.MaxExpansionRatio > 0 && len(out) > len(parentInput)*b.MaxExpansionRatio {
 					res.Gaps = append(res.Gaps, Gap{
 						Reason:    GapExpansionRatio,

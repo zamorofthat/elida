@@ -2,6 +2,7 @@ package unit
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,22 @@ func TestDecisionConfig_PolicyModeCapWarns(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a decision.mode warning about the policy.mode cap, got %+v", res.Warnings)
+	}
+}
+
+// TestSampleConfig_DecisionMatchesDefaults keeps the shipped sample config
+// honest. configs/elida.yaml documents the decision surface for operators and
+// is what the Docker image runs, so a default changed in code but not in the
+// sample (or the reverse) would hand operators a file that quietly overrides
+// the value the code considers safe.
+func TestSampleConfig_DecisionMatchesDefaults(t *testing.T) {
+	cfg, err := config.Load("../../configs/elida.yaml")
+	if err != nil {
+		t.Fatalf("load configs/elida.yaml: %v", err)
+	}
+	want := config.DefaultConfig().Decision
+	if !reflect.DeepEqual(cfg.Decision, want) {
+		t.Fatalf("configs/elida.yaml decision block drifted from DefaultConfig:\n got %+v\nwant %+v", cfg.Decision, want)
 	}
 }
 

@@ -26,7 +26,9 @@ type FakeProvider struct {
 	// Scores is the probability returned per signal.
 	Scores map[decision.Signal]float64
 	// ScoreFunc, when set, overrides Scores and lets a test make the answer
-	// depend on the content (for windowing and dedup tests).
+	// depend on the content (for windowing and dedup tests). It cannot widen
+	// Supported: a signal absent from Supported stays unanswered even if
+	// ScoreFunc returns a score for it.
 	ScoreFunc func(decision.Input) map[decision.Signal]float64
 	// Latency is how long Decide blocks before answering. Decide returns
 	// ctx.Err() if the context expires first.
