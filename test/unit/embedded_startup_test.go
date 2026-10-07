@@ -31,7 +31,7 @@ func goodOptions(t *testing.T) embedded.Options {
 		ModelPath:        copyFixture(t),
 		ThresholdSet:     "v1",
 		Arch:             "amd64",
-		SIMD:             true,
+		SIMD:             embedded.Bool(true),
 		NewPipeline:      fakeFactory(),
 		BreakerThreshold: 3,
 		BreakerCooldown:  time.Second,
@@ -156,7 +156,7 @@ func TestEmbeddedProvider_AsyncOnlyWithoutSIMD(t *testing.T) {
 		t.Run(tc.arch, func(t *testing.T) {
 			opts := goodOptions(t)
 			opts.Arch = tc.arch
-			opts.SIMD = tc.simd
+			opts.SIMD = embedded.Bool(tc.simd)
 			p, err := embedded.New(context.Background(), opts)
 			if err != nil {
 				t.Fatalf("New: %v", err)
@@ -278,5 +278,27 @@ func TestEmbeddedProvider_CountTokens(t *testing.T) {
 	defer func() { _ = dp.Close() }()
 	if got := dp.CountTokens("abcdefgh"); got <= 0 {
 		t.Fatalf("a disabled provider must still estimate tokens, got %d", got)
+	}
+}
+
+func TestEmbeddedProvider_SIMDDefaultsToBinary(t *testing.T) {
+	opts := goodOptions(t)
+	opts.SIMD = nil
+	opts.Arch = "" // also default
+	p, err := embedded.New(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	h := p.Health()
+	if h.SIMD != embedded.SIMDEnabled() {
+		t.Fatalf("Health.SIMD = %v, want SIMDEnabled() = %v", h.SIMD, embedded.SIMDEnabled())
+	}
+	want := embedded.CapabilityAsyncOnly
+	if embedded.DefaultArch() == "amd64" && embedded.SIMDEnabled() {
+		want = embedded.CapabilityInline
+	}
+	if h.Capability != want {
+		t.Fatalf("Capability = %q, want %q", h.Capability, want)
 	}
 }

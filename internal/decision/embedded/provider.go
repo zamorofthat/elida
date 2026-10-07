@@ -54,16 +54,20 @@ type Health struct {
 	Panics              int64             // recovered inference panics
 }
 
+// Bool returns a pointer to v, for setting Options.SIMD explicitly.
+func Bool(v bool) *bool { return &v }
+
 // Options configures the embedded provider.
 type Options struct {
 	Enabled      bool
 	Required     bool
 	ModelPath    string
 	ThresholdSet string
-	// Arch and SIMD default to this binary's values; tests set them to
+	// Arch defaults to DefaultArch() and SIMD, when nil, defaults to
+	// SIMDEnabled(); tests set them to
 	// exercise the capability matrix.
 	Arch string
-	SIMD bool
+	SIMD *bool
 	// NewPipeline defaults to the Hugot factory (Task 21).
 	NewPipeline PipelineFactory
 	// BreakerThreshold is how many consecutive failures trip the circuit
@@ -100,6 +104,9 @@ type Provider struct {
 
 // New constructs the provider.
 //
+// With Enabled true and a nil NewPipeline, New returns an error regardless
+// of Required: that is a programmer error, not a model-loading failure.
+//
 // Startup contract:
 //   - Enabled false: load nothing, return a disabled provider, nil error.
 //   - Enabled true, Required true: any load or verification failure is a
@@ -113,6 +120,10 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 	if opts.Arch == "" {
 		opts.Arch = DefaultArch()
 	}
+	simd := SIMDEnabled()
+	if opts.SIMD != nil {
+		simd = *opts.SIMD
+	}
 	if opts.BreakerThreshold <= 0 {
 		opts.BreakerThreshold = 5
 	}
@@ -122,7 +133,7 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 
 	p := &Provider{
 		arch:             opts.Arch,
-		simd:             opts.SIMD,
+		simd:             simd,
 		thresholdSet:     opts.ThresholdSet,
 		clock:            opts.Clock,
 		breakerThreshold: opts.BreakerThreshold,
@@ -177,12 +188,12 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 	// GoMLX's accelerated kernels are gated to `amd64 && goexperiment.simd`;
 	// everything else runs the scalar path at roughly 20x the latency, which
 	// no 50 ms inline budget can absorb.
-	if opts.Arch == "amd64" && opts.SIMD {
+	if opts.Arch == "amd64" && simd {
 		p.capability = CapabilityInline
 		p.reason = "amd64 with GOEXPERIMENT=simd: accelerated kernels are compiled in"
 	} else {
 		p.capability = CapabilityAsyncOnly
-		p.reason = fmt.Sprintf("%s simd=%v: GoMLX accelerated kernels are gated to amd64 && goexperiment.simd, so this build runs the scalar path and cannot meet an inline budget", opts.Arch, opts.SIMD)
+		p.reason = fmt.Sprintf("%s simd=%v: GoMLX accelerated kernels are gated to amd64 && goexperiment.simd, so this build runs the scalar path and cannot meet an inline budget", opts.Arch, simd)
 	}
 
 	slog.Info("semantic detection enabled",
@@ -357,11 +368,11 @@ func (p *Provider) CountTokens(text string) int {
 func (p *Provider) Health() Health {
 	p.mu.RLock()
 	m := p.manifest
-	cap, reason := p.capability, p.reason
+	capab, reason := p.capability, p.reason
 	p.mu.RUnlock()
 
 	h := Health{
-		Capability:   cap,
+		Capability:   capab,
 		Reason:       reason,
 		Arch:         p.arch,
 		SIMD:         p.simd,
@@ -380,7 +391,9 @@ func (p *Provider) Health() Health {
 	return h
 }
 
-// Close releases the pipeline.
+// Close releases the pipeline. After Close, Supports still reports the
+// manifest's signals while Decide returns unanswered decisions. This is
+// intentional so callers can introspect capability after shutdown.
 func (p *Provider) Close() error {
 	p.mu.Lock()
 	pipe := p.pipeline
