@@ -278,7 +278,8 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 		// request failure.
 		return p.unanswered(signals, 0), nil
 	}
-	if !p.admit() {
+	ok, probe := p.admit()
+	if !ok {
 		return p.unanswered(signals, 0), nil
 	}
 
@@ -292,6 +293,7 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 		// window stays unanswered, which is unknown and never safe.
 		if errors.Is(err, ErrNothingToScore) {
 			p.inputRejected.Add(1)
+			p.releaseProbe(probe)
 			return p.unanswered(signals, latency), err
 		}
 		// A caller whose context ended gave up on the budget; that says
@@ -299,6 +301,7 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 		// breaker. A recovered panic is always the provider's fault.
 		if ctx.Err() != nil && !errors.Is(err, errInferencePanic) {
 			p.canceled.Add(1)
+			p.releaseProbe(probe)
 			return p.unanswered(signals, latency), err
 		}
 		p.recordFailure(err)
@@ -448,23 +451,47 @@ func (p *Provider) breakerOpen() bool {
 // first caller to re-arm the cooldown with CompareAndSwap is the single
 // probe and is let through; concurrent callers lose the race and see the
 // breaker as still open. A probe success closes the breaker (see Decide);
-// a probe failure re-opens it through recordFailure.
-func (p *Provider) admit() bool {
+// a probe failure re-opens it through recordFailure. A probe that ends
+// without evidence either way (input rejected, caller canceled) hands the
+// probe back through releaseProbe.
+func (p *Provider) admit() (bool, halfOpenProbe) {
 	until := p.breakerUntil.Load()
 	if until == 0 {
-		return true
+		return true, halfOpenProbe{}
 	}
 	now := p.clock()
 	if now.UnixNano() < until {
-		return false
+		return false, halfOpenProbe{}
 	}
-	if p.breakerUntil.CompareAndSwap(until, now.Add(p.breakerCooldown).UnixNano()) {
+	rearmed := now.Add(p.breakerCooldown).UnixNano()
+	if p.breakerUntil.CompareAndSwap(until, rearmed) {
 		slog.Warn("semantic detection circuit breaker half-open: admitting one probe",
 			"cooldown", p.breakerCooldown,
 		)
-		return true
+		return true, halfOpenProbe{held: true, expired: until, rearmed: rearmed}
 	}
-	return false
+	return false, halfOpenProbe{}
+}
+
+// halfOpenProbe records that a Decide call holds the breaker's single
+// half-open probe: expired is the breakerUntil value whose cooldown had
+// elapsed, rearmed the value the probe installed.
+type halfOpenProbe struct {
+	held    bool
+	expired int64
+	rearmed int64
+}
+
+// releaseProbe hands an unused half-open probe back. An input rejection or
+// a caller cancellation says nothing about the provider's health, so it must
+// not spend the one probe and keep the breaker open for another full
+// cooldown; restoring the expired deadline lets the next call probe. The
+// CompareAndSwap makes it a no-op if anything else (a success closing the
+// breaker, a failure re-opening it) has changed the state since.
+func (p *Provider) releaseProbe(probe halfOpenProbe) {
+	if probe.held {
+		p.breakerUntil.CompareAndSwap(probe.rearmed, probe.expired)
+	}
 }
 
 // recordSuccess ends the failure run and closes the breaker. A success from

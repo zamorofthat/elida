@@ -945,3 +945,69 @@ func TestErrNothingToScore_IsContentFree(t *testing.T) {
 		t.Error("a wrapped ErrNothingToScore must still match")
 	}
 }
+
+// probePipeline is scriptedPipeline that also honors a canceled context.
+type probePipeline struct{ scriptedPipeline }
+
+func (p probePipeline) Logits(ctx context.Context, texts []string) ([][]float64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return p.scriptedPipeline.Logits(ctx, texts)
+}
+
+func TestProvider_NonEvidenceOutcomesDoNotSpendTheHalfOpenProbe(t *testing.T) {
+	for _, outcome := range []string{"input-rejected", "canceled"} {
+		t.Run(outcome, func(t *testing.T) {
+			quietSlog(t)
+			now := time.Unix(1_000_000, 0)
+			p, err := New(context.Background(), Options{
+				Enabled: true, Required: true, ModelPath: filepath.Join("testdata", "good"), ThresholdSet: "v1",
+				NewPipeline: func(context.Context, string, *Manifest) (Pipeline, error) {
+					return probePipeline{}, nil
+				},
+				BreakerThreshold: 2,
+				BreakerCooldown:  10 * time.Second,
+				Clock:            func() time.Time { return now },
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer func() { _ = p.Close() }()
+			decide := func(ctx context.Context, text string) ([]decision.Decision, error) {
+				return p.Decide(ctx, decision.Input{Content: text}, []decision.Signal{decision.SignalInjection})
+			}
+
+			_, _ = decide(context.Background(), "bad")
+			_, _ = decide(context.Background(), "bad")
+			if !p.Health().BreakerOpen {
+				t.Fatal("two failures must open a threshold-2 breaker")
+			}
+
+			now = now.Add(11 * time.Second) // cooldown elapsed: half-open
+			switch outcome {
+			case "input-rejected":
+				if _, jerr := decide(context.Background(), "junk"); !errors.Is(jerr, ErrNothingToScore) {
+					t.Fatalf("junk probe: err = %v", jerr)
+				}
+			case "canceled":
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				if _, cerr := decide(ctx, "fine"); !errors.Is(cerr, context.Canceled) {
+					t.Fatalf("canceled probe: err = %v", cerr)
+				}
+			}
+
+			// Same instant, well within a fresh cooldown: the probe must
+			// still be available, and a success closes the breaker.
+			now = now.Add(time.Second)
+			ds, err := decide(context.Background(), "fine")
+			if err != nil || len(ds) != 1 || !ds[0].Answered {
+				t.Fatalf("the next real call must get the probe and answer: err=%v decisions=%+v", err, ds)
+			}
+			if h := p.Health(); h.BreakerOpen {
+				t.Fatal("a successful probe must close the breaker")
+			}
+		})
+	}
+}

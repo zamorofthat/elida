@@ -56,9 +56,21 @@ type Request struct {
 type Config struct {
 	// Provider scores one window per call. Required.
 	Provider decision.Provider
-	// TokenCounter counts tokens for windowing and the inline token budget.
-	// Required.
+	// TokenCounter is the EXACT token counter (the embedded provider's
+	// tokenizer). It may be expensive, so it is called only for windows
+	// that are actually about to be scored inline or queued async (at most
+	// MaxInlineWindows + MaxAsyncWindows per request, plus the counts of any
+	// hard split), immediately before admission. A window whose exact count
+	// exceeds MaxWindowTokens is hard-split by exact count; the extra pieces
+	// take inline budget or async slots like any other window and are never
+	// silently truncated. Required.
 	TokenCounter decision.TokenCounter
+	// Estimator is the cheap counter used ONLY to split content into
+	// windows. It must be O(n) in its input and should rarely undercount
+	// TokenCounter, since an undercount costs an exact hard split later.
+	// Nil selects DefaultEstimator (EstimateTokens). Windowing never calls
+	// TokenCounter.
+	Estimator decision.TokenCounter
 	// Signals are asked when a caller passes none. Required, non-empty.
 	Signals []decision.Signal
 
@@ -301,7 +313,12 @@ func New(cfg Config) (*Inline, error) {
 		return nil, errors.New("scheduler: Provider is required")
 	}
 	if cfg.TokenCounter == nil {
-		return nil, errors.New("scheduler: TokenCounter is required")
+		// Required even when an Estimator is set: windows are only ever
+		// scored after an exact count.
+		return nil, errors.New("scheduler: TokenCounter (the exact counter) is required")
+	}
+	if cfg.Estimator == nil {
+		cfg.Estimator = DefaultEstimator
 	}
 	if len(cfg.Signals) == 0 {
 		return nil, errors.New("scheduler: at least one Signal is required")
@@ -426,13 +443,28 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	var a decision.Assessment
 	a.Scope = decision.ScopeCurrentRequest
 
-	// Window every candidate, then order the whole set together so a
-	// suspicious derived representation can outrank a bland original window.
-	var all []WindowedText
+	// Window every candidate with the cheap estimator, then order the whole
+	// set together so a suspicious derived representation can outrank a
+	// bland original window. Windowing draws from the same deadline: content
+	// it never reached is an unscored remainder, so coverage is incomplete.
+	var all, remainders []WindowedText
 	for _, c := range cands {
-		all = append(all, SplitWindows(c, s.cfg.TokenCounter, s.cfg.MaxWindowTokens)...)
+		if ctx.Err() != nil {
+			remainders = append(remainders, remainderWindow(c, 0))
+			continue
+		}
+		ws, rest := SplitWindowsContext(ctx, c, s.cfg.Estimator, s.cfg.MaxWindowTokens)
+		all = append(all, ws...)
+		if rest >= 0 && rest < len(c.Content) {
+			remainders = append(remainders, remainderWindow(c, rest))
+		}
 	}
-	a.Coverage.EligibleWindows = len(all)
+	for _, rw := range remainders {
+		a.Coverage.EligibleWindows++
+		a.Coverage.EligibleBytes += len(rw.Text)
+		s.deny(&a, rw, decision.DenyDeadlineSpent)
+	}
+	a.Coverage.EligibleWindows += len(all)
 	for _, w := range all {
 		a.Coverage.EligibleBytes += len(w.Text)
 	}
@@ -447,7 +479,12 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 
 	var inlineWindows, inlineTokens, asyncWindows int
 	var tmpl asyncTemplate
-	for _, w := range ordered {
+	// exact[i] records that queue[i].Tokens is the exact count. Pieces of a
+	// hard split are spliced in place and are exact by construction.
+	queue := ordered
+	exact := make([]bool, len(queue))
+	for i := 0; i < len(queue); i++ {
+		w := queue[i]
 		// 1. Is this message eligible at all? not_eligible means we are not
 		// analyzing this content, so it is never queued either: async
 		// capacity is for work we wanted to do and could not, not for work
@@ -455,6 +492,25 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		if !eligible {
 			s.deny(&a, w, eligibleReason)
 			continue
+		}
+
+		// Exact count, only for a window that can still be scored inline
+		// or queued async. Windowing used the estimate; this is the count
+		// the model will actually see. An over-limit window is hard-split
+		// by exact count and its pieces join the queue in its place.
+		usable := (inlineWindows < s.cfg.MaxInlineWindows && ctx.Err() == nil) || asyncWindows < s.cfg.MaxAsyncWindows
+		if usable && !exact[i] {
+			pieces := s.exactPieces(w)
+			queue = append(queue[:i], append(pieces, queue[i+1:]...)...)
+			grown := make([]bool, len(queue))
+			copy(grown, exact[:i])
+			for j := range pieces {
+				grown[i+j] = true
+			}
+			copy(grown[i+len(pieces):], exact[i+1:])
+			exact = grown
+			a.Coverage.EligibleWindows += len(pieces) - 1
+			w = queue[i]
 		}
 
 		var denied decision.AdmissionReason
@@ -509,6 +565,49 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	a.Coverage.Complete = a.Coverage.IsComplete()
 	a.TotalLatency = s.cfg.Clock().Sub(start)
 	return a, nil
+}
+
+// exactPieces counts w with the exact counter and, when it exceeds
+// MaxWindowTokens, hard-splits it by exact count. Each piece carries its
+// exact count and a byte range inside w's. A window built by SplitWindows is
+// bounded by the estimate (at most about 4*MaxWindowTokens bytes), so a
+// split yields a handful of pieces.
+func (s *Inline) exactPieces(w WindowedText) []WindowedText {
+	tc := s.cfg.TokenCounter
+	n := tc.CountTokens(w.Text)
+	if n <= s.cfg.MaxWindowTokens {
+		w.Tokens = n
+		return []WindowedText{w}
+	}
+	parts := hardSplit(w.Text, tc, s.cfg.MaxWindowTokens)
+	out := make([]WindowedText, 0, len(parts))
+	off := 0
+	for _, part := range parts {
+		pw := w.Window
+		if pw.Transform == "" {
+			// Original content: a real absolute range. A derived window
+			// keeps its ancestor's range (see SplitWindows).
+			pw.StartByte = w.Window.StartByte + off
+			pw.EndByte = pw.StartByte + len(part)
+		}
+		out = append(out, WindowedText{Window: pw, Text: part, Tokens: tc.CountTokens(part)})
+		off += len(part)
+	}
+	return out
+}
+
+// remainderWindow is the part of a candidate, from byte rest of its
+// content, that windowing never reached before the deadline. It is recorded
+// as eligible and denied, never scored or queued, so coverage reports it as
+// a gap.
+func remainderWindow(c decision.Candidate, rest int) WindowedText {
+	w := decision.Window{Transform: c.Transform, TransformDepth: c.TransformDepth}
+	if c.Transform != "" {
+		w.StartByte, w.EndByte = c.StartByte, c.EndByte
+	} else {
+		w.StartByte, w.EndByte = c.StartByte+rest, c.StartByte+len(c.Content)
+	}
+	return WindowedText{Window: w, Text: c.Content[rest:]}
 }
 
 // eligible decides whether this message may attempt the inline fast lane,

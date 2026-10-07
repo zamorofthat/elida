@@ -21,8 +21,11 @@ import (
 
 func inlineConfig(p decision.Provider) scheduler.Config {
 	return scheduler.Config{
-		Provider:         p,
-		TokenCounter:     decisiontest.ByteTokenCounter{BytesPerToken: 4},
+		Provider:     p,
+		TokenCounter: decisiontest.ByteTokenCounter{BytesPerToken: 4},
+		// The same byte heuristic for windowing keeps these fixtures'
+		// window boundaries independent of DefaultEstimator.
+		Estimator:        decisiontest.ByteTokenCounter{BytesPerToken: 4},
 		Signals:          []decision.Signal{decision.SignalInjection, decision.SignalHumanDirected},
 		MaxConcurrency:   2,
 		InlineTimeout:    200 * time.Millisecond,

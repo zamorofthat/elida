@@ -9,8 +9,10 @@
 package scheduler
 
 import (
+	"context"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"elida/internal/decision"
 )
@@ -118,8 +120,24 @@ func isSpace(b byte) bool {
 // returns 0 for non-empty text reports everything as fitting, so the content
 // becomes a single window.
 func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int) []WindowedText {
+	out, _ := SplitWindowsContext(context.Background(), c, tc, maxTokens)
+	return out
+}
+
+// splitCheckEvery is how many sentences SplitWindowsContext processes
+// between deadline checks.
+const splitCheckEvery = 32
+
+// SplitWindowsContext is SplitWindows bounded by ctx. It checks ctx every
+// splitCheckEvery sentences; once ctx has ended it stops and returns the
+// windows built so far together with the byte offset, within c.Content,
+// where the unsplit remainder starts. rest is -1 when the whole candidate
+// was windowed. The caller must report the remainder as an unscored
+// coverage gap: content that was never windowed was never analyzed.
+func SplitWindowsContext(ctx context.Context, c decision.Candidate, tc decision.TokenCounter, maxTokens int) (out []WindowedText, rest int) {
+	rest = -1
 	if c.Content == "" {
-		return nil
+		return nil, rest
 	}
 	if maxTokens <= 0 {
 		maxTokens = DefaultWindowTokens
@@ -136,7 +154,6 @@ func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int)
 		return WindowedText{Window: w, Text: text, Tokens: tokens}
 	}
 
-	var out []WindowedText
 	sentences := splitSentences(c.Content)
 
 	var bufStart, bufEnd int
@@ -162,7 +179,11 @@ func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int)
 	}
 
 	offset := 0
-	for _, sentence := range sentences {
+	for i, sentence := range sentences {
+		if i%splitCheckEvery == 0 && i > 0 && ctx.Err() != nil {
+			flush()
+			return out, offset
+		}
 		sStart, sEnd := offset, offset+len(sentence)
 		offset = sEnd
 		sTokens := tc.CountTokens(sentence)
@@ -183,8 +204,75 @@ func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int)
 		bufTokens += sTokens
 	}
 	flush()
-	return out
+	return out, rest
 }
+
+// EstimateTokens is a cheap O(n) estimate of how many model tokens one
+// inference over text costs, special tokens included. It is used ONLY to
+// split content into windows; the exact, tokenizer-backed count
+// (Config.TokenCounter) is taken only for windows that are actually
+// scored.
+//
+// It is built to be hard to undercount for a BERT WordPiece vocabulary,
+// which splits on whitespace, makes every punctuation or symbol character
+// its own token, and gives most non-ASCII characters at least one token
+// each. It returns
+//
+//	max(ceil(bytes/4), words + ASCII punctuation/symbols + non-ASCII runes) + 2
+//
+// capped at len(text)+2, where a word is a maximal run of ASCII letters and
+// digits. Long or rare words can still split into more WordPiece pieces
+// than the estimate assumes; the exact count before scoring catches those
+// and hard-splits the window, so an undercount costs a split, never an
+// unscored tail. It is monotonic over rune-aligned prefixes, which are the
+// only prefixes hardSplit takes. It scans the string once and allocates
+// nothing.
+func EstimateTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	var units int
+	inWord := false
+	for i := 0; i < len(text); {
+		b := text[i]
+		if b < utf8.RuneSelf {
+			switch {
+			case b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\v' || b == '\f':
+				inWord = false
+			case (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9'):
+				if !inWord {
+					units++
+					inWord = true
+				}
+			case b < 0x20 || b == 0x7f:
+				// Control characters are dropped by the BERT normalizer.
+				inWord = false
+			default:
+				units++ // punctuation or symbol: its own token
+				inWord = false
+			}
+			i++
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(text[i:])
+		units++ // non-ASCII rune (invalid bytes decode as one byte each)
+		inWord = false
+		i += size
+	}
+	byBytes := (len(text) + 3) / 4
+	est := max(units, byBytes)
+	return min(est, len(text)) + 2
+}
+
+// EstimateFunc adapts a plain estimate function to decision.TokenCounter.
+type EstimateFunc func(text string) int
+
+// CountTokens implements decision.TokenCounter.
+func (f EstimateFunc) CountTokens(text string) int { return f(text) }
+
+// DefaultEstimator is EstimateTokens as a decision.TokenCounter. It is the
+// windowing counter when Config.Estimator is nil.
+var DefaultEstimator decision.TokenCounter = EstimateFunc(EstimateTokens)
 
 // hardSplit cuts s into pieces of at most maxTokens tokens, preferring word
 // boundaries. The pieces concatenate back to s and every cut is on a rune
