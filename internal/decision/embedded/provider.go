@@ -271,7 +271,7 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 		// request failure.
 		return p.unanswered(signals, 0), nil
 	}
-	if p.breakerOpen() {
+	if !p.admit() {
 		return p.unanswered(signals, 0), nil
 	}
 
@@ -282,7 +282,7 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 		p.recordFailure()
 		return p.unanswered(signals, latency), err
 	}
-	p.consecutiveFails.Store(0)
+	p.recordSuccess()
 
 	// Map head order to probabilities with the model's own temperature.
 	probs := make(map[decision.Signal]float64, len(m.HeadOrder))
@@ -405,17 +405,80 @@ func (p *Provider) Close() error {
 	return pipe.Close()
 }
 
-// breakerOpen reports whether the circuit breaker is currently open.
-// Task 17 replaces this with the cooldown-aware implementation.
+// breakerOpen reports whether the circuit breaker is currently open. It is
+// read-only, so Health can call it without affecting admission.
 func (p *Provider) breakerOpen() bool {
 	until := p.breakerUntil.Load()
 	return until != 0 && p.clock().UnixNano() < until
 }
 
-// recordFailure counts a failure. Task 17 adds the trip logic.
+// admit decides whether Decide may call the pipeline.
+//
+// While the breaker is open every decision is unanswered, which is unknown
+// and never safe. Once the cooldown elapses the breaker is half-open: the
+// first caller to re-arm the cooldown with CompareAndSwap is the single
+// probe and is let through; concurrent callers lose the race and see the
+// breaker as still open. A probe success closes the breaker (see Decide);
+// a probe failure re-opens it through recordFailure.
+func (p *Provider) admit() bool {
+	until := p.breakerUntil.Load()
+	if until == 0 {
+		return true
+	}
+	now := p.clock()
+	if now.UnixNano() < until {
+		return false
+	}
+	if p.breakerUntil.CompareAndSwap(until, now.Add(p.breakerCooldown).UnixNano()) {
+		slog.Warn("semantic detection circuit breaker half-open: admitting one probe",
+			"cooldown", p.breakerCooldown,
+		)
+		return true
+	}
+	return false
+}
+
+// recordSuccess ends the failure run and closes the breaker.
+func (p *Provider) recordSuccess() {
+	p.consecutiveFails.Store(0)
+	if p.breakerUntil.Swap(0) != 0 {
+		slog.Warn("semantic detection circuit breaker closed after a successful inference")
+	}
+}
+
+// recordFailure counts one failed inference and opens the breaker once the
+// consecutive-failure run reaches the threshold. A failed half-open probe
+// keeps the run at or above the threshold, so it re-opens the breaker for a
+// fresh cooldown.
+//
+// Consecutive, not cumulative: a provider that fails on one pathological
+// input among thousands of good ones is not broken, and tripping on a
+// lifetime total would eventually disable a healthy deployment.
 func (p *Provider) recordFailure() {
 	p.errors.Add(1)
-	p.consecutiveFails.Add(1)
+	n := p.consecutiveFails.Add(1)
+	if n < int64(p.breakerThreshold) {
+		return
+	}
+	p.breakerUntil.Store(p.clock().Add(p.breakerCooldown).UnixNano())
+	// Log the trip itself at error level; later failures in the same run
+	// (the probe, or calls already in flight) are warnings, so a burst does
+	// not produce a burst of identical errors.
+	if n == int64(p.breakerThreshold) {
+		slog.Error("semantic detection circuit breaker OPEN: repeated inference failures",
+			"consecutive_failures", n,
+			"threshold", p.breakerThreshold,
+			"cooldown", p.breakerCooldown,
+			"errors_total", p.errors.Load(),
+			"panics_total", p.panics.Load(),
+			"consequence", "every semantic decision is unknown until the cooldown elapses",
+		)
+		return
+	}
+	slog.Warn("semantic detection circuit breaker (re)opened: inference still failing",
+		"consecutive_failures", n,
+		"cooldown", p.breakerCooldown,
+	)
 }
 
 var (
