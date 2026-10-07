@@ -385,6 +385,7 @@ func TestScheduler_InlineWindowBudget(t *testing.T) {
 	cfg := inlineConfig(f)
 	cfg.MaxInlineWindows = 2
 	cfg.MaxInlineTokens = 1024 // not the binding constraint here
+	cfg.MaxAsyncWindows = 0    // isolate the inline path: no async provider calls
 	s, err := scheduler.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -422,6 +423,7 @@ func TestScheduler_InlineTokenBudget(t *testing.T) {
 	cfg.MaxInlineWindows = 100 // not the binding constraint here
 	cfg.MaxWindowTokens = 16
 	cfg.MaxInlineTokens = 32 // room for about two windows
+	cfg.MaxAsyncWindows = 0  // isolate the inline path: no async provider calls
 	s, err := scheduler.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)

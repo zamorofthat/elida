@@ -85,10 +85,11 @@ type Config struct {
 	// the gap, which surfaces as DenyNoWorkerAvailable for a later window of
 	// this request.
 	MaxInlineWindows int
-	// MaxAsyncWindows caps the windows one request may queue async (Task 20).
+	// MaxAsyncWindows caps the windows one request may queue for async
+	// continuation. Zero is valid and disables async continuation.
 	MaxAsyncWindows int
-	// AsyncQueueSize is the async job queue capacity (Task 20). Must be at
-	// least 1.
+	// AsyncQueueSize is the async job queue capacity. Must be at least 1. A
+	// full queue drops the window (DenyQueueFull) rather than blocking.
 	AsyncQueueSize int
 
 	// AsyncTimeout bounds one async job's lifetime. It is not an operator
@@ -103,7 +104,10 @@ type Config struct {
 	// Admission selects which messages are eligible for the inline lane.
 	Admission AdmissionPolicy
 
-	// OnAsync is called when an async job completes. It must not block.
+	// OnAsync is called on an async worker when an async job completes. Its
+	// Assessment always has Scope decision.ScopeFutureActivity. It must not
+	// block: the worker running it consumes no further queued jobs until it
+	// returns, and Shutdown's drain waits for it. A panic in it is recovered.
 	OnAsync func(req Request, in decision.Input, a decision.Assessment)
 
 	// Clock measures TotalLatency. Defaults to time.Now. The deadline itself
@@ -125,16 +129,20 @@ type Metrics struct {
 	InlineCompleted int64
 	// InlineDenied counts windows that were not admitted, for any reason.
 	InlineDenied int64
-	// AsyncQueued counts async jobs accepted (Task 20).
+	// AsyncQueued counts windows accepted onto the async queue. Every
+	// queued job ends as exactly one of AsyncCompleted or AsyncCanceled.
 	AsyncQueued int64
-	// AsyncCompleted counts async jobs finished (Task 20).
+	// AsyncCompleted counts async jobs that ran and were delivered to
+	// OnAsync, answered or not (a provider error or panic is a delivered
+	// unknown, not a cancellation).
 	AsyncCompleted int64
-	// AsyncDropped counts async jobs rejected or abandoned (Task 20).
+	// AsyncDropped counts windows the async queue refused: the queue was
+	// full, or the scheduler was shut down. Each is a coverage gap.
 	AsyncDropped int64
-	// AsyncQueueDepth is the current async queue length (Task 20).
+	// AsyncQueueDepth is the current async queue length.
 	AsyncQueueDepth int
-	// DuplicatesSuppressed counts async jobs suppressed as duplicates
-	// (Task 20).
+	// DuplicatesSuppressed counts windows not queued because the same job
+	// (decision.JobID) was already claimed inline or async.
 	DuplicatesSuppressed int64
 	// MaxInFlight is the highest number of concurrent provider calls seen.
 	MaxInFlight int64
@@ -148,6 +156,30 @@ type Metrics struct {
 	// calls a caller already abandoned at its deadline that still hold a
 	// worker.
 	InFlight int64
+	// AsyncCanceled counts queued jobs whose context ended (AsyncTimeout or
+	// Shutdown) before they produced an answer. Like the embedded provider's
+	// Canceled count, these are budget outcomes, not provider failures, and
+	// they are not delivered to OnAsync.
+	AsyncCanceled int64
+	// AsyncPanics counts provider panics recovered on an async job. Each is
+	// delivered to OnAsync as an unknown and counted in AsyncCompleted.
+	AsyncPanics int64
+}
+
+// DedupHistory is how many recent job identities are remembered for
+// deduplication. It is a fixed ring, not a per-session map: unbounded
+// retained history is exactly the failure mode the bounds exist to prevent.
+// At 4096 entries it covers far more than any single session's windows while
+// costing a few hundred kilobytes.
+const DedupHistory = 4096
+
+// asyncJob is one window waiting for an async worker.
+type asyncJob struct {
+	req    Request
+	in     decision.Input
+	win    WindowedText
+	sigs   []decision.Signal
+	denied decision.AdmissionReason // why the window missed the inline lane
 }
 
 // Inline is the scheduler. It is safe for concurrent use.
@@ -159,6 +191,30 @@ type Inline struct {
 	// "is a worker free right now?" without ever waiting.
 	workers chan struct{}
 
+	// queue is the bounded async continuation queue. A full queue drops the
+	// job (counted and reported) rather than blocking the hot path.
+	queue chan asyncJob
+	// lifeMu guards closed and the close of queue: enqueue sends under the
+	// read lock, Shutdown closes under the write lock, so a send can never
+	// race the close into a panic.
+	lifeMu sync.RWMutex
+	closed bool
+	// baseCtx is the lifetime of async work. Shutdown cancels it when the
+	// drain finishes or its deadline passes, so a job cannot outlive it.
+	baseCtx      context.Context
+	cancelBase   context.CancelFunc
+	asyncWG      sync.WaitGroup
+	shutdownOnce sync.Once
+	// drained is closed once every async worker has exited after Shutdown.
+	drained chan struct{}
+
+	// seen and seenRing are the bounded deduplication set: seen maps a job
+	// ID to its ring slot, and the ring evicts the oldest ID on wrap.
+	seenMu   sync.Mutex
+	seen     map[string]int
+	seenRing []string
+	seenNext int
+
 	inlineAttempted atomic.Int64
 	inlineCompleted atomic.Int64
 	inlineDenied    atomic.Int64
@@ -169,6 +225,8 @@ type Inline struct {
 	inFlight        atomic.Int64
 	maxInFlight     atomic.Int64
 	inlinePanics    atomic.Int64
+	asyncCanceled   atomic.Int64
+	asyncPanics     atomic.Int64
 
 	reasonsMu sync.Mutex
 	reasons   map[decision.AdmissionReason]int64
@@ -222,13 +280,27 @@ func New(cfg Config) (*Inline, error) {
 	// what a running scheduler asks.
 	cfg.Signals = append([]decision.Signal(nil), cfg.Signals...)
 
+	baseCtx, cancelBase := context.WithCancel(context.Background())
 	s := &Inline{
-		cfg:     cfg,
-		workers: make(chan struct{}, cfg.MaxConcurrency),
-		reasons: make(map[decision.AdmissionReason]int64),
+		cfg:        cfg,
+		workers:    make(chan struct{}, cfg.MaxConcurrency),
+		queue:      make(chan asyncJob, cfg.AsyncQueueSize),
+		baseCtx:    baseCtx,
+		cancelBase: cancelBase,
+		drained:    make(chan struct{}),
+		seen:       make(map[string]int, DedupHistory),
+		seenRing:   make([]string, DedupHistory),
+		reasons:    make(map[decision.AdmissionReason]int64),
 	}
 	for i := 0; i < cfg.MaxConcurrency; i++ {
 		s.workers <- struct{}{}
+	}
+	// One async worker per physical worker. They contend for the same
+	// worker tokens as inline work, which is what keeps total inference
+	// concurrency at MaxConcurrency regardless of where work came from.
+	for i := 0; i < cfg.MaxConcurrency; i++ {
+		s.asyncWG.Add(1)
+		go s.asyncWorker()
 	}
 	return s, nil
 }
@@ -291,28 +363,38 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 
 	eligible, eligibleReason := s.eligible(req, in, ordered)
 
-	var inlineWindows, inlineTokens int
+	var inlineWindows, inlineTokens, asyncWindows int
 	for _, w := range ordered {
-		// 1. Is this message eligible for inline at all?
+		// 1. Is this message eligible at all? not_eligible means we are not
+		// analyzing this content, so it is never queued either: async
+		// capacity is for work we wanted to do and could not, not for work
+		// we declined.
 		if !eligible {
 			s.deny(&a, w, eligibleReason)
 			continue
 		}
+
+		var denied decision.AdmissionReason
+		switch {
 		// 2. Is there inline budget left?
-		if inlineWindows >= s.cfg.MaxInlineWindows || inlineTokens+w.Tokens > s.cfg.MaxInlineTokens {
-			s.deny(&a, w, decision.DenyInlineBudgetSpent)
-			continue
-		}
+		case inlineWindows >= s.cfg.MaxInlineWindows || inlineTokens+w.Tokens > s.cfg.MaxInlineTokens:
+			denied = decision.DenyInlineBudgetSpent
 		// 3. Is any of the deadline left?
-		if ctx.Err() != nil {
-			s.deny(&a, w, decision.DenyDeadlineSpent)
-			continue
-		}
+		case ctx.Err() != nil:
+			denied = decision.DenyDeadlineSpent
 		// 4. Is a physical worker free RIGHT NOW? Never wait.
-		select {
-		case <-s.workers:
 		default:
-			s.deny(&a, w, decision.DenyNoWorkerAvailable)
+			select {
+			case <-s.workers:
+			default:
+				denied = decision.DenyNoWorkerAvailable
+			}
+		}
+		if denied != "" {
+			// 5. Bounded async continuation for capacity denials.
+			if s.continueAsync(&a, req, in, w, signals, denied, asyncWindows) {
+				asyncWindows++
+			}
 			continue
 		}
 
@@ -320,9 +402,16 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		inlineTokens += w.Tokens
 		s.inlineAttempted.Add(1)
 		s.note(&a, w, true, eligibleReason)
+		// Claim the job so a retry of this request does not queue this
+		// window async after it was already scored inline. The inline lane
+		// itself never consults the claim: protecting the current request
+		// outranks deduplication, and decision IDs collapse the repeat.
+		if id := jobIDFor(req, in, w); id != "" {
+			s.claim(id)
+		}
 
 		// runOnWorker takes ownership of the worker token acquired above.
-		ds, ok := s.runOnWorker(ctx, in, w, signals)
+		ds, ok := s.runOnWorker(ctx, in, w, signals, &s.inlinePanics)
 		if ok {
 			s.inlineCompleted.Add(1)
 			a.Coverage.ScoredInline++
@@ -396,7 +485,10 @@ var errProviderPanic = errors.New("scheduler: provider panicked")
 //
 // A provider panic is recovered on the worker goroutine, where an
 // unrecovered panic would crash the process, and reported as an error.
-func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedText, signals []decision.Signal) ([]decision.Decision, bool) {
+//
+// panics is the counter a recovered panic increments, so inline and async
+// panics are reported separately.
+func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedText, signals []decision.Signal, panics *atomic.Int64) ([]decision.Decision, bool) {
 	cur := s.inFlight.Add(1)
 	for {
 		m := s.maxInFlight.Load()
@@ -412,7 +504,7 @@ func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedT
 		var r workerResult
 		defer func() {
 			if p := recover(); p != nil {
-				s.inlinePanics.Add(1)
+				panics.Add(1)
 				// Never log the panic value: a provider's panic message can
 				// quote request content. The type and a short hash are enough
 				// to group recurrences without disclosing anything.
@@ -524,8 +616,7 @@ func unanswered(signals []decision.Signal, w decision.Window) []decision.Decisio
 	return out
 }
 
-// deny records a denied admission. In this task denied windows are recorded
-// and counted; Task 20 also enqueues them for async continuation.
+// deny records a denied admission that is not continued asynchronously.
 func (s *Inline) deny(a *decision.Assessment, w WindowedText, reason decision.AdmissionReason) {
 	s.inlineDenied.Add(1)
 	s.note(a, w, false, reason)
@@ -560,11 +651,283 @@ func (s *Inline) Metrics() Metrics {
 		AsyncQueued:          s.asyncQueued.Load(),
 		AsyncCompleted:       s.asyncCompleted.Load(),
 		AsyncDropped:         s.asyncDropped.Load(),
+		AsyncQueueDepth:      len(s.queue),
 		DuplicatesSuppressed: s.duplicates.Load(),
 		MaxInFlight:          s.maxInFlight.Load(),
 		AdmissionReasons:     reasons,
 		InlinePanics:         s.inlinePanics.Load(),
 		InFlight:             s.inFlight.Load(),
+		AsyncCanceled:        s.asyncCanceled.Load(),
+		AsyncPanics:          s.asyncPanics.Load(),
+	}
+}
+
+// continueAsync offers a window that was denied the inline lane for a
+// capacity reason (budget, deadline or worker) to the bounded async queue,
+// and records its admission. It reports whether the window was queued.
+//
+// It never blocks. A window past MaxAsyncWindows, or a duplicate of a job
+// already claimed, keeps its capacity denial reason; a window the queue
+// refuses is recorded as DenyQueueFull. Either way it is a coverage gap.
+func (s *Inline) continueAsync(a *decision.Assessment, req Request, in decision.Input, w WindowedText, sigs []decision.Signal, denied decision.AdmissionReason, queuedSoFar int) bool {
+	if queuedSoFar >= s.cfg.MaxAsyncWindows {
+		s.deny(a, w, denied)
+		return false
+	}
+	id := jobIDFor(req, in, w)
+	if id != "" && !s.claim(id) {
+		s.duplicates.Add(1)
+		s.deny(a, w, denied)
+		return false
+	}
+	job := asyncJob{req: req, in: in, win: w, sigs: sigs, denied: denied}
+	if !s.enqueue(job) {
+		// Release the claim: the job never ran, so a retry must be free to
+		// queue it rather than be suppressed as a duplicate of nothing.
+		if id != "" {
+			s.unclaim(id)
+		}
+		s.deny(a, w, decision.DenyQueueFull)
+		return false
+	}
+	a.Coverage.QueuedAsync++
+	s.deny(a, w, denied)
+	return true
+}
+
+// jobIDFor derives the stable dedup key for one window of one request. It
+// returns "" for a request with no session or request identity (Assess):
+// without identity, equal content from unrelated callers would collide, and
+// suppressing those as duplicates would silently skip analysis.
+func jobIDFor(req Request, in decision.Input, w WindowedText) string {
+	if req.SessionID == "" && req.RequestID == "" {
+		return ""
+	}
+	return decision.JobID(decision.JobIdentity{
+		SessionID:      req.SessionID,
+		RequestID:      req.RequestID,
+		MessageIndex:   in.MessageIndex,
+		StartByte:      w.Window.StartByte,
+		EndByte:        w.Window.EndByte,
+		TransformChain: w.Window.Transform,
+	})
+}
+
+// claim records a job identity and reports whether it is new.
+//
+// The ring makes the history bounded: the oldest identity is evicted when
+// the ring wraps. An evicted identity could in principle be re-scored, which
+// is acceptable — DedupHistory is far larger than one session's window
+// count, and the alternative is an unbounded map keyed by session.
+func (s *Inline) claim(id string) bool {
+	s.seenMu.Lock()
+	defer s.seenMu.Unlock()
+	if _, dup := s.seen[id]; dup {
+		return false
+	}
+	slot := s.seenNext
+	if old := s.seenRing[slot]; old != "" {
+		// Only evict the map entry if it still points at this slot; an ID
+		// that was unclaimed and re-claimed lives in a newer slot.
+		if at, ok := s.seen[old]; ok && at == slot {
+			delete(s.seen, old)
+		}
+	}
+	s.seenRing[slot] = id
+	s.seenNext = (slot + 1) % len(s.seenRing)
+	s.seen[id] = slot
+	return true
+}
+
+// unclaim forgets a job identity whose job never ran.
+func (s *Inline) unclaim(id string) {
+	s.seenMu.Lock()
+	defer s.seenMu.Unlock()
+	if slot, ok := s.seen[id]; ok {
+		delete(s.seen, id)
+		s.seenRing[slot] = ""
+	}
+}
+
+// enqueue offers a job to the async queue and reports whether it was
+// accepted.
+//
+// It never blocks: a full queue is a dropped window, counted and logged
+// without content, not back-pressure on the proxied request. After Shutdown
+// it refuses everything. The read lock is held across the non-blocking send
+// so Shutdown cannot close the queue underneath it.
+func (s *Inline) enqueue(job asyncJob) bool {
+	s.lifeMu.RLock()
+	defer s.lifeMu.RUnlock()
+	if s.closed {
+		s.asyncDropped.Add(1)
+		return false
+	}
+	// Count before the send so a fast worker can never make AsyncCompleted
+	// exceed AsyncQueued in a snapshot.
+	s.asyncQueued.Add(1)
+	select {
+	case s.queue <- job:
+		return true
+	default:
+		s.asyncQueued.Add(-1)
+		s.asyncDropped.Add(1)
+		slog.Warn("semantic async queue is full; window dropped",
+			"session_id", job.req.SessionID,
+			"request_id", job.req.RequestID,
+			"queue_size", cap(s.queue),
+			"transform", job.win.Window.Transform,
+			"consequence", "this window is a coverage gap and contributes no risk",
+		)
+		return false
+	}
+}
+
+// asyncWorker runs queued jobs until Shutdown closes the queue.
+func (s *Inline) asyncWorker() {
+	defer s.asyncWG.Done()
+	for job := range s.queue {
+		s.runAsync(job)
+	}
+}
+
+// runAsync runs one queued job.
+//
+// The job gets its own context bounded by AsyncTimeout and by Shutdown,
+// waits for a physical worker token (unlike inline, async work may wait),
+// and reports through OnAsync with ScopeFutureActivity: by the time it
+// finishes the request has been forwarded, so the result can raise session
+// risk and affect later activity but can never claim to have protected the
+// current request.
+//
+// A job whose context ends first — while waiting for a worker or during
+// inference — is counted in AsyncCanceled and not delivered: that is a
+// budget outcome, not a provider failure, and an all-unknown result carries
+// nothing a later decision could use.
+func (s *Inline) runAsync(job asyncJob) {
+	if s.baseCtx.Err() != nil {
+		s.asyncCanceled.Add(1)
+		return
+	}
+	start := s.cfg.Clock()
+	ctx, cancel := context.WithTimeout(s.baseCtx, s.cfg.AsyncTimeout)
+	defer cancel()
+
+	select {
+	case <-s.workers:
+	case <-ctx.Done():
+		s.asyncCanceled.Add(1)
+		return
+	}
+	// select picks randomly when both cases are ready; do not start
+	// inference on a context that has already ended.
+	if ctx.Err() != nil {
+		s.workers <- struct{}{}
+		s.asyncCanceled.Add(1)
+		return
+	}
+
+	// runOnWorker takes ownership of the worker token acquired above.
+	ds, ok := s.runOnWorker(ctx, job.in, job.win, job.sigs, &s.asyncPanics)
+	if !ok && ctx.Err() != nil {
+		s.asyncCanceled.Add(1)
+		return
+	}
+
+	a := decision.Assessment{
+		Decisions: ds,
+		Scope:     decision.ScopeFutureActivity,
+		Coverage: decision.Coverage{
+			EligibleWindows: 1,
+			EligibleBytes:   len(job.win.Text),
+		},
+		// The admission record repeats why the window missed the inline
+		// lane; an async result never claims inline admission.
+		Admissions: []decision.Admission{{
+			Window:   job.win.Window,
+			Admitted: false,
+			Reason:   job.denied,
+		}},
+	}
+	if ok {
+		a.Coverage.ScoredBytes = len(job.win.Text)
+	}
+	// Coverage.ScoredInline stays 0, so IsComplete is false: an async result
+	// never reports a clean scan of the request it arrived too late for.
+	// Whether this window answered is read from the decisions and
+	// ScoredBytes.
+	a.Coverage.Complete = a.Coverage.IsComplete()
+	a.TotalLatency = s.cfg.Clock().Sub(start)
+
+	// Count before delivery so a callback that signals completion observes
+	// an up-to-date AsyncCompleted.
+	s.asyncCompleted.Add(1)
+	s.deliver(job, a)
+}
+
+// deliver hands an async result to OnAsync, recovering a callback panic so
+// one bad sink cannot kill a worker or the process. The panic value is never
+// logged: it could quote the content the callback was handed.
+func (s *Inline) deliver(job asyncJob, a decision.Assessment) {
+	if s.cfg.OnAsync == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("semantic async callback panicked; result was not recorded",
+				"panic_type", fmt.Sprintf("%T", p),
+				"panic_hash", panicHash(p),
+				"transform", job.win.Window.Transform,
+			)
+		}
+	}()
+	s.cfg.OnAsync(job.req, job.in, a)
+}
+
+// Shutdown stops accepting new async work, drains the queue within the
+// caller's deadline, and then cancels any job still waiting or running.
+//
+// It returns nil when every async worker has exited, and ctx.Err() when the
+// deadline passed first, so the caller can log that some semantic analysis
+// was abandoned rather than silently losing it. After the deadline the
+// remaining queued jobs are counted in AsyncCanceled and the workers exit
+// promptly; a provider call that ignores its context may still finish in
+// the background, exactly as on the inline path.
+//
+// Inline assessment keeps working after Shutdown; only async continuation
+// stops. Calling Shutdown more than once is safe: a later call waits, under
+// its own context, for any workers an earlier call left behind.
+func (s *Inline) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() {
+		s.lifeMu.Lock()
+		s.closed = true
+		close(s.queue)
+		s.lifeMu.Unlock()
+
+		go func() {
+			s.asyncWG.Wait()
+			close(s.drained)
+		}()
+	})
+
+	// Prefer a finished drain over an expired context when both are ready.
+	select {
+	case <-s.drained:
+		s.cancelBase()
+		return nil
+	default:
+	}
+	select {
+	case <-s.drained:
+		s.cancelBase()
+		return nil
+	case <-ctx.Done():
+		s.cancelBase()
+		slog.Warn("semantic scheduler shutdown deadline passed with async work outstanding",
+			"queue_depth", len(s.queue),
+			"error_class", errorClass(ctx.Err()),
+		)
+		return ctx.Err()
 	}
 }
 
