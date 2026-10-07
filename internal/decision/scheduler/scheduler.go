@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -75,6 +77,13 @@ type Config struct {
 	MaxInlineTokens int
 	// MaxInlineWindows caps the windows one request may score inline.
 	// Windows past it are denied with DenyInlineBudgetSpent.
+	//
+	// Windows within one request run sequentially under the one global
+	// deadline, so with N inline windows each gets roughly InlineTimeout/N
+	// of wall time in the worst case. A request holds one worker at a time
+	// and returns it between windows; another request can take that slot in
+	// the gap, which surfaces as DenyNoWorkerAvailable for a later window of
+	// this request.
 	MaxInlineWindows int
 	// MaxAsyncWindows caps the windows one request may queue async (Task 20).
 	MaxAsyncWindows int
@@ -131,6 +140,14 @@ type Metrics struct {
 	MaxInFlight int64
 	// AdmissionReasons is a copy of the per-reason admission counts.
 	AdmissionReasons map[decision.AdmissionReason]int64
+	// InlinePanics counts provider panics recovered on a worker. Each one is
+	// also an unanswered window, so it is included in InlineAttempted minus
+	// InlineCompleted.
+	InlinePanics int64
+	// InFlight is a gauge: the provider calls running right now, including
+	// calls a caller already abandoned at its deadline that still hold a
+	// worker.
+	InFlight int64
 }
 
 // Inline is the scheduler. It is safe for concurrent use.
@@ -151,6 +168,7 @@ type Inline struct {
 	duplicates      atomic.Int64
 	inFlight        atomic.Int64
 	maxInFlight     atomic.Int64
+	inlinePanics    atomic.Int64
 
 	reasonsMu sync.Mutex
 	reasons   map[decision.AdmissionReason]int64
@@ -230,6 +248,12 @@ func (s *Inline) Assess(ctx context.Context, in decision.Input, signals []decisi
 // free at the instant it is considered. Windows run one at a time on the
 // caller's behalf, each returning its worker before the next is admitted,
 // so one request never holds more than one worker.
+//
+// Coverage is window-level: a window counts as scored (ScoredInline,
+// ScoredBytes) when ANY requested signal on it was answered. Coverage.Complete
+// therefore means "every eligible window produced at least one answer", not
+// "every signal was answered on every window"; per-signal answeredness is
+// read from the decisions themselves (MaxProbability, ByWindow).
 //
 // It never returns an error for a denied admission, a timeout, a provider
 // error or a provider panic: all of those are "unknown", which is a
@@ -388,8 +412,13 @@ func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedT
 		var r workerResult
 		defer func() {
 			if p := recover(); p != nil {
+				s.inlinePanics.Add(1)
+				// Never log the panic value: a provider's panic message can
+				// quote request content. The type and a short hash are enough
+				// to group recurrences without disclosing anything.
 				slog.Error("semantic inference panicked; decision is unknown",
-					"panic", p,
+					"panic_type", fmt.Sprintf("%T", p),
+					"panic_hash", panicHash(p),
 					"transform", w.Window.Transform,
 				)
 				r = workerResult{err: errProviderPanic}
@@ -413,7 +442,7 @@ func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedT
 		case r = <-done:
 		default:
 			slog.Debug("semantic inference abandoned at the deadline",
-				"error", ctx.Err(),
+				"error_class", errorClass(ctx.Err()),
 				"transform", w.Window.Transform,
 			)
 			return unanswered(signals, w.Window), false
@@ -421,7 +450,7 @@ func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedT
 	}
 	if r.err != nil {
 		slog.Debug("semantic inference did not answer",
-			"error", r.err,
+			"error_class", errorClass(r.err),
 			"transform", w.Window.Transform,
 		)
 		return unanswered(signals, w.Window), false
@@ -429,12 +458,39 @@ func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedT
 	return normalize(r.ds, signals, w.Window)
 }
 
+// errorClass classifies a provider error for logging without its message,
+// which a provider may have built from request content.
+func errorClass(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, errProviderPanic):
+		return "provider_panic"
+	default:
+		return fmt.Sprintf("%T", err)
+	}
+}
+
+// panicHash returns the first 12 hex characters of the SHA-256 of a panic
+// value's printed form: stable for grouping, useless for recovering content.
+func panicHash(p any) string {
+	sum := sha256.Sum256([]byte(fmt.Sprint(p)))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
 // normalize turns a provider's output into exactly one decision per
 // requested signal, in request order, stamped with the window: a Provider
 // scores one window and does not know where it came from. A signal the
 // provider omitted, or answered with a probability outside [0, 1] or NaN,
-// is unanswered rather than absent or trusted. ok reports whether any
-// signal was answered; a window with no answers does not count as scored.
+// is unanswered rather than absent or trusted, and every unanswered
+// decision carries Probability 0 so no stale value can be read off it.
+//
+// ok reports whether ANY requested signal was answered. That is the
+// window-level definition of "scored" that Coverage uses: a window with at
+// least one answer counts as scored even if other signals on it are
+// unanswered, and a window with no answers does not count.
 func normalize(out []decision.Decision, signals []decision.Signal, w decision.Window) ([]decision.Decision, bool) {
 	res := make([]decision.Decision, 0, len(signals))
 	var ok bool
@@ -448,6 +504,8 @@ func normalize(out []decision.Decision, signals []decision.Signal, w decision.Wi
 		}
 		if d.Answered && (d.Probability < 0 || d.Probability > 1 || math.IsNaN(d.Probability)) {
 			d.Answered = false
+		}
+		if !d.Answered {
 			d.Probability = 0
 		}
 		d.Window = w
@@ -505,6 +563,8 @@ func (s *Inline) Metrics() Metrics {
 		DuplicatesSuppressed: s.duplicates.Load(),
 		MaxInFlight:          s.maxInFlight.Load(),
 		AdmissionReasons:     reasons,
+		InlinePanics:         s.inlinePanics.Load(),
+		InFlight:             s.inFlight.Load(),
 	}
 }
 
