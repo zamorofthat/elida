@@ -251,6 +251,9 @@ func TestScheduler_InlineNeverWaitsForAWorker(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			req, in := userRequest()
+			// Distinct requests: one holds the inline slot, the other is
+			// continued on the async slot (the pool is split one-and-one).
+			req.RequestID = "req-hold-" + string(rune('a'+i))
 			in.SourceRole = "tool"
 			in.Content = content
 			<-start
@@ -736,6 +739,7 @@ func TestScheduler_DeadlineBoundsAProviderThatIgnoresContext(t *testing.T) {
 	p := &stuckProvider{release: make(chan struct{})}
 	cfg := inlineConfig(p)
 	cfg.MaxConcurrency = 1
+	cfg.MaxAsyncWindows = 0 // isolate the inline path: report the inline denial reason
 	cfg.InlineTimeout = 40 * time.Millisecond
 	s, err := scheduler.New(cfg)
 	if err != nil {
