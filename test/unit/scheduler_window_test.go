@@ -261,3 +261,26 @@ func TestOrderWindows_DoesNotMutateItsInput(t *testing.T) {
 		t.Fatal("OrderWindows must not reorder its argument in place")
 	}
 }
+
+func TestSplitWindows_NonzeroStartByteOffsetsAreAbsolute(t *testing.T) {
+	content := "First sentence. Second sentence. Third sentence. Fourth sentence."
+	c := decision.Candidate{Content: content, StartByte: 100, EndByte: 100 + len(content)}
+	ws := scheduler.SplitWindows(c, counter(), 5)
+	if len(ws) < 3 {
+		t.Fatalf("expected several windows, got %d", len(ws))
+	}
+	prev := 100
+	for i, w := range ws {
+		if w.Window.StartByte != prev {
+			t.Fatalf("window %d starts at %d, want %d", i, w.Window.StartByte, prev)
+		}
+		local := content[w.Window.StartByte-100 : w.Window.EndByte-100]
+		if local != w.Text {
+			t.Fatalf("window %d span slices %q, text is %q", i, local, w.Text)
+		}
+		prev = w.Window.EndByte
+	}
+	if prev != 100+len(content) {
+		t.Fatalf("windows end at %d, want %d", prev, 100+len(content))
+	}
+}

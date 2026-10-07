@@ -33,8 +33,8 @@ type WindowedText struct {
 	Tokens int
 }
 
-// sentenceTerminators end a sentence when followed by whitespace or by the
-// end of the string.
+// isSentenceTerminator reports whether b ends a sentence when followed by
+// whitespace or by the end of the string.
 func isSentenceTerminator(b byte) bool {
 	return b == '.' || b == '!' || b == '?'
 }
@@ -109,6 +109,14 @@ func isSpace(b byte) bool {
 // Windows tile the content: they are contiguous, non-overlapping, and
 // concatenating their text reproduces the candidate exactly. A single
 // sentence longer than maxTokens is hard-split at a word boundary.
+//
+// maxTokens <= 0 falls back to DefaultWindowTokens. Every window's Tokens is
+// the counter's own count of the window text, and a window over budget
+// (possible only with a non-additive counter) is hard-split. A single rune
+// that alone exceeds maxTokens cannot be split without corrupting UTF-8 and
+// is emitted whole, so it necessarily exceeds the budget. A counter that
+// returns 0 for non-empty text reports everything as fitting, so the content
+// becomes a single window.
 func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int) []WindowedText {
 	if c.Content == "" {
 		return nil
@@ -133,9 +141,22 @@ func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int)
 
 	var bufStart, bufEnd int
 	var bufTokens int
+	// emit appends the span [from,to) as one window, re-counting its text so
+	// Tokens is truthful for any counter. A span over budget is hard-split.
+	emit := func(from, to int) {
+		text := c.Content[from:to]
+		if n := tc.CountTokens(text); n <= maxTokens {
+			out = append(out, mkWindow(from, to, text, n))
+			return
+		}
+		for _, piece := range hardSplit(text, tc, maxTokens) {
+			out = append(out, mkWindow(from, from+len(piece), piece, tc.CountTokens(piece)))
+			from += len(piece)
+		}
+	}
 	flush := func() {
 		if bufEnd > bufStart {
-			out = append(out, mkWindow(bufStart, bufEnd, c.Content[bufStart:bufEnd], bufTokens))
+			emit(bufStart, bufEnd)
 		}
 		bufStart, bufTokens = bufEnd, 0
 	}
@@ -150,10 +171,7 @@ func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int)
 			// The sentence alone busts the budget. Flush what we have, then
 			// hard-split the sentence at word boundaries.
 			flush()
-			for _, piece := range hardSplit(c.Content[sStart:sEnd], tc, maxTokens) {
-				out = append(out, mkWindow(sStart, sStart+len(piece), piece, tc.CountTokens(piece)))
-				sStart += len(piece)
-			}
+			emit(sStart, sEnd)
 			bufStart, bufEnd = sEnd, sEnd
 			continue
 		}
@@ -169,48 +187,76 @@ func SplitWindows(c decision.Candidate, tc decision.TokenCounter, maxTokens int)
 }
 
 // hardSplit cuts s into pieces of at most maxTokens tokens, preferring word
-// boundaries. The pieces concatenate back to s.
+// boundaries. The pieces concatenate back to s and every cut is on a rune
+// boundary, so a single rune that alone exceeds maxTokens is emitted whole.
+//
+// Tokenizer work is proportional to the pieces produced, not to the
+// remainder: each piece is found by doubling a prefix until it stops fitting
+// and then bisecting, so every CountTokens call sees at most about twice a
+// piece. The counter is assumed monotonic in prefix length.
 func hardSplit(s string, tc decision.TokenCounter, maxTokens int) []string {
 	var out []string
 	for len(s) > 0 {
-		if tc.CountTokens(s) <= maxTokens {
-			out = append(out, s)
-			break
+		// Gallop: lo is a prefix known to fit, hi one known not to (or len).
+		lo, hi := 0, alignUp(s, maxTokens)
+		for hi < len(s) && tc.CountTokens(s[:hi]) <= maxTokens {
+			lo = hi
+			hi = alignUp(s, hi*2)
 		}
-		// Estimate the byte length that fits, then back off to a space.
-		tokens := tc.CountTokens(s)
-		cut := len(s) * maxTokens / tokens
-		if cut <= 0 {
-			cut = 1
-		}
-		if cut > len(s) {
-			cut = len(s)
-		}
-		// Shrink until it actually fits (the estimate can overshoot).
-		for cut > 1 && tc.CountTokens(s[:cut]) > maxTokens {
-			cut = cut * 3 / 4
-			if cut < 1 {
-				cut = 1
+		if hi >= len(s) {
+			hi = len(s)
+			if tc.CountTokens(s) <= maxTokens {
+				out = append(out, s)
+				break
 			}
 		}
-		// Prefer the last space inside the cut, but never produce an empty
-		// piece and never lose bytes.
-		if idx := strings.LastIndexByte(s[:cut], ' '); idx > 0 {
-			cut = idx + 1
+		// Bisect for the longest fitting rune-aligned prefix in [lo, hi).
+		for {
+			mid := alignDown(s, (lo+hi)/2)
+			if mid <= lo {
+				mid = alignUp(s, lo+1)
+			}
+			if mid >= hi {
+				break
+			}
+			if tc.CountTokens(s[:mid]) <= maxTokens {
+				lo = mid
+			} else {
+				hi = mid
+			}
 		}
-		// Keep the cut on a UTF-8 boundary.
-		for cut > 1 && cut < len(s) && s[cut]&0xC0 == 0x80 {
-			cut--
-		}
-		// A single rune wider than the budget cannot be split further:
-		// emit it whole rather than cut inside it.
-		for cut < len(s) && s[cut]&0xC0 == 0x80 {
-			cut++
+		cut := lo
+		if cut == 0 {
+			cut = alignUp(s, 1) // one rune wider than the budget: emit whole
+		} else if idx := strings.LastIndexByte(s[:cut], ' '); idx > 0 && cut < len(s) {
+			cut = idx + 1 // prefer a word boundary
 		}
 		out = append(out, s[:cut])
 		s = s[cut:]
 	}
 	return out
+}
+
+// alignDown moves i back to the nearest rune boundary at or before i.
+func alignDown(s string, i int) int {
+	if i > len(s) {
+		i = len(s)
+	}
+	for i > 0 && i < len(s) && s[i]&0xC0 == 0x80 {
+		i--
+	}
+	return i
+}
+
+// alignUp moves i forward to the nearest rune boundary at or after i.
+func alignUp(s string, i int) int {
+	if i > len(s) {
+		return len(s)
+	}
+	for i < len(s) && s[i]&0xC0 == 0x80 {
+		i++
+	}
+	return i
 }
 
 // injectionCues are cheap lexical markers of instruction-manipulation

@@ -3,8 +3,10 @@ package scheduler
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"elida/internal/decision"
 	"elida/internal/decision/decisiontest"
 )
 
@@ -95,5 +97,71 @@ func TestHardSplitNeverCutsARune(t *testing.T) {
 				t.Fatalf("bpt=%d budget=%d: pieces do not reassemble", bpt, budget)
 			}
 		}
+	}
+}
+
+// countingCounter wraps a counter and tallies calls and bytes inspected.
+type countingCounter struct {
+	inner decisiontest.ByteTokenCounter
+	calls int
+	bytes int
+}
+
+func (c *countingCounter) CountTokens(s string) int {
+	c.calls++
+	c.bytes += len(s)
+	return c.inner.CountTokens(s)
+}
+
+func TestHardSplitTokenizerWorkIsLinear(t *testing.T) {
+	const size = 200 * 1024
+	in := strings.Repeat("A", size) // no space, no terminator: worst case
+	cc := &countingCounter{inner: decisiontest.ByteTokenCounter{BytesPerToken: 4}}
+	start := time.Now()
+	pieces := hardSplit(in, cc, 128)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("hardSplit took %v", d)
+	}
+	n := size / (128 * 4)
+	if len(pieces) < n {
+		t.Fatalf("expected at least %d pieces, got %d", n, len(pieces))
+	}
+	t.Logf("pieces=%d calls=%d bytesInspected=%d", len(pieces), cc.calls, cc.bytes)
+	// O(pieces * log): generous constant, far below the quadratic cost.
+	if cc.calls > len(pieces)*20 {
+		t.Fatalf("%d CountTokens calls for %d pieces", cc.calls, len(pieces))
+	}
+	// Bytes inspected must be proportional to input, not quadratic.
+	if cc.bytes > size*40 {
+		t.Fatalf("inspected %d bytes for a %d byte input", cc.bytes, size)
+	}
+}
+
+// superAdditive makes a merged window cost more than the sum of its
+// sentences, like a tokenizer with per-window overhead.
+type superAdditive struct{}
+
+func (superAdditive) CountTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+	return len(strings.Fields(s)) + strings.Count(s, ". ")*3
+}
+
+func TestSplitWindowsNonAdditiveCounterStaysInBudget(t *testing.T) {
+	content := strings.Repeat("alpha beta. ", 40)
+	ws := SplitWindows(decision.Candidate{Content: content, EndByte: len(content)}, superAdditive{}, 10)
+	var joined string
+	for i, w := range ws {
+		if w.Tokens != (superAdditive{}).CountTokens(w.Text) {
+			t.Fatalf("window %d Tokens=%d is not the counter's count", i, w.Tokens)
+		}
+		if w.Tokens > 10 {
+			t.Fatalf("window %d holds %d tokens, over budget", i, w.Tokens)
+		}
+		joined += w.Text
+	}
+	if joined != content {
+		t.Fatal("windows do not reassemble")
 	}
 }
