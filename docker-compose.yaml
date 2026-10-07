@@ -27,7 +27,12 @@ services:
 
   # ELIDA proxy (optional - can also run locally)
   elida:
-    build: .
+    build:
+      context: .
+      args:
+        # The image's model-builder stage requires the pinned upstream model
+        # commit; scripts/models/fetch.sh refuses any other value.
+        DEFENDER_COMMIT: ${DEFENDER_COMMIT:-ff83e70981099f9261520e0e9bc6cb85bb9789da}
     ports:
       - "8080:8080"
       - "9090:9090"

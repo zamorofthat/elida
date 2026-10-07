@@ -9,6 +9,11 @@ permissions: {}
 
 env:
   GO_VERSION: "1.27.0"
+  # Same pins as ci.yml (a called workflow does not inherit this env).
+  # DEFENDER_COMMIT feeds the image's model-builder stage; fetch.sh refuses
+  # any other value. Bumping it is a model change requiring security review.
+  DEFENDER_COMMIT: "ff83e70981099f9261520e0e9bc6cb85bb9789da"
+  MODEL_ONNX_SHA256: "13febddd90418e64b9285543f31a92534f778cb43ca728b33e46b2dba8848f6a"
 
 jobs:
   ci:
@@ -53,7 +58,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            DEFENDER_COMMIT=${{ env.DEFENDER_COMMIT }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
@@ -78,6 +85,28 @@ jobs:
       - name: Get tag name
         id: tag
         run: echo "tag_name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      # The CI job (the reusable ci.yml above, same run) built the model,
+      # ran the conversion parity gate on it and uploaded it. Shipping that
+      # artifact, rather than rebuilding here, means the released bytes are
+      # the ones that passed parity.
+      - name: Download the model artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: models-injection-v5-fp32
+          path: build/release
+
+      - name: Verify and unpack the model artifact
+        # build/release/models-injection-v5-fp32.tar.gz{,.sha256} are
+        # attached to the release by .goreleaser.yaml (release.extra_files),
+        # and models/injection/ goes into every archive beside the binary.
+        run: |
+          set -euo pipefail
+          (cd build/release && sha256sum -c models-injection-v5-fp32.tar.gz.sha256)
+          mkdir -p models
+          tar -xzf build/release/models-injection-v5-fp32.tar.gz -C models
+          echo "${MODEL_ONNX_SHA256}  models/injection/model.onnx" | sha256sum -c -
+          ls -l models/injection
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

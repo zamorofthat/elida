@@ -14,6 +14,16 @@ permissions:
 
 env:
   GO_VERSION: "1.27.0"
+  # Pinned upstream source for the injection model. Bumping this is a model
+  # change and requires security review (model provenance is a reserved
+  # decision), not just a green build. scripts/models/fetch.sh refuses any
+  # other value, so this cannot drift from the checksums recorded there.
+  DEFENDER_COMMIT: "ff83e70981099f9261520e0e9bc6cb85bb9789da"
+  # sha256 of the float32 model.onnx that DEFENDER_COMMIT, scripts/models/
+  # and onnx 1.23.1 / numpy 2.5.3 produce (also pinned in
+  # internal/decision/embedded/hugot_test.go). Checked on every run, so a
+  # cache hit is verified as strictly as a fresh build.
+  MODEL_ONNX_SHA256: "13febddd90418e64b9285543f31a92534f778cb43ca728b33e46b2dba8848f6a"
 
 jobs:
   lint:
@@ -163,6 +173,104 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  model:
+    name: Model Artifact
+    runs-on: ubuntu-latest
+    # A cold run fetches ~23 MiB from upstream, converts it and runs the
+    # model-backed tests in a few minutes; this is headroom, not a target.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Restore the model artifact
+        id: model-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            models/injection
+            build/model-int8
+          # The artifact is a deterministic function of the pinned upstream
+          # commit, scripts/models/ (which carries the upstream checksums and
+          # the pinned Python versions) and the model card it ships. No
+          # restore-keys: a near match is a different artifact. The cache is
+          # saved only when the job succeeds, so a build that fails the
+          # parity gate is never cached.
+          key: model-injection-v5-fp32-${{ env.DEFENDER_COMMIT }}-${{ hashFiles('scripts/models/**', 'docs/model-card-injection.md') }}
+
+      - name: Set up Python
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Build the model artifact
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        # make model installs exactly onnx 1.23.1 and numpy 2.5.3 (build.sh
+        # refuses anything else) and runs scripts/models/build.sh, whose
+        # fetch verifies every upstream file against its pinned sha256 and
+        # fails if upstream's classifier_config.json has drifted from the
+        # pinned fixture.
+        run: make model
+
+      - name: Verify the model digest
+        run: echo "${MODEL_ONNX_SHA256}  models/injection/model.onnx" | sha256sum -c -
+
+      - name: Run the model-backed Go tests and the conversion parity gate
+        # GOEXPERIMENT=simd is what the released linux/amd64 binary uses, so
+        # the model is exercised through the same kernels it will run on.
+        # The parity gate compares the float32 graph against the int8 source
+        # in build/model-int8 at a 1e-4 tolerance. Every load verifies the
+        # manifest's sha256 for each file.
+        #
+        # Not under -race: GoMLX aborts under checkptr, so plain -race skips
+        # every real-model test, and -race with checkptr disabled makes the
+        # Hugot test binaries take ~12 minutes to link. The Unit Tests job
+        # runs this code under -race with the model absent.
+        run: |
+          go test -count=1 ./internal/decision/...
+          go test -count=1 -v ./test/unit/ -run 'TestRealModel|TestEmbedded|TestModelParity'
+        env:
+          GOEXPERIMENT: simd
+          ELIDA_TEST_MODEL_PATH: ${{ github.workspace }}/models/injection
+          ELIDA_TEST_INT8_MODEL_PATH: ${{ github.workspace }}/build/model-int8
+
+      - name: Benchmark the sequence length
+        # Records whether a 128-token window actually costs less than a
+        # 256-token one. Informational: it does not gate the build, but these
+        # numbers are what justify the window size, so they belong in the log.
+        run: go test -run '^$' -bench BenchmarkSequenceLength -benchtime 20x ./internal/decision/embedded/
+        env:
+          GOEXPERIMENT: simd
+          ELIDA_TEST_MODEL_PATH: ${{ github.workspace }}/models/injection
+
+      - name: Package the artifact
+        # Deterministic tarball: fixed order, mtime and owner, and no gzip
+        # timestamp, so the same artifact always has the same digest.
+        run: |
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -cf - -C models injection | gzip -n -9 > models-injection-v5-fp32.tar.gz
+          sha256sum models-injection-v5-fp32.tar.gz > models-injection-v5-fp32.tar.gz.sha256
+          cat models-injection-v5-fp32.tar.gz.sha256
+
+      - name: Upload the artifact
+        # The release workflow calls this workflow and ships these exact
+        # bytes, so the released model is the one that passed parity above.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: models-injection-v5-fp32
+          path: |
+            models-injection-v5-fp32.tar.gz
+            models-injection-v5-fp32.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
 
   integration:
     name: Integration Tests
@@ -339,7 +447,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            DEFENDER_COMMIT=${{ env.DEFENDER_COMMIT }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
