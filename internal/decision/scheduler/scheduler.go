@@ -63,11 +63,24 @@ type Config struct {
 	Signals []decision.Signal
 
 	// MaxConcurrency is the physical worker pool size, split into two lanes
-	// that never share slots. One slot is reserved for inline admission and
-	// the remaining MaxConcurrency-1 serve the async queue, so async backlog
-	// can never take the worker the hot path needs. With MaxConcurrency 1,
-	// async continuation is disabled: every window that misses the inline
-	// lane is refused with DenyQueueFull and counted in AsyncDropped.
+	// that never share slots, so async backlog can never take a worker the
+	// hot path needs. Inline is the hot path and holds the majority:
+	//
+	//	async workers = 0                        when MaxConcurrency == 1
+	//	async workers = max(1, MaxConcurrency/4) otherwise
+	//	inline slots  = MaxConcurrency - async workers
+	//
+	//	MaxConcurrency | inline | async
+	//	1              | 1      | 0
+	//	2              | 1      | 1
+	//	4              | 3      | 1
+	//	8              | 6      | 2
+	//	16             | 12     | 4
+	//
+	// MaxConcurrency 1 disables async continuation entirely: every window
+	// that misses the inline lane is refused with DenyQueueFull and counted
+	// in AsyncDropped. Metrics.InlineSlots and Metrics.AsyncWorkers report
+	// the split.
 	//
 	// A slot is held until its provider call actually returns, which is what
 	// keeps a timed-out inference from creating an unbounded compute
@@ -178,6 +191,21 @@ type Metrics struct {
 	// AsyncCallbackPanics counts panics recovered from OnAsync itself. The
 	// worker survives and goes on to the next job.
 	AsyncCallbackPanics int64
+	// InlineSlots is the inline lane's share of MaxConcurrency (fixed at
+	// New; see Config.MaxConcurrency).
+	InlineSlots int
+	// AsyncWorkers is the async lane's share of MaxConcurrency; 0 means
+	// async continuation is disabled.
+	AsyncWorkers int
+}
+
+// poolSplit returns the inline and async shares of a MaxConcurrency pool.
+// Inline holds the majority; MaxConcurrency 1 disables async entirely.
+func poolSplit(maxConcurrency int) (inlineSlots, asyncWorkers int) {
+	if maxConcurrency > 1 {
+		asyncWorkers = max(1, maxConcurrency/4)
+	}
+	return maxConcurrency - asyncWorkers, asyncWorkers
 }
 
 // queueFullLogInterval is how often, at most, a queue-full drop is logged.
@@ -211,12 +239,14 @@ type Inline struct {
 	// "is a worker free right now?" without ever waiting. Async work never
 	// touches it.
 	workers chan struct{}
-	// asyncSlots is the async lane's slot pool, MaxConcurrency-1 tokens.
-	// Async jobs wait on it; a slot is held until its provider call returns,
-	// so abandoned async inference cannot exceed the lane's share.
+	// asyncSlots is the async lane's slot pool, asyncWorkers tokens. Async
+	// jobs wait on it; a slot is held until its provider call returns, so
+	// abandoned async inference cannot exceed the lane's share.
 	asyncSlots chan struct{}
 	// asyncWorkers is the async lane's size; 0 disables async continuation.
 	asyncWorkers int
+	// inlineSlots is the inline lane's size (cap of workers).
+	inlineSlots int
 
 	// dropLogMu guards the queue-full log suppression state.
 	dropLogMu       sync.Mutex
@@ -313,9 +343,7 @@ func New(cfg Config) (*Inline, error) {
 	// what a running scheduler asks.
 	cfg.Signals = append([]decision.Signal(nil), cfg.Signals...)
 
-	// Split the pool: one slot reserved for inline, the rest for async.
-	asyncWorkers := cfg.MaxConcurrency - 1
-	inlineSlots := cfg.MaxConcurrency - asyncWorkers
+	inlineSlots, asyncWorkers := poolSplit(cfg.MaxConcurrency)
 
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	s := &Inline{
@@ -323,6 +351,7 @@ func New(cfg Config) (*Inline, error) {
 		workers:      make(chan struct{}, inlineSlots),
 		asyncSlots:   make(chan struct{}, asyncWorkers),
 		asyncWorkers: asyncWorkers,
+		inlineSlots:  inlineSlots,
 		queue:        make(chan asyncJob, cfg.AsyncQueueSize),
 		baseCtx:      baseCtx,
 		cancelBase:   cancelBase,
@@ -343,9 +372,11 @@ func New(cfg Config) (*Inline, error) {
 		go s.asyncWorker()
 	}
 	if asyncWorkers == 0 && cfg.MaxAsyncWindows > 0 {
-		slog.Warn("semantic async continuation disabled: max_concurrency=1",
+		slog.Warn("semantic async continuation disabled: max_concurrency=1 disables async continuation entirely",
 			"max_concurrency", cfg.MaxConcurrency,
-			"consequence", "windows that miss the inline lane are coverage gaps",
+			"inline_slots", inlineSlots,
+			"async_workers", asyncWorkers,
+			"consequence", "windows that miss the inline lane are refused as async_queue_full and are coverage gaps",
 		)
 	}
 	return s, nil
@@ -716,6 +747,8 @@ func (s *Inline) Metrics() Metrics {
 		AsyncCanceled:        s.asyncCanceled.Load(),
 		AsyncPanics:          s.asyncPanics.Load(),
 		AsyncCallbackPanics:  s.callbackPanics.Load(),
+		InlineSlots:          s.inlineSlots,
+		AsyncWorkers:         s.asyncWorkers,
 	}
 }
 
