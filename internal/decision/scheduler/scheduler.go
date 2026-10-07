@@ -64,6 +64,13 @@ type Config struct {
 	// exceeds MaxWindowTokens is hard-split by exact count; the extra pieces
 	// take inline budget or async slots like any other window and are never
 	// silently truncated. Required.
+	//
+	// The bound is by attempts: once MaxInlineWindows + MaxAsyncWindows
+	// windows have been counted, the rest are denied uncounted, whether the
+	// counted ones were scored, deduplicated or refused by a full queue.
+	// Counts for async-bound windows run on the request goroutine and can
+	// run after InlineTimeout has passed: up to MaxAsyncWindows exact counts
+	// (about 2 ms each with the embedded tokenizer) per request.
 	TokenCounter decision.TokenCounter
 	// Estimator is the cheap counter used ONLY to split content into
 	// windows. It must be O(n) in its input and should rarely undercount
@@ -122,6 +129,11 @@ type Config struct {
 	MaxInlineWindows int
 	// MaxAsyncWindows caps the windows one request may queue for async
 	// continuation. Zero is valid and disables async continuation.
+	//
+	// Each async-bound window is exact-counted on the request goroutine
+	// before it is queued, possibly after InlineTimeout has passed, so this
+	// also bounds post-deadline tokenizer work on the request path (about
+	// 2 ms per window with the embedded tokenizer). See TokenCounter.
 	MaxAsyncWindows int
 	// AsyncQueueSize is the async job queue capacity. Must be at least 1. A
 	// full queue drops the window (DenyQueueFull) rather than blocking.
@@ -478,6 +490,15 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	eligible, eligibleReason := s.eligible(req, in, ordered)
 
 	var inlineWindows, inlineTokens, asyncWindows int
+	// Exact counting is bounded by attempts, not outcomes: at most
+	// MaxInlineWindows + MaxAsyncWindows windows are ever counted (plus the
+	// counts a hard split makes), however many of them end up denied,
+	// deduplicated or refused by a full queue. asyncRefused records that the
+	// async queue refused a job in this request; later windows are dropped
+	// without being counted.
+	var considered int
+	var asyncRefused bool
+	maxConsidered := s.cfg.MaxInlineWindows + s.cfg.MaxAsyncWindows
 	var tmpl asyncTemplate
 	// exact[i] records that queue[i].Tokens is the exact count. Pieces of a
 	// hard split are spliced in place and are exact by construction.
@@ -498,8 +519,10 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		// or queued async. Windowing used the estimate; this is the count
 		// the model will actually see. An over-limit window is hard-split
 		// by exact count and its pieces join the queue in its place.
-		usable := (inlineWindows < s.cfg.MaxInlineWindows && ctx.Err() == nil) || asyncWindows < s.cfg.MaxAsyncWindows
-		if usable && !exact[i] {
+		inlineOpen := inlineWindows < s.cfg.MaxInlineWindows && ctx.Err() == nil
+		asyncOpen := s.asyncWorkers > 0 && !asyncRefused && asyncWindows < s.cfg.MaxAsyncWindows
+		if !exact[i] && (inlineOpen || asyncOpen) && considered < maxConsidered {
+			considered++
 			pieces := s.exactPieces(w)
 			queue = append(queue[:i], append(pieces, queue[i+1:]...)...)
 			grown := make([]bool, len(queue))
@@ -515,6 +538,12 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 
 		var denied decision.AdmissionReason
 		switch {
+		// A window that was never counted exactly is never scored: its
+		// token count is only an estimate. It is a capacity denial.
+		case !exact[i] && ctx.Err() != nil:
+			denied = decision.DenyDeadlineSpent
+		case !exact[i]:
+			denied = decision.DenyInlineBudgetSpent
 		// 2. Is there inline budget left?
 		case inlineWindows >= s.cfg.MaxInlineWindows || inlineTokens+w.Tokens > s.cfg.MaxInlineTokens:
 			denied = decision.DenyInlineBudgetSpent
@@ -530,9 +559,31 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 			}
 		}
 		if denied != "" {
+			if !exact[i] {
+				switch {
+				case s.asyncWorkers == 0:
+					// Async disabled: continueAsync refuses it exactly as
+					// it would any window (async_queue_full, counted in
+					// AsyncDropped); nothing can be enqueued, so no exact
+					// count is needed.
+					s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows)
+				case asyncRefused:
+					// The queue already refused this request's work.
+					s.asyncDropped.Add(1)
+					s.deny(&a, w, decision.DenyQueueFull)
+				default:
+					// Past the attempt bound: a gap, never enqueued with
+					// an estimated count.
+					s.deny(&a, w, denied)
+				}
+				continue
+			}
 			// 5. Bounded async continuation for capacity denials.
-			if s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows) {
+			switch s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows) {
+			case asyncQueued:
 				asyncWindows++
+			case asyncRefusedByQueue:
+				asyncRefused = true
 			}
 			continue
 		}
@@ -851,9 +902,22 @@ func (s *Inline) Metrics() Metrics {
 	}
 }
 
+// asyncOutcome is what continueAsync did with a window.
+type asyncOutcome int
+
+const (
+	// asyncQueued: the job was accepted onto the async queue.
+	asyncQueued asyncOutcome = iota
+	// asyncNotOffered: past MaxAsyncWindows, or a duplicate of a claimed job.
+	asyncNotOffered
+	// asyncRefusedByQueue: the queue refused it (full, shut down, or async
+	// disabled).
+	asyncRefusedByQueue
+)
+
 // continueAsync offers a window that was denied the inline lane for a
 // capacity reason (budget, deadline or worker) to the bounded async queue,
-// and records its admission. It reports whether the window was queued.
+// and records its admission. It reports what happened to the window.
 //
 // It never blocks. A window past MaxAsyncWindows, or a duplicate of a job
 // already claimed, keeps its capacity denial reason; a window the queue
@@ -862,16 +926,16 @@ func (s *Inline) Metrics() Metrics {
 // tmpl holds this assessment's private copies of the caller's slices, made
 // once on first use, so a caller reusing its slices after AssessCandidates
 // returns cannot race a queued job.
-func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, w WindowedText, sigs []decision.Signal, denied decision.AdmissionReason, queuedSoFar int) bool {
+func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, w WindowedText, sigs []decision.Signal, denied decision.AdmissionReason, queuedSoFar int) asyncOutcome {
 	if queuedSoFar >= s.cfg.MaxAsyncWindows {
 		s.deny(a, w, denied)
-		return false
+		return asyncNotOffered
 	}
 	id := jobIDFor(req, in, w)
 	if id != "" && !s.claim(id) {
 		s.duplicates.Add(1)
 		s.deny(a, w, denied)
-		return false
+		return asyncNotOffered
 	}
 	if !tmpl.ready {
 		tmpl.req = req
@@ -887,11 +951,11 @@ func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req 
 			s.unclaim(id)
 		}
 		s.deny(a, w, decision.DenyQueueFull)
-		return false
+		return asyncRefusedByQueue
 	}
 	a.Coverage.QueuedAsync++
 	s.deny(a, w, denied)
-	return true
+	return asyncQueued
 }
 
 // asyncTemplate is one assessment's copy of the request-scoped job fields.

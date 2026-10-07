@@ -279,3 +279,84 @@ func TestEstimateTokens_Shape(t *testing.T) {
 		prev = n
 	}
 }
+
+func TestScheduler_ExactCountingIsBoundedWhenAsyncCannotEnqueue(t *testing.T) {
+	discardSlog(t)
+	prose := strings.Repeat("the deployment pipeline runs in three stages and then promotes the build ", 3600)[:256*1024]
+	budget := 100 * time.Millisecond
+	if raceEnabled() {
+		budget = time.Second
+	}
+	cases := []struct {
+		name  string
+		tweak func(*scheduler.Config)
+	}{
+		{"max_concurrency_1", func(c *scheduler.Config) { c.MaxConcurrency = 1 }},
+		{"async_queue_size_1", func(c *scheduler.Config) { c.AsyncQueueSize = 1 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := decisiontest.NewFake(map[decision.Signal]float64{decision.SignalInjection: 0.1})
+			exact := &countingCounter{inner: decisiontest.ByteTokenCounter{BytesPerToken: 4}}
+			cfg := countingConfig(f, exact)
+			cfg.MaxInlineWindows = 1
+			cfg.MaxAsyncWindows = 8
+			tc.tweak(&cfg)
+			s, err := scheduler.New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer func() { _ = s.Shutdown(context.Background()) }()
+
+			req, in := userRequest()
+			in.SourceRole = "tool"
+			start := time.Now()
+			a, err := s.AssessCandidates(context.Background(), req, in, candidatesFor(prose), nil)
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("AssessCandidates: %v", err)
+			}
+			t.Logf("%s: %d windows, %d exact counts, queued %d, %v", tc.name, a.Coverage.EligibleWindows, exact.calls.Load(), a.Coverage.QueuedAsync, elapsed)
+			if limit := int64(cfg.MaxInlineWindows + cfg.MaxAsyncWindows); exact.calls.Load() > limit {
+				t.Errorf("exact counter called %d times, want at most %d", exact.calls.Load(), limit)
+			}
+			if elapsed > budget {
+				t.Errorf("windowing and admission took %v, want under %v", elapsed, budget)
+			}
+			if a.Coverage.Complete {
+				t.Error("most windows were refused; coverage must be incomplete")
+			}
+			if len(a.Admissions) != a.Coverage.EligibleWindows {
+				t.Errorf("admissions %d != eligible windows %d: every window must be recorded", len(a.Admissions), a.Coverage.EligibleWindows)
+			}
+		})
+	}
+}
+
+func TestScheduler_ExactCountingIsBoundedOnDedupRetry(t *testing.T) {
+	discardSlog(t)
+	prose := strings.Repeat("the deployment pipeline runs in three stages and then promotes the build ", 3600)[:256*1024]
+	f := decisiontest.NewFake(map[decision.Signal]float64{decision.SignalInjection: 0.1})
+	exact := &countingCounter{inner: decisiontest.ByteTokenCounter{BytesPerToken: 4}}
+	cfg := countingConfig(f, exact)
+	cfg.MaxInlineWindows = 1
+	cfg.MaxAsyncWindows = 8
+	s, err := scheduler.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = s.Shutdown(context.Background()) }()
+
+	req, in := userRequest()
+	in.SourceRole = "tool"
+	limit := int64(cfg.MaxInlineWindows + cfg.MaxAsyncWindows)
+	for pass := 0; pass < 2; pass++ {
+		before := exact.calls.Load()
+		if _, err := s.AssessCandidates(context.Background(), req, in, candidatesFor(prose), nil); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if n := exact.calls.Load() - before; n > limit {
+			t.Errorf("pass %d (retry deduplicates): %d exact counts, want at most %d", pass, n, limit)
+		}
+	}
+}
