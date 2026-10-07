@@ -316,3 +316,165 @@ func TestEmbeddedBreaker_OpenSkipsPipelineAndProbeReopens(t *testing.T) {
 		t.Fatal("a successful probe must close the breaker")
 	}
 }
+
+// gatedPipeline blocks in Logits until ctx is done (blockOnCtx) or until
+// release is closed (gate), and counts calls.
+type gatedPipeline struct {
+	calls      *atomic.Int64
+	fail       *atomic.Bool
+	blockOnCtx bool
+	gate       chan struct{}
+	heads      int
+}
+
+func (g *gatedPipeline) Logits(ctx context.Context, texts []string) ([][]float64, error) {
+	g.calls.Add(1)
+	if g.blockOnCtx {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if g.gate != nil {
+		<-g.gate
+	}
+	if g.fail.Load() {
+		return nil, errors.New("gated pipeline failed")
+	}
+	return [][]float64{make([]float64, g.heads)}, nil
+}
+func (g *gatedPipeline) CountTokens(text string) int { return (len(text) + 3) / 4 }
+func (g *gatedPipeline) Close() error                { return nil }
+
+func gatedProvider(t *testing.T, mk func(heads int) *gatedPipeline, now *time.Time) *embedded.Provider {
+	t.Helper()
+	p, err := embedded.New(context.Background(), embedded.Options{
+		Enabled: true, Required: true, ModelPath: copyFixture(t), ThresholdSet: "v1",
+		Arch: "amd64", SIMD: embedded.Bool(true),
+		NewPipeline: func(ctx context.Context, dir string, m *embedded.Manifest) (embedded.Pipeline, error) {
+			return mk(len(m.HeadOrder)), nil
+		},
+		BreakerThreshold: 3, BreakerCooldown: 10 * time.Second,
+		Clock: func() time.Time { return *now },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
+func TestEmbeddedBreaker_ContextErrorsDoNotTrip(t *testing.T) {
+	var calls atomic.Int64
+	var fail atomic.Bool
+	now := time.Now()
+	p := gatedProvider(t, func(h int) *gatedPipeline {
+		return &gatedPipeline{calls: &calls, fail: &fail, blockOnCtx: true, heads: h}
+	}, &now)
+
+	in := decision.Input{Content: "x"}
+	sig := []decision.Signal{decision.SignalInjection}
+	const n = 3 + 2
+	for i := 0; i < n; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := p.Decide(ctx, in, sig); err == nil {
+			t.Fatalf("call %d should surface the context error", i)
+		}
+	}
+	h := p.Health()
+	if h.BreakerOpen {
+		t.Fatal("caller context errors must not trip the breaker")
+	}
+	if h.Errors != 0 {
+		t.Fatalf("Errors = %d, want 0 for caller context errors", h.Errors)
+	}
+	if h.Canceled != n {
+		t.Fatalf("Canceled = %d, want %d", h.Canceled, n)
+	}
+}
+
+func TestEmbeddedBreaker_PipelineErrorWithLiveContextStillCounts(t *testing.T) {
+	var calls atomic.Int64
+	var fail atomic.Bool
+	fail.Store(true)
+	now := time.Now()
+	p := gatedProvider(t, func(h int) *gatedPipeline {
+		return &gatedPipeline{calls: &calls, fail: &fail, heads: h}
+	}, &now)
+
+	for i := 0; i < 3; i++ {
+		_, _ = p.Decide(context.Background(), decision.Input{Content: "x"},
+			[]decision.Signal{decision.SignalInjection})
+	}
+	h := p.Health()
+	if !h.BreakerOpen || h.Errors != 3 || h.Canceled != 0 {
+		t.Fatalf("pipeline errors with a live context must count, health = %+v", h)
+	}
+}
+
+func TestEmbeddedBreaker_CooldownAdmitsExactlyOneProbe(t *testing.T) {
+	var calls atomic.Int64
+	var fail atomic.Bool
+	fail.Store(true)
+	gate := make(chan struct{})
+	close(gate) // open while tripping
+	now := time.Now()
+	var pipe *gatedPipeline
+	p := gatedProvider(t, func(h int) *gatedPipeline {
+		pipe = &gatedPipeline{calls: &calls, fail: &fail, gate: gate, heads: h}
+		return pipe
+	}, &now)
+
+	in := decision.Input{Content: "x"}
+	sig := []decision.Signal{decision.SignalInjection}
+	for i := 0; i < 3; i++ {
+		_, _ = p.Decide(context.Background(), in, sig)
+	}
+	if !p.Health().BreakerOpen {
+		t.Fatal("breaker should be open")
+	}
+
+	// Hold the probe in flight on a fresh gate.
+	probeGate := make(chan struct{})
+	pipe.gate = probeGate
+	fail.Store(false)
+	before := calls.Load()
+	now = now.Add(11 * time.Second)
+
+	const callers = 32
+	var wg sync.WaitGroup
+	answered := make(chan bool, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ds, err := p.Decide(context.Background(), in, sig)
+			answered <- err == nil && len(ds) == 1 && ds[0].Answered
+		}()
+	}
+
+	// Wait until the 31 rejected callers have returned; only the probe remains.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(answered) < callers-1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := calls.Load() - before; got != 1 {
+		t.Fatalf("pipeline calls during half-open = %d, want exactly 1", got)
+	}
+	if len(answered) != callers-1 {
+		t.Fatalf("%d callers returned while the probe was in flight, want %d", len(answered), callers-1)
+	}
+	for i := 0; i < callers-1; i++ {
+		if <-answered {
+			t.Fatal("a caller that lost the probe race must get an unanswered decision")
+		}
+	}
+
+	close(probeGate)
+	wg.Wait()
+	if !<-answered {
+		t.Fatal("the probe should have been answered")
+	}
+	if p.Health().BreakerOpen {
+		t.Fatal("a successful probe must close the breaker")
+	}
+}

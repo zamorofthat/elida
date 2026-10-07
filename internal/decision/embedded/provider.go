@@ -2,6 +2,7 @@ package embedded
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -16,6 +17,9 @@ import (
 // pinned to 1 because Hugot 0.8.1 panics on a batch of 10
 // (backends/model_gomlx.go:256), so every Decide issues exactly one input.
 const maxBatch = 1
+
+// errInferencePanic marks an error produced by a recovered pipeline panic.
+var errInferencePanic = errors.New("embedded: inference panicked")
 
 // Capability is what a deployment can honestly claim about semantic
 // detection.
@@ -49,9 +53,10 @@ type Health struct {
 	Signals             []decision.Signal // signals the model answers
 	ThresholdSet        string            // configured threshold-set version
 	ThresholdSetMatches bool              // configured set equals the model's
-	BreakerOpen         bool              // circuit breaker currently open
+	BreakerOpen         bool              // breaker open; false also covers cooldown elapsed, awaiting the probe
 	Errors              int64             // inference errors since start
 	Panics              int64             // recovered inference panics
+	Canceled            int64             // inferences abandoned because the caller's context ended; budget outcomes, not provider failures
 }
 
 // Bool returns a pointer to v, for setting Options.SIMD explicitly.
@@ -71,7 +76,7 @@ type Options struct {
 	// NewPipeline defaults to the Hugot factory (Task 21).
 	NewPipeline PipelineFactory
 	// BreakerThreshold is how many consecutive failures trip the circuit
-	// breaker. BreakerCooldown is how long it stays open. See Task 17.
+	// breaker. BreakerCooldown is how long it stays open.
 	BreakerThreshold int
 	BreakerCooldown  time.Duration
 	Clock            func() time.Time
@@ -94,12 +99,13 @@ type Provider struct {
 	thresholdSet string
 	clock        func() time.Time
 
-	breakerThreshold int
-	breakerCooldown  time.Duration
-	consecutiveFails atomic.Int64
-	breakerUntil     atomic.Int64 // unix nanos; 0 = closed
-	errors           atomic.Int64
-	panics           atomic.Int64
+	breakerThreshold int           // consecutive failures that open the breaker
+	breakerCooldown  time.Duration // how long the breaker stays open before a probe
+	consecutiveFails atomic.Int64  // current run of consecutive failures
+	breakerUntil     atomic.Int64  // unix nanos the open state lasts until; 0 = closed
+	errors           atomic.Int64  // provider inference errors, including panics
+	panics           atomic.Int64  // recovered inference panics
+	canceled         atomic.Int64  // caller-context ends; never counted as failures
 }
 
 // New constructs the provider.
@@ -279,7 +285,14 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 	logits, err := p.runGuarded(ctx, pipe, in.Content)
 	latency := p.clock().Sub(start)
 	if err != nil {
-		p.recordFailure()
+		// A caller whose context ended gave up on the budget; that says
+		// nothing about the provider's health, so it must not feed the
+		// breaker. A recovered panic is always the provider's fault.
+		if ctx.Err() != nil && !errors.Is(err, errInferencePanic) {
+			p.canceled.Add(1)
+			return p.unanswered(signals, latency), err
+		}
+		p.recordFailure(err)
 		return p.unanswered(signals, latency), err
 	}
 	p.recordSuccess()
@@ -316,7 +329,7 @@ func (p *Provider) runGuarded(ctx context.Context, pipe Pipeline, text string) (
 	defer func() {
 		if r := recover(); r != nil {
 			p.panics.Add(1)
-			err = fmt.Errorf("embedded: inference panicked: %v", r)
+			err = fmt.Errorf("%w: %v", errInferencePanic, r)
 		}
 	}()
 	texts := []string{text}
@@ -380,6 +393,7 @@ func (p *Provider) Health() Health {
 		BreakerOpen:  p.breakerOpen(),
 		Errors:       p.errors.Load(),
 		Panics:       p.panics.Load(),
+		Canceled:     p.canceled.Load(),
 	}
 	if m != nil {
 		h.Model = m.Name
@@ -438,10 +452,13 @@ func (p *Provider) admit() bool {
 	return false
 }
 
-// recordSuccess ends the failure run and closes the breaker.
+// recordSuccess ends the failure run and closes the breaker. A success from
+// a call admitted before the trip also closes it: a completed inference is
+// direct evidence the provider works, and the next failure run would re-open
+// the breaker anyway.
 func (p *Provider) recordSuccess() {
 	p.consecutiveFails.Store(0)
-	if p.breakerUntil.Swap(0) != 0 {
+	if p.breakerUntil.Load() != 0 && p.breakerUntil.Swap(0) != 0 {
 		slog.Warn("semantic detection circuit breaker closed after a successful inference")
 	}
 }
@@ -454,7 +471,7 @@ func (p *Provider) recordSuccess() {
 // Consecutive, not cumulative: a provider that fails on one pathological
 // input among thousands of good ones is not broken, and tripping on a
 // lifetime total would eventually disable a healthy deployment.
-func (p *Provider) recordFailure() {
+func (p *Provider) recordFailure(err error) {
 	p.errors.Add(1)
 	n := p.consecutiveFails.Add(1)
 	if n < int64(p.breakerThreshold) {
@@ -467,6 +484,7 @@ func (p *Provider) recordFailure() {
 	if n == int64(p.breakerThreshold) {
 		slog.Error("semantic detection circuit breaker OPEN: repeated inference failures",
 			"consecutive_failures", n,
+			"error", err,
 			"threshold", p.breakerThreshold,
 			"cooldown", p.breakerCooldown,
 			"errors_total", p.errors.Load(),
@@ -477,6 +495,7 @@ func (p *Provider) recordFailure() {
 	}
 	slog.Warn("semantic detection circuit breaker (re)opened: inference still failing",
 		"consecutive_failures", n,
+		"error", err,
 		"cooldown", p.breakerCooldown,
 	)
 }
