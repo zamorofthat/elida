@@ -435,6 +435,9 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 
 	snap := sess.Snapshot()
 	info := h.buildSessionInfo(&snap, sess)
+	// Detail path only: the snapshot already holds a deep copy taken under
+	// the session lock.
+	info.SemanticShadow = snap.SemanticShadow
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -529,6 +532,11 @@ type SessionInfo struct {
 	FailedBackends []string       `json:"failed_backends,omitempty"`
 	Terminated     bool           `json:"terminated,omitempty"`
 	MessageCount   int            `json:"message_count"`
+
+	// SemanticShadow is populated only on the single-session detail path.
+	// Fifty entries per session would bloat every list response, and
+	// calibration review happens one session at a time.
+	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.

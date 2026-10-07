@@ -111,6 +111,38 @@ type SessionRecord struct {
 	FingerprintDistance float64 `json:"fingerprint_distance"`
 	FingerprintBucket   string  `json:"fingerprint_bucket,omitempty"`
 	FingerprintClass    string  `json:"fingerprint_class,omitempty"`
+
+	// SemanticShadow holds shadow-mode semantic decisions, newest first.
+	// Loaded by GetSession only; ListSessions leaves it empty to keep list
+	// payloads small.
+	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+}
+
+// SemanticShadow mirrors session.SemanticShadow for persistence. The storage
+// package keeps its own copies of the types it writes (see Violation and
+// CapturedRequest) so the schema does not move every time an in-memory
+// struct does. It carries no request content.
+type SemanticShadow struct {
+	Timestamp        time.Time `json:"timestamp"`
+	DecisionID       string    `json:"decision_id"`
+	Signal           string    `json:"signal"`
+	Probability      float64   `json:"probability"`
+	AuxProbability   float64   `json:"aux_probability,omitempty"`
+	Vetoed           bool      `json:"vetoed,omitempty"`
+	SourceRole       string    `json:"source_role"`
+	MessageIndex     int       `json:"message_index"`
+	Transform        string    `json:"transform,omitempty"`
+	TransformDepth   int       `json:"transform_depth,omitempty"`
+	WindowStartByte  int       `json:"window_start_byte"`
+	WindowEndByte    int       `json:"window_end_byte"`
+	Model            string    `json:"model"`
+	ModelVersion     string    `json:"model_version"`
+	ModelChecksum    string    `json:"model_checksum,omitempty"`
+	ThresholdSet     string    `json:"threshold_set"`
+	ExecutionMode    string    `json:"execution_mode"`
+	ProtectionScope  string    `json:"protection_scope"`
+	CoverageComplete bool      `json:"coverage_complete"`
+	LatencyMs        int64     `json:"latency_ms"`
 }
 
 // SQLiteStore provides persistent storage for session history
@@ -168,6 +200,7 @@ func (s *SQLiteStore) migrate() error {
 		fingerprint_distance REAL DEFAULT 0,
 		fingerprint_bucket TEXT DEFAULT '',
 		fingerprint_class TEXT DEFAULT '',
+		semantic_shadow TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -292,6 +325,9 @@ func (s *SQLiteStore) migrate() error {
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_bucket TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_class TEXT DEFAULT ''")
 
+	// Add the semantic shadow column (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN semantic_shadow TEXT DEFAULT ''")
+
 	return nil
 }
 
@@ -312,10 +348,15 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		violations = []byte("[]")
 	}
 
+	semanticShadow, err := json.Marshal(record.SemanticShadow)
+	if err != nil {
+		semanticShadow = []byte("[]")
+	}
+
 	_, err = s.db.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -332,6 +373,7 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		record.FingerprintDistance,
 		record.FingerprintBucket,
 		record.FingerprintClass,
+		string(semanticShadow),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
@@ -354,13 +396,14 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 // GetSessionCtx retrieves a session by ID using the provided context.
 func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
 	var metadataStr, capturedStr, violationsStr sql.NullString
 	var fingerprintDistance sql.NullFloat64
 	var fingerprintBucket, fingerprintClass sql.NullString
+	var semanticShadowStr sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -378,6 +421,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 		&fingerprintDistance,
 		&fingerprintBucket,
 		&fingerprintClass,
+		&semanticShadowStr,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -398,6 +442,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 	unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
 	unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
 	unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
+	unmarshalJSON(semanticShadowStr, &record.SemanticShadow, "semantic_shadow", record.ID)
 
 	integrity, integrityErr := s.GetSDRIntegrity(ctx, record.ID)
 	if integrityErr != nil {
