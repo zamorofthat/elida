@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"elida/internal/decision"
@@ -168,6 +169,11 @@ func TestEmbeddedLoad_RejectsPathTraversalInFiles(t *testing.T) {
 	_, err := embedded.Load(dir)
 	if err == nil {
 		t.Fatal("a manifest entry escaping the model directory must be rejected")
+	}
+	// The entry would also fail a checksum comparison, so assert the
+	// confinement error specifically.
+	if !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("error must come from the confinement check, got: %v", err)
 	}
 }
 
