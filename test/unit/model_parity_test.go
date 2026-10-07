@@ -2,6 +2,8 @@ package unit
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"math"
 	"os"
@@ -14,19 +16,27 @@ import (
 )
 
 // parityTolerance is the maximum allowed difference in calibrated
-// probability between the shipped float32 model and the int8 source.
+// probability between the shipped float32 model and the int8 source, both
+// scored through Hugot's pure-Go backend.
 //
-// The spike measured 1.1e-6 on the main head and 1.0e-6 on the aux head
-// through this same backend: near-exact, because Hugot emulates int8
-// operators in float rather than running real int8 kernels. 1e-4 leaves two
-// orders of magnitude of headroom and is still far tighter than any real
-// conversion defect would produce.
+// Measured: 1.05e-6 on the main head and 1.00e-6 on the aux head. It is
+// near-exact because the backend never runs int8 arithmetic: onnx-gomlx
+// fuses each DynamicQuantizeLinear -> MatMulInteger -> Cast -> Mul chain
+// into a float-activation matmul over dequantized weights, so both sides
+// compute nearly the same function. 1e-4 leaves two orders of magnitude of
+// headroom and still catches a mis-dequantized weight.
 const parityTolerance = 1e-4
 
 // int8ModelPathEnv points at the int8 parity directory build.sh prepares
 // (build/model-int8: the upstream int8 graph as model.onnx, with the same
 // config.json patch as the shipped model).
 const int8ModelPathEnv = "ELIDA_TEST_INT8_MODEL_PATH"
+
+// pinnedInt8ModelSHA256 is the SHA-256 of upstream's model_quantized.onnx at
+// the commit scripts/models/fetch.sh pins. The int8 directory has no
+// manifest, so the gate checks this itself: a stale or hand-edited
+// build/model-int8 must fail, not be compared silently.
+const pinnedInt8ModelSHA256 = "68685f34a646d66c53239d9ee54acd279803f507f70f86f9f99854e3f08368c8"
 
 type parityProbe struct {
 	ID   string `json:"id"`
@@ -51,11 +61,23 @@ func loadProbes(t *testing.T) []parityProbe {
 
 // TestModelParity_Float32MatchesInt8 is the conversion gate.
 //
-// The float32 graph ELIDA ships is derived from upstream's int8 publication
-// by dequantization, so parity is not a bit-exactness claim. What it has to
-// show is that the derived model scores and classifies a fixed probe set the
-// same way: a calibrated threshold chosen against the source must still mean
-// the same thing on the shipped model.
+// What it compares: the float32 graph scripts/models/dequantize.py derives,
+// scored through Provider.Decide, against upstream's int8 graph scored
+// through the same Hugot backend and calibrated with the same temperature,
+// on the fixed probes in scripts/models/probes.json.
+//
+// What that shows: the offline dequantization is equivalent to the
+// backend's own handling of the int8 graph, which dequantizes weights and
+// keeps activations in float. A wrong scale, zero point, axis or rewired
+// node fails it.
+//
+// What it does NOT show: that the float32 model scores like upstream's
+// deployment. Upstream runs the int8 graph under onnxruntime with real int8
+// kernels (activations quantized too), and its thresholds and temperature
+// were fitted on those scores. That gap is measured separately, not gated:
+// up to about 0.064 calibrated probability on these probes with no decision
+// flips (scripts/models/ort_reference.py --compare-int8; recorded in
+// docs/model-card-injection.md under "Calibration provenance").
 func TestModelParity_Float32MatchesInt8(t *testing.T) {
 	if _, ok := embedded.TestModelPath(); !ok {
 		t.Skipf("set %s to the built float32 model directory", embedded.TestModelPathEnv)
@@ -66,6 +88,16 @@ func TestModelParity_Float32MatchesInt8(t *testing.T) {
 	}
 	// realModel skips under plain -race, where checkptr aborts inside GoMLX.
 	fp32 := realModel(t)
+
+	int8Graph := filepath.Join(int8Dir, "model.onnx")
+	raw, err := os.ReadFile(int8Graph) // #nosec G304 -- test fixture path from the environment
+	if err != nil {
+		t.Fatalf("read the int8 graph: %v", err)
+	}
+	if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != pinnedInt8ModelSHA256 {
+		t.Fatalf("%s has sha256 %x, want the pinned upstream %s: rebuild with scripts/models/build.sh",
+			int8Graph, sum, pinnedInt8ModelSHA256)
+	}
 
 	// The int8 directory is build scratch with no manifest of its own, so
 	// it cannot go through embedded.New. It is built with the same Hugot

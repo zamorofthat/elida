@@ -22,13 +22,13 @@ Upstream publishes only a dynamically quantized int8 ONNX graph. No float32 or s
 
 The conversion rewrites 38 `MatMulInteger` chains and 3 quantized embedding tables, taking the graph from 748 to 606 nodes and the file from 23.0 MB to 90.4 MB. `onnx.checker.check_model(full_check=True)` passes and no quantized operator or int8 initializer survives.
 
-Conversion is verified, not assumed. `TestModelParity_Float32MatchesInt8` scores a fixed ten-probe set (`scripts/models/probes.json`) through both models in the pure-Go backend ELIDA actually ships, and fails if any calibrated probability differs by more than 1e-4 or if any decision flips under the packaged thresholds. The spike measured **1.1e-6 on the main head and 1.0e-6 on the aux head**. Parity is this close because the Go backend emulates int8 operators in float rather than running real int8 kernels, so the two graphs are doing nearly the same arithmetic.
+The conversion is verified, within a stated scope. `TestModelParity_Float32MatchesInt8` scores a fixed ten-probe set (`scripts/models/probes.json`) through both graphs in the pure-Go backend ELIDA actually ships, and fails if any calibrated probability differs by more than 1e-4 or if any decision flips under the packaged thresholds. Measured: **1.05e-6 on the main head and 1.00e-6 on the aux head**. Parity is this close because the Go backend never runs int8 arithmetic: it fuses each int8 matmul chain into a float-activation matmul over dequantized weights, so both sides compute nearly the same function. The gate therefore proves that `dequantize.py` reproduces the backend's own dequantization. It does **not** show that the float32 model scores like upstream's deployment, which runs the int8 graph with real onnxruntime int8 kernels; that difference is measured separately under [Calibration provenance](#calibration-provenance).
 
 The int8 graph is **not shipped**. Measured on an arm64 Mac: float32 runs at **184 ms p50 / 232 ms p99** against int8's **618 ms / 1050 ms**, a 3.4x gap, with a 127 ms model load and about 405 MiB of heap after warmup.
 
 ## License
 
-Apache-2.0, carried verbatim in `models/injection/LICENSE` from the upstream repository at the pinned commit. The converted artifact is a derivative work of StackOne Defender's `minilm-multihead-v5` model: ELIDA modified it by dequantizing the int8 graph to float32, adding `id2label`, `label2id` and a sequence-classification architecture to `config.json`, and recording a 128-token sequence length in `tokenizer_config.json`. This card is the notice of those changes. Redistribution rights for the converted artifact were reviewed before release; `embedded.Load` refuses a manifest with no `license` field.
+Apache-2.0, carried verbatim in `models/injection/LICENSE` from the upstream repository at the pinned commit. The converted artifact is a derivative work of StackOne Defender's `minilm-multihead-v5` model: ELIDA modified it by dequantizing the int8 graph to float32, adding `id2label`, `label2id` and a sequence-classification architecture to `config.json`, and recording a 128-token sequence length in `tokenizer_config.json`. This card is the notice of those changes. Apache-2.0 permits redistributing derivative works provided the license accompanies them, modified files carry notice of the changes, and upstream NOTICE content is retained; upstream ships no NOTICE file at the pinned commit. `embedded.Load` refuses a manifest with no `license` field.
 
 ## Calibration
 
@@ -57,6 +57,34 @@ The packaged pipeline applies a sigmoid **without** this temperature. ELIDA ther
 
 Probabilities support ranking and threshold selection. They are **not** literal risk percentages, and an expected calibration error of 0.09 is a reminder of that.
 
+## Calibration provenance
+
+Upstream's thresholds (`main 0.5`, `aux 0.64`) and temperature (`T = 2.41`, ECE 0.09) were fitted and validated on scores from the **int8** graph running under **onnxruntime** with real int8 kernels, where activations are quantized at run time. ELIDA scores the **float32** graph in Hugot's pure-Go backend, where nothing is quantized. The two paths do not produce identical scores, so upstream's calibration transfers to ELIDA only approximately.
+
+Measured on the parity probe set, with calibrated probabilities from the shipped `models/injection/model.onnx` and upstream's int8 graph, both under onnxruntime 1.30.0 (CPU), tokenizers 0.23.2 truncating at 128 tokens, and the manifest's temperature and thresholds:
+
+```bash
+python -I scripts/models/ort_reference.py --compare-int8 \
+  models/injection build/model-int8 scripts/models/probes.json
+```
+
+| probe | main fp32 | main ort-int8 | Δ main | aux fp32 | aux ort-int8 | Δ aux | flag fp32 / int8 |
+|---|---|---|---|---|---|---|---|
+| `benign-short` | 0.0715 | 0.0652 | 6.2e-03 | 0.8356 | 0.8191 | 1.6e-02 | False / False |
+| `benign-short2` | 0.0386 | 0.0371 | 1.5e-03 | 0.7419 | 0.7263 | 1.6e-02 | False / False |
+| `benign-tool` | 0.7868 | 0.8507 | 6.4e-02 | 0.5266 | 0.4764 | 5.0e-02 | True / True |
+| `inj-ignore` | 0.9684 | 0.9681 | 3.2e-04 | 0.1100 | 0.1092 | 8.7e-04 | True / True |
+| `inj-dan` | 0.8587 | 0.8711 | 1.2e-02 | 0.0559 | 0.0574 | 1.5e-03 | True / True |
+| `inj-exfil` | 0.9632 | 0.9669 | 3.8e-03 | 0.2424 | 0.2186 | 2.4e-02 | True / True |
+| `inj-override` | 0.9677 | 0.9716 | 3.9e-03 | 0.1635 | 0.1831 | 2.0e-02 | True / True |
+| `inj-creds` | 0.9767 | 0.9771 | 3.7e-04 | 0.1791 | 0.1854 | 6.3e-03 | True / True |
+| `code-snippet` | 0.0783 | 0.0762 | 2.2e-03 | 0.8515 | 0.8528 | 1.3e-03 | False / False |
+| `human-directed` | 0.6782 | 0.6683 | 9.9e-03 | 0.0756 | 0.0757 | 1.2e-04 | True / True |
+
+Worst delta: **main 6.4e-2, aux 5.0e-2**; no decision flipped on these ten probes. (The float32 numbers are the same through Hugot to within 1.1e-6; see Provenance.)
+
+So ELIDA's float32 path shifts calibrated probabilities by up to about 0.064 relative to the scoring upstream calibrated on. Ten probes, none of them close to a threshold, cannot bound that shift in general, and no-flip on this set is not evidence that decisions near 0.5 or 0.64 are preserved. **Recalibrating the temperature and thresholds on the float32 path is an open follow-up**; until it is done, the thresholds above are upstream's, used as they are. The release gate under [Evaluation](#evaluation) (recorded calibration evidence for the exact model and threshold-set versions before enforcement) has to be met on this float32 model, not inferred from upstream's int8 numbers.
+
 ## Intended use
 
 Scoring request-side user content and untrusted tool results for prompt-injection intent, inside ELIDA, as evidence feeding the existing session risk score. It is one signal among several, never the sole basis for an enforcement action.
@@ -71,6 +99,7 @@ Scoring request-side user content and untrusted tool results for prompt-injectio
 
 - **Adversarial paraphrase.** A rewritten injection that avoids the training distribution can score low. This model raises the cost of injection; it does not close it.
 - **Distribution shift.** Calibration was fitted on upstream's plugin events, not on ELIDA traffic. Thresholds must be recalibrated on representative traffic before enforcement.
+- **Calibration transfer.** Upstream fitted its calibration on onnxruntime int8 scores; ELIDA runs float32 in a different backend, which moved calibrated probabilities by up to about 0.064 on the probe set. See [Calibration provenance](#calibration-provenance).
 - **The auxiliary head is a veto, not a detector.** A high `human_directed` rescues content the main head would flag. It can therefore also rescue a real injection that is phrased as documentation or a runbook.
 - **Partial coverage.** Inline capacity is scarce. A long message may have only one window scored before forwarding, with the rest arriving asynchronously. Coverage is reported on every decision and is never represented as a clean full scan.
 - **Architecture.** GoMLX's accelerated kernels are gated to `amd64 && goexperiment.simd`. Other architectures run a scalar path roughly 20x slower and are async-only.
@@ -81,7 +110,7 @@ Scoring request-side user content and untrusted tool results for prompt-injectio
 
 Upstream reports an expected calibration error of 0.09, fitted on labeled plugin events from 2026-05-13, over 23 named public and internal corpora: `qualifire`, `jayavibhav`, `agentdojo`, `jasperls`, `jailbreakbench`, `toxic-chat`, `chatgpt-jailbreaks`, `email-hardneg`, `email-hardneg-gen`, `multilingual-hardneg`, `jailbreakbench-neg`, `toxic-chat-neg`, `fujitsu-injecagent`, `fujitsu-rag`, `enron-ham`, `connector-hardneg-v2`, `dev-tooling-hardneg-curated`, `dev-tooling-attacks`, `agentshield-shape-attacks`, `system-prompt-extraction-attacks`, `emoji-ci-benign`, `benign-user-queries`, `code-docs-benign`. That list is also the corpus set the fallback-training path would use.
 
-ELIDA has not independently evaluated precision, recall or false-positive rate on ELIDA traffic. Until it has, `decision.mode` stays at `shadow` or `audit`: the release gates require recorded calibration evidence for the exact model and threshold-set versions before enforcement.
+ELIDA has not independently evaluated precision, recall or false-positive rate on ELIDA traffic, and has not refitted upstream's calibration on the float32 path it actually runs (see [Calibration provenance](#calibration-provenance)). Until it has, `decision.mode` stays at `shadow` or `audit`: the release gates require recorded calibration evidence for the exact model and threshold-set versions before enforcement.
 
 ## Supply chain
 

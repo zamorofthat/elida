@@ -16,7 +16,7 @@
 # directories and swapped in only when every step has succeeded, so a failed
 # build never leaves a partial artifact behind.
 #
-# Needs only the `onnx` package and numpy (set PYTHON to the interpreter
+# Needs only onnx==1.23.1 and numpy==2.5.3 (set PYTHON to the interpreter
 # that has them). Parity is a Go test, because the measured parity is
 # through the backend ELIDA actually ships.
 #
@@ -55,7 +55,19 @@ for f in docs/model-card-injection.md scripts/models/dequantize.py; do
     exit 1
   fi
 done
-py -c 'import onnx, numpy; print(f"using onnx {onnx.__version__}, numpy {numpy.__version__}")'
+# The pinned model.onnx digest (README, hugot_test.go) was produced with
+# exactly these versions. Another version may serialize differently, so it
+# is refused unless ALLOW_UNPINNED_PYTHON_DEPS=1 says the caller expects a
+# different digest.
+ONNX_VERSION="1.23.1"
+NUMPY_VERSION="2.5.3"
+HAVE_VERSIONS="$(py -c 'import onnx, numpy; print(onnx.__version__, numpy.__version__)')"
+echo "using onnx/numpy $HAVE_VERSIONS (pinned $ONNX_VERSION $NUMPY_VERSION)"
+if [[ "$HAVE_VERSIONS" != "$ONNX_VERSION $NUMPY_VERSION" && "${ALLOW_UNPINNED_PYTHON_DEPS:-0}" != "1" ]]; then
+  echo "error: install onnx==$ONNX_VERSION numpy==$NUMPY_VERSION (see scripts/models/README.md)," >&2
+  echo "or set ALLOW_UNPINNED_PYTHON_DEPS=1 and expect a different model.onnx digest." >&2
+  exit 1
+fi
 
 OUT_STAGE=""
 INT8_STAGE=""

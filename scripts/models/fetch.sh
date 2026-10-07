@@ -77,7 +77,8 @@ while read -r name want; do
     path="$MODEL_SUBDIR/$name"
   fi
   echo "fetching $name"
-  curl --fail --silent --show-error --location --retry 3 --proto '=https' \
+  curl --fail --silent --show-error --location --retry 3 \
+    --proto '=https' --proto-redir '=https' --max-redirs 3 \
     --output "$STAGE/$name" "$(raw_url "$path")"
   got="$(sha256_of "$STAGE/$name")"
   if [[ "$got" != "$want" ]]; then
@@ -102,6 +103,9 @@ if ! diff -u "$FIXTURE" "$STAGE/classifier_config.json"; then
 fi
 echo "calibration matches the pinned fixture"
 
+# mktemp -d creates the stage owner-only; the verified source is ordinary
+# build scratch, readable like any other build directory.
+chmod 755 "$STAGE"
 rm -rf "$OUT_DIR"
 mv "$STAGE" "$OUT_DIR"
 trap - EXIT

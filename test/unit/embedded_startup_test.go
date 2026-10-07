@@ -14,7 +14,7 @@ import (
 // fakeFactory returns a pipeline factory whose logits make injection
 // probability high and human_directed low after temperature 2.41.
 //
-//	sigmoid(6.0/2.41) = 0.926 ; sigmoid(-6.0/2.41) = 0.074
+//	sigmoid(6.0/2.41) = 0.9234 ; sigmoid(-6.0/2.41) = 0.0766
 func fakeFactory() embedded.PipelineFactory {
 	return embedded.NewFakePipelineFactory(map[string][]float64{
 		"":        {6.0, -6.0}, // default for any text
@@ -218,7 +218,7 @@ func TestEmbeddedProvider_AppliesCalibrationTemperature(t *testing.T) {
 		byKind[d.Signal] = d
 	}
 	inj := byKind[decision.SignalInjection]
-	// sigmoid(6.0/2.41) = 0.9263...; the raw sigmoid(6.0) would be 0.9975,
+	// sigmoid(6.0/2.41) = 0.9234...; the raw sigmoid(6.0) would be 0.9975,
 	// so this assertion fails if temperature is skipped.
 	if inj.Probability < 0.92 || inj.Probability > 0.93 {
 		t.Fatalf("injection probability = %v, want ~0.926 (sigmoid(6.0/2.41))", inj.Probability)

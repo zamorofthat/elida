@@ -4,13 +4,13 @@
 
 ```bash
 python3 -m venv build/model-venv
-build/model-venv/bin/pip install 'onnx>=1.17' numpy
+build/model-venv/bin/pip install 'onnx==1.23.1' 'numpy==2.5.3'
 PYTHON=build/model-venv/bin/python3 \
   DEFENDER_COMMIT=ff83e70981099f9261520e0e9bc6cb85bb9789da \
   scripts/models/build.sh
 ```
 
-Only `onnx` and `numpy` are needed. Parity is a Go test, not a Python one, so the build has no `onnxruntime` or `tokenizers` dependency. The reference build used onnx 1.23.1 and numpy 2.5.3; the resulting `model.onnx` SHA-256 is `13febddd90418e64b9285543f31a92534f778cb43ca728b33e46b2dba8848f6a`, which `internal/decision/embedded/hugot_test.go` also pins.
+Only `onnx` and `numpy` are needed, at exactly onnx 1.23.1 and numpy 2.5.3: `build.sh` refuses other versions unless `ALLOW_UNPINNED_PYTHON_DEPS=1`, because another version may serialize a different graph. Parity is a Go test, not a Python one, so the build has no `onnxruntime` or `tokenizers` dependency. With the pinned versions the resulting `model.onnx` SHA-256 is `13febddd90418e64b9285543f31a92534f778cb43ca728b33e46b2dba8848f6a`, which `internal/decision/embedded/hugot_test.go` also pins.
 
 The build writes two directories, both gitignored:
 
@@ -37,14 +37,14 @@ ELIDA_TEST_MODEL_PATH="$PWD/models/injection" go test ./test/unit/ -run TestReal
 | `dequantize.py` | Rewrite the int8 graph to float32: 38 matmul chains and 3 embedding tables. Adopted from the validated spike; `onnx` only. |
 | `build.sh` | Run both, patch `config.json` and `tokenizer_config.json`, write `manifest.json`, prepare `build/model-int8/`. Idempotent. |
 | `probes.json` | The ten fixed inputs the parity gate scores. |
-| `ort_reference.py` | Developer tool: regenerates the onnxruntime reference logits pinned in `internal/decision/embedded/hugot_test.go`. Needs `onnxruntime` and `tokenizers`; not part of the build and not a gate. |
+| `ort_reference.py` | Developer tool, not part of the build and not a gate; needs `onnxruntime` 1.30.0 and `tokenizers` 0.23.2. `<dir>` regenerates the reference logits pinned in `internal/decision/embedded/hugot_test.go`; `--compare-int8 models/injection build/model-int8 scripts/models/probes.json` prints the float32 vs real-onnxruntime-int8 delta table recorded in the model card. |
 | `testdata/classifier_config.json` | The whole upstream file at the pinned commit, byte for byte. Drift here is a model change needing review. |
 
 The calibration block is pinned a second time at `internal/decision/embedded/testdata/defender-calibration-v5.json`, where `TestModelParity_ManifestCalibrationMatchesFixture` checks the generated manifest against it. The two guard different things: this one catches upstream changing, that one catches `build.sh` reading the wrong JSON path.
 
 `tokenizer_config.json` is patched to `max_length` and `model_max_length` 128 as documentation only. Hugot's pure-Go tokenizer does not read that file and never truncates or pads; ELIDA enforces the 128-token cut in code (`maxSequenceLength` in `internal/decision/embedded/hugot.go`).
 
-Parity lives in `test/unit/model_parity_test.go` and runs through Hugot, the backend ELIDA ships:
+Parity lives in `test/unit/model_parity_test.go` and runs through Hugot, the backend ELIDA ships. It proves `dequantize.py` matches the backend's own dequantization of the int8 graph; it does not compare against upstream's onnxruntime int8 scoring, which `ort_reference.py --compare-int8` measures (see the model card's Calibration provenance):
 
 ```bash
 ELIDA_TEST_MODEL_PATH="$PWD/models/injection" \
