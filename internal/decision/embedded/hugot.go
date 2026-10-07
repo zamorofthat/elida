@@ -86,6 +86,23 @@ type classifyFunc func(ctx context.Context, texts []string) (*pipelines.TextClas
 // and the go-huggingface tokenizer is read-only after construction, so
 // inference runs concurrently under a read lock; the write lock is only for
 // Close, so a pipeline is never destroyed under an in-flight call.
+//
+// Cancellation is not an abort. Hugot's Go backend answers a canceled
+// context by returning early while the GoMLX computation keeps running on
+// its own goroutine, and RunPipeline then finalizes the input tensors under
+// it; a Close after that destroys the backend under a live computation and
+// crashes the process. So GoMLX never sees a cancelable context: every
+// inference runs to completion while the caller stays blocked, holding its
+// scheduler worker slot for exactly as long as the CPU is busy, and only
+// then reports ctx.Err(). The inline deadline therefore bounds what a
+// request waits for, not the CPU an inference spends.
+//
+// One inference is not one CPU. GoMLX's pure-Go backend executes each graph
+// over a shared intra-op worker pool (2 x GOMAXPROCS); a warm 128-token
+// inference measured cpu/wall of about 4.7 on an 8-core M1 Pro. A scheduler
+// worker slot (decision.max_concurrency) is therefore several cores, not
+// one. Capping intra-op parallelism is a follow-up pending a Hugot option
+// that passes GoMLX's parallelism setting through.
 type hugotPipeline struct {
 	mu       sync.RWMutex
 	session  *hugot.Session // nil in tests; Destroy is skipped
@@ -152,6 +169,11 @@ func HugotPipelineFactory(ctx context.Context, dir string, m *Manifest) (Pipelin
 		return nil, fmt.Errorf("embedded: building the text-classification pipeline from %s: %w", dir, err)
 	}
 
+	if lerr := validateHeadLabels(pipe.Model.IDLabelMap, m.HeadOrder); lerr != nil {
+		_ = session.Destroy()
+		return nil, lerr
+	}
+
 	tok, specials, err := loadTruncationTokenizer(dir)
 	if err != nil {
 		_ = session.Destroy()
@@ -162,6 +184,31 @@ func HugotPipelineFactory(ctx context.Context, dir string, m *Manifest) (Pipelin
 	h.session = session
 	h.specials = specials
 	return h, nil
+}
+
+// validateHeadLabels checks the model's id2label (from config.json) against
+// the manifest's head order before startup succeeds. Output index i must
+// carry a label that normalizes to HeadOrder[i], and there must be exactly
+// one label per head. The adapter maps by label, so a mismatch would not
+// swap heads silently; it would load "healthy" and then fail every
+// inference, or let two labels for one head overwrite each other. Failing
+// here routes it through the provider's Required/degraded startup handling
+// instead.
+func validateHeadLabels(idLabel map[int]string, heads []string) error {
+	if len(idLabel) != len(heads) {
+		return fmt.Errorf("embedded: config.json id2label has %d labels, the manifest declares %d heads", len(idLabel), len(heads))
+	}
+	for i, want := range heads {
+		label, ok := idLabel[i]
+		if !ok {
+			return fmt.Errorf("embedded: config.json id2label has no label for output %d (head %q)", i, want)
+		}
+		got, ok := normalizeHeadLabel(label)
+		if !ok || got != want {
+			return fmt.Errorf("embedded: config.json id2label[%d] = %q, which does not name head %q", i, label, want)
+		}
+	}
+	return nil
 }
 
 // loadTruncationTokenizer builds a private go-huggingface tokenizer from the
@@ -205,6 +252,19 @@ func loadTruncationTokenizer(dir string) (*hftokenizer.Tokenizer, int, error) {
 // over whatever it is given, so an unbounded input would cost unbounded CPU
 // before inference even starts. Probing a growing prefix keeps both
 // tokenizer passes bounded.
+//
+// Pathological input can collapse the scored text: invalid UTF-8 made of
+// continuation bytes has no rune boundary to cut on, and token-cheap
+// filler longer than maxTruncationProbeBytes pushes anything after it out
+// of the probe. Logits refuses to score an empty result of a non-empty
+// input (errEmptyAfterTruncation), and exact CountTokens keeps scheduler
+// windows small enough that this cut is a backstop, not the normal path.
+//
+// Tokenizer parity: for English the kept tokens match HF tokenizers'
+// right truncation at 128 exactly (the parity test pins two >128-token
+// texts). For some multibyte text the back-off pass can stop one token
+// short of the limit (a Japanese+emoji probe kept 127 where HF keeps 128,
+// with the first 126 identical); that is a documented limitation.
 //
 // The result is not reported upward: Pipeline.Logits returns logits only,
 // and Hugot itself exposes no truncation flag (it never truncates). A
@@ -318,13 +378,30 @@ func (h *hugotPipeline) Logits(ctx context.Context, texts []string) ([][]float64
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		batch := []string{h.truncate(text)}
-		if err := batchGuard(len(batch)); err != nil {
+		scored, err := h.prepare(text)
+		if err != nil {
 			return nil, err
+		}
+		batch := []string{scored}
+		if gerr := batchGuard(len(batch)); gerr != nil {
+			return nil, gerr
 		}
 		res, err := h.runOne(ctx, batch)
 		if err != nil {
+			// A recovered panic is the provider's fault whatever the
+			// caller's context did; anything else after the caller gave up
+			// is a budget outcome.
+			if !errors.Is(err, errInferencePanic) {
+				if cerr := ctx.Err(); cerr != nil {
+					return nil, cerr
+				}
+			}
 			return nil, err
+		}
+		// The computation ran to completion (see runOne). A caller whose
+		// context ended meanwhile gets ctx.Err(), never a late score.
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
 		}
 		if res == nil || len(res.ClassificationOutputs) != 1 {
 			n := 0
@@ -342,26 +419,57 @@ func (h *hugotPipeline) Logits(ctx context.Context, texts []string) ([][]float64
 	return out, nil
 }
 
+// errEmptyAfterTruncation means truncation reduced a non-empty input to
+// nothing. Scoring "" would report a confident answer about text the model
+// never saw; an error leaves the decision unknown, which is never safe.
+var errEmptyAfterTruncation = errors.New("embedded: truncation left nothing to score")
+
+// prepare truncates one input for inference. Tokenizer panics are recovered
+// into errInferencePanic, like backend panics, and the error never carries
+// the input.
+func (h *hugotPipeline) prepare(text string) (out string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = ""
+			err = panicError("tokenizer", r)
+		}
+	}()
+	out = h.truncate(text)
+	if out == "" && text != "" {
+		return "", errEmptyAfterTruncation
+	}
+	return out, nil
+}
+
+// panicError converts a recovered panic value into an error wrapping
+// errInferencePanic without echoing content: a runtime.Error keeps its
+// message (it names a bounds or nil failure), anything else is reported by
+// type only.
+func panicError(where string, r any) error {
+	if re, ok := r.(runtime.Error); ok {
+		return fmt.Errorf("%w in the %s: %s", errInferencePanic, where, re.Error())
+	}
+	return fmt.Errorf("%w in the %s: panic value of type %T", errInferencePanic, where, r)
+}
+
 // runOne makes exactly one RunPipeline call, converting a backend panic into
 // an error that wraps errInferencePanic so the provider counts it and the
 // breaker sees it.
 //
-// The error never carries input text. A runtime panic (index out of range,
-// nil dereference) keeps its message, which names a bounds or nil failure
-// and nothing else; any other panic value is reported by type only, since
-// its content is the backend's to choose and could echo the input.
+// The error never carries input text (see panicError).
+//
+// The backend gets context.WithoutCancel(ctx): Hugot's cancellation returns
+// early while GoMLX keeps computing on tensors RunPipeline has already
+// released, so the only safe cancellation is none. The caller stays blocked
+// until the computation finishes; Logits reports ctx.Err() afterwards.
 func (h *hugotPipeline) runOne(ctx context.Context, batch []string) (res *pipelines.TextClassificationOutput, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			res = nil
-			if re, ok := r.(runtime.Error); ok {
-				err = fmt.Errorf("%w in the Hugot backend: %s", errInferencePanic, re.Error())
-				return
-			}
-			err = fmt.Errorf("%w in the Hugot backend: panic value of type %T", errInferencePanic, r)
+			err = panicError("Hugot backend", r)
 		}
 	}()
-	res, err = h.classify(ctx, batch)
+	res, err = h.classify(context.WithoutCancel(ctx), batch)
 	if err != nil {
 		return nil, fmt.Errorf("embedded: inference failed: %w", err)
 	}
@@ -444,18 +552,37 @@ func invertSigmoid(s float64) (float64, error) {
 	return math.Log(s / (1 - s)), nil
 }
 
-// CountTokens estimates model tokens for windowing and the inline token
-// budget.
+// CountTokens counts the tokens one inference over text costs, special
+// tokens included, for windowing and the inline token budget.
 //
-// It is an estimate on purpose: the exact count would mean running the
-// tokenizer for a number that only chooses window boundaries. It can
-// undercount (punctuation-dense or non-English text runs well above one
-// token per four bytes); truncate() is what enforces the hard
-// maxSequenceLength limit on every inference.
-func (h *hugotPipeline) CountTokens(text string) int {
+// It is exact for text up to maxTruncationProbeBytes, so a scheduler window
+// of at most maxSequenceLength counted tokens reaches the model whole and
+// truncate() stays a backstop. A byte estimate is not enough: JSON, code and
+// punctuation run at one to one and a half bytes per token, so a bytes/4
+// window can hold three times the tokens the model sees, and whatever an
+// attacker puts after a token-dense prefix would go unscored.
+//
+// Above the cap it returns len(text): a content token is never shorter than
+// one byte, so that never undercounts, it forces the scheduler to split, and
+// it keeps the quadratic tokenizer from seeing more than the cap. The count
+// stays monotonic in prefix length, which the scheduler's hard split
+// assumes. A tokenizer panic also yields len(text).
+func (h *hugotPipeline) CountTokens(text string) (n int) {
 	if text == "" {
 		return 0
 	}
+	if h.tok != nil {
+		if len(text) > maxTruncationProbeBytes {
+			return len(text)
+		}
+		defer func() {
+			if recover() != nil {
+				n = len(text)
+			}
+		}()
+		return len(h.tok.Encode(text)) + h.specials
+	}
+	// No tokenizer (white-box tests only): estimate.
 	ratio := h.tokRatio
 	if ratio <= 0 {
 		ratio = 4
@@ -463,8 +590,11 @@ func (h *hugotPipeline) CountTokens(text string) int {
 	return (len(text) + ratio - 1) / ratio
 }
 
-// Close destroys the pipeline and session. It waits for in-flight
-// inferences to finish and is safe to call more than once.
+// Close destroys the pipeline and session. It takes the write lock, so it
+// waits for every in-flight inference to finish (including ones whose caller
+// has already been canceled, since those run to completion) and never tears
+// GoMLX down under a live computation. It blocks for at most one inference
+// duration per in-flight call. It is safe to call more than once.
 func (h *hugotPipeline) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

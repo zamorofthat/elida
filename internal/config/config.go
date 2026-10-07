@@ -472,12 +472,18 @@ type DecisionConfig struct {
 	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1)
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
 	InlineTimeout     time.Duration `yaml:"inline_timeout"`     // Global inline deadline: admission, preprocessing, tokenization and inference (default: 50ms)
-	MaxConcurrency    int           `yaml:"max_concurrency"`    // Physical worker pool size (default: 2)
-	InlineQueueWait   time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
-	MaxInlineTokens   int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
-	MaxInlineWindows  int           `yaml:"max_inline_windows"` // Windows scored inline per request (default: 1)
-	MaxAsyncWindows   int           `yaml:"max_async_windows"`  // Windows queued per request (default: 8)
-	AsyncQueueSize    int           `yaml:"async_queue_size"`   // Bounded queue; overflow is a metric (default: 100)
+	// MaxConcurrency is the physical inference worker pool size (default: 2).
+	// A worker slot is not one CPU: the embedded pure-Go backend runs each
+	// inference over an intra-op worker pool, measured at about 4.7 CPUs of
+	// work per wall-clock second on an 8-core M1 Pro, so two slots can occupy
+	// most of such a machine. Capping intra-op parallelism is a follow-up
+	// pending Hugot support.
+	MaxConcurrency   int           `yaml:"max_concurrency"`
+	InlineQueueWait  time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
+	MaxInlineTokens  int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
+	MaxInlineWindows int           `yaml:"max_inline_windows"` // Windows scored inline per request (default: 1)
+	MaxAsyncWindows  int           `yaml:"max_async_windows"`  // Windows queued per request (default: 8)
+	AsyncQueueSize   int           `yaml:"async_queue_size"`   // Bounded queue; overflow is a metric (default: 100)
 
 	InlineAdmission DecisionAdmissionConfig     `yaml:"inline_admission"`
 	Preprocessing   DecisionPreprocessingConfig `yaml:"preprocessing"`
