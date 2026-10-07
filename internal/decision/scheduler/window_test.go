@@ -126,6 +126,9 @@ func TestHardSplitTokenizerWorkIsLinear(t *testing.T) {
 	if len(pieces) < n {
 		t.Fatalf("expected at least %d pieces, got %d", n, len(pieces))
 	}
+	if strings.Join(pieces, "") != in {
+		t.Fatal("pieces do not reassemble into the input")
+	}
 	t.Logf("pieces=%d calls=%d bytesInspected=%d", len(pieces), cc.calls, cc.bytes)
 	// O(pieces * log): generous constant, far below the quadratic cost.
 	if cc.calls > len(pieces)*20 {
@@ -137,28 +140,40 @@ func TestHardSplitTokenizerWorkIsLinear(t *testing.T) {
 	}
 }
 
-// superAdditive makes a merged window cost more than the sum of its
-// sentences, like a tokenizer with per-window overhead.
-type superAdditive struct{}
+// quadraticCounter is genuinely super-additive: w words cost w*(w+1)/2, so
+// two sentences merged cost more than the sum of their separate counts.
+type quadraticCounter struct{}
 
-func (superAdditive) CountTokens(s string) int {
-	if s == "" {
-		return 0
-	}
-	return len(strings.Fields(s)) + strings.Count(s, ". ")*3
+func (quadraticCounter) CountTokens(s string) int {
+	w := len(strings.Fields(s))
+	return w * (w + 1) / 2
 }
 
 func TestSplitWindowsNonAdditiveCounterStaysInBudget(t *testing.T) {
+	// Each sentence is 2 words = 3 tokens. Two merged by the per-sentence sum
+	// give 6 <= 7, but the re-count of the merged text is 4 words = 10 > 7, so
+	// the over-budget fallback must hard-split it.
+	const budget = 7
 	content := strings.Repeat("alpha beta. ", 40)
-	ws := SplitWindows(decision.Candidate{Content: content, EndByte: len(content)}, superAdditive{}, 10)
+	ws := SplitWindows(decision.Candidate{Content: content, EndByte: len(content)}, quadraticCounter{}, budget)
+
+	// A naive sum-based merge would yield 20 windows of two sentences each.
+	if len(ws) <= 20 {
+		t.Fatalf("fallback not taken: %d windows, a naive merge gives 20", len(ws))
+	}
 	var joined string
+	prevEnd := 0
 	for i, w := range ws {
-		if w.Tokens != (superAdditive{}).CountTokens(w.Text) {
+		if w.Tokens != (quadraticCounter{}).CountTokens(w.Text) {
 			t.Fatalf("window %d Tokens=%d is not the counter's count", i, w.Tokens)
 		}
-		if w.Tokens > 10 {
-			t.Fatalf("window %d holds %d tokens, over budget", i, w.Tokens)
+		if w.Tokens > budget {
+			t.Fatalf("window %d holds %d tokens, over budget %d", i, w.Tokens, budget)
 		}
+		if w.Window.StartByte != prevEnd {
+			t.Fatalf("window %d starts at %d, want %d", i, w.Window.StartByte, prevEnd)
+		}
+		prevEnd = w.Window.EndByte
 		joined += w.Text
 	}
 	if joined != content {
