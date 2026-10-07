@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -743,8 +744,8 @@ func TestHugotLogits_EmptyAfterTruncationIsAnError(t *testing.T) {
 	// truncation collapses it to "".
 	junk := strings.Repeat("\x80\x81\xbf", 2000)
 	_, err = h.Logits(context.Background(), []string{junk})
-	if !errors.Is(err, errEmptyAfterTruncation) {
-		t.Fatalf("Logits error = %v, want errEmptyAfterTruncation", err)
+	if !errors.Is(err, ErrNothingToScore) {
+		t.Fatalf("Logits error = %v, want ErrNothingToScore", err)
 	}
 	if calls != 0 {
 		t.Fatal("empty text must never be scored")
@@ -867,5 +868,80 @@ func linkOrCopy(t *testing.T, src, dst string) {
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// scriptedPipeline answers by input: "junk" is rejected as having nothing
+// to score, "bad" is a provider failure, anything else succeeds.
+type scriptedPipeline struct{}
+
+func (scriptedPipeline) Logits(_ context.Context, texts []string) ([][]float64, error) {
+	switch texts[0] {
+	case "junk":
+		return nil, ErrNothingToScore
+	case "bad":
+		return nil, errors.New("embedded: inference failed: backend exploded")
+	}
+	return [][]float64{{1, -1}}, nil
+}
+func (scriptedPipeline) CountTokens(text string) int { return len(text) }
+func (scriptedPipeline) Close() error                { return nil }
+
+func TestProvider_InputRejectedDoesNotFeedBreaker(t *testing.T) {
+	quietSlog(t)
+	p, err := New(context.Background(), Options{
+		Enabled: true, Required: true, ModelPath: filepath.Join("testdata", "good"), ThresholdSet: "v1",
+		NewPipeline: func(context.Context, string, *Manifest) (Pipeline, error) {
+			return scriptedPipeline{}, nil
+		},
+		BreakerThreshold: 3,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	decide := func(text string) ([]decision.Decision, error) {
+		return p.Decide(context.Background(), decision.Input{Content: text}, []decision.Signal{decision.SignalInjection})
+	}
+
+	for i := 0; i < 10; i++ {
+		ds, err := decide("junk")
+		if !errors.Is(err, ErrNothingToScore) {
+			t.Fatalf("junk %d: err = %v, want ErrNothingToScore", i, err)
+		}
+		if len(ds) != 1 || ds[0].Answered {
+			t.Fatalf("junk %d: decisions = %+v, want one unanswered (unknown, never safe)", i, ds)
+		}
+	}
+	h := p.Health()
+	if h.InputRejected != 10 || h.Errors != 0 || h.BreakerOpen {
+		t.Fatalf("after 10 rejected inputs: InputRejected=%d Errors=%d BreakerOpen=%v, want 10/0/false", h.InputRejected, h.Errors, h.BreakerOpen)
+	}
+	if ds, err := decide("fine"); err != nil || !ds[0].Answered {
+		t.Fatalf("a normal input after rejections must still be scored: %v %+v", err, ds)
+	}
+
+	// Real provider failures still count, and a rejected input in the
+	// middle neither counts nor resets the failure run.
+	for _, text := range []string{"bad", "bad", "junk", "bad"} {
+		_, _ = decide(text)
+	}
+	h = p.Health()
+	if h.Errors != 3 || !h.BreakerOpen {
+		t.Fatalf("after 3 provider failures: Errors=%d BreakerOpen=%v, want 3/true", h.Errors, h.BreakerOpen)
+	}
+	if h.InputRejected != 11 {
+		t.Errorf("InputRejected = %d, want 11", h.InputRejected)
+	}
+}
+
+func TestErrNothingToScore_IsContentFree(t *testing.T) {
+	// The scheduler logs only the error's type; the message must not be
+	// able to carry content either.
+	if got := fmt.Sprintf("%T", ErrNothingToScore); got != "embedded.inputRejectedError" {
+		t.Errorf("ErrNothingToScore type = %s", got)
+	}
+	if !errors.Is(fmt.Errorf("wrapped: %w", ErrNothingToScore), ErrNothingToScore) {
+		t.Error("a wrapped ErrNothingToScore must still match")
 	}
 }

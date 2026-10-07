@@ -257,7 +257,7 @@ func loadTruncationTokenizer(dir string) (*hftokenizer.Tokenizer, int, error) {
 // continuation bytes has no rune boundary to cut on, and token-cheap
 // filler longer than maxTruncationProbeBytes pushes anything after it out
 // of the probe. Logits refuses to score an empty result of a non-empty
-// input (errEmptyAfterTruncation), and exact CountTokens keeps scheduler
+// input (ErrNothingToScore), and exact CountTokens keeps scheduler
 // windows small enough that this cut is a backstop, not the normal path.
 //
 // Tokenizer parity: for English the kept tokens match HF tokenizers'
@@ -419,10 +419,25 @@ func (h *hugotPipeline) Logits(ctx context.Context, texts []string) ([][]float64
 	return out, nil
 }
 
-// errEmptyAfterTruncation means truncation reduced a non-empty input to
-// nothing. Scoring "" would report a confident answer about text the model
-// never saw; an error leaves the decision unknown, which is never safe.
-var errEmptyAfterTruncation = errors.New("embedded: truncation left nothing to score")
+// ErrNothingToScore means truncation or the tokenizer byte cap reduced a
+// non-empty input to nothing, as with text made only of invalid UTF-8
+// continuation bytes. Scoring "" would report a confident answer about text
+// the model never saw, so the window stays unanswered: unknown, never safe.
+//
+// It describes the input, not the provider. The provider does not count it
+// toward the circuit breaker (an attacker could otherwise open the breaker,
+// and so blind detection, by sending junk) and reports it in
+// Health.InputRejected instead.
+var ErrNothingToScore error = inputRejectedError{}
+
+// inputRejectedError is ErrNothingToScore's type. A distinct type makes the
+// scheduler's content-free error_class log field read
+// "embedded.inputRejectedError" rather than a generic string error.
+type inputRejectedError struct{}
+
+func (inputRejectedError) Error() string {
+	return "embedded: input rejected: truncation left nothing to score"
+}
 
 // prepare truncates one input for inference. Tokenizer panics are recovered
 // into errInferencePanic, like backend panics, and the error never carries
@@ -436,7 +451,7 @@ func (h *hugotPipeline) prepare(text string) (out string, err error) {
 	}()
 	out = h.truncate(text)
 	if out == "" && text != "" {
-		return "", errEmptyAfterTruncation
+		return "", ErrNothingToScore
 	}
 	return out, nil
 }
@@ -567,6 +582,16 @@ func invertSigmoid(s float64) (float64, error) {
 // it keeps the quadratic tokenizer from seeing more than the cap. The count
 // stays monotonic in prefix length, which the scheduler's hard split
 // assumes. A tokenizer panic also yields len(text).
+//
+// Documented costs of exactness:
+//   - Each call runs the tokenizer: about 2 ms for a 128-token text on an
+//     M1 Pro (go-huggingface v0.4.13; quadratic in length, bounded by the
+//     cap). The scheduler counts every sentence and every window, so a long
+//     message pays this several times; caching is a follow-up.
+//   - The count includes the special tokens ([CLS], [SEP]) on every call,
+//     and the scheduler sums per-sentence counts, so a window packs slightly
+//     fewer sentences than its exact joined count would allow. This is
+//     conservative: windows never exceed what one inference sees.
 func (h *hugotPipeline) CountTokens(text string) (n int) {
 	if text == "" {
 		return 0

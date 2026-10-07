@@ -57,6 +57,7 @@ type Health struct {
 	Errors              int64             // inference errors since start
 	Panics              int64             // recovered inference panics
 	Canceled            int64             // inferences abandoned because the caller's context ended; budget outcomes, not provider failures
+	InputRejected       int64             // windows left unanswered because the input had nothing scoreable (ErrNothingToScore); input outcomes, not provider failures
 }
 
 // Bool returns a pointer to v, for setting Options.SIMD explicitly.
@@ -106,6 +107,7 @@ type Provider struct {
 	errors           atomic.Int64  // provider inference errors, including panics
 	panics           atomic.Int64  // recovered inference panics
 	canceled         atomic.Int64  // caller-context ends; never counted as failures
+	inputRejected    atomic.Int64  // ErrNothingToScore; never counted as failures
 }
 
 // New constructs the provider.
@@ -284,6 +286,14 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 	logits, err := p.runGuarded(ctx, pipe, in.Content)
 	latency := p.clock().Sub(start)
 	if err != nil {
+		// An input with nothing scoreable is the input's fault, not the
+		// provider's: like a caller cancellation it must not feed the
+		// breaker, or junk content could open it and blind detection. The
+		// window stays unanswered, which is unknown and never safe.
+		if errors.Is(err, ErrNothingToScore) {
+			p.inputRejected.Add(1)
+			return p.unanswered(signals, latency), err
+		}
 		// A caller whose context ended gave up on the budget; that says
 		// nothing about the provider's health, so it must not feed the
 		// breaker. A recovered panic is always the provider's fault.
@@ -389,15 +399,16 @@ func (p *Provider) Health() Health {
 	p.mu.RUnlock()
 
 	h := Health{
-		Capability:   capab,
-		Reason:       reason,
-		Arch:         p.arch,
-		SIMD:         p.simd,
-		ThresholdSet: p.thresholdSet,
-		BreakerOpen:  p.breakerOpen(),
-		Errors:       p.errors.Load(),
-		Panics:       p.panics.Load(),
-		Canceled:     p.canceled.Load(),
+		Capability:    capab,
+		Reason:        reason,
+		Arch:          p.arch,
+		SIMD:          p.simd,
+		ThresholdSet:  p.thresholdSet,
+		BreakerOpen:   p.breakerOpen(),
+		Errors:        p.errors.Load(),
+		Panics:        p.panics.Load(),
+		Canceled:      p.canceled.Load(),
+		InputRejected: p.inputRejected.Load(),
 	}
 	if m != nil {
 		h.Model = m.Name
