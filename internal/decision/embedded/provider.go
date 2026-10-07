@@ -73,7 +73,7 @@ type Options struct {
 	// exercise the capability matrix.
 	Arch string
 	SIMD *bool
-	// NewPipeline defaults to the Hugot factory (Task 21).
+	// NewPipeline defaults to HugotPipelineFactory.
 	NewPipeline PipelineFactory
 	// BreakerThreshold is how many consecutive failures trip the circuit
 	// breaker. BreakerCooldown is how long it stays open.
@@ -110,8 +110,7 @@ type Provider struct {
 
 // New constructs the provider.
 //
-// With Enabled true and a nil NewPipeline, New returns an error regardless
-// of Required: that is a programmer error, not a model-loading failure.
+// A nil NewPipeline selects HugotPipelineFactory, the pure-Go backend.
 //
 // Startup contract:
 //   - Enabled false: load nothing, return a disabled provider, nil error.
@@ -154,7 +153,7 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 
 	factory := opts.NewPipeline
 	if factory == nil {
-		return nil, fmt.Errorf("embedded: no pipeline factory configured")
+		factory = HugotPipelineFactory
 	}
 
 	m, err := Load(opts.ModelPath)
@@ -338,6 +337,11 @@ func (p *Provider) runGuarded(ctx context.Context, pipe Pipeline, text string) (
 	}
 	batch, err := pipe.Logits(ctx, texts)
 	if err != nil {
+		// The Hugot adapter recovers backend panics itself and returns
+		// them wrapped; count those exactly like one recovered here.
+		if errors.Is(err, errInferencePanic) {
+			p.panics.Add(1)
+		}
 		return nil, err
 	}
 	if len(batch) != 1 {
@@ -352,7 +356,7 @@ func (p *Provider) runGuarded(ctx context.Context, pipe Pipeline, text string) (
 // temperature, so applying it here is what makes the probability
 // comparable to the calibrated thresholds in the manifest. Skipping it
 // would make every score overconfident: sigmoid(6.0) is 0.9975 where
-// sigmoid(6.0/2.41) is 0.9263.
+// sigmoid(6.0/2.41) is 0.9234.
 func calibrate(logit, temperature float64) float64 {
 	if temperature <= 0 {
 		temperature = 1
