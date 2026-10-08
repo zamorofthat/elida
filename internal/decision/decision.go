@@ -217,7 +217,32 @@ type Assessment struct {
 	Scope        ProtectionScope
 	TotalLatency time.Duration
 	Admissions   []Admission
+	// Outcome is how an async job ended. It is set only on assessments a
+	// Scheduler delivers asynchronously, and every queued job is delivered
+	// exactly once with a terminal Outcome, so a sink can always tell a
+	// finished job from one still pending. Inline assessments leave it "".
+	Outcome AsyncOutcome
+	// ErrorClass classifies why an async job produced no answer
+	// ("deadline_exceeded", "canceled", "provider_panic", or an error type
+	// name). It never carries an error message, which could quote content.
+	ErrorClass string
 }
+
+// AsyncOutcome is the terminal state of one async job.
+type AsyncOutcome string
+
+const (
+	// AsyncAnswered: at least one requested signal was answered.
+	AsyncAnswered AsyncOutcome = "answered"
+	// AsyncUnanswered: the provider ran and answered nothing.
+	AsyncUnanswered AsyncOutcome = "unanswered"
+	// AsyncFailed: the provider returned an error or panicked.
+	AsyncFailed AsyncOutcome = "failed"
+	// AsyncCanceled: the job's context ended (its async timeout, or
+	// scheduler shutdown) before it produced an answer. Its decisions are
+	// all unanswered.
+	AsyncCanceled AsyncOutcome = "canceled"
+)
 
 // MaxProbability returns the highest probability among answered decisions
 // for one signal, and whether anything answered at all. Returning answered

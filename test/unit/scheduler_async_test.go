@@ -814,8 +814,10 @@ func TestSchedulerAsync_MaxConcurrencyOneDisablesAsync(t *testing.T) {
 
 func TestSchedulerAsync_CanceledJobReleasesItsClaim(t *testing.T) {
 	// An async job that times out produced nothing. It must count as
-	// canceled (a budget outcome), must not be delivered, and must release
-	// its dedup claim so a retry of the same request can queue it again.
+	// canceled (a budget outcome, not AsyncCompleted), must be delivered
+	// all-unanswered with Outcome canceled so a sink can settle it, and must
+	// release its dedup claim so a retry of the same request can queue it
+	// again.
 	f := decisiontest.NewFake(map[decision.Signal]float64{decision.SignalInjection: 0.5})
 	f.Latency = 300 * time.Millisecond
 	cfg := inlineConfig(f)
@@ -823,8 +825,15 @@ func TestSchedulerAsync_CanceledJobReleasesItsClaim(t *testing.T) {
 	cfg.MaxWindowTokens = 12
 	cfg.InlineTimeout = 2 * time.Second      // the inline window answers
 	cfg.AsyncTimeout = 50 * time.Millisecond // the async window cannot
-	var delivered atomic.Int64
-	cfg.OnAsync = func(scheduler.Request, decision.Input, decision.Assessment) { delivered.Add(1) }
+	var delivered, canceledUnanswered atomic.Int64
+	cfg.OnAsync = func(_ scheduler.Request, _ decision.Input, a decision.Assessment) {
+		delivered.Add(1)
+		if a.Outcome == decision.AsyncCanceled && a.ErrorClass == "deadline_exceeded" {
+			if _, answered := a.MaxProbability(decision.SignalInjection); !answered {
+				canceledUnanswered.Add(1)
+			}
+		}
+	}
 	s, err := scheduler.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -863,8 +872,11 @@ func TestSchedulerAsync_CanceledJobReleasesItsClaim(t *testing.T) {
 	if m.DuplicatesSuppressed != 0 {
 		t.Fatalf("DuplicatesSuppressed = %d, want 0", m.DuplicatesSuppressed)
 	}
-	if m.AsyncCanceled != 2 || m.AsyncCompleted != 0 || delivered.Load() != 0 {
-		t.Fatalf("canceled/completed/delivered = %d/%d/%d, want 2/0/0", m.AsyncCanceled, m.AsyncCompleted, delivered.Load())
+	if m.AsyncCanceled != 2 || m.AsyncCompleted != 0 || delivered.Load() != 2 {
+		t.Fatalf("canceled/completed/delivered = %d/%d/%d, want 2/0/2", m.AsyncCanceled, m.AsyncCompleted, delivered.Load())
+	}
+	if canceledUnanswered.Load() != 2 {
+		t.Fatalf("each canceled job must be delivered all-unanswered with Outcome canceled and its error class; got %d of 2", canceledUnanswered.Load())
 	}
 }
 

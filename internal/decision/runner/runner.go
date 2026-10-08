@@ -36,7 +36,17 @@
 // already_assessed is not a gap and is counted separately
 // (AlreadyAssessed). Chat clients resend the whole history, so a message
 // this session already had scored (same index, same content hash) is
-// skipped rather than scored and recorded again on every turn.
+// skipped rather than scored and recorded again on every turn. A claim is
+// kept only once some window of the message was answered, inline or by an
+// async job; a message whose every window went unanswered (including async
+// jobs that were canceled or failed) is released and assessed again later.
+//
+// Known limitations. A message that a concurrent request on the same
+// session is still assessing is counted as already_assessed by the other
+// request; if that assessment then answers nothing the claim is released,
+// but the other request has skipped the message without a gap. The deadline
+// is checked before each message, so preprocessing of the one message in
+// progress can overrun it, at most once per request.
 //
 // Sessions. Bind registers a session so async results and the per-session
 // assessed-message set can find it; the registry is bounded. The session-end
@@ -215,6 +225,25 @@ type Runner struct {
 type boundSession struct {
 	sess     *session.Session
 	assessed *assessedSet
+	// pending tracks claimed messages whose assessment is not settled yet:
+	// the request is still assessing them, or async jobs for them are still
+	// outstanding. It holds at most MaxAssessedPerSession entries.
+	pending map[msgKey]*pendingMsg
+}
+
+// pendingMsg is the settlement state of one claimed message.
+//
+// The claim stays only if some window of the message was answered, inline
+// or async. Once the request has finished with it (open is false) and every
+// async job queued for it has been delivered (jobs is 0), a message with
+// no answer at all is released, so the next request carrying it assesses it
+// again: unknown is never "already assessed". jobs may go negative while
+// open, when a fast async job is delivered before the request has counted
+// what it queued.
+type pendingMsg struct {
+	open     bool
+	jobs     int
+	answered bool
 }
 
 // msgKey identifies one message of a session's history by position and
@@ -552,7 +581,11 @@ func (r *Runner) Bind(sess *session.Session) {
 	}
 	r.boundRing[r.boundNext] = sess.ID
 	r.boundNext = (r.boundNext + 1) % len(r.boundRing)
-	r.bound[sess.ID] = &boundSession{sess: sess, assessed: newAssessedSet()}
+	r.bound[sess.ID] = &boundSession{
+		sess:     sess,
+		assessed: newAssessedSet(),
+		pending:  make(map[msgKey]*pendingMsg),
+	}
 }
 
 // Unbind drops a session from the registry, with its assessed-message set.
@@ -610,6 +643,81 @@ func (r *Runner) releaseMessage(sessionID string, k msgKey) {
 	}
 }
 
+// openPending starts tracking a claimed message's settlement. It reports
+// false when the session is not bound or its pending set is full; the caller
+// then settles the message from the inline result alone.
+func (r *Runner) openPending(sessionID string, k msgKey) bool {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sessionID]
+	if !ok || len(b.pending) >= MaxAssessedPerSession {
+		return false
+	}
+	b.pending[k] = &pendingMsg{open: true}
+	return true
+}
+
+// closePending records what the request's own assessment of a message did:
+// whether anything was answered inline and how many async jobs it queued.
+func (r *Runner) closePending(sessionID string, k msgKey, answered bool, queued int) {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sessionID]
+	if !ok {
+		return
+	}
+	p, ok := b.pending[k]
+	if !ok {
+		return
+	}
+	p.open = false
+	p.answered = p.answered || answered
+	p.jobs += queued
+	b.settle(k, p)
+}
+
+// asyncDelivered records one async job's terminal delivery for a message.
+// A delivery for a message not being tracked (settled already, or never
+// tracked) changes nothing.
+func (r *Runner) asyncDelivered(sessionID string, k msgKey, answered bool) {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sessionID]
+	if !ok {
+		return
+	}
+	p, ok := b.pending[k]
+	if !ok {
+		return
+	}
+	p.jobs--
+	p.answered = p.answered || answered
+	b.settle(k, p)
+}
+
+// settle ends tracking once the request is done with the message and every
+// queued job has been delivered, releasing the claim when nothing at all
+// was answered. The caller holds boundMu.
+func (b *boundSession) settle(k msgKey, p *pendingMsg) {
+	if p.open || p.jobs > 0 {
+		return
+	}
+	delete(b.pending, k)
+	if !p.answered {
+		b.assessed.remove(k)
+	}
+}
+
+// answeredAny reports whether any decision in a was answered.
+func answeredAny(a decision.Assessment) bool {
+	for _, d := range a.Decisions {
+		if d.Answered {
+			return true
+		}
+	}
+	return false
+}
+
 // claimDecision reports whether id has not been recorded before, and marks
 // it recorded. Check and mark happen under one lock, so an inline and an
 // async completion racing on the same decision record it once.
@@ -661,7 +769,7 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 	r.Bind(sess)
 
 	elevated := isElevated(r.cfg.RiskLookup(sess.ID))
-	spent := &scheduler.InlineSpend{}
+	spent := &scheduler.Spend{}
 
 	var assessed, notAssessed int64
 	for _, msg := range eligible {
@@ -681,10 +789,16 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 			continue
 		}
 		assessed++
-		if !r.assessMessage(ctx, sess, requestID, msg, elevated, spent) {
-			// Nothing was scored or queued (not admitted, or the deadline or
-			// capacity ran out): release the claim so a later request can
-			// try again. Unknown is never "already assessed".
+		tracked := r.openPending(sess.ID, k)
+		answered, queued := r.assessMessage(ctx, sess, requestID, msg, elevated, spent)
+		switch {
+		case tracked:
+			// Settles now if nothing was queued, or once every queued job
+			// has been delivered (OnAsync); released if nothing answered.
+			r.closePending(sess.ID, k, answered, queued)
+		case !answered && queued == 0:
+			// Untracked (pending set full): settle from what is known now.
+			// Unknown is never "already assessed".
 			r.releaseMessage(sess.ID, k)
 		}
 	}
@@ -710,8 +824,9 @@ func (r *Runner) alreadyClaimed(sessionID string, k msgKey) bool {
 }
 
 // assessMessage preprocesses, assesses and records one message. It reports
-// whether any window was scored inline or queued for async scoring.
-func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.InlineSpend) bool {
+// whether any window was answered inline, and how many async jobs were
+// queued whose deliveries will reach OnAsync for this session.
+func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.Spend) (answered bool, queued int) {
 	// Analysis-only preprocessing, inside the request deadline: the loop
 	// in AssessRequest checks the deadline before each message. Nothing
 	// here is forwarded.
@@ -743,6 +858,9 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 			// elevation or preprocessing signals: never a complete scan.
 			a.Coverage.Complete = false
 			r.countGap(GapOriginalOnly, 1)
+			// Assess carries no session identity, so any async job it
+			// queued can never be delivered back to this session.
+			a.Coverage.QueuedAsync = 0
 		}
 	}
 	if err != nil {
@@ -750,7 +868,7 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 		slog.Debug("semantic assessment did not complete",
 			"session_id", sess.ID, "request_id", requestID,
 			"error_type", fmt.Sprintf("%T", err))
-		return false
+		return false, 0
 	}
 
 	for _, g := range pre.Gaps {
@@ -770,7 +888,7 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 	}
 
 	r.handle(sess, requestID, in, a)
-	return a.Coverage.ScoredInline > 0 || a.Coverage.QueuedAsync > 0
+	return answeredAny(a), a.Coverage.QueuedAsync
 }
 
 // OnAsync handles an async completion. It is the scheduler's OnAsync
@@ -779,10 +897,17 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 // An async result arrives after the request was forwarded, so it is always
 // recorded with ScopeFutureActivity and never claims to have protected the
 // current request, whatever scope it arrived with.
+//
+// Every delivery, including a canceled or failed job's all-unanswered one,
+// also counts toward settling its message's claim: when the last job for a
+// message is delivered and nothing about that message was answered, the
+// claim is released so the next request carrying it assesses it again.
 func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.Assessment) {
 	if r.mode == config.DecisionModeDisabled {
 		return
 	}
+	k := msgKey{index: in.MessageIndex, sum: sha256.Sum256([]byte(in.Content))}
+	defer r.asyncDelivered(req.SessionID, k, answeredAny(a))
 	sess := r.lookupSession(req.SessionID)
 	if sess == nil {
 		// The session ended (Unbind), was evicted from the bounded registry,

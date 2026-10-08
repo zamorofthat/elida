@@ -50,19 +50,29 @@ type Request struct {
 	PreSignals []string
 	// Strict is true when the operator has enabled broad inline attempts.
 	Strict bool
-	// Spent, when non-nil, is the inline budget already spent by earlier
-	// messages of the same proxied request. AssessCandidates starts from it
-	// and adds what it spends, so MaxInlineWindows and MaxInlineTokens bound
-	// the whole request rather than each message. Nil gives each call a
-	// fresh budget. One InlineSpend belongs to one request goroutine and is
-	// not safe for concurrent use; it never reaches an async job.
-	Spent *InlineSpend
+	// Spent, when non-nil, is the budget already spent by earlier messages
+	// of the same proxied request. AssessCandidates starts from it and adds
+	// what it spends, so MaxInlineWindows, MaxInlineTokens, MaxAsyncWindows
+	// and the exact-count attempt bound all apply to the whole request
+	// rather than to each message. Nil gives each call a fresh budget. One
+	// Spend belongs to one request goroutine and is not safe for concurrent
+	// use; it never reaches an async job.
+	Spent *Spend
 }
 
-// InlineSpend is the inline budget a request has spent so far.
-type InlineSpend struct {
-	Windows int
-	Tokens  int
+// Spend is the budget a request has spent so far.
+type Spend struct {
+	// InlineWindows and InlineTokens are the inline windows and tokens
+	// scored so far.
+	InlineWindows int
+	InlineTokens  int
+	// AsyncWindows is the windows queued for async continuation so far.
+	AsyncWindows int
+	// Considered is the windows exact-counted so far.
+	Considered int
+	// AsyncRefused records that the async queue refused this request's
+	// work; later windows are dropped without being counted.
+	AsyncRefused bool
 }
 
 // Config configures the scheduler.
@@ -164,8 +174,13 @@ type Config struct {
 	// Admission selects which messages are eligible for the inline lane.
 	Admission AdmissionPolicy
 
-	// OnAsync is called on an async worker when an async job completes. Its
-	// Assessment always has Scope decision.ScopeFutureActivity. It must not
+	// OnAsync is called on an async worker exactly once for every queued
+	// job, whatever its end: answered, unanswered, failed, or canceled by
+	// AsyncTimeout or Shutdown (Assessment.Outcome says which; a canceled or
+	// failed job is all-unanswered). Its Assessment always has Scope
+	// decision.ScopeFutureActivity. After a Shutdown whose deadline passed,
+	// the remaining canceled jobs may be delivered after Shutdown returns.
+	// It must not
 	// block: the worker running it consumes no further queued jobs until it
 	// returns, and Shutdown's drain waits for it. A panic in it is recovered
 	// and counted in AsyncCallbackPanics.
@@ -219,8 +234,10 @@ type Metrics struct {
 	InFlight int64
 	// AsyncCanceled counts queued jobs whose context ended (AsyncTimeout or
 	// Shutdown) before they produced an answer. Like the embedded provider's
-	// Canceled count, these are budget outcomes, not provider failures, and
-	// they are not delivered to OnAsync.
+	// Canceled count, these are budget outcomes, not provider failures. Each
+	// is delivered to OnAsync all-unanswered with Outcome AsyncCanceled, so a
+	// sink can settle the work it was waiting on, and is not counted in
+	// AsyncCompleted.
 	AsyncCanceled int64
 	// AsyncPanics counts provider panics recovered on an async job. Each is
 	// delivered to OnAsync as an unknown and counted in AsyncCompleted.
@@ -508,14 +525,6 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	eligible, eligibleReason := s.eligible(req, in, ordered)
 
 	var inlineWindows, inlineTokens, asyncWindows int
-	if req.Spent != nil {
-		// A request-scoped budget: start from what earlier messages of this
-		// request spent, and hand back what this one spends.
-		inlineWindows, inlineTokens = req.Spent.Windows, req.Spent.Tokens
-		defer func() {
-			req.Spent.Windows, req.Spent.Tokens = inlineWindows, inlineTokens
-		}()
-	}
 	// Exact counting is bounded by attempts, not outcomes: at most
 	// MaxInlineWindows + MaxAsyncWindows windows are ever counted (plus the
 	// counts a hard split makes), however many of them end up denied,
@@ -524,6 +533,17 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	// without being counted.
 	var considered int
 	var asyncRefused bool
+	if sp := req.Spent; sp != nil {
+		// A request-scoped budget: start from what earlier messages of this
+		// request spent, and hand back what this one spends, so every bound
+		// below is per request rather than per message.
+		inlineWindows, inlineTokens = sp.InlineWindows, sp.InlineTokens
+		asyncWindows, considered, asyncRefused = sp.AsyncWindows, sp.Considered, sp.AsyncRefused
+		defer func() {
+			sp.InlineWindows, sp.InlineTokens = inlineWindows, inlineTokens
+			sp.AsyncWindows, sp.Considered, sp.AsyncRefused = asyncWindows, considered, asyncRefused
+		}()
+	}
 	maxConsidered := s.cfg.MaxInlineWindows + s.cfg.MaxAsyncWindows
 	var tmpl asyncTemplate
 	// exact[i] records that queue[i].Tokens is the exact count. Pieces of a
@@ -626,7 +646,7 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		claimed := id != "" && s.claim(id)
 
 		// runOnWorker takes ownership of the worker token acquired above.
-		ds, ok := s.runOnWorker(ctx, in, w, signals, &s.inlinePanics, s.workers)
+		ds, ok, _ := s.runOnWorker(ctx, in, w, signals, &s.inlinePanics, s.workers)
 		if !ok && claimed {
 			// Nothing was learned; release only the claim this call made.
 			s.unclaim(id)
@@ -761,7 +781,10 @@ var errProviderPanic = errors.New("scheduler: provider panicked")
 // panics is the counter a recovered panic increments, so inline and async
 // panics are reported separately. slots is the lane's pool the acquired
 // token is returned to.
-func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedText, signals []decision.Signal, panics *atomic.Int64, slots chan struct{}) ([]decision.Decision, bool) {
+//
+// errClass is "" on success or an all-unanswered normalize; otherwise it
+// classifies the failure without its message.
+func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedText, signals []decision.Signal, panics *atomic.Int64, slots chan struct{}) (ds []decision.Decision, ok bool, errClass string) {
 	cur := s.inFlight.Add(1)
 	for {
 		m := s.maxInFlight.Load()
@@ -806,21 +829,24 @@ func (s *Inline) runOnWorker(ctx context.Context, in decision.Input, w WindowedT
 		select {
 		case r = <-done:
 		default:
+			class := errorClass(ctx.Err())
 			slog.Debug("semantic inference abandoned at the deadline",
-				"error_class", errorClass(ctx.Err()),
+				"error_class", class,
 				"transform", w.Window.Transform,
 			)
-			return unanswered(signals, w.Window), false
+			return unanswered(signals, w.Window), false, class
 		}
 	}
 	if r.err != nil {
+		class := errorClass(r.err)
 		slog.Debug("semantic inference did not answer",
-			"error_class", errorClass(r.err),
+			"error_class", class,
 			"transform", w.Window.Transform,
 		)
-		return unanswered(signals, w.Window), false
+		return unanswered(signals, w.Window), false, class
 	}
-	return normalize(r.ds, signals, w.Window)
+	ds, ok = normalize(r.ds, signals, w.Window)
+	return ds, ok, ""
 }
 
 // errorClass classifies a provider error for logging without its message,
@@ -1131,50 +1157,81 @@ func (s *Inline) asyncWorker() {
 // risk and affect later activity but can never claim to have protected the
 // current request.
 //
-// A job whose context ends first — while waiting for a slot or during
-// inference — is counted in AsyncCanceled and not delivered: that is a
-// budget outcome, not a provider failure, and an all-unknown result carries
-// nothing a later decision could use.
+// Every queued job is delivered to OnAsync exactly once, with a terminal
+// Assessment.Outcome, so a sink tracking outstanding work never waits on a
+// job that silently vanished:
+//   - answered or unanswered: the provider ran (AsyncCompleted).
+//   - failed: a provider error or panic, delivered all-unanswered with its
+//     ErrorClass (AsyncCompleted).
+//   - canceled: the job's context ended — AsyncTimeout or Shutdown — while
+//     it waited for a slot or during inference (AsyncCanceled, not
+//     AsyncCompleted). It is delivered all-unanswered, so it carries no
+//     probability, only the fact that the window was never scored.
 //
-// Every job that produced no answer — canceled, timed out, provider error
-// or provider panic — releases its dedup claim, so a retry of the same
-// request is free to queue the window again.
+// Every job that produced no answer releases its dedup claim, so a retry of
+// the same request is free to queue the window again.
 func (s *Inline) runAsync(job asyncJob) {
-	if s.baseCtx.Err() != nil {
-		s.cancelJob(job)
+	start := s.cfg.Clock()
+	if err := s.baseCtx.Err(); err != nil {
+		s.cancelJob(job, err, start)
 		return
 	}
-	start := s.cfg.Clock()
 	ctx, cancel := context.WithTimeout(s.baseCtx, s.cfg.AsyncTimeout)
 	defer cancel()
 
 	select {
 	case <-s.asyncSlots:
 	case <-ctx.Done():
-		s.cancelJob(job)
+		s.cancelJob(job, ctx.Err(), start)
 		return
 	}
 	// select picks randomly when both cases are ready; do not start
 	// inference on a context that has already ended.
-	if ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
 		s.asyncSlots <- struct{}{}
-		s.cancelJob(job)
+		s.cancelJob(job, err, start)
 		return
 	}
 
 	// runOnWorker takes ownership of the async slot acquired above.
-	ds, ok := s.runOnWorker(ctx, job.in, job.win, job.sigs, &s.asyncPanics, s.asyncSlots)
-	if !ok && ctx.Err() != nil {
-		s.cancelJob(job)
+	ds, ok, class := s.runOnWorker(ctx, job.in, job.win, job.sigs, &s.asyncPanics, s.asyncSlots)
+	if err := ctx.Err(); !ok && err != nil {
+		s.cancelJob(job, err, start)
 		return
 	}
 	if !ok && job.id != "" {
-		// A provider error or panic: delivered as an unknown below, but
-		// nothing was learned, so the work is not "done" for dedup.
+		// A provider error, panic or all-unanswered result: delivered as an
+		// unknown below, but nothing was learned, so the work is not "done"
+		// for dedup.
 		s.unclaim(job.id)
 	}
 
-	a := decision.Assessment{
+	a := s.asyncAssessment(job, ds, start)
+	switch {
+	case ok:
+		a.Outcome = decision.AsyncAnswered
+		a.Coverage.ScoredBytes = len(job.win.Text)
+		a.Coverage.Complete = a.Coverage.IsComplete()
+	case class != "":
+		a.Outcome = decision.AsyncFailed
+		a.ErrorClass = class
+	default:
+		a.Outcome = decision.AsyncUnanswered
+	}
+
+	// Count before delivery so a callback that signals completion observes
+	// an up-to-date AsyncCompleted.
+	s.asyncCompleted.Add(1)
+	s.deliver(job, a)
+}
+
+// asyncAssessment builds the delivered Assessment for one job.
+//
+// Coverage.ScoredInline stays 0, so IsComplete is false: an async result
+// never reports a clean scan of the request it arrived too late for.
+// Whether this window answered is read from the decisions and ScoredBytes.
+func (s *Inline) asyncAssessment(job asyncJob, ds []decision.Decision, start time.Time) decision.Assessment {
+	return decision.Assessment{
 		Decisions: ds,
 		Scope:     decision.ScopeFutureActivity,
 		Coverage: decision.Coverage{
@@ -1188,30 +1245,22 @@ func (s *Inline) runAsync(job asyncJob) {
 			Admitted: false,
 			Reason:   job.denied,
 		}},
+		TotalLatency: s.cfg.Clock().Sub(start),
 	}
-	if ok {
-		a.Coverage.ScoredBytes = len(job.win.Text)
-	}
-	// Coverage.ScoredInline stays 0, so IsComplete is false: an async result
-	// never reports a clean scan of the request it arrived too late for.
-	// Whether this window answered is read from the decisions and
-	// ScoredBytes.
-	a.Coverage.Complete = a.Coverage.IsComplete()
-	a.TotalLatency = s.cfg.Clock().Sub(start)
-
-	// Count before delivery so a callback that signals completion observes
-	// an up-to-date AsyncCompleted.
-	s.asyncCompleted.Add(1)
-	s.deliver(job, a)
 }
 
 // cancelJob records a job that ended without an answer because its context
-// ended, and releases its dedup claim.
-func (s *Inline) cancelJob(job asyncJob) {
+// ended, releases its dedup claim, and delivers it all-unanswered with
+// Outcome AsyncCanceled and the context's error class.
+func (s *Inline) cancelJob(job asyncJob, cause error, start time.Time) {
 	s.asyncCanceled.Add(1)
 	if job.id != "" {
 		s.unclaim(job.id)
 	}
+	a := s.asyncAssessment(job, unanswered(job.sigs, job.win.Window), start)
+	a.Outcome = decision.AsyncCanceled
+	a.ErrorClass = errorClass(cause)
+	s.deliver(job, a)
 }
 
 // deliver hands an async result to OnAsync, recovering a callback panic so
@@ -1240,7 +1289,8 @@ func (s *Inline) deliver(job asyncJob, a decision.Assessment) {
 // It returns nil when every async worker has exited, and ctx.Err() when the
 // deadline passed first, so the caller can log that some semantic analysis
 // was abandoned rather than silently losing it. After the deadline the
-// remaining queued jobs are counted in AsyncCanceled and the workers exit
+// remaining queued jobs are counted in AsyncCanceled, each is delivered to
+// OnAsync as canceled (possibly after Shutdown returns), and the workers exit
 // promptly; a provider call that ignores its context may still finish in
 // the background, exactly as on the inline path.
 //
