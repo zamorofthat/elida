@@ -314,13 +314,9 @@ type Verdict struct {
 // window, with the human_directed head of the SAME window applied as a veto.
 //
 // The pairing goes through Assessment.ByWindow, never MaxProbability: an
-// unrelated window's human_directed score cannot rescue this one.
-//
-// A derived representation split into several windows reports every piece
-// with its ancestor's byte range, so those pieces share one Window and one
-// DecisionID. ByWindow cannot pair them, so such a window gets one verdict
-// with the highest injection probability among its pieces and no veto:
-// an ambiguous pairing never lowers a score.
+// unrelated window's human_directed score cannot rescue this one. A Window
+// is unique per scored window, including across the windows of one derived
+// representation (its local offsets differ), so ByWindow pairs exactly.
 func (r *Runner) Verdicts(sessionID, requestID string, in decision.Input, a decision.Assessment) []Verdict {
 	inj := a.ByWindow(decision.SignalInjection)
 	if len(inj) == 0 {
@@ -328,39 +324,20 @@ func (r *Runner) Verdicts(sessionID, requestID string, in decision.Input, a deci
 	}
 	aux := a.ByWindow(decision.SignalHumanDirected)
 
-	// Count answered decisions per window to find ambiguous pairings, and
-	// keep Decisions order for a deterministic result.
-	injCount := make(map[decision.Window]int, len(inj))
-	auxCount := make(map[decision.Window]int, len(aux))
-	maxInj := make(map[decision.Window]decision.Decision, len(inj))
-	var order []decision.Window
-	for _, d := range a.Decisions {
-		if !d.Answered {
+	// Walk Decisions for a deterministic order; ByWindow supplies the
+	// answers, one per window.
+	seen := make(map[decision.Window]bool, len(inj))
+	out := make([]Verdict, 0, len(inj))
+	for _, cand := range a.Decisions {
+		w := cand.Window
+		d, ok := inj[w]
+		if cand.Signal != decision.SignalInjection || !ok || seen[w] {
 			continue
 		}
-		switch d.Signal {
-		case decision.SignalInjection:
-			if injCount[d.Window] == 0 {
-				order = append(order, d.Window)
-			}
-			injCount[d.Window]++
-			if cur, ok := maxInj[d.Window]; !ok || d.Probability > cur.Probability {
-				maxInj[d.Window] = d
-			}
-		case decision.SignalHumanDirected:
-			auxCount[d.Window]++
-		}
-	}
-
-	out := make([]Verdict, 0, len(order))
-	for _, w := range order {
-		d := inj[w]
+		seen[w] = true
 		var auxP float64
 		var auxOK bool
-		if injCount[w] > 1 || auxCount[w] > 1 {
-			// Ambiguous: several invocations share this window identity.
-			d = maxInj[w]
-		} else if ad, ok := aux[w]; ok {
+		if ad, ok := aux[w]; ok {
 			auxP, auxOK = ad.Probability, true
 		}
 

@@ -8,8 +8,10 @@ import (
 )
 
 // Identity is the tuple a stable decision ID is derived from: session,
-// request, message index, original byte range, transformation chain, signal
-// and model version.
+// request, message index, original byte range, the window's local byte range
+// within its representation, transformation chain, signal and model version.
+// The local range is what distinguishes the windows of one derived
+// representation: they all share the ancestor's original byte range.
 //
 // Two decisions with the same Identity are the same decision and contribute
 // risk once, no matter how many times they arrive — a retry, an overlapping
@@ -21,16 +23,20 @@ type Identity struct {
 	MessageIndex   int
 	StartByte      int
 	EndByte        int
+	LocalStartByte int
+	LocalEndByte   int
 	TransformChain string
 	Signal         Signal
 	ModelVersion   string
 }
 
-// WithWindow returns a copy of id with the window's byte range and
-// transformation chain filled in. The receiver is not modified.
+// WithWindow returns a copy of id with the window's byte ranges (original and
+// local) and transformation chain filled in. The receiver is not modified.
 func (id Identity) WithWindow(w Window) Identity {
 	id.StartByte = w.StartByte
 	id.EndByte = w.EndByte
+	id.LocalStartByte = w.LocalStartByte
+	id.LocalEndByte = w.LocalEndByte
 	id.TransformChain = w.Transform
 	return id
 }
@@ -48,30 +54,42 @@ type JobIdentity struct {
 	MessageIndex   int
 	StartByte      int
 	EndByte        int
+	LocalStartByte int
+	LocalEndByte   int
 	TransformChain string
 }
 
+// identityVersion is the canonical form's version. It opens every canonical
+// string and names both hash domains, so an ID derived under an earlier form
+// can never equal one derived under this form.
+//
+// v1 had no local window offsets, so the windows of one derived
+// representation collided. v2 adds them.
+const identityVersion = "v2"
+
 // canonicalIdentity renders an Identity as an unambiguous string.
 //
-// Every field is length-prefixed ("<len>:<value>") and joined with "|", so
-// no field value can impersonate a field boundary: ("sess", "abc-req-1")
-// and ("sess-abc", "req-1") produce different strings.
+// It opens with the form version; then every field is length-prefixed
+// ("<len>:<value>") and preceded by "|", so no field value can impersonate a
+// field boundary: ("sess", "abc-req-1") and ("sess-abc", "req-1") produce
+// different strings.
 func canonicalIdentity(id Identity) string {
 	var b strings.Builder
+	b.WriteString(identityVersion)
 	fields := []string{
 		id.SessionID,
 		id.RequestID,
 		strconv.Itoa(id.MessageIndex),
 		strconv.Itoa(id.StartByte),
 		strconv.Itoa(id.EndByte),
+		strconv.Itoa(id.LocalStartByte),
+		strconv.Itoa(id.LocalEndByte),
 		id.TransformChain,
 		string(id.Signal),
 		id.ModelVersion,
 	}
-	for i, f := range fields {
-		if i > 0 {
-			b.WriteByte('|')
-		}
+	for _, f := range fields {
+		b.WriteByte('|')
 		b.WriteString(strconv.Itoa(len(f)))
 		b.WriteByte(':')
 		b.WriteString(f)
@@ -87,6 +105,8 @@ func canonicalJob(j JobIdentity) string {
 		MessageIndex:   j.MessageIndex,
 		StartByte:      j.StartByte,
 		EndByte:        j.EndByte,
+		LocalStartByte: j.LocalStartByte,
+		LocalEndByte:   j.LocalEndByte,
 		TransformChain: j.TransformChain,
 	})
 }
@@ -98,7 +118,7 @@ func canonicalJob(j JobIdentity) string {
 // event history, they are not secrets, and they are not an authentication
 // token.
 func DecisionID(id Identity) string {
-	sum := sha256.Sum256([]byte("elida.decision.v1\x00" + canonicalIdentity(id)))
+	sum := sha256.Sum256([]byte("elida.decision." + identityVersion + "\x00" + canonicalIdentity(id)))
 	return "dec_" + hex.EncodeToString(sum[:16])
 }
 
@@ -106,6 +126,6 @@ func DecisionID(id Identity) string {
 // prefix differs from DecisionID's, so a job ID and a decision ID can never
 // collide even over identical fields.
 func JobID(j JobIdentity) string {
-	sum := sha256.Sum256([]byte("elida.job.v1\x00" + canonicalJob(j)))
+	sum := sha256.Sum256([]byte("elida.job." + identityVersion + "\x00" + canonicalJob(j)))
 	return "job_" + hex.EncodeToString(sum[:16])
 }

@@ -620,7 +620,9 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 
 // exactPieces counts w with the exact counter and, when it exceeds
 // MaxWindowTokens, hard-splits it by exact count. Each piece carries its
-// exact count and a byte range inside w's. A window built by SplitWindows is
+// exact count and a local byte range inside w's (and, for original content,
+// an absolute one), so pieces stay distinct in Window, DecisionID and JobID
+// even within a derived representation. A window built by SplitWindows is
 // bounded by the estimate (at most about 4*MaxWindowTokens bytes), so a
 // split yields a handful of pieces.
 func (s *Inline) exactPieces(w WindowedText) []WindowedText {
@@ -635,9 +637,12 @@ func (s *Inline) exactPieces(w WindowedText) []WindowedText {
 	off := 0
 	for _, part := range parts {
 		pw := w.Window
+		pw.LocalStartByte = w.Window.LocalStartByte + off
+		pw.LocalEndByte = pw.LocalStartByte + len(part)
 		if pw.Transform == "" {
 			// Original content: a real absolute range. A derived window
-			// keeps its ancestor's range (see SplitWindows).
+			// keeps its ancestor's range (see SplitWindows); its local
+			// range, set above, is what distinguishes the pieces.
 			pw.StartByte = w.Window.StartByte + off
 			pw.EndByte = pw.StartByte + len(part)
 		}
@@ -652,7 +657,12 @@ func (s *Inline) exactPieces(w WindowedText) []WindowedText {
 // as eligible and denied, never scored or queued, so coverage reports it as
 // a gap.
 func remainderWindow(c decision.Candidate, rest int) WindowedText {
-	w := decision.Window{Transform: c.Transform, TransformDepth: c.TransformDepth}
+	w := decision.Window{
+		LocalStartByte: rest,
+		LocalEndByte:   len(c.Content),
+		Transform:      c.Transform,
+		TransformDepth: c.TransformDepth,
+	}
 	if c.Transform != "" {
 		w.StartByte, w.EndByte = c.StartByte, c.EndByte
 	} else {
@@ -979,6 +989,8 @@ func jobIDFor(req Request, in decision.Input, w WindowedText) string {
 		MessageIndex:   in.MessageIndex,
 		StartByte:      w.Window.StartByte,
 		EndByte:        w.Window.EndByte,
+		LocalStartByte: w.Window.LocalStartByte,
+		LocalEndByte:   w.Window.LocalEndByte,
 		TransformChain: w.Window.Transform,
 	})
 }

@@ -46,11 +46,25 @@ type Input struct {
 // Window locates scored content inside the original message. StartByte and
 // EndByte are always offsets into the ORIGINAL content, even for a derived
 // representation, so evidence always points at real bytes the operator can
-// find. Transform is the transformation chain that produced the scored text
-// ("" for the original) and TransformDepth is how many decodes deep it is.
+// find. A decode cannot be byte-mapped in reverse, so every window of a
+// derived representation reports its ancestor's full original range there.
+//
+// LocalStartByte and LocalEndByte are the window's offsets within the text
+// of the representation it was scored from. They are what tells the windows
+// of one derived representation apart, and an operator can reproduce a
+// derived window by applying Transform to the original and slicing these
+// offsets. For the original representation they equal StartByte and EndByte
+// less the representation's own start (normally 0, so local == absolute).
+//
+// Transform is the transformation chain that produced the scored text ("" for
+// the original) and TransformDepth is how many decodes deep it is. Together
+// with the local offsets, a Window is unique within one message, which is
+// what makes it a correct map key for ByWindow.
 type Window struct {
 	StartByte      int
 	EndByte        int
+	LocalStartByte int
+	LocalEndByte   int
 	Transform      string
 	TransformDepth int
 }
@@ -233,7 +247,9 @@ func (a Assessment) MaxProbability(s Signal) (float64, bool) {
 
 // ByWindow returns the answered decisions for one signal, keyed by the Window
 // each one covered. Window is a struct of ints and a string, so it is
-// comparable by value and is used as the map key directly.
+// comparable by value and is used as the map key directly. Its local offsets
+// make it unique per window, including across the windows of one derived
+// representation, which all share the ancestor's absolute range.
 //
 // This is the accessor the human_directed veto must use. The veto applies
 // only to the injection score from the same invocation, window and

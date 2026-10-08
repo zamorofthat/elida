@@ -105,8 +105,11 @@ func isSpace(b byte) bool {
 // Byte ranges. For the original candidate (Transform == "") a window's span
 // is its real absolute range in the original content. For a derived
 // candidate the span is the ancestor's full range, because a decode cannot
-// be byte-mapped in reverse; Transform and TransformDepth are what identify
-// such a window.
+// be byte-mapped in reverse. Every window also carries its local range
+// within the candidate's own text (LocalStartByte, LocalEndByte); together
+// with Transform and TransformDepth that is what identifies a window of a
+// derived candidate. For the original candidate the local range is the
+// absolute range less c.StartByte.
 //
 // Windows tile the content: they are contiguous, non-overlapping, and
 // concatenating their text reproduces the candidate exactly. A single
@@ -145,7 +148,12 @@ func SplitWindowsContext(ctx context.Context, c decision.Candidate, tc decision.
 	derived := c.Transform != ""
 
 	mkWindow := func(localStart, localEnd int, text string, tokens int) WindowedText {
-		w := decision.Window{Transform: c.Transform, TransformDepth: c.TransformDepth}
+		w := decision.Window{
+			LocalStartByte: localStart,
+			LocalEndByte:   localEnd,
+			Transform:      c.Transform,
+			TransformDepth: c.TransformDepth,
+		}
 		if derived {
 			w.StartByte, w.EndByte = c.StartByte, c.EndByte
 		} else {

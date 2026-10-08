@@ -35,14 +35,16 @@ func TestDecisionID_Stable(t *testing.T) {
 func TestDecisionID_UniquePerField(t *testing.T) {
 	base := decision.DecisionID(baseIdentity())
 	mutations := map[string]func(*decision.Identity){
-		"session":   func(i *decision.Identity) { i.SessionID = "sess-xyz" },
-		"request":   func(i *decision.Identity) { i.RequestID = "req-2" },
-		"message":   func(i *decision.Identity) { i.MessageIndex = 4 },
-		"start":     func(i *decision.Identity) { i.StartByte = 11 },
-		"end":       func(i *decision.Identity) { i.EndByte = 201 },
-		"transform": func(i *decision.Identity) { i.TransformChain = "nfkc>hex" },
-		"signal":    func(i *decision.Identity) { i.Signal = decision.SignalHumanDirected },
-		"model":     func(i *decision.Identity) { i.ModelVersion = "minilm-multihead-v6" },
+		"session":    func(i *decision.Identity) { i.SessionID = "sess-xyz" },
+		"request":    func(i *decision.Identity) { i.RequestID = "req-2" },
+		"message":    func(i *decision.Identity) { i.MessageIndex = 4 },
+		"start":      func(i *decision.Identity) { i.StartByte = 11 },
+		"end":        func(i *decision.Identity) { i.EndByte = 201 },
+		"localStart": func(i *decision.Identity) { i.LocalStartByte = 1 },
+		"localEnd":   func(i *decision.Identity) { i.LocalEndByte = 1 },
+		"transform":  func(i *decision.Identity) { i.TransformChain = "nfkc>hex" },
+		"signal":     func(i *decision.Identity) { i.Signal = decision.SignalHumanDirected },
+		"model":      func(i *decision.Identity) { i.ModelVersion = "minilm-multihead-v6" },
 	}
 	seen := map[string]string{base: "base"}
 	for name, mutate := range mutations {
@@ -80,14 +82,48 @@ func TestDecisionID_WithWindow(t *testing.T) {
 		SessionID: "s", RequestID: "r", MessageIndex: 1,
 		Signal: decision.SignalInjection, ModelVersion: "m",
 	}
-	w := decision.Window{StartByte: 5, EndByte: 50, Transform: "rot13", TransformDepth: 1}
+	w := decision.Window{StartByte: 5, EndByte: 50, LocalStartByte: 7, LocalEndByte: 9, Transform: "rot13", TransformDepth: 1}
 	got := id.WithWindow(w)
-	if got.StartByte != 5 || got.EndByte != 50 || got.TransformChain != "rot13" {
+	if got.StartByte != 5 || got.EndByte != 50 || got.LocalStartByte != 7 || got.LocalEndByte != 9 || got.TransformChain != "rot13" {
 		t.Fatalf("WithWindow did not copy the window: %+v", got)
 	}
 	// It must not mutate the receiver.
 	if id.StartByte != 0 || id.TransformChain != "" {
 		t.Fatalf("WithWindow mutated its receiver: %+v", id)
+	}
+}
+
+func TestDecisionID_V2NeverEqualsV1(t *testing.T) {
+	// These are the v1 IDs for these identities, captured from the v1 form
+	// (no local offsets, "elida.*.v1" domains). A v2 ID over the same
+	// fields must differ, so a stored v1 ID can never be mistaken for v2.
+	const (
+		v1Decision = "dec_ee89e4324a9297dcb650eb26024a5e35"
+		v1Job      = "job_c11040d70bd204365cf1fd3458296308"
+	)
+	if got := decision.DecisionID(baseIdentity()); got == v1Decision {
+		t.Fatalf("v2 DecisionID equals the v1 value %q", got)
+	}
+	j := decision.JobIdentity{SessionID: "s", RequestID: "r", MessageIndex: 2, StartByte: 0, EndByte: 100}
+	if got := decision.JobID(j); got == v1Job {
+		t.Fatalf("v2 JobID equals the v1 value %q", got)
+	}
+}
+
+func TestDecisionID_LocalOffsetsSeparateDerivedWindows(t *testing.T) {
+	// The windows of one derived representation share the ancestor's
+	// original range; only the local offsets tell them apart.
+	id := baseIdentity()
+	a := id.WithWindow(decision.Window{StartByte: 0, EndByte: 300, LocalStartByte: 0, LocalEndByte: 100, Transform: "base64_decode", TransformDepth: 1})
+	b := id.WithWindow(decision.Window{StartByte: 0, EndByte: 300, LocalStartByte: 100, LocalEndByte: 200, Transform: "base64_decode", TransformDepth: 1})
+	if decision.DecisionID(a) == decision.DecisionID(b) {
+		t.Fatal("two windows of one derived representation must have distinct decision IDs")
+	}
+	ja := decision.JobIdentity{SessionID: "s", RequestID: "r", StartByte: 0, EndByte: 300, LocalStartByte: 0, LocalEndByte: 100, TransformChain: "base64_decode"}
+	jb := ja
+	jb.LocalStartByte, jb.LocalEndByte = 100, 200
+	if decision.JobID(ja) == decision.JobID(jb) {
+		t.Fatal("two windows of one derived representation must have distinct job IDs")
 	}
 }
 
