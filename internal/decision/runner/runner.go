@@ -15,15 +15,46 @@
 // verdict and no shadow entry; the runner never synthesizes a low
 // probability from absence, and partial coverage is recorded as partial.
 //
-// Nothing in this package logs, records or returns request content.
+// Request scope. One request gets one inline deadline (Config.InlineTimeout,
+// or the scheduler's own) covering preprocessing and every message's
+// assessment, and one inline window and token budget shared across its
+// messages. New messages are taken newest first, at most
+// MaxMessagesPerRequest per request.
+//
+// Coverage. coverage_complete on a recorded decision is per message: it says
+// whether every eligible window of THAT message was scored. What a request
+// left unexamined is counted by reason and exposed through CoverageGaps, for
+// the decision status output:
+//   - messages_not_assessed: eligible new messages past
+//     MaxMessagesPerRequest, or reached after the request deadline. They are
+//     retried on the next request that carries them.
+//   - preprocessing gap reasons (input_truncated, ...): content the
+//     scheduler never saw; that message's coverage_complete is false.
+//   - original_only: the scheduler could not take derived representations,
+//     so only the original was scored; coverage_complete is false.
+//
+// already_assessed is not a gap and is counted separately
+// (AlreadyAssessed). Chat clients resend the whole history, so a message
+// this session already had scored (same index, same content hash) is
+// skipped rather than scored and recorded again on every turn.
+//
+// Sessions. Bind registers a session so async results and the per-session
+// assessed-message set can find it; the registry is bounded. The session-end
+// path must call Unbind, so an ended session is neither retained nor written
+// to by a late async result.
+//
+// Nothing in this package logs, records or returns request content; the
+// assessed-message set keeps a SHA-256 of each message, never the message.
 package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"elida/internal/config"
@@ -86,7 +117,8 @@ type Config struct {
 	PolicyMode string
 	// Scheduler assesses content. If it also implements AssessCandidates
 	// (as *scheduler.Inline does), every preprocessed representation is
-	// assessed; otherwise only the original content is.
+	// assessed; otherwise only the original content is, and the result is
+	// recorded as incomplete coverage.
 	Scheduler decision.Scheduler
 	// Budget bounds analysis-only preprocessing.
 	Budget preprocess.Budget
@@ -107,29 +139,47 @@ type Config struct {
 	RiskLookup func(sessionID string) (score float64, action string)
 	// Clock stamps recorded decisions. Defaults to time.Now.
 	Clock func() time.Time
+	// InlineTimeout is the one inline deadline for a whole request. Zero
+	// takes the scheduler's own (*scheduler.Inline exposes it); if neither
+	// is known, only the caller's context bounds the request. It is the
+	// same deadline the scheduler applies per call, scoped to the request;
+	// it never extends the scheduler's.
+	InlineTimeout time.Duration
 }
 
-// maxBoundSessions caps the async-completion registry. An async result has
-// to find its session, and a map keyed by session ID that nothing prunes is
-// an unbounded retained history.
+// maxBoundSessions caps the session registry. An async result has to find
+// its session, and a map keyed by session ID that nothing prunes is an
+// unbounded retained history.
 const maxBoundSessions = 1024
 
+// MaxAssessedPerSession caps the per-session set of messages already
+// assessed. Past it the oldest entry is evicted, and that message is
+// assessed again if it is still being resent.
+const MaxAssessedPerSession = 256
+
 // maxRecordedDecisions caps the set of decision IDs already recorded. It is
-// what keeps a retried request, or an inline and an async completion of the
-// same window, from recording one decision twice. Like the scheduler's
-// dedup history it is a fixed ring, not a per-session map.
+// what keeps an inline and an async completion of the same window, or a
+// redelivery, from recording one decision twice. Like the scheduler's dedup
+// history it is a fixed ring, not a per-session map.
 const maxRecordedDecisions = 4096
 
-// MaxMessagesPerRequest caps how many eligible messages of one request are
-// assessed. The scheduler's deadline and budgets apply per message, so
-// without this cap a request carrying a long history would multiply both.
-// The newest messages are assessed first; the rest are counted as the
-// GapMessagesNotAssessed coverage gap.
+// MaxMessagesPerRequest caps how many new eligible messages of one request
+// are assessed. The newest are assessed first; the rest are counted as
+// GapMessagesNotAssessed and retried on the next request carrying them.
 const MaxMessagesPerRequest = 8
 
-// GapMessagesNotAssessed is the CoverageGaps reason for eligible messages
-// skipped because of MaxMessagesPerRequest or an ended request context.
-const GapMessagesNotAssessed = "messages_not_assessed"
+// Coverage reasons.
+const (
+	// GapMessagesNotAssessed counts eligible new messages skipped because of
+	// MaxMessagesPerRequest or because the request deadline had passed.
+	GapMessagesNotAssessed = "messages_not_assessed"
+	// GapOriginalOnly counts messages assessed through a scheduler without
+	// AssessCandidates: derived representations were not scored.
+	GapOriginalOnly = "original_only"
+	// ReasonAlreadyAssessed counts messages skipped because this session
+	// already had them scored. It is not a gap; see AlreadyAssessed.
+	ReasonAlreadyAssessed = "already_assessed"
+)
 
 // Runner is the orchestrator. It is safe for concurrent use.
 type Runner struct {
@@ -137,11 +187,14 @@ type Runner struct {
 	mode string
 	// assessor is cfg.Scheduler's candidate-aware form, when it has one.
 	assessor candidateAssessor
+	// timeout is the request-scoped inline deadline; 0 means none known.
+	timeout time.Duration
 
-	// bound lets an async completion find its session. It is bounded and
-	// evicted in insertion order.
+	// bound is the session registry: async results and the per-session
+	// assessed-message set find their session through it. It is bounded and
+	// evicted in insertion order; boundMu also guards every assessedSet.
 	boundMu   sync.Mutex
-	bound     map[string]*session.Session
+	bound     map[string]*boundSession
 	boundRing []string
 	boundNext int
 
@@ -154,12 +207,76 @@ type Runner struct {
 	// gaps counts coverage gaps by reason, for health output.
 	gapsMu sync.Mutex
 	gaps   map[string]int64
+
+	alreadyAssessed atomic.Int64
+}
+
+// boundSession is one registry entry.
+type boundSession struct {
+	sess     *session.Session
+	assessed *assessedSet
+}
+
+// msgKey identifies one message of a session's history by position and
+// content hash, never by content.
+type msgKey struct {
+	index int
+	sum   [sha256.Size]byte
+}
+
+// assessedSet is a bounded set of message keys, evicted oldest first.
+type assessedSet struct {
+	seen map[msgKey]int // key -> ring slot
+	ring []msgKey
+	used []bool
+	next int
+}
+
+func newAssessedSet() *assessedSet {
+	return &assessedSet{
+		seen: make(map[msgKey]int),
+		ring: make([]msgKey, MaxAssessedPerSession),
+		used: make([]bool, MaxAssessedPerSession),
+	}
+}
+
+// add reports whether k is new, and records it.
+func (s *assessedSet) add(k msgKey) bool {
+	if _, dup := s.seen[k]; dup {
+		return false
+	}
+	slot := s.next
+	if s.used[slot] {
+		// Evict only if the old key still points at this slot; a key that
+		// was released and re-added lives in a newer slot.
+		if at, ok := s.seen[s.ring[slot]]; ok && at == slot {
+			delete(s.seen, s.ring[slot])
+		}
+	}
+	s.ring[slot], s.used[slot] = k, true
+	s.next = (slot + 1) % len(s.ring)
+	s.seen[k] = slot
+	return true
+}
+
+// remove forgets k: its assessment produced nothing, so a later request may
+// try again.
+func (s *assessedSet) remove(k msgKey) {
+	if slot, ok := s.seen[k]; ok {
+		delete(s.seen, k)
+		s.used[slot] = false
+	}
 }
 
 // candidateAssessor is the richer scheduler entry point that takes every
 // preprocessed representation of one message at once.
 type candidateAssessor interface {
 	AssessCandidates(ctx context.Context, req scheduler.Request, in decision.Input, cands []decision.Candidate, signals []decision.Signal) (decision.Assessment, error)
+}
+
+// timeoutReporter is a scheduler that reports its inline deadline.
+type timeoutReporter interface {
+	InlineTimeout() time.Duration
 }
 
 // New validates the configuration and constructs a runner.
@@ -188,6 +305,9 @@ func New(cfg Config) (*Runner, error) {
 			return nil, errors.New("runner: Model.ThresholdSet is required")
 		}
 	}
+	if cfg.InlineTimeout < 0 {
+		return nil, fmt.Errorf("runner: InlineTimeout must not be negative, got %v", cfg.InlineTimeout)
+	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
@@ -199,7 +319,8 @@ func New(cfg Config) (*Runner, error) {
 	r := &Runner{
 		cfg:          cfg,
 		mode:         capMode(cfg.Mode, cfg.PolicyMode),
-		bound:        make(map[string]*session.Session, maxBoundSessions),
+		timeout:      cfg.InlineTimeout,
+		bound:        make(map[string]*boundSession, maxBoundSessions),
 		boundRing:    make([]string, maxBoundSessions),
 		recorded:     make(map[string]int, maxRecordedDecisions),
 		recordedRing: make([]string, maxRecordedDecisions),
@@ -207,6 +328,9 @@ func New(cfg Config) (*Runner, error) {
 	}
 	if ca, ok := cfg.Scheduler.(candidateAssessor); ok {
 		r.assessor = ca
+	}
+	if tr, ok := cfg.Scheduler.(timeoutReporter); ok && r.timeout == 0 {
+		r.timeout = tr.InlineTimeout()
 	}
 	return r, nil
 }
@@ -236,6 +360,20 @@ func (r *Runner) EffectiveMode() string { return r.mode }
 // System and assistant content is trusted and excluded.
 func eligibleRole(role string) bool {
 	return role == "user" || role == "tool"
+}
+
+// isElevated reports whether the session's risk is already elevated.
+//
+// The ladder action is the authority: past observe means elevated, and a
+// nonzero score alone is not (a single decaying info-level flag must not
+// admit all plain content inline). When the action is empty, which is what
+// a disabled risk ladder reports, the score is all there is, so any
+// positive score counts.
+func isElevated(score float64, action string) bool {
+	if action == "" {
+		return score > 0
+	}
+	return action != "observe"
 }
 
 // severityFor maps a calibrated probability onto a violation severity.
@@ -374,8 +512,10 @@ func (r *Runner) countGap(reason string, n int64) {
 	r.gaps[reason] += n
 }
 
-// CoverageGaps returns a snapshot of the gap counts by reason. The map is
-// copied so a caller cannot mutate runner state through it.
+// CoverageGaps returns a snapshot of the gap counts by reason, including
+// GapMessagesNotAssessed, GapOriginalOnly and the preprocessing gap reasons.
+// The decision status output surfaces it. The map is copied so a caller
+// cannot mutate runner state through it.
 func (r *Runner) CoverageGaps() map[string]int64 {
 	r.gapsMu.Lock()
 	defer r.gapsMu.Unlock()
@@ -386,19 +526,25 @@ func (r *Runner) CoverageGaps() map[string]int64 {
 	return out
 }
 
-// Bind registers a session so an async completion can find it again. The
-// registry is bounded: past maxBoundSessions the oldest binding is evicted,
-// and an async result for an evicted session is dropped.
+// AlreadyAssessed returns how many messages were skipped because their
+// session already had them scored (ReasonAlreadyAssessed). This is not a
+// coverage gap: the content was analyzed on an earlier request.
+func (r *Runner) AlreadyAssessed() int64 { return r.alreadyAssessed.Load() }
+
+// Bind registers a session so an async completion and the assessed-message
+// set can find it. The registry is bounded: past maxBoundSessions the oldest
+// binding is evicted, an async result for it is dropped, and its history is
+// assessed again if it is resent.
 func (r *Runner) Bind(sess *session.Session) {
 	if sess == nil {
 		return
 	}
 	r.boundMu.Lock()
 	defer r.boundMu.Unlock()
-	if _, ok := r.bound[sess.ID]; ok {
+	if b, ok := r.bound[sess.ID]; ok {
 		// Refresh the pointer: a session re-created under the same ID must
 		// not leave async results landing on the stale one.
-		r.bound[sess.ID] = sess
+		b.sess = sess
 		return
 	}
 	if old := r.boundRing[r.boundNext]; old != "" {
@@ -406,13 +552,62 @@ func (r *Runner) Bind(sess *session.Session) {
 	}
 	r.boundRing[r.boundNext] = sess.ID
 	r.boundNext = (r.boundNext + 1) % len(r.boundRing)
-	r.bound[sess.ID] = sess
+	r.bound[sess.ID] = &boundSession{sess: sess, assessed: newAssessedSet()}
+}
+
+// Unbind drops a session from the registry, with its assessed-message set.
+// The session-end callback must call it (Task 26): an ended session is then
+// no longer retained by the runner, and a late async result for it is
+// dropped instead of landing on an already-persisted session.
+func (r *Runner) Unbind(sess *session.Session) {
+	if sess == nil {
+		return
+	}
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sess.ID]
+	if !ok || b.sess != sess {
+		// Not bound, or a newer session now owns this ID.
+		return
+	}
+	delete(r.bound, sess.ID)
+	for i, id := range r.boundRing {
+		if id == sess.ID {
+			r.boundRing[i] = ""
+			break
+		}
+	}
 }
 
 func (r *Runner) lookupSession(id string) *session.Session {
 	r.boundMu.Lock()
 	defer r.boundMu.Unlock()
-	return r.bound[id]
+	if b, ok := r.bound[id]; ok {
+		return b.sess
+	}
+	return nil
+}
+
+// claimMessage reports whether this session has not yet had the message
+// assessed, and marks it. A session missing from the registry has no
+// history to consult, so every message counts as new.
+func (r *Runner) claimMessage(sessionID string, k msgKey) bool {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sessionID]
+	if !ok {
+		return true
+	}
+	return b.assessed.add(k)
+}
+
+// releaseMessage forgets a claim whose assessment produced nothing.
+func (r *Runner) releaseMessage(sessionID string, k msgKey) {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	if b, ok := r.bound[sessionID]; ok {
+		b.assessed.remove(k)
+	}
 }
 
 // claimDecision reports whether id has not been recorded before, and marks
@@ -434,21 +629,26 @@ func (r *Runner) claimDecision(id string) bool {
 	return true
 }
 
-// AssessRequest preprocesses and assesses the eligible messages of one
+// AssessRequest preprocesses and assesses the new eligible messages of one
 // request.
 //
 // It never returns an error: a failure to analyze is a coverage fact, not a
-// request failure. Each message is assessed under the scheduler's own
-// deadline; at most MaxMessagesPerRequest messages are assessed, newest
-// first, and assessment stops once ctx has ended. It must be called BEFORE
+// request failure. One deadline covers the whole request, preprocessing
+// included, and one inline budget is shared by its messages. Messages this
+// session already had scored are skipped; of the rest, at most
+// MaxMessagesPerRequest are assessed, newest first. It must be called BEFORE
 // the request is forwarded, so an inline result can still protect it.
 func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []Message) {
 	if r.mode == config.DecisionModeDisabled || sess == nil || len(msgs) == 0 {
 		return
 	}
+	if r.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.timeout)
+		defer cancel()
+	}
 
-	// Newest first: in a chat request the last messages are the new ones;
-	// the history before them was assessed on earlier requests.
+	// Newest first: in a chat request the last messages are the new ones.
 	var eligible []Message
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if eligibleRole(msgs[i].Role) && msgs[i].Content != "" {
@@ -460,27 +660,61 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 	}
 	r.Bind(sess)
 
-	_, action := r.cfg.RiskLookup(sess.ID)
-	// Elevated means the ladder has moved past observe; a nonzero score
-	// alone is not elevation.
-	elevated := action != "" && action != "observe"
+	elevated := isElevated(r.cfg.RiskLookup(sess.ID))
+	spent := &scheduler.InlineSpend{}
 
-	for n, msg := range eligible {
-		if n >= MaxMessagesPerRequest || ctx.Err() != nil {
-			skipped := int64(len(eligible) - n)
-			r.countGap(GapMessagesNotAssessed, skipped)
-			slog.Debug("semantic assessment skipped messages",
-				"session_id", sess.ID, "request_id", requestID,
-				"skipped", skipped, "reason", GapMessagesNotAssessed)
-			return
+	var assessed, notAssessed int64
+	for _, msg := range eligible {
+		k := msgKey{index: msg.Index, sum: sha256.Sum256([]byte(msg.Content))}
+		if assessed >= MaxMessagesPerRequest || ctx.Err() != nil {
+			// Unclaimed, so a later request carrying it tries again; unless
+			// it was already assessed, in which case nothing is missing.
+			if r.alreadyClaimed(sess.ID, k) {
+				r.alreadyAssessed.Add(1)
+			} else {
+				notAssessed++
+			}
+			continue
 		}
-		r.assessMessage(ctx, sess, requestID, msg, elevated)
+		if !r.claimMessage(sess.ID, k) {
+			r.alreadyAssessed.Add(1)
+			continue
+		}
+		assessed++
+		if !r.assessMessage(ctx, sess, requestID, msg, elevated, spent) {
+			// Nothing was scored or queued (not admitted, or the deadline or
+			// capacity ran out): release the claim so a later request can
+			// try again. Unknown is never "already assessed".
+			r.releaseMessage(sess.ID, k)
+		}
+	}
+	if notAssessed > 0 {
+		r.countGap(GapMessagesNotAssessed, notAssessed)
+		slog.Debug("semantic assessment skipped messages",
+			"session_id", sess.ID, "request_id", requestID,
+			"skipped", notAssessed, "reason", GapMessagesNotAssessed)
 	}
 }
 
-// assessMessage preprocesses, assesses and records one message.
-func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool) {
-	// Analysis-only preprocessing. Nothing here is forwarded.
+// alreadyClaimed reports whether the session's assessed set holds k, without
+// claiming it.
+func (r *Runner) alreadyClaimed(sessionID string, k msgKey) bool {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sessionID]
+	if !ok {
+		return false
+	}
+	_, dup := b.assessed.seen[k]
+	return dup
+}
+
+// assessMessage preprocesses, assesses and records one message. It reports
+// whether any window was scored inline or queued for async scoring.
+func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.InlineSpend) bool {
+	// Analysis-only preprocessing, inside the request deadline: the loop
+	// in AssessRequest checks the deadline before each message. Nothing
+	// here is forwarded.
 	pre := preprocess.Run(msg.Content, r.cfg.Budget)
 
 	in := decision.Input{
@@ -499,17 +733,24 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 			Elevated:   elevated,
 			PreSignals: pre.Signals,
 			Strict:     r.cfg.Strict,
+			Spent:      spent,
 		}
 		a, err = r.assessor.AssessCandidates(ctx, req, in, pre.Candidates(), r.cfg.Signals)
 	} else {
 		a, err = r.cfg.Scheduler.Assess(ctx, in, r.cfg.Signals)
+		if err == nil {
+			// Only the original was scored, without the request's
+			// elevation or preprocessing signals: never a complete scan.
+			a.Coverage.Complete = false
+			r.countGap(GapOriginalOnly, 1)
+		}
 	}
 	if err != nil {
 		// The error type only: an error message could quote content.
 		slog.Debug("semantic assessment did not complete",
 			"session_id", sess.ID, "request_id", requestID,
 			"error_type", fmt.Sprintf("%T", err))
-		return
+		return false
 	}
 
 	for _, g := range pre.Gaps {
@@ -529,6 +770,7 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 	}
 
 	r.handle(sess, requestID, in, a)
+	return a.Coverage.ScoredInline > 0 || a.Coverage.QueuedAsync > 0
 }
 
 // OnAsync handles an async completion. It is the scheduler's OnAsync
@@ -543,9 +785,9 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 	}
 	sess := r.lookupSession(req.SessionID)
 	if sess == nil {
-		// The session was evicted from the bounded registry or never bound.
-		// The result has nowhere to land; that is a bounded-history
-		// consequence, not an error.
+		// The session ended (Unbind), was evicted from the bounded registry,
+		// or was never bound. The result has nowhere to land; that is a
+		// bounded-history consequence, not an error.
 		slog.Debug("async semantic result has no bound session",
 			"session_id", req.SessionID, "request_id", req.RequestID)
 		return

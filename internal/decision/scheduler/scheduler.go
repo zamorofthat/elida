@@ -50,6 +50,19 @@ type Request struct {
 	PreSignals []string
 	// Strict is true when the operator has enabled broad inline attempts.
 	Strict bool
+	// Spent, when non-nil, is the inline budget already spent by earlier
+	// messages of the same proxied request. AssessCandidates starts from it
+	// and adds what it spends, so MaxInlineWindows and MaxInlineTokens bound
+	// the whole request rather than each message. Nil gives each call a
+	// fresh budget. One InlineSpend belongs to one request goroutine and is
+	// not safe for concurrent use; it never reaches an async job.
+	Spent *InlineSpend
+}
+
+// InlineSpend is the inline budget a request has spent so far.
+type InlineSpend struct {
+	Windows int
+	Tokens  int
 }
 
 // Config configures the scheduler.
@@ -411,6 +424,11 @@ func New(cfg Config) (*Inline, error) {
 	return s, nil
 }
 
+// InlineTimeout returns the configured global inline deadline, so a caller
+// that assesses several messages of one request can scope that one deadline
+// to the whole request instead of granting it once per message.
+func (s *Inline) InlineTimeout() time.Duration { return s.cfg.InlineTimeout }
+
 // Assess implements decision.Scheduler. It treats the whole input as one
 // original candidate and supplies a zero Request, so admission depends only
 // on the content and the source role.
@@ -490,6 +508,14 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	eligible, eligibleReason := s.eligible(req, in, ordered)
 
 	var inlineWindows, inlineTokens, asyncWindows int
+	if req.Spent != nil {
+		// A request-scoped budget: start from what earlier messages of this
+		// request spent, and hand back what this one spends.
+		inlineWindows, inlineTokens = req.Spent.Windows, req.Spent.Tokens
+		defer func() {
+			req.Spent.Windows, req.Spent.Tokens = inlineWindows, inlineTokens
+		}()
+	}
 	// Exact counting is bounded by attempts, not outcomes: at most
 	// MaxInlineWindows + MaxAsyncWindows windows are ever counted (plus the
 	// counts a hard split makes), however many of them end up denied,
@@ -950,6 +976,9 @@ func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req 
 	if !tmpl.ready {
 		tmpl.req = req
 		tmpl.req.PreSignals = append([]string(nil), req.PreSignals...)
+		// The request's inline budget belongs to the request goroutine; an
+		// async job must never share it.
+		tmpl.req.Spent = nil
 		tmpl.sigs = append([]decision.Signal(nil), sigs...)
 		tmpl.ready = true
 	}
