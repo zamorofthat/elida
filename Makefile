@@ -12,11 +12,13 @@ build:
 
 # Injection model artifact (see scripts/models/README.md).
 #
-# DEFENDER_COMMIT defaults to the commit scripts/models/fetch.sh is pinned
-# to, which is the only value fetch.sh accepts; it never floats. The Python
-# versions are the ones build.sh enforces: another version may serialize a
-# different graph and change the model.onnx digest.
-DEFENDER_COMMIT ?= $(shell sed -n 's/^PINNED_DEFENDER_COMMIT="\([0-9a-f]*\)"$$/\1/p' scripts/models/fetch.sh)
+# scripts/models/pins.env is the single source of the model pins.
+# DEFENDER_COMMIT defaults to its PINNED_DEFENDER_COMMIT, the only value
+# fetch.sh accepts, so it never floats. The Python versions are the ones
+# build.sh enforces: another version may serialize a different graph and
+# change the model.onnx digest.
+include scripts/models/pins.env
+DEFENDER_COMMIT ?= $(PINNED_DEFENDER_COMMIT)
 MODEL_DIR = models/injection
 MODEL_INT8_DIR = build/model-int8
 MODEL_VENV = build/model-venv

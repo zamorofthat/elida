@@ -42,6 +42,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 cd "$REPO_ROOT"
 
+# PINNED_DEFENDER_COMMIT, MODEL_ONNX_SHA256 and MANIFEST_SHA256.
+# shellcheck source=pins.env
+source scripts/models/pins.env
+
 # -I: never import modules from the working directory or the environment.
 py() { "$PYTHON" -I "$@"; }
 
@@ -240,6 +244,21 @@ with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
     fh.write("\n")
 print("wrote manifest.json")
 PY
+
+echo "== verify against scripts/models/pins.env =="
+# MANIFEST_SHA256 pins the whole artifact (the manifest lists every other
+# file's sha256), so editing the model card or any shipped file lands here.
+# verify.sh prints each new digest; bump pins.env under review and rerun.
+# The previous artifact stays in place until the build matches.
+if ! PYTHON="$PYTHON" scripts/models/verify.sh "$OUT_STAGE"; then
+  if [[ "${ALLOW_UNPINNED_PYTHON_DEPS:-0}" == "1" ]]; then
+    echo "warning: ALLOW_UNPINNED_PYTHON_DEPS=1, so the artifact does not match pins.env" \
+      "(MANIFEST_SHA256=$MANIFEST_SHA256); installing it anyway" >&2
+  else
+    echo "error: the built artifact does not match scripts/models/pins.env; $OUT_DIR was not replaced" >&2
+    exit 1
+  fi
+fi
 
 # Swap the staged directories in only now that every step has succeeded.
 chmod 755 "$OUT_STAGE" "$INT8_STAGE"

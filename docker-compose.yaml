@@ -31,7 +31,9 @@ services:
       context: .
       args:
         # The image's model-builder stage requires the pinned upstream model
-        # commit; scripts/models/fetch.sh refuses any other value.
+        # commit; scripts/models/fetch.sh refuses any other value. Compose
+        # cannot read scripts/models/pins.env for a build-arg default, so
+        # TestModelPins_ComposeDefaultMatches keeps this literal in sync.
         DEFENDER_COMMIT: ${DEFENDER_COMMIT:-ff83e70981099f9261520e0e9bc6cb85bb9789da}
     ports:
       - "8080:8080"

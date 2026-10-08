@@ -32,7 +32,16 @@ RUN pip install --no-cache-dir 'onnx==1.23.1' 'numpy==2.5.3'
 
 COPY scripts/models/ ./scripts/models/
 COPY docs/model-card-injection.md ./docs/model-card-injection.md
+# build.sh verifies its upstream inputs and refuses an output that does not
+# match scripts/models/pins.env. The explicit checks after it make the
+# output guard independent of build.sh: manifest.json must match
+# MANIFEST_SHA256 (the manifest lists every other file's sha256, so this
+# pins the whole artifact), and verify.sh then checks every listed file.
+# A mismatch fails the image build.
 RUN DEFENDER_COMMIT="${DEFENDER_COMMIT}" OUT_DIR=/out/injection scripts/models/build.sh \
+ && . scripts/models/pins.env \
+ && echo "${MANIFEST_SHA256}  /out/injection/manifest.json" | sha256sum -c - \
+ && scripts/models/verify.sh /out/injection \
  && chmod -R a-w /out/injection
 
 # Build stage - Go binary
@@ -86,16 +95,21 @@ COPY --from=builder /app/configs/elida.yaml ./configs/
 # Model assets at the default decision.model_path. The directory is
 # read-only: ELIDA never downloads or replaces a model at runtime, and a
 # writable model directory is a supply-chain hazard, not a convenience.
+#
+# Ownership is root:root, not elida: the directory and files are owned by
+# root and elida reads them through the other-read bit. This deliberately
+# departs from the spec's "owned by elida" wording in favor of its intent
+# (read-only to the runtime user). An owner can always chmod its own
+# directory writable again and then create, replace or delete files,
+# manifest.json included, so elida ownership would not be read-only.
+#
 # The files' write bits are removed in the model-builder stage and COPY
 # keeps file modes, so the ~90 MiB layer is written once (a chmod -R here
 # would copy every file into a second layer). COPY does not keep the
-# destination directory's mode and gives the parents it creates the
-# --chown owner, so the RUN below fixes only those directories: the model
-# directory loses its write bits, and /etc/elida and /etc/elida/models go
-# back to root so the model directory cannot be renamed or replaced.
-COPY --from=model-builder --chown=elida:elida /out/injection /etc/elida/models/injection
-RUN chown root:root /etc/elida /etc/elida/models \
- && chmod 0555 /etc/elida/models/injection
+# destination directory's mode, so the RUN below sets only that directory
+# (a 0 B layer). The parents COPY creates are root:root 0755.
+COPY --from=model-builder /out/injection /etc/elida/models/injection
+RUN chmod 0555 /etc/elida/models/injection
 
 # Set ownership
 RUN chown -R elida:elida /app

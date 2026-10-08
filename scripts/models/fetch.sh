@@ -15,23 +15,26 @@
 # Usage: DEFENDER_COMMIT=<sha> scripts/models/fetch.sh [out_dir]
 set -euo pipefail
 
-# The commit this script, its checksums and the fixtures were written
-# against (git ls-remote https://github.com/StackOneHQ/defender.git HEAD on
-# 2026-10-07). Reproducibility depends on this not floating: moving it means
-# updating the checksums, both calibration fixtures and the model card under
-# review.
-PINNED_DEFENDER_COMMIT="ff83e70981099f9261520e0e9bc6cb85bb9789da"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# PINNED_DEFENDER_COMMIT comes from pins.env: the commit this script, its
+# checksums and the fixtures were written against (git ls-remote
+# https://github.com/StackOneHQ/defender.git HEAD on 2026-10-07).
+# Reproducibility depends on it not floating: moving it means updating the
+# checksums below, both calibration fixtures, the model card and the
+# artifact digests in pins.env, under review.
+# shellcheck source=pins.env
+source "$SCRIPT_DIR/pins.env"
 
 DEFENDER_COMMIT="${DEFENDER_COMMIT:?set DEFENDER_COMMIT to the pinned 40-character upstream SHA}"
 DEFENDER_REPO="https://github.com/StackOneHQ/defender"
 MODEL_SUBDIR="src/classifiers/models/minilm-multihead-v5"
 OUT_DIR="${1:-build/model-src}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXTURE="$SCRIPT_DIR/testdata/classifier_config.json"
 
 if [[ "$DEFENDER_COMMIT" != "$PINNED_DEFENDER_COMMIT" ]]; then
-  echo "error: DEFENDER_COMMIT=$DEFENDER_COMMIT but this script is pinned to $PINNED_DEFENDER_COMMIT." >&2
-  echo "Moving the pin is a model change: update PINNED_DEFENDER_COMMIT, the checksums below," >&2
+  echo "error: DEFENDER_COMMIT=$DEFENDER_COMMIT but scripts/models/pins.env pins $PINNED_DEFENDER_COMMIT." >&2
+  echo "Moving the pin is a model change: update pins.env, the checksums below," >&2
   echo "both calibration fixtures and docs/model-card-injection.md together, under review." >&2
   exit 1
 fi

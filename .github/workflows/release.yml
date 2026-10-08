@@ -9,11 +9,9 @@ permissions: {}
 
 env:
   GO_VERSION: "1.27.0"
-  # Same pins as ci.yml (a called workflow does not inherit this env).
-  # DEFENDER_COMMIT feeds the image's model-builder stage; fetch.sh refuses
-  # any other value. Bumping it is a model change requiring security review.
-  DEFENDER_COMMIT: "ff83e70981099f9261520e0e9bc6cb85bb9789da"
-  MODEL_ONNX_SHA256: "13febddd90418e64b9285543f31a92534f778cb43ca728b33e46b2dba8848f6a"
+  # The injection model pins live only in scripts/models/pins.env; jobs
+  # that need them load it into $GITHUB_ENV. Bumping a pin is a model
+  # change requiring security review.
 
 jobs:
   ci:
@@ -31,6 +29,12 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Load the model pins
+        # The image's model-builder stage builds its own copy and checks it
+        # against the same pins (Dockerfile), so this image and the
+        # GoReleaser archives carry the same pinned artifact.
+        run: grep -E '^[A-Z0-9_]+=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -60,7 +64,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
-            DEFENDER_COMMIT=${{ env.DEFENDER_COMMIT }}
+            DEFENDER_COMMIT=${{ env.PINNED_DEFENDER_COMMIT }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
@@ -100,12 +104,19 @@ jobs:
         # build/release/models-injection-v5-fp32.tar.gz{,.sha256} are
         # attached to the release by .goreleaser.yaml (release.extra_files),
         # and models/injection/ goes into every archive beside the binary.
+        #
+        # The bundled .sha256 travels with the tarball, so it proves only
+        # integrity. Origin comes from scripts/models/pins.env in this
+        # checkout: manifest.json must match MANIFEST_SHA256, and every file
+        # the manifest lists must match its recorded sha256.
         run: |
           set -euo pipefail
           (cd build/release && sha256sum -c models-injection-v5-fp32.tar.gz.sha256)
           mkdir -p models
           tar -xzf build/release/models-injection-v5-fp32.tar.gz -C models
-          echo "${MODEL_ONNX_SHA256}  models/injection/model.onnx" | sha256sum -c -
+          source scripts/models/pins.env
+          echo "${MANIFEST_SHA256}  models/injection/manifest.json" | sha256sum -c -
+          scripts/models/verify.sh models/injection
           ls -l models/injection
 
       - name: Set up Go

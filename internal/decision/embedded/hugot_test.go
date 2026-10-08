@@ -366,9 +366,27 @@ func quietSlog(t *testing.T) {
 	})
 }
 
-// defenderV5FP32 is the SHA-256 of the dequantized minilm-multihead-v5
-// model.onnx the reference logits below were produced from.
-const defenderV5FP32 = "13febddd90418e64b9285543f31a92534f778cb43ca728b33e46b2dba8848f6a"
+// pinsEnvPath is the single source of the model pins, relative to this
+// package directory (go test runs in it).
+const pinsEnvPath = "../../../scripts/models/pins.env"
+
+// defenderV5FP32 returns the SHA-256 of the dequantized minilm-multihead-v5
+// model.onnx the reference logits below were produced from, read from
+// scripts/models/pins.env (MODEL_ONNX_SHA256) so the pin lives in one place.
+func defenderV5FP32(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(pinsEnvPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", pinsEnvPath, err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "MODEL_ONNX_SHA256="); ok {
+			return v
+		}
+	}
+	t.Fatalf("%s has no MODEL_ONNX_SHA256", pinsEnvPath)
+	return ""
+}
 
 // parityLongBenign is the long reference text from the parity generator
 // (scripts/models parity script, recorded in the Task 21 report).
@@ -388,7 +406,7 @@ func TestHugotLogits_MatchONNXRuntimeReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if m.Files["model.onnx"] != defenderV5FP32 {
+	if m.Files["model.onnx"] != defenderV5FP32(t) {
 		t.Skip("reference logits are for the minilm-multihead-v5 fp32 model only")
 	}
 	pipe, err := HugotPipelineFactory(context.Background(), dir, m)

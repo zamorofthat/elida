@@ -55,10 +55,12 @@ GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # The image's model-builder stage requires the pinned upstream model
-# commit. Default to the one fetch.sh is pinned to (the only value it
-# accepts) unless the caller overrides it.
+# commit. Default to the one scripts/models/pins.env pins (the only value
+# fetch.sh accepts) unless the caller overrides it.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFENDER_COMMIT="${DEFENDER_COMMIT:-$(sed -n 's/^PINNED_DEFENDER_COMMIT="\([0-9a-f]*\)"$/\1/p' "$SCRIPT_DIR/models/fetch.sh")}"
+# shellcheck source=models/pins.env
+source "$SCRIPT_DIR/models/pins.env"
+DEFENDER_COMMIT="${DEFENDER_COMMIT:-$PINNED_DEFENDER_COMMIT}"
 
 # Build the image with labels
 docker build \

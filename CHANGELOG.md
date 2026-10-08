@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Release archives now carry the semantic-injection model under
+  `models/injection/` beside the binary. That adds about 86 MiB
+  uncompressed (about 47 MiB compressed) to every per-platform archive. The
+  same model is also attached once as `models-injection-v5-fp32.tar.gz`
+  with a `.sha256`, and the Docker image ships it at
+  `/etc/elida/models/injection`.
+
 ## [0.18.0] - 2026-08-02
 
 ### Fixed
