@@ -35,7 +35,7 @@ func fakeVerifiedArtifact(t *testing.T) (script, dir string) {
 		t.Fatalf("read verify.sh: %v", err)
 	}
 	script = filepath.Join(scriptDir, "verify.sh")
-	if err := os.WriteFile(script, src, 0o755); err != nil {
+	if err = os.WriteFile(script, src, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -50,7 +50,7 @@ func fakeVerifiedArtifact(t *testing.T) (script, dir string) {
 	}
 	files := map[string]string{}
 	for name, body := range shipped {
-		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+		if err = os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		files[name] = digest(body)
@@ -82,7 +82,7 @@ func TestModelVerify_RejectsUnlistedFiles(t *testing.T) {
 		t.Fatalf("a clean artifact must verify: %v\n%s", err, out)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "extra.onnx"), []byte("second graph"), 0o644); err != nil {
+	if err = os.WriteFile(filepath.Join(dir, "extra.onnx"), []byte("second graph"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, err = exec.Command("bash", script, dir).CombinedOutput()
