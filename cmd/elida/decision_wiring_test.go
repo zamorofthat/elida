@@ -19,6 +19,7 @@ import (
 	"elida/internal/decision"
 	"elida/internal/decision/embedded"
 	"elida/internal/decision/runner"
+	"elida/internal/session"
 )
 
 // goodModelPath is the checksummed fixture model directory. Its manifest
@@ -103,7 +104,11 @@ func TestDecisionWiring_SchedulerTakesProviderAsExactCounterOnly(t *testing.T) {
 		t.Fatal("a loaded model must produce a scheduler and a runner")
 	}
 
-	sc := decisionSchedulerConfig(cfg.Decision, a.decisionProvider, nil)
+	// The configuration setupDecision actually handed scheduler.New.
+	sc := a.decisionSchedulerCfg
+	if sc.OnAsync == nil {
+		t.Fatal("the built scheduler config must carry the runner's OnAsync sink")
+	}
 	if sc.Estimator != nil {
 		t.Fatal("production wiring must leave Estimator nil (cheap default); the provider as Estimator tokenizes whole messages on the request path")
 	}
@@ -120,6 +125,138 @@ func TestDecisionWiring_SchedulerTakesProviderAsExactCounterOnly(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sc.Signals, []decision.Signal{decision.SignalInjection, decision.SignalHumanDirected}) {
 		t.Fatalf("Signals = %v", sc.Signals)
+	}
+}
+
+func TestDecisionWiring_DrainHasItsOwnSubDeadline(t *testing.T) {
+	near := func(got, want time.Duration) bool {
+		d := got - want
+		return d > -500*time.Millisecond && d < 500*time.Millisecond
+	}
+	remaining := func(ctx context.Context) time.Duration {
+		dl, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("the drain context must always have a deadline")
+		}
+		return time.Until(dl)
+	}
+
+	// No parent deadline: the cap alone.
+	ctx, cancel := decisionDrainContext(context.Background())
+	if got := remaining(ctx); !near(got, decisionDrainLimit) {
+		t.Errorf("no parent deadline: drain budget %v, want %v", got, decisionDrainLimit)
+	}
+	cancel()
+
+	// A long shutdown budget: still capped.
+	parent, pcancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel = decisionDrainContext(parent)
+	if got := remaining(ctx); !near(got, decisionDrainLimit) {
+		t.Errorf("60s budget: drain budget %v, want the %v cap", got, decisionDrainLimit)
+	}
+	cancel()
+	pcancel()
+
+	// A short shutdown budget: the drain takes at most the unreserved part,
+	// so the OTEL flush and storage close keep the rest.
+	parent, pcancel = context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel = decisionDrainContext(parent)
+	want := time.Duration(float64(4*time.Second) * (1 - decisionDrainReserveFraction))
+	if got := remaining(ctx); !near(got, want) {
+		t.Errorf("4s budget: drain budget %v, want about %v", got, want)
+	}
+	if pd, _ := parent.Deadline(); !mustDeadline(t, ctx).Before(pd) {
+		t.Error("the drain deadline must end before the shutdown deadline")
+	}
+	cancel()
+	pcancel()
+
+	// A spent budget: already expired, so outstanding jobs are canceled.
+	parent, pcancel = context.WithCancel(context.Background())
+	pcancel()
+	ctx, cancel = decisionDrainContext(parent)
+	if ctx.Err() == nil {
+		t.Error("a spent shutdown budget must give an expired drain context")
+	}
+	cancel()
+}
+
+func mustDeadline(t *testing.T, ctx context.Context) time.Time {
+	t.Helper()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("no deadline")
+	}
+	return dl
+}
+
+func TestDecisionWiring_HungProviderLeavesShutdownBudget(t *testing.T) {
+	// A provider that never returns must not consume the whole shutdown
+	// budget: shutdownDecision returns at its sub-deadline.
+	quietLogs(t)
+	g := &gate{}
+	g.blocked.Store(true)
+	cfg := decisionTestConfig(t)
+	cfg.Decision.InlineTimeout = 20 * time.Millisecond
+	a := newDecisionApp(t, cfg, g)
+	if err := a.setupDecision(context.Background()); err != nil {
+		t.Fatalf("setupDecision: %v", err)
+	}
+	sess := a.newTestSession(t, "sess-hung")
+	a.decisionRunner.AssessRequest(context.Background(), sess, "req-1", []runner.Message{
+		{Role: "tool", Index: 0, Content: strings.Repeat("The quarterly report lists every office. ", 40)},
+	})
+	if a.decisionScheduler.Metrics().AsyncQueued == 0 {
+		t.Fatal("fixture: async work must be outstanding")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	a.shutdownDecision(shutdownCtx)
+	if took := time.Since(start); took > 1500*time.Millisecond {
+		t.Fatalf("drain took %v of a 2s budget; it must leave the reserve for later steps", took)
+	}
+	if shutdownCtx.Err() != nil {
+		t.Fatal("the shutdown budget itself must not be spent by the drain")
+	}
+}
+
+func (a *app) newTestSession(t *testing.T, id string) *session.Session {
+	t.Helper()
+	if a.manager == nil {
+		a.initSessionStore()
+	}
+	return a.manager.GetOrCreate(id, "http://backend", "127.0.0.1:1")
+}
+
+func TestDecisionWiring_StatusWhenDisabledReportsConfiguredMode(t *testing.T) {
+	quietLogs(t)
+	cfg := decisionTestConfig(t)
+	cfg.Decision.Enabled = false
+	a := newDecisionApp(t, cfg, &gate{})
+	a.initSessionStore()
+	if err := a.setupDecision(context.Background()); err != nil {
+		t.Fatalf("setupDecision: %v", err)
+	}
+	a.initControlAPI()
+
+	w := httptest.NewRecorder()
+	a.controlHandler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/control/decision", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if raw["enabled"] != false || raw["mode"] != config.DecisionModeShadow ||
+		raw["effective_mode"] != config.DecisionModeDisabled || raw["capability"] != "disabled" {
+		t.Fatalf("disabled status = %s", w.Body.String())
+	}
+	gaps, ok := raw["coverage_gaps"].(map[string]any)
+	if !ok || len(gaps) != 0 {
+		t.Fatalf("coverage_gaps must be present and empty when nothing runs: %s", w.Body.String())
 	}
 }
 

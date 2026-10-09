@@ -73,6 +73,9 @@ type app struct {
 	// decisionPipeline overrides the embedded provider's inference backend.
 	// Nil in production (the pure-Go Hugot backend); tests set a fake.
 	decisionPipeline embedded.PipelineFactory
+	// decisionSchedulerCfg is the configuration decisionScheduler was built
+	// with, kept for inspection.
+	decisionSchedulerCfg scheduler.Config
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -996,11 +999,9 @@ func (a *app) initControlAPI() {
 	if a.panel != nil {
 		a.controlHandler.SetPanel(a.panel)
 	}
-	if a.cfg.Decision.Enabled {
-		// Wired whenever the feature is enabled, so a degraded or
-		// mode-disabled deployment reports why rather than "disabled".
-		a.controlHandler.SetDecisionProvider(a)
-	}
+	// Always wired, so the status reports the configured mode and why the
+	// feature is or is not running (disabled, degraded, mode-disabled).
+	a.controlHandler.SetDecisionProvider(a)
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")

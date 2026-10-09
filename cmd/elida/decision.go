@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"elida/internal/config"
 	"elida/internal/control"
@@ -96,11 +97,17 @@ func (a *app) setupDecision(ctx context.Context) error {
 	// pointer that is stored before setupDecision returns, i.e. before any
 	// request can queue async work, so no delivery ever finds it nil.
 	var pending atomic.Pointer[runner.Runner]
-	sch, err := scheduler.New(decisionSchedulerConfig(d, provider, func(req scheduler.Request, in decision.Input, as decision.Assessment) {
+	schCfg := decisionSchedulerConfig(d, provider, func(req scheduler.Request, in decision.Input, as decision.Assessment) {
 		if r := pending.Load(); r != nil {
 			r.OnAsync(req, in, as)
 		}
-	}))
+	})
+	// Kept so tests can inspect exactly the configuration the scheduler was
+	// built with (the exact counter is the provider; Estimator stays nil).
+	// New is handed the stored value itself, so what is inspected is what
+	// was built.
+	a.decisionSchedulerCfg = schCfg
+	sch, err := scheduler.New(a.decisionSchedulerCfg)
 	if err != nil {
 		return a.abandonDecision(ctx, fmt.Errorf("semantic scheduler configuration is invalid: %w", err))
 	}
@@ -231,12 +238,51 @@ func riskLookup(pe *policy.Engine) func(string) (float64, string) {
 	}
 }
 
-// shutdownDecision drains queued semantic analysis within ctx and then
-// closes the provider. The caller has already stopped the proxy, so no new
-// semantic work can start.
+// decisionDrainLimit caps how long shutdown waits for queued semantic
+// analysis. There is no operator key for it: async results are shadow
+// evidence, and losing the tail of them at shutdown is a coverage gap, not
+// a correctness problem.
+const decisionDrainLimit = 5 * time.Second
+
+// decisionDrainReserveFraction is the share of the remaining shutdown budget
+// kept back for the steps after the drain (session drain and persistence,
+// OCSF close, OTEL flush, storage close). A hung provider can therefore
+// consume at most the rest, never the whole budget.
+const decisionDrainReserveFraction = 0.5
+
+// decisionDrainContext derives the drain's own deadline from the shutdown
+// context: min(decisionDrainLimit, remaining budget minus the reserve).
+// With no parent deadline, decisionDrainLimit alone applies. A budget
+// already spent yields an expired context, which makes the scheduler cancel
+// outstanding jobs at once.
+func decisionDrainContext(parent context.Context) (context.Context, context.CancelFunc) {
+	limit := decisionDrainLimit
+	if dl, ok := parent.Deadline(); ok {
+		remaining := time.Until(dl)
+		share := time.Duration(float64(remaining) * (1 - decisionDrainReserveFraction))
+		if share < limit {
+			limit = share
+		}
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return context.WithTimeout(parent, limit)
+}
+
+// shutdownDecision drains queued semantic analysis under its own
+// sub-deadline (decisionDrainContext) and then closes the provider. The
+// caller has already stopped the proxy, so no new semantic work can start.
+//
+// A provider call that ignores its context may still be running on a
+// worker when Close runs; the embedded provider answers unknown after
+// Close, and the process is exiting, so that call's result is dropped.
 func (a *app) shutdownDecision(ctx context.Context) {
 	if a.decisionScheduler != nil {
-		if err := a.decisionScheduler.Shutdown(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		drainCtx, cancel := decisionDrainContext(ctx)
+		err := a.decisionScheduler.Shutdown(drainCtx)
+		cancel()
+		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("semantic scheduler drain did not finish", "error", err)
 		}
 	}
@@ -271,7 +317,9 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		// Pinned: Phase 1 inline admission never waits for a worker, and
 		// validation rejects any other value.
 		InlineQueueWaitMs: 0,
-		CoverageGaps:      map[string]int64{runner.GapMessagesNotAssessed: 0},
+		// Always present: empty when nothing runs, and carrying
+		// messages_not_assessed as soon as a runner exists.
+		CoverageGaps: map[string]int64{},
 	}
 	if a.decisionProvider == nil {
 		return st
@@ -294,6 +342,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 
 	if a.decisionRunner != nil {
 		st.EffectiveMode = a.decisionRunner.EffectiveMode()
+		st.CoverageGaps[runner.GapMessagesNotAssessed] = 0
 		for k, v := range a.decisionRunner.CoverageGaps() {
 			st.CoverageGaps[k] = v
 		}

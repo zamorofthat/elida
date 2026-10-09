@@ -95,8 +95,9 @@ type DecisionStatus struct {
 	// CoverageGaps counts preprocessing budget exhaustions and messages not
 	// assessed, by reason. A gap is never a finding and adds no risk; it is
 	// reported so partial analysis is visible instead of being mistaken for a
-	// clean full scan. messages_not_assessed is always present.
-	CoverageGaps map[string]int64 `json:"coverage_gaps,omitempty"`
+	// clean full scan. The key is always present; messages_not_assessed is
+	// present whenever semantic assessment is running.
+	CoverageGaps map[string]int64 `json:"coverage_gaps"`
 	// AlreadyAssessed counts messages skipped because their session already
 	// had them scored. It is not a gap: the content was analyzed earlier.
 	AlreadyAssessed int64 `json:"already_assessed"`
@@ -833,7 +834,13 @@ func (h *Handler) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if h.decisionProvider == nil {
 		// Not wired means the feature is off. Report that, rather than 404:
 		// a dashboard needs to distinguish "disabled" from "missing route".
-		writeJSON(w, http.StatusOK, DecisionStatus{Capability: "disabled"})
+		// The configured mode is unknown here; main always wires a provider
+		// that reports it.
+		writeJSON(w, http.StatusOK, DecisionStatus{
+			Capability:    "disabled",
+			EffectiveMode: "disabled",
+			CoverageGaps:  map[string]int64{},
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, h.decisionProvider.DecisionStatus())

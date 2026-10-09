@@ -277,6 +277,73 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  container-smoke:
+    name: Container Smoke (amd64 semantic detection)
+    runs-on: ubuntu-latest
+    # Builds the linux/amd64 image (never pushed) and checks that the
+    # released configuration starts semantic detection with the inline
+    # capability, which only amd64 + GOEXPERIMENT=simd can claim and no
+    # developer machine on arm64 can verify. Runs on every PR. Sends no
+    # request content: it reads only the startup log and /control/decision.
+    needs: [model]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Load the model pins
+        run: grep -E '^[A-Z0-9_]+=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the linux/amd64 image (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: elida:ci-smoke
+          platforms: linux/amd64
+          build-args: |
+            VERSION=ci-smoke
+            DEFENDER_COMMIT=${{ env.PINNED_DEFENDER_COMMIT }}
+          cache-from: type=gha
+
+      - name: Semantic detection starts inline and reports its model
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          key="ci-smoke-$(openssl rand -hex 16)"
+          echo "::add-mask::$key"
+          docker run -d --name elida-smoke -p 127.0.0.1:19090:9090 \
+            -e ELIDA_DECISION_ENABLED=true -e ELIDA_DECISION_REQUIRED=true \
+            -e ELIDA_CONTROL_API_KEY="$key" -e ELIDA_BACKEND=http://127.0.0.1:1 \
+            elida:ci-smoke
+          ready=""
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:19090/control/health >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          test -n "$ready" || { docker logs elida-smoke; exit 1; }
+
+          enabled=$(docker logs elida-smoke 2>&1 | grep '"msg":"semantic detection enabled"' || true)
+          echo "$enabled"
+          echo "$enabled" | grep -q '"capability":"inline"'
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19090/control/decision)
+          test "$code" = "401"
+
+          status=$(curl -fsS -H "Authorization: Bearer $key" http://127.0.0.1:19090/control/decision)
+          echo "$status" | jq '{capability, arch, simd, effective_mode, model, model_version, model_checksum, threshold_set_matches}'
+          echo "$status" | jq -e '.capability == "inline" and .arch == "amd64" and .simd == true and .effective_mode == "shadow" and .threshold_set_matches == true'
+          echo "$status" | jq -e --arg sum "$MANIFEST_SHA256" '.model_checksum == $sum'
+
+      - name: Remove the smoke container
+        if: always()
+        run: docker rm -f elida-smoke >/dev/null 2>&1 || true
+
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
