@@ -395,9 +395,11 @@ func (a *app) initSessionEndCallback() {
 		// The record is saved and exported, so the policy engine can let go
 		// of the session: its flagged entry, events and semantic dedup set
 		// would otherwise live for the whole process (alongside Unbind
-		// above, which releases the runner's side).
+		// above, which releases the runner's side). A session at block or
+		// terminate is retained (bounded), so a client reusing its ID still
+		// meets that action; see policy.Engine.ReleaseFlaggedSession.
 		if a.policyEngine != nil {
-			a.policyEngine.RemoveFlaggedSession(sess.ID)
+			a.policyEngine.ReleaseFlaggedSession(sess.ID)
 		}
 	})
 }

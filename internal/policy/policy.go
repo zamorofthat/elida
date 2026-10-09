@@ -306,9 +306,18 @@ type Engine struct {
 	// DecisionID: session ID -> the event IDs (derived from semantic
 	// DecisionIDs) already recorded for that session. Bound: at most
 	// maxSeenDecisionIDsPerSession IDs per session, oldest evicted first,
-	// and it shares the flagged session's lifetime (RemoveFlaggedSession
-	// deletes both). Guarded by mu.
+	// and it shares the flagged session's lifetime (RemoveFlaggedSession and
+	// ReleaseFlaggedSession delete both). Guarded by mu.
 	seenSemanticEvents map[string]*seenDecisionIDs
+
+	// retained holds the IDs of ended sessions whose flagged entry
+	// ReleaseFlaggedSession kept because their ladder action was block or
+	// terminate. retainedOrder is the FIFO used to evict the oldest past
+	// MaxRetainedFlaggedSessions; an entry whose seq no longer matches
+	// retained is stale, skipped and compacted away. Guarded by mu.
+	retained      map[string]uint64
+	retainedOrder []retainedRef
+	retainedSeq   uint64
 
 	// Risk ladder configuration
 	riskLadderEnabled bool
@@ -411,6 +420,7 @@ func NewEngine(cfg Config) *Engine {
 		observeRules:      observeRulesFrom(cfg.Rules),
 
 		seenSemanticEvents: make(map[string]*seenDecisionIDs),
+		retained:           make(map[string]uint64),
 	}
 
 	// Compile regex patterns for content rules
@@ -1636,12 +1646,97 @@ func (e *Engine) severityMeetsMinimum(actual, minimum Severity) bool {
 	return severityOrder[actual] >= severityOrder[minimum]
 }
 
-// RemoveFlaggedSession removes a flagged session (e.g., when session ends)
+// RemoveFlaggedSession removes a flagged session unconditionally, including
+// one ReleaseFlaggedSession retained. The session-end path uses
+// ReleaseFlaggedSession instead.
 func (e *Engine) RemoveFlaggedSession(sessionID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.removeFlaggedLocked(sessionID)
+}
+
+// removeFlaggedLocked drops every per-session record. The caller holds mu.
+func (e *Engine) removeFlaggedLocked(sessionID string) {
 	delete(e.flaggedSessions, sessionID)
 	delete(e.seenSemanticEvents, sessionID)
+	delete(e.retained, sessionID)
+}
+
+// MaxRetainedFlaggedSessions caps how many ended sessions
+// ReleaseFlaggedSession keeps for their block or terminate action. The
+// engine has no cap on live flagged sessions; this bounds only what outlives
+// its session. Past it the oldest retained entry is evicted (removed
+// entirely), so that session ID no longer meets its old action.
+const MaxRetainedFlaggedSessions = 4096
+
+// ReleaseFlaggedSession is the session-end counterpart of recording: it lets
+// the engine forget an ended session, with one retention rule.
+//
+// Retention rule: a session whose current ladder action is block or
+// terminate keeps its whole entry (score, action, violations, events), so a
+// client that reuses that session ID after the session ended still meets
+// the same action. Every other flagged entry (observe, warn/flag, throttle,
+// or no ladder action) is removed, together with its semantic dedup set.
+// Retained entries are bounded by MaxRetainedFlaggedSessions, oldest
+// evicted first. A retained entry that is released again with a lower
+// action is removed.
+//
+// It reports whether the entry was retained; false also covers a session
+// that was never flagged.
+func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	flagged, ok := e.flaggedSessions[sessionID]
+	if !ok {
+		delete(e.seenSemanticEvents, sessionID)
+		delete(e.retained, sessionID)
+		return false
+	}
+	if flagged.CurrentAction != string(ActionBlock) && flagged.CurrentAction != string(ActionTerminate) {
+		e.removeFlaggedLocked(sessionID)
+		return false
+	}
+	if _, already := e.retained[sessionID]; already {
+		return true
+	}
+	e.retainedSeq++
+	e.retained[sessionID] = e.retainedSeq
+	e.retainedOrder = append(e.retainedOrder, retainedRef{id: sessionID, seq: e.retainedSeq})
+	for len(e.retained) > MaxRetainedFlaggedSessions {
+		oldest := e.retainedOrder[0]
+		e.retainedOrder = e.retainedOrder[1:]
+		if seq, live := e.retained[oldest.id]; live && seq == oldest.seq {
+			e.removeFlaggedLocked(oldest.id)
+		}
+	}
+	// Compact stale IDs (released again or removed) so the order slice
+	// stays proportional to the retained set.
+	if len(e.retainedOrder) > 2*MaxRetainedFlaggedSessions {
+		kept := make([]retainedRef, 0, len(e.retained))
+		for _, ref := range e.retainedOrder {
+			if seq, live := e.retained[ref.id]; live && seq == ref.seq {
+				kept = append(kept, ref)
+			}
+		}
+		e.retainedOrder = kept
+	}
+	return true
+}
+
+// retainedRef is one entry of the retention FIFO. seq tells a current entry
+// from a stale one for an ID that was removed and later retained again.
+type retainedRef struct {
+	id  string
+	seq uint64
+}
+
+// RetainedFlaggedSessions reports how many ended sessions are currently
+// retained by ReleaseFlaggedSession.
+func (e *Engine) RetainedFlaggedSessions() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.retained)
 }
 
 // Stats returns policy engine statistics

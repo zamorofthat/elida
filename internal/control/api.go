@@ -1106,6 +1106,12 @@ func (h *Handler) handlePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFlagged handles GET /control/flagged
+//
+// It lists the policy engine's flagged sessions: live sessions, plus ended
+// sessions retained because their ladder action was block or terminate
+// (policy.Engine.ReleaseFlaggedSession, bounded by
+// policy.MaxRetainedFlaggedSessions). Other ended sessions are released at
+// session end; their history is in SQLite when storage is enabled.
 func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

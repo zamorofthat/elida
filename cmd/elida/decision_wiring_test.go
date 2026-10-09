@@ -694,3 +694,72 @@ func TestDecisionWiring_AuditEvidencePersistsAndSessionEndReleasesPolicy(t *test
 		t.Fatal("session end must Unbind the session from the runner")
 	}
 }
+
+// TestSessionEnd_TerminatedSessionIDStaysTerminatedOnReuse: the session-end
+// callback releases flagged sessions from the policy engine, except one at
+// block or terminate, so a client reusing that X-Session-ID after the
+// session ended is still refused by the risk ladder.
+func TestSessionEnd_TerminatedSessionIDStaysTerminatedOnReuse(t *testing.T) {
+	quietLogs(t)
+	var forwarded atomic.Int64
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded.Add(1)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := decisionTestConfig(t)
+	cfg.Decision.Enabled = false
+	cfg.Backend = backend.URL
+	cfg.Policy.Enabled = true
+	cfg.Storage.Enabled = true
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "elida.db")
+	a := newDecisionApp(t, cfg, nil)
+	a.initSessionStore()
+	a.initSQLiteStorage()
+	t.Cleanup(func() { _ = a.sqliteStore.Close() })
+	a.initPolicyEngine()
+	a.initSessionEndCallback()
+	a.initProxy()
+
+	send := func(id string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Session-ID", id)
+		w := httptest.NewRecorder()
+		a.proxyHandler.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	// Two sessions: one driven to terminate, one to throttle.
+	if send("sess-term") != http.StatusOK || send("sess-throttle") != http.StatusOK {
+		t.Fatal("fixture: first requests must pass")
+	}
+	a.policyEngine.AddExternalRiskPoints("sess-term", 60, "test")
+	a.policyEngine.AddExternalRiskPoints("sess-throttle", 16, "test")
+	if _, action, _ := a.policyEngine.GetSessionRiskScore("sess-term"); action != "terminate" {
+		t.Fatalf("fixture: action = %q", action)
+	}
+
+	if n := a.manager.DrainActiveSessions(); n != 2 {
+		t.Fatalf("drained %d sessions, want 2", n)
+	}
+
+	// The terminated ID keeps its action and is refused on reuse.
+	if _, action, _ := a.policyEngine.GetSessionRiskScore("sess-term"); action != "terminate" {
+		t.Fatalf("a terminated session ID must still meet terminate after session end, got %q", action)
+	}
+	before := forwarded.Load()
+	if code := send("sess-term"); code != http.StatusForbidden {
+		t.Fatalf("reusing a terminated session ID: status %d, want 403", code)
+	}
+	if forwarded.Load() != before {
+		t.Fatal("a refused request must not be forwarded")
+	}
+	// The throttled one was released.
+	if a.policyEngine.GetFlaggedSession("sess-throttle") != nil {
+		t.Fatal("a session below block must be removed at session end")
+	}
+}
