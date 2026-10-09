@@ -154,6 +154,7 @@ func (a *app) setupDecision(ctx context.Context) error {
 	}
 	pending.Store(r)
 	a.decisionRunner = r
+	warnEmptyElevatedBand(d.ElevatedThreshold, m.Calibration.MainThreshold)
 
 	h := provider.Health()
 	slog.Info("semantic injection detection initialized",
@@ -232,6 +233,17 @@ func decisionThresholds(m *embedded.Manifest, elevated float64) runner.Threshold
 		Elevated: elevated,
 		Warning:  main,
 		Critical: main + (1-main)/2,
+	}
+}
+
+// warnEmptyElevatedBand logs one WARN when decision.elevated_threshold is
+// at or above the model's main threshold. The two come from different
+// sources (config and manifest), so config validation cannot compare them;
+// the runner then emits no injection_elevated events at all.
+func warnEmptyElevatedBand(elevated, main float64) {
+	if elevated > 0 && elevated >= main {
+		slog.Warn("decision.elevated_threshold is at or above the model's main threshold; the injection_elevated band is empty and no injection_elevated evidence will be recorded",
+			"elevated_threshold", elevated, "main_threshold", main)
 	}
 }
 

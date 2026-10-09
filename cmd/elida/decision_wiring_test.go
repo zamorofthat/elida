@@ -322,6 +322,36 @@ func TestDecisionWiring_NotRequiredStartsDegradedAndOff(t *testing.T) {
 	}
 }
 
+// TestDecisionWiring_WarnsWhenElevatedBandIsEmpty: the fixture model's main
+// threshold is 0.5; an elevated_threshold at or above it logs one WARN.
+func TestDecisionWiring_WarnsWhenElevatedBandIsEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		elevated float64
+		want     int
+	}{
+		{0.3, 0},
+		{0, 0},
+		{0.5, 1},
+		{0.7, 1},
+	} {
+		var buf strings.Builder
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		cfg := decisionTestConfig(t)
+		cfg.Decision.ElevatedThreshold = tc.elevated
+		a := newDecisionApp(t, cfg, &gate{})
+		err := a.setupDecision(context.Background())
+		slog.SetDefault(prev)
+		if err != nil {
+			t.Fatalf("setupDecision: %v", err)
+		}
+		a.shutdownDecision(context.Background())
+		if got := strings.Count(buf.String(), "injection_elevated band is empty"); got != tc.want {
+			t.Errorf("elevated=%v: %d warnings, want %d\n%s", tc.elevated, got, tc.want, buf.String())
+		}
+	}
+}
+
 func TestDecisionWiring_PolicyModeCapsDecisionMode(t *testing.T) {
 	quietLogs(t)
 	for _, tc := range []struct {

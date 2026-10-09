@@ -70,6 +70,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,7 +147,9 @@ type Thresholds struct {
 	// Elevated is the lower edge of the injection_elevated band: a score in
 	// [Elevated, Main) that was not vetoed records an evidence-only
 	// injection_elevated event in audit and enforce modes. Zero or less
-	// disables the band (otherwise every score would qualify).
+	// disables the band (otherwise every score would qualify). Elevated at
+	// or above Main leaves the band empty: no injection_elevated events
+	// (setupDecision warns about it at startup).
 	Elevated float64
 	// Warning maps a probability at or above it onto a warning severity.
 	Warning float64
@@ -224,8 +227,8 @@ type Config struct {
 	InlineTimeout time.Duration
 	// Policy records violations. Nil means shadow-only behavior regardless
 	// of Mode, which is how the runner is tested without a policy engine.
-	// Callers must not pass a typed nil (a nil *policy.Engine): that is a
-	// non-nil interface and would be called.
+	// New rejects a typed nil (a nil *policy.Engine behind the interface),
+	// which would otherwise be called on the first finding.
 	Policy PolicyRecorder
 }
 
@@ -408,6 +411,13 @@ func New(cfg Config) (*Runner, error) {
 		}
 		if cfg.Model.ThresholdSet == "" {
 			return nil, errors.New("runner: Model.ThresholdSet is required")
+		}
+	}
+	if cfg.Policy != nil {
+		// A nil pointer behind the interface (e.g. a nil *policy.Engine) is
+		// a non-nil interface and would be called on the first finding.
+		if rv := reflect.ValueOf(cfg.Policy); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			return nil, fmt.Errorf("runner: Policy is a nil %T; pass a nil interface for shadow-only behavior", cfg.Policy)
 		}
 	}
 	if cfg.InlineTimeout < 0 {

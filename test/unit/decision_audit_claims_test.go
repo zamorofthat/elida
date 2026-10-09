@@ -362,3 +362,37 @@ func TestAuditClaims_NoContentInViolationsEvidenceOrLogs(t *testing.T) {
 		t.Fatalf("content leaked into logs:\n%s", buf.String())
 	}
 }
+
+func TestRunnerNew_RejectsTypedNilPolicy(t *testing.T) {
+	sch, err := scheduler.New(scheduler.Config{
+		Provider:         decisiontest.NewFake(nil),
+		TokenCounter:     decisiontest.ByteTokenCounter{BytesPerToken: 4},
+		Signals:          []decision.Signal{decision.SignalInjection},
+		MaxConcurrency:   1,
+		InlineTimeout:    time.Second,
+		MaxInlineTokens:  1024,
+		MaxInlineWindows: 1,
+		AsyncQueueSize:   1,
+		MaxWindowTokens:  64,
+	})
+	if err != nil {
+		t.Fatalf("scheduler.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sch.Shutdown(context.Background()) })
+	cfg := runner.Config{
+		Mode: "audit", PolicyMode: "enforce", Scheduler: sch, Budget: runnerBudget(),
+		Signals:    []decision.Signal{decision.SignalInjection},
+		Thresholds: runner.Thresholds{Main: 0.5, Aux: 0.64, Elevated: 0.3, Warning: 0.5, Critical: 0.8},
+		Model:      runner.ModelIdentity{Name: "m", Version: "v", ThresholdSet: "v1"},
+	}
+
+	var nilEngine *policy.Engine
+	cfg.Policy = nilEngine
+	if _, err := runner.New(cfg); err == nil || !strings.Contains(err.Error(), "nil") {
+		t.Fatalf("a typed-nil Policy must be rejected with a clear error, got %v", err)
+	}
+	cfg.Policy = nil
+	if _, err := runner.New(cfg); err != nil {
+		t.Fatalf("a nil interface means shadow-only behavior: %v", err)
+	}
+}
