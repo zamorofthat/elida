@@ -195,6 +195,11 @@ type TrustConfig struct {
 
 	// AllowlistedTools - tool names that bypass content scanning on request side
 	// Example: ["Bash", "Read", "Glob"] — requests invoking these tools skip request-side rules
+	//
+	// This is a control for the regex policy engine only. Semantic injection
+	// detection (decision.*) ignores it: tool output is the untrusted content
+	// that detection exists to score, so an allowlisted Read result is still
+	// assessed.
 	AllowlistedTools []string `yaml:"allowlisted_tools"`
 }
 

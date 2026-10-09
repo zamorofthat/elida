@@ -539,6 +539,8 @@ policy:
 
 Tools like `Bash` are intentionally excluded — they can execute dangerous commands and should be scanned.
 
+The allowlist applies to the regex policy engine only. Semantic injection detection (`decision.*`) ignores it. An allowlisted tool's output, such as a `Read` of a README that carries an injection, is still assessed. That untrusted tool output is exactly what semantic detection exists to score.
+
 ## Session ID Behavior
 
 ELIDA resolves a session ID per request, in order of precedence:

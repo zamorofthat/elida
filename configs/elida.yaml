@@ -242,6 +242,8 @@ policy:
       - "system-reminder"
     # Tool names that bypass request-side content scanning
     # Requests containing only these tools skip policy checks
+    # Regex policy only: semantic detection (decision.*) still assesses
+    # these tools' output, which is the untrusted content it exists to score.
     allowlisted_tools:
       - "Read"
       - "Glob"

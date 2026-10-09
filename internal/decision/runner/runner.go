@@ -32,6 +32,8 @@
 //     scheduler never saw; that message's coverage_complete is false.
 //   - original_only: the scheduler could not take derived representations,
 //     so only the original was scored; coverage_complete is false.
+//   - unsupported_block: content blocks of the message the proxy could not
+//     render as text (images, documents); coverage_complete is false.
 //
 // already_assessed is not a gap and is counted separately
 // (AlreadyAssessed). Chat clients resend the whole history, so a message
@@ -120,6 +122,11 @@ type Message struct {
 	Index int
 	// Content is the text to analyze. It is never logged or recorded.
 	Content string
+	// SkippedBlocks counts content blocks of the message that are not in
+	// Content (images, documents, other non-text blocks). Nonzero means the
+	// message is only partly analyzable: its decisions are recorded with
+	// coverage_complete false and GapUnsupportedBlock is counted.
+	SkippedBlocks int
 }
 
 // Config configures the runner.
@@ -190,6 +197,10 @@ const (
 	// GapOriginalOnly counts messages assessed through a scheduler without
 	// AssessCandidates: derived representations were not scored.
 	GapOriginalOnly = "original_only"
+	// GapUnsupportedBlock counts content blocks of assessed messages that
+	// could not be rendered as text (images, documents, nested non-text
+	// tool_result blocks), so were never analyzed.
+	GapUnsupportedBlock = "unsupported_block"
 	// ReasonAlreadyAssessed counts messages skipped because this session
 	// already had them scored. It is not a gap; see AlreadyAssessed.
 	ReasonAlreadyAssessed = "already_assessed"
@@ -828,7 +839,7 @@ func (r *Runner) AssessPolicyMessages(ctx context.Context, sess *session.Session
 	}
 	converted := make([]Message, 0, len(msgs))
 	for _, m := range msgs {
-		converted = append(converted, Message{Role: m.Role, Index: m.Index, Content: m.Content})
+		converted = append(converted, Message{Role: m.Role, Index: m.Index, Content: m.Content, SkippedBlocks: m.SkippedBlocks})
 	}
 	r.AssessRequest(ctx, sess, requestID, converted)
 }
@@ -913,6 +924,12 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 	// is content the scheduler never saw, so the scan is not complete even
 	// when every window it was handed answered.
 	if len(pre.Gaps) > 0 {
+		a.Coverage.Complete = false
+	}
+	// Blocks the proxy could not render as text were never handed over at
+	// all: the same kind of gap, at the message level.
+	if msg.SkippedBlocks > 0 {
+		r.countGap(GapUnsupportedBlock, int64(msg.SkippedBlocks))
 		a.Coverage.Complete = false
 	}
 

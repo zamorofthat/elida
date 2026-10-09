@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -447,25 +446,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract scannable messages once: both the regex policy engine and the
-	// semantic assessor consume the same per-message view with source
-	// attribution. System prompts are hash-cached, only scanned on first
-	// request or if changed; trusted tags (e.g., <system-reminder>) are
-	// stripped. The extraction is skipped entirely when neither consumer is
-	// wired, so the disabled-everything path is unchanged.
-	//
-	// toolResults holds Anthropic tool_result block text as role "tool".
-	// Only the semantic assessor sees it: the policy engine's input is
-	// exactly what it was before semantic detection existed.
-	var messages, toolResults []policy.MessageToScan
-	if len(requestBody) > 0 && (p.policy != nil || p.semantic != nil) {
-		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
-		messages, toolResults = extractRequestMessages(requestBody, sess, p.trustedTagRegexs, p.semantic != nil, allowlistedTools)
-	}
-
 	// Content inspection - check request body against policy rules BEFORE forwarding
 	// Per-message scanning: each message scanned individually with source attribution
+	// System prompts: hash-cached, only scanned on first request or if changed
+	// Trusted tags (e.g., <system-reminder>) are stripped before scanning
 	if p.policy != nil && len(requestBody) > 0 {
+		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
+		messages := extractScannableMessages(requestBody, sess, p.trustedTagRegexs, allowlistedTools)
 		var result *policy.ContentCheckResult
 		if len(messages) > 0 {
 			result = p.policy.EvaluateMessages(sess.ID, messages)
@@ -531,11 +518,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Semantic assessment runs after regex policy and before forwarding, so
 	// an inline result can still protect this request, and it runs whether
-	// or not the policy engine is enabled. It never changes the body and
-	// never fails the request: a panic or a timeout is a coverage gap, not
-	// an error.
-	if p.semantic != nil && len(messages)+len(toolResults) > 0 {
-		p.runSemanticAssessment(ctx, sess, semanticMessages(messages, toolResults))
+	// or not the policy engine is enabled. It has its own view of the
+	// request (extractSemanticMessages: tool_result content included, the
+	// regex allowlist ignored), so the policy engine's input is exactly what
+	// it was before semantic detection existed. It never changes the body
+	// and never fails the request: a panic or a timeout is a coverage gap,
+	// not an error.
+	if p.semantic != nil && len(requestBody) > 0 {
+		if msgs := extractSemanticMessages(requestBody, p.trustedTagRegexs); len(msgs) > 0 {
+			p.runSemanticAssessment(ctx, sess, msgs)
+		}
 	}
 
 	// Extract tool calls from request (tools being defined or tool results being sent)
@@ -1846,19 +1838,14 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 	}
 }
 
-// extractRequestMessages parses a chat request and returns individual messages to scan
+// extractScannableMessages parses a chat request and returns individual messages to scan
 // with role/index attribution. System prompts are hash-cached — only scanned once per session
 // unless the content changes. Supports both Anthropic (top-level "system") and OpenAI
 // (role: "system" message) formats. Returns nil for non-chat requests (caller should fallback).
 //
-// messages is the policy engine's view and is independent of withToolResults.
-// When withToolResults is true, toolResults additionally carries the text of
-// each message's Anthropic tool_result blocks as one role "tool" entry per
-// message (see extractToolResultContent); extractMessageContent reads only
-// block "text" fields, so that content never reaches messages. Trusted tags
-// are not stripped from tool results: tool output is untrusted, and a
-// trusted tag inside it must not hide content from analysis.
-func extractRequestMessages(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, withToolResults bool, allowlistedTools ...[]string) (messages, toolResults []policy.MessageToScan) {
+// This is the policy engine's view only. The semantic assessor gets its own
+// view from extractSemanticMessages.
+func extractScannableMessages(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, allowlistedTools ...[]string) []policy.MessageToScan {
 	var req struct {
 		System   any `json:"system"` // Anthropic top-level system prompt (string or content blocks)
 		Messages []struct {
@@ -1868,7 +1855,7 @@ func extractRequestMessages(body []byte, sess *session.Session, trustedTagRegexs
 	}
 
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
-		return nil, nil // Not a chat request, fallback to full body
+		return nil // Not a chat request, fallback to full body
 	}
 
 	// Check if request contains only allowlisted tool usage — skip scanning if so
@@ -1878,9 +1865,10 @@ func extractRequestMessages(body []byte, sess *session.Session, trustedTagRegexs
 	}
 	if len(allowed) > 0 && containsOnlyAllowlistedTools(req.Messages, allowed) {
 		slog.Debug("skipping content scan — allowlisted tools only", "session_id", sess.ID)
-		return nil, nil
+		return nil
 	}
 
+	var messages []policy.MessageToScan
 	cachedHash := sess.GetSystemPromptHash()
 
 	// Handle Anthropic top-level system field (scan once, then skip via hash cache)
@@ -1898,16 +1886,6 @@ func extractRequestMessages(body []byte, sess *session.Session, trustedTagRegexs
 	}
 
 	for i, msg := range req.Messages {
-		if withToolResults {
-			if tr := extractToolResultContent(msg.Content); tr != "" {
-				toolResults = append(toolResults, policy.MessageToScan{
-					Role:    "tool",
-					Index:   i,
-					Content: tr,
-				})
-			}
-		}
-
 		content := extractMessageContent(msg.Content)
 		if content == "" {
 			continue
@@ -1933,17 +1911,102 @@ func extractRequestMessages(body []byte, sess *session.Session, trustedTagRegexs
 		}
 	}
 
-	return messages, toolResults
+	return messages
+}
+
+// extractSemanticMessages parses a chat request into the semantic assessor's
+// view: one entry per non-system message with its text (trusted tags
+// stripped, as in the policy view), followed directly by one role "tool"
+// entry carrying the message's Anthropic tool_result content, in message
+// order. Returns nil for a non-chat request.
+//
+// It differs from the policy view on purpose:
+//   - policy.trust.allowlisted_tools is ignored. The allowlist suppresses
+//     regex false positives on known tool output; semantic detection exists
+//     to score exactly that untrusted output, so an allowlisted Read result
+//     is still assessed.
+//   - System prompts are omitted (they are trusted and never assessed), so
+//     the policy engine's system-prompt hash cache is not touched.
+//   - Trusted tags are not stripped from tool results: tool output is
+//     untrusted, and a trusted tag inside it must not hide content.
+//
+// SkippedBlocks records content blocks that could not be rendered as text
+// (images, documents, nested non-text blocks), so the assessment of that
+// entry is never recorded as complete.
+func extractSemanticMessages(body []byte, trustedTagRegexs []*regexp.Regexp) []policy.MessageToScan {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
+		return nil
+	}
+
+	var out []policy.MessageToScan
+	for i, msg := range req.Messages {
+		if msg.Role == "system" {
+			continue
+		}
+		if content := extractMessageContent(msg.Content); content != "" {
+			if len(trustedTagRegexs) > 0 {
+				content = stripTrustedTags(content, trustedTagRegexs)
+			}
+			out = append(out, policy.MessageToScan{
+				Role:          msg.Role,
+				Index:         i,
+				Content:       content,
+				SkippedBlocks: unsupportedMessageBlocks(msg.Content),
+			})
+		}
+		if tr, skipped := extractToolResultContent(msg.Content); tr != "" {
+			out = append(out, policy.MessageToScan{
+				Role:          "tool",
+				Index:         i,
+				Content:       tr,
+				SkippedBlocks: skipped,
+			})
+		}
+	}
+	return out
+}
+
+// unsupportedMessageBlocks counts a message's top-level content blocks that
+// carry neither text nor a tool_result (images, documents, and so on): content
+// the assessor never sees.
+func unsupportedMessageBlocks(content any) int {
+	blocks, ok := content.([]any)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok {
+			n++
+			continue
+		}
+		switch m["type"] {
+		case "text", "tool_result", "tool_use":
+			// text is rendered; tool_result is its own entry; tool_use is a
+			// call the model made, not content to analyze.
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 // extractToolResultContent returns the text of every Anthropic tool_result
 // block in a message's content, joined like extractMessageContent joins text
-// blocks. A tool_result's content is either a string or an array of blocks,
-// of which only {type: "text"} blocks carry text. Anything else returns "".
-func extractToolResultContent(content any) string {
+// blocks, and how many blocks inside those tool_results were not text. A
+// tool_result's content is either a string or an array of blocks, of which
+// only {type: "text"} blocks carry text.
+func extractToolResultContent(content any) (text string, skipped int) {
 	blocks, ok := content.([]any)
 	if !ok {
-		return ""
+		return "", 0
 	}
 	var result strings.Builder
 	for _, block := range blocks {
@@ -1952,6 +2015,7 @@ func extractToolResultContent(content any) string {
 			continue
 		}
 		switch c := m["content"].(type) {
+		case nil:
 		case string:
 			if c != "" {
 				result.WriteString(c)
@@ -1961,30 +2025,19 @@ func extractToolResultContent(content any) string {
 			for _, inner := range c {
 				im, ok := inner.(map[string]any)
 				if !ok || im["type"] != "text" {
+					skipped++
 					continue
 				}
-				if text, ok := im["text"].(string); ok && text != "" {
-					result.WriteString(text)
+				if t, ok := im["text"].(string); ok && t != "" {
+					result.WriteString(t)
 					result.WriteString(" ")
 				}
 			}
+		default:
+			skipped++
 		}
 	}
-	return result.String()
-}
-
-// semanticMessages merges the policy view with the tool-result entries in
-// message order, so the runner's newest-first selection sees each tool
-// result next to the message that carried it. The inputs are not modified.
-func semanticMessages(messages, toolResults []policy.MessageToScan) []policy.MessageToScan {
-	if len(toolResults) == 0 {
-		return messages
-	}
-	out := make([]policy.MessageToScan, 0, len(messages)+len(toolResults))
-	out = append(out, messages...)
-	out = append(out, toolResults...)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Index < out[j].Index })
-	return out
+	return result.String(), skipped
 }
 
 // runSemanticAssessment calls the assessor with a recovered panic.
