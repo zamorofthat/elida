@@ -51,7 +51,9 @@
 // Sessions. Bind registers a session so async results and the per-session
 // assessed-message set can find it; the registry is bounded. The session-end
 // path must call Unbind, so an ended session is neither retained nor written
-// to by a late async result.
+// to by a late async result. One benign race remains: an OnAsync that looked
+// the session up just before Unbind can still record onto it, so at most one
+// in-flight result per job can land on a session that is being persisted.
 //
 // Nothing in this package logs, records or returns request content; the
 // assessed-message set keeps a SHA-256 of each message, never the message.
@@ -71,6 +73,7 @@ import (
 	"elida/internal/decision"
 	"elida/internal/decision/preprocess"
 	"elida/internal/decision/scheduler"
+	"elida/internal/policy"
 	"elida/internal/session"
 )
 
@@ -107,7 +110,8 @@ type ModelIdentity struct {
 }
 
 // Message is one message to analyze. It mirrors policy.MessageToScan by
-// value so this package does not depend on the policy engine in shadow mode.
+// value; the only use of the policy package is the AssessPolicyMessages
+// conversion, so nothing here depends on the policy engine's behavior.
 type Message struct {
 	// Role is "user", "assistant", "system" or "tool".
 	Role string
@@ -808,6 +812,30 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 			"session_id", sess.ID, "request_id", requestID,
 			"skipped", notAssessed, "reason", GapMessagesNotAssessed)
 	}
+}
+
+// AssessPolicyMessages adapts the policy engine's per-message view to this
+// package's Message type, so the proxy can hand the same extraction to both
+// the regex engine and the semantic subsystem. It then behaves exactly as
+// AssessRequest.
+//
+// This is the only place runner depends on the policy package, and it is a
+// one-way value conversion.
+func (r *Runner) AssessPolicyMessages(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) {
+	if r.mode == config.DecisionModeDisabled || len(msgs) == 0 {
+		return
+	}
+	converted := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		converted = append(converted, Message{Role: m.Role, Index: m.Index, Content: m.Content})
+	}
+	r.AssessRequest(ctx, sess, requestID, converted)
+}
+
+// Bound reports whether a session is currently in the registry. It exists so
+// the session-end path can be verified to release the session (Unbind).
+func (r *Runner) Bound(sessionID string) bool {
+	return r.lookupSession(sessionID) != nil
 }
 
 // alreadyClaimed reports whether the session's assessed set holds k, without

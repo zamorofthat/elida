@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"elida/internal/instruction"
+	"elida/internal/session"
 
 	_ "modernc.org/sqlite"
 )
@@ -143,6 +144,24 @@ type SemanticShadow struct {
 	ProtectionScope  string    `json:"protection_scope"`
 	CoverageComplete bool      `json:"coverage_complete"`
 	LatencyMs        int64     `json:"latency_ms"`
+}
+
+// SemanticShadowFromSession copies a session's shadow list into its
+// persisted form, preserving order (newest first). It returns nil for an
+// empty list so a record without shadow decisions stays unchanged.
+//
+// The conversion is field-for-field: it compiles only while the two structs
+// have identical fields, so the persisted form cannot silently drift from
+// the in-memory one.
+func SemanticShadowFromSession(in []session.SemanticShadow) []SemanticShadow {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SemanticShadow, len(in))
+	for i, s := range in {
+		out[i] = SemanticShadow(s)
+	}
+	return out
 }
 
 // SQLiteStore provides persistent storage for session history

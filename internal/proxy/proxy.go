@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,6 +69,7 @@ type Proxy struct {
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 	redactor                redaction.Redactor    // Redaction provider for sensitive data
+	semantic                SemanticAssessor      // Semantic injection assessment (nil when disabled)
 	trustedNets             []*net.IPNet          // proxy.auth.trusted_networks parsed at startup
 }
 
@@ -96,6 +99,22 @@ func WithInstructionRegistry(reg *instruction.Registry) ProxyOption {
 // WithRedactor sets the redaction provider.
 func WithRedactor(r redaction.Redactor) ProxyOption {
 	return func(p *Proxy) { p.redactor = r }
+}
+
+// SemanticAssessor runs semantic injection assessment on the eligible
+// messages of a request.
+//
+// Implementations must not modify the messages, must not block past their
+// own configured inline deadline, and must treat a failure to analyze as a
+// coverage fact rather than a request failure. A nil assessor means the
+// feature is disabled and the request path does nothing.
+type SemanticAssessor interface {
+	AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan)
+}
+
+// WithSemanticAssessor sets the semantic injection assessor.
+func WithSemanticAssessor(a SemanticAssessor) ProxyOption {
+	return func(p *Proxy) { p.semantic = a }
 }
 
 // New creates a new proxy handler with the given options.
@@ -428,13 +447,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Extract scannable messages once: both the regex policy engine and the
+	// semantic assessor consume the same per-message view with source
+	// attribution. System prompts are hash-cached, only scanned on first
+	// request or if changed; trusted tags (e.g., <system-reminder>) are
+	// stripped. The extraction is skipped entirely when neither consumer is
+	// wired, so the disabled-everything path is unchanged.
+	//
+	// toolResults holds Anthropic tool_result block text as role "tool".
+	// Only the semantic assessor sees it: the policy engine's input is
+	// exactly what it was before semantic detection existed.
+	var messages, toolResults []policy.MessageToScan
+	if len(requestBody) > 0 && (p.policy != nil || p.semantic != nil) {
+		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
+		messages, toolResults = extractRequestMessages(requestBody, sess, p.trustedTagRegexs, p.semantic != nil, allowlistedTools)
+	}
+
 	// Content inspection - check request body against policy rules BEFORE forwarding
 	// Per-message scanning: each message scanned individually with source attribution
-	// System prompts: hash-cached, only scanned on first request or if changed
-	// Trusted tags (e.g., <system-reminder>) are stripped before scanning
 	if p.policy != nil && len(requestBody) > 0 {
-		allowlistedTools := p.config.Policy.Trust.AllowlistedTools
-		messages := extractScannableMessages(requestBody, sess, p.trustedTagRegexs, allowlistedTools)
 		var result *policy.ContentCheckResult
 		if len(messages) > 0 {
 			result = p.policy.EvaluateMessages(sess.ID, messages)
@@ -496,6 +527,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"violations", len(result.Violations),
 			)
 		}
+	}
+
+	// Semantic assessment runs after regex policy and before forwarding, so
+	// an inline result can still protect this request, and it runs whether
+	// or not the policy engine is enabled. It never changes the body and
+	// never fails the request: a panic or a timeout is a coverage gap, not
+	// an error.
+	if p.semantic != nil && len(messages)+len(toolResults) > 0 {
+		p.runSemanticAssessment(ctx, sess, semanticMessages(messages, toolResults))
 	}
 
 	// Extract tool calls from request (tools being defined or tool results being sent)
@@ -1757,6 +1797,8 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 		BytesOut:     snap.BytesOut,
 		Backend:      backendName,
 		ClientAddr:   snap.ClientAddr,
+		// Shadow decisions carry no content, so they need no redaction.
+		SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
 	}
 
 	// Add captured content
@@ -1804,12 +1846,19 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 	}
 }
 
-// extractScannableContent parses the request body and returns content to scan.
-// extractScannableMessages parses a chat request and returns individual messages to scan
+// extractRequestMessages parses a chat request and returns individual messages to scan
 // with role/index attribution. System prompts are hash-cached — only scanned once per session
 // unless the content changes. Supports both Anthropic (top-level "system") and OpenAI
 // (role: "system" message) formats. Returns nil for non-chat requests (caller should fallback).
-func extractScannableMessages(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, allowlistedTools ...[]string) []policy.MessageToScan {
+//
+// messages is the policy engine's view and is independent of withToolResults.
+// When withToolResults is true, toolResults additionally carries the text of
+// each message's Anthropic tool_result blocks as one role "tool" entry per
+// message (see extractToolResultContent); extractMessageContent reads only
+// block "text" fields, so that content never reaches messages. Trusted tags
+// are not stripped from tool results: tool output is untrusted, and a
+// trusted tag inside it must not hide content from analysis.
+func extractRequestMessages(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, withToolResults bool, allowlistedTools ...[]string) (messages, toolResults []policy.MessageToScan) {
 	var req struct {
 		System   any `json:"system"` // Anthropic top-level system prompt (string or content blocks)
 		Messages []struct {
@@ -1819,7 +1868,7 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 	}
 
 	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
-		return nil // Not a chat request, fallback to full body
+		return nil, nil // Not a chat request, fallback to full body
 	}
 
 	// Check if request contains only allowlisted tool usage — skip scanning if so
@@ -1829,10 +1878,9 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 	}
 	if len(allowed) > 0 && containsOnlyAllowlistedTools(req.Messages, allowed) {
 		slog.Debug("skipping content scan — allowlisted tools only", "session_id", sess.ID)
-		return nil
+		return nil, nil
 	}
 
-	var messages []policy.MessageToScan
 	cachedHash := sess.GetSystemPromptHash()
 
 	// Handle Anthropic top-level system field (scan once, then skip via hash cache)
@@ -1850,6 +1898,16 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 	}
 
 	for i, msg := range req.Messages {
+		if withToolResults {
+			if tr := extractToolResultContent(msg.Content); tr != "" {
+				toolResults = append(toolResults, policy.MessageToScan{
+					Role:    "tool",
+					Index:   i,
+					Content: tr,
+				})
+			}
+		}
+
 		content := extractMessageContent(msg.Content)
 		if content == "" {
 			continue
@@ -1875,7 +1933,79 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 		}
 	}
 
-	return messages
+	return messages, toolResults
+}
+
+// extractToolResultContent returns the text of every Anthropic tool_result
+// block in a message's content, joined like extractMessageContent joins text
+// blocks. A tool_result's content is either a string or an array of blocks,
+// of which only {type: "text"} blocks carry text. Anything else returns "".
+func extractToolResultContent(content any) string {
+	blocks, ok := content.([]any)
+	if !ok {
+		return ""
+	}
+	var result strings.Builder
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok || m["type"] != "tool_result" {
+			continue
+		}
+		switch c := m["content"].(type) {
+		case string:
+			if c != "" {
+				result.WriteString(c)
+				result.WriteString(" ")
+			}
+		case []any:
+			for _, inner := range c {
+				im, ok := inner.(map[string]any)
+				if !ok || im["type"] != "text" {
+					continue
+				}
+				if text, ok := im["text"].(string); ok && text != "" {
+					result.WriteString(text)
+					result.WriteString(" ")
+				}
+			}
+		}
+	}
+	return result.String()
+}
+
+// semanticMessages merges the policy view with the tool-result entries in
+// message order, so the runner's newest-first selection sees each tool
+// result next to the message that carried it. The inputs are not modified.
+func semanticMessages(messages, toolResults []policy.MessageToScan) []policy.MessageToScan {
+	if len(toolResults) == 0 {
+		return messages
+	}
+	out := make([]policy.MessageToScan, 0, len(messages)+len(toolResults))
+	out = append(out, messages...)
+	out = append(out, toolResults...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Index < out[j].Index })
+	return out
+}
+
+// runSemanticAssessment calls the assessor with a recovered panic.
+//
+// The assessor touches a model, a worker pool and a queue. None of that may
+// ever take down a proxied request: a failure to analyze is a coverage gap.
+// The panic value is not logged: it could quote request content.
+func (p *Proxy) runSemanticAssessment(ctx context.Context, sess *session.Session, messages []policy.MessageToScan) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("semantic assessment panicked; request continues unanalyzed",
+				"session_id", sess.ID,
+				"panic_type", fmt.Sprintf("%T", r),
+			)
+		}
+	}()
+	// The request ID makes decision IDs stable per request. The proxy has no
+	// request ID of its own, so a fresh one is minted here; unlike the
+	// session's request counter it cannot collide between two concurrent
+	// requests on one session, and it needs no session lock.
+	p.semantic.AssessRequest(ctx, sess, uuid.New().String(), messages)
 }
 
 // systemMessageIfChanged returns a MessageToScan for the system prompt only if it's new or changed.

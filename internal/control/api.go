@@ -34,6 +34,74 @@ type PanelProvider interface {
 	Members() []panel.MemberInfo
 }
 
+// DecisionProvider exposes semantic decision status for the control API.
+type DecisionProvider interface {
+	DecisionStatus() DecisionStatus
+}
+
+// DecisionStatus is the read-only operational view of semantic detection.
+//
+// This is deliberately on an authenticated route and not on
+// /control/health: model identity, checksums and threshold-set versions are
+// deployment detail, and /control/health is reachable without credentials so
+// liveness probes can use it.
+type DecisionStatus struct {
+	Enabled       bool   `json:"enabled"`
+	Mode          string `json:"mode"`
+	EffectiveMode string `json:"effective_mode"`
+	// Capability is inline, async_only, degraded or disabled.
+	Capability string `json:"capability"`
+	Reason     string `json:"reason,omitempty"`
+	Arch       string `json:"arch"`
+	SIMD       bool   `json:"simd"`
+
+	// InlineQueueWaitMs is reported read-only. Phase 1 requires it to be
+	// zero, so it is not in the editable settings surface; an operator sees
+	// the value in force here instead.
+	InlineQueueWaitMs int `json:"inline_queue_wait_ms"`
+
+	Model         string   `json:"model,omitempty"`
+	ModelVersion  string   `json:"model_version,omitempty"`
+	ModelChecksum string   `json:"model_checksum,omitempty"`
+	Signals       []string `json:"signals,omitempty"`
+
+	ThresholdSet        string `json:"threshold_set,omitempty"`
+	ThresholdSetMatches bool   `json:"threshold_set_matches"`
+
+	BreakerOpen bool `json:"breaker_open"`
+
+	// Capacity signals. These, not a fixed requests-per-second figure, are
+	// what tell an operator to add replicas or lower concurrency.
+	InlineCompletionRatio float64          `json:"inline_completion_ratio"`
+	InlineAdmissionRatio  float64          `json:"inline_admission_ratio"`
+	AsyncFallbackRatio    float64          `json:"async_fallback_ratio"`
+	AsyncQueueDepth       int              `json:"async_queue_depth"`
+	AsyncDropped          int64            `json:"async_dropped"`
+	MaxInFlight           int64            `json:"max_in_flight"`
+	AdmissionReasons      map[string]int64 `json:"admission_reasons,omitempty"`
+
+	// InlineSlots and AsyncWorkers are the two lanes of max_concurrency;
+	// AsyncWorkers 0 means async continuation is disabled.
+	InlineSlots  int `json:"inline_slots"`
+	AsyncWorkers int `json:"async_workers"`
+	// InlinePanics counts provider panics recovered on the inline lane.
+	InlinePanics int64 `json:"inline_panics"`
+	// AsyncCanceled counts queued jobs whose async timeout or shutdown ended
+	// them before an answer: budget outcomes, not provider failures.
+	AsyncCanceled int64 `json:"async_canceled"`
+	// InputRejected counts windows the model had nothing to score in.
+	InputRejected int64 `json:"input_rejected"`
+
+	// CoverageGaps counts preprocessing budget exhaustions and messages not
+	// assessed, by reason. A gap is never a finding and adds no risk; it is
+	// reported so partial analysis is visible instead of being mistaken for a
+	// clean full scan. messages_not_assessed is always present.
+	CoverageGaps map[string]int64 `json:"coverage_gaps,omitempty"`
+	// AlreadyAssessed counts messages skipped because their session already
+	// had them scored. It is not a gap: the content was analyzed earlier.
+	AlreadyAssessed int64 `json:"already_assessed"`
+}
+
 // Handler handles control API requests
 type Handler struct {
 	store         session.Store
@@ -45,7 +113,10 @@ type Handler struct {
 	settingsStore *config.SettingsStore
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
-	mux           *http.ServeMux
+	// decisionProvider reports semantic detection status; nil means the
+	// feature is off.
+	decisionProvider DecisionProvider
+	mux              *http.ServeMux
 
 	// Authentication
 	authEnabled bool
@@ -149,6 +220,10 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	// Behavioral panel roster (read-only)
 	h.mux.HandleFunc("/control/panel", h.handlePanel)
 
+	// Semantic decision status (read-only, authenticated like every
+	// /control/* route except /control/health)
+	h.mux.HandleFunc("/control/decision", h.handleDecision)
+
 	return h
 }
 
@@ -175,6 +250,12 @@ func (h *Handler) SetFingerprinter(fp FingerprintProvider) {
 // SetPanel sets the panel provider used to report the seated behavioral panel roster.
 func (h *Handler) SetPanel(p PanelProvider) {
 	h.panelProvider = p
+}
+
+// SetDecisionProvider sets the provider used to report semantic decision
+// status. Call it before serving starts.
+func (h *Handler) SetDecisionProvider(p DecisionProvider) {
+	h.decisionProvider = p
 }
 
 // reloadPolicyEngine applies current settings to the policy engine without restart
@@ -741,6 +822,21 @@ type panelMemberOut struct {
 	Version string  `json:"version"`
 	Shadow  bool    `json:"shadow"`
 	Weight  float64 `json:"weight"`
+}
+
+// handleDecision handles GET /control/decision
+func (h *Handler) handleDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.decisionProvider == nil {
+		// Not wired means the feature is off. Report that, rather than 404:
+		// a dashboard needs to distinguish "disabled" from "missing route".
+		writeJSON(w, http.StatusOK, DecisionStatus{Capability: "disabled"})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.decisionProvider.DecisionStatus())
 }
 
 // handlePanel handles GET /control/panel

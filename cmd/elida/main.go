@@ -24,6 +24,9 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/decision/embedded"
+	"elida/internal/decision/runner"
+	"elida/internal/decision/scheduler"
 	"elida/internal/fingerprint"
 	"elida/internal/instruction"
 	"elida/internal/instructionstore"
@@ -60,6 +63,16 @@ type app struct {
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
 	redactor            *redaction.PatternRedactor
+
+	// Semantic injection detection (see decision.go). All nil when
+	// decision.enabled is false; the provider alone is set when it started
+	// degraded, so its status stays visible.
+	decisionProvider  *embedded.Provider
+	decisionScheduler *scheduler.Inline
+	decisionRunner    *runner.Runner
+	// decisionPipeline overrides the embedded provider's inference backend.
+	// Nil in production (the pure-Go Hugot backend); tests set a fake.
+	decisionPipeline embedded.PipelineFactory
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -146,6 +159,7 @@ func main() {
 	a.initTelemetry()
 	a.initPolicyEngine()
 	a.initInstructionIntegrity()
+	a.initDecision()
 
 	// Start session manager (handles timeouts, cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -328,11 +342,18 @@ func (a *app) initPanel() {
 }
 
 func (a *app) initSessionEndCallback() {
-	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil && !a.cfg.Decision.Enabled {
 		return
 	}
 
 	a.manager.SetSessionEndCallback(func(sess *session.Session) {
+		// Release the session from the semantic runner first, so a late
+		// async result is dropped rather than recorded onto a session whose
+		// record is being built below.
+		if a.decisionRunner != nil {
+			a.decisionRunner.Unbind(sess)
+		}
+
 		snap := sess.Snapshot()
 		var endTime time.Time
 		if snap.EndTime != nil {
@@ -352,6 +373,9 @@ func (a *app) initSessionEndCallback() {
 			Backend:      snap.Backend,
 			ClientAddr:   snap.ClientAddr,
 			Metadata:     snap.Metadata,
+			// Shadow decisions carry no content, so redaction does not
+			// apply to them.
+			SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
 		}
 
 		a.enrichRecordFromPolicy(&record, snap.ID)
@@ -822,6 +846,10 @@ func (a *app) initProxy() {
 	if a.redactor != nil {
 		proxyOpts = append(proxyOpts, proxy.WithRedactor(a.redactor))
 	}
+	if a.decisionRunner != nil {
+		proxyOpts = append(proxyOpts, proxy.WithSemanticAssessor(
+			semanticAssessorFunc(a.decisionRunner.AssessPolicyMessages)))
+	}
 	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
 		slog.Error("failed to create proxy", "error", err)
@@ -968,6 +996,11 @@ func (a *app) initControlAPI() {
 	if a.panel != nil {
 		a.controlHandler.SetPanel(a.panel)
 	}
+	if a.cfg.Decision.Enabled {
+		// Wired whenever the feature is enabled, so a degraded or
+		// mode-disabled deployment reports why rather than "disabled".
+		a.controlHandler.SetDecisionProvider(a)
+	}
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
@@ -1049,6 +1082,12 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 			slog.Error("control server shutdown error", "error", err)
 		}
 	}
+
+	// Step 1b: No request can start semantic work any more. Drain queued
+	// semantic analysis, then close the provider. This runs before the
+	// session drain below, so async results still land on their sessions
+	// before those sessions are persisted.
+	a.shutdownDecision(shutdownCtx)
 
 	// Step 2: Stop the session manager background loop
 	cancel()
