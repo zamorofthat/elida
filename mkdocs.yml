@@ -75,6 +75,7 @@ nav:
     - Security Controls: security-controls.md
     - Telco-Style Controls: telco-controls.md
     - Security: security.md
+    - Security Limitations: SECURITY_LIMITATIONS.md
   - Features:
     - Session Records: session-records.md
     - Control API: api.md

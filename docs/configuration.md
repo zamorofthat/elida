@@ -541,6 +541,81 @@ Tools like `Bash` are intentionally excluded — they can execute dangerous comm
 
 The allowlist applies to the regex policy engine only. Semantic injection detection (`decision.*`) ignores it. An allowlisted tool's output, such as a `Read` of a README that carries an injection, is still assessed. That untrusted tool output is exactly what semantic detection exists to score.
 
+## Semantic Injection Detection (`decision.*`)
+
+The `decision` block in `configs/elida.yaml` documents every key inline. This
+section covers the rules that span several keys. Known limits of the detector
+itself are listed in [SECURITY_LIMITATIONS.md](SECURITY_LIMITATIONS.md#semantic-detection).
+
+### `decision.require_inline`
+
+`true` fails startup unless the computed capability is `inline`: the model
+loaded and verified, and the build has accelerated inference kernels. Those
+kernels are gated to linux/amd64 built with `GOEXPERIMENT=simd`, so every other
+target (arm64 included) reports `async_only` and fails the gate. An unmet gate
+fails startup whatever `decision.required` says, including when the model does
+not load; the error names the architecture, whether SIMD kernels are compiled
+in, and which builds can be inline.
+
+The key is inert while semantic detection is off (`decision.enabled: false` or
+`decision.mode: disabled`): no model is loaded, startup succeeds, and config
+validation warns that `require_inline` has no effect. `/control/decision`
+echoes the configured value as `require_inline`.
+
+### `decision.max_concurrency` (default 4)
+
+The physical inference worker pool, split into an inline lane and an async lane
+that never share slots, so async backlog cannot take a worker the request path
+needs. Async workers are 0 at 1, otherwise `max(1, max_concurrency / 4)`;
+inline takes the rest:
+
+| `max_concurrency` | inline | async |
+|---|---|---|
+| 1 | 1 | 0 (async continuation disabled) |
+| 2 | 1 | 1 |
+| 4 (default) | 3 | 1 |
+| 8 | 6 | 2 |
+| 16 | 12 | 4 |
+
+At 1, a window that misses the inline lane is a coverage gap recorded with its
+real capacity reason (`no_worker_available`, `deadline_spent`,
+`inline_budget_spent`). A slot is not one CPU: one embedded inference used
+about 4.7 CPUs of work per wall-clock second on an 8-core machine.
+
+### Modes and when enforcement is refused
+
+- **`enforce` requires a matching threshold set.** `decision.mode: enforce`
+  with a `decision.threshold_set` that does not match the loaded model's
+  threshold set is always a startup error, whatever `decision.required` says.
+  Choose the matching threshold set, or run `audit`. `audit` with a mismatch
+  starts, and `/control/decision` reports `threshold_set_matches: false`.
+- **"Strict" enforcement means `decision.mode: enforce`.** Only `enforce` lets
+  semantic violations drive the risk ladder to block or terminate.
+  `decision.inline_admission.broad_strict_mode` only widens which messages may
+  try the inline lane; it does not change what a finding does.
+- **`policy.mode: audit` caps `enforce` to `audit`.** Validation warns.
+- **No policy engine caps `audit` and `enforce` to `shadow`.** With
+  `policy.enabled: false` nothing can be recorded. Validation warns, the
+  startup log gives the reason, and `/control/decision` reports
+  `effective_mode: shadow` with reason `policy engine disabled`. Shadow is
+  never capped, so it carries no such reason.
+
+### Allowlisted tools
+
+`policy.trust.allowlisted_tools` is not applied to the semantic view: an
+allowlisted tool's output is still assessed (see
+[Allowlisted Tools](#allowlisted-tools)).
+
+### Blocked and terminated sessions after they end
+
+When a session ends, the policy engine forgets its flagged entry, with one
+exception: a session whose ladder action is `block` or `terminate` keeps a slim
+entry (action, score, maximum severity, timestamps and content-free violations;
+about 1 KB). A client that reuses that session ID after the session ended still
+meets the same action. At most 4096 ended sessions are retained, oldest evicted
+first; an evicted ID no longer meets its old action. The full session record
+has already been persisted at session end.
+
 ## Session ID Behavior
 
 ELIDA resolves a session ID per request, in order of precedence:
