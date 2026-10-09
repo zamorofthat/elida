@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Semantic prompt-injection detection, disabled by default
+  (`decision.enabled: false`). An embedded, pure-Go MiniLM classifier scores
+  user content and tool results, including bounded decoded representations,
+  in sentence-aligned windows of at most 128 tokens. Unknown is never treated
+  as safe, and partial coverage is always reported as partial. See
+  `docs/semantic-detection.md` for the detector's limits.
+- `decision.*` configuration keys (all restart-only): `enabled`, `required`,
+  `require_inline`, `mode` (`disabled` | `shadow` | `audit` | `enforce`,
+  default `shadow`), `provider`, `model_path`, `threshold_set`,
+  `elevated_threshold`, `inline_timeout`, `max_concurrency` (default 4: 3
+  inline slots, 1 async worker), `inline_queue_wait` (pinned to 0),
+  `max_inline_tokens`, `max_inline_windows`, `max_async_windows`,
+  `async_queue_size`, `inline_admission.*` and `preprocessing.*`.
+- `decision.require_inline`: refuses to start unless the build can run
+  inference inline (linux/amd64 with `GOEXPERIMENT=simd`). Other builds
+  report `async_only`, and their results protect later activity only.
+- `decision.mode: enforce` drives the existing risk ladder. An inline finding
+  is checked against the ladder before its request is forwarded. Enforce is
+  refused at startup unless `threshold_set` matches the loaded model.
+  `audit` records evidence-only violations, which contribute no risk.
+- `GET /control/decision` (authenticated): capability and reason, model
+  identity and checksum, effective mode, lane sizes, admission reasons,
+  queue and drop counters, `coverage_gaps` (including `not_assessed` and
+  `messages_not_assessed`), and `async_dropped_no_session`.
+  `/control/health` adds only the capability enum and a fixed reason.
+- SQLite `sessions` columns `semantic_shadow` (bounded per-session shadow
+  decisions for calibration) and `prior_history` (violations and captures
+  carried across reuse of a session ID). Both are added by migration.
+- Evidence-only violations are marked in every export. OTEL spans and logs
+  carry `evidence_only`, OCSF findings carry `elida.evidence_only` at
+  Informational severity, and `violation_detected` rows carry
+  `evidence_only`. Exported max severity ignores evidence.
+- The injection model artifact (`models-injection-v5-fp32`, Apache-2.0,
+  built from the pinned StackOne Defender commit in
+  `scripts/models/pins.env`) ships in the Docker image at
+  `/etc/elida/models/injection` and in release archives. The model card is
+  `docs/model-card-injection.md`.
+- Behaviour change: at `max_concurrency: 1` async continuation is disabled.
+  Windows that miss the inline lane are coverage gaps recorded with their
+  capacity reason. They are no longer counted in `async_dropped` or
+  `async_queue_full`.
+
 ### Changed
 - Release archives now carry the semantic-injection model under
   `models/injection/` beside the binary. That adds about 86 MiB
