@@ -38,6 +38,7 @@ func TestDecisionID_UniquePerField(t *testing.T) {
 		"session":    func(i *decision.Identity) { i.SessionID = "sess-xyz" },
 		"request":    func(i *decision.Identity) { i.RequestID = "req-2" },
 		"message":    func(i *decision.Identity) { i.MessageIndex = 4 },
+		"role":       func(i *decision.Identity) { i.SourceRole = "tool" },
 		"start":      func(i *decision.Identity) { i.StartByte = 11 },
 		"end":        func(i *decision.Identity) { i.EndByte = 201 },
 		"localStart": func(i *decision.Identity) { i.LocalStartByte = 1 },
@@ -107,6 +108,41 @@ func TestDecisionID_V2NeverEqualsV1(t *testing.T) {
 	j := decision.JobIdentity{SessionID: "s", RequestID: "r", MessageIndex: 2, StartByte: 0, EndByte: 100}
 	if got := decision.JobID(j); got == v1Job {
 		t.Fatalf("v2 JobID equals the v1 value %q", got)
+	}
+}
+
+func TestDecisionID_V3NeverEqualsV2(t *testing.T) {
+	// These are the v2 IDs for these identities, captured from the v2 form
+	// (no source role, "elida.*.v2" domains). A v3 ID over the same fields
+	// must differ, so a stored v2 ID can never be mistaken for v3.
+	const (
+		v2Decision = "dec_6f8cea9a0f0a3805bc57b618ffa84c4f"
+		v2Job      = "job_445d7945b588530640266336e9703a0c"
+	)
+	if got := decision.DecisionID(baseIdentity()); got == v2Decision {
+		t.Fatalf("v3 DecisionID equals the v2 value %q", got)
+	}
+	j := decision.JobIdentity{SessionID: "s", RequestID: "r", MessageIndex: 2, StartByte: 0, EndByte: 100}
+	if got := decision.JobID(j); got == v2Job {
+		t.Fatalf("v3 JobID equals the v2 value %q", got)
+	}
+}
+
+func TestDecisionID_SourceRoleSeparatesSameIndexInputs(t *testing.T) {
+	// An Anthropic user message's text and its tool_result content share a
+	// message index; equal window offsets must still give distinct IDs.
+	user := baseIdentity()
+	user.SourceRole = "user"
+	tool := user
+	tool.SourceRole = "tool"
+	if decision.DecisionID(user) == decision.DecisionID(tool) {
+		t.Fatal("user and tool inputs at one index must have distinct decision IDs")
+	}
+	ju := decision.JobIdentity{SessionID: "s", RequestID: "r", MessageIndex: 2, SourceRole: "user", EndByte: 20, LocalEndByte: 20}
+	jt := ju
+	jt.SourceRole = "tool"
+	if decision.JobID(ju) == decision.JobID(jt) {
+		t.Fatal("user and tool inputs at one index must have distinct job IDs")
 	}
 }
 

@@ -8,8 +8,9 @@ import (
 )
 
 // Identity is the tuple a stable decision ID is derived from: session,
-// request, message index, original byte range, the window's local byte range
-// within its representation, transformation chain, signal and model version.
+// request, message index, source role, original byte range, the window's
+// local byte range within its representation, transformation chain, signal
+// and model version.
 // The local range is what distinguishes the windows of one derived
 // representation: they all share the ancestor's original byte range.
 //
@@ -17,10 +18,16 @@ import (
 // risk once, no matter how many times they arrive — a retry, an overlapping
 // window, the same bytes reached through two chains, or the same job
 // completing inline and then async.
+//
+// SourceRole is part of the identity because one message can carry two
+// analyzed inputs at the same index: an Anthropic user message's text and
+// its tool_result content. Without the role, equal window offsets in the two
+// would give one ID, and whichever verdict arrived second would be dropped.
 type Identity struct {
 	SessionID      string
 	RequestID      string
 	MessageIndex   int
+	SourceRole     string
 	StartByte      int
 	EndByte        int
 	LocalStartByte int
@@ -52,6 +59,7 @@ type JobIdentity struct {
 	SessionID      string
 	RequestID      string
 	MessageIndex   int
+	SourceRole     string
 	StartByte      int
 	EndByte        int
 	LocalStartByte int
@@ -64,8 +72,9 @@ type JobIdentity struct {
 // can never equal one derived under this form.
 //
 // v1 had no local window offsets, so the windows of one derived
-// representation collided. v2 adds them.
-const identityVersion = "v2"
+// representation collided. v2 adds them. v3 adds the source role, so a
+// message's user text and its tool_result content never share an ID.
+const identityVersion = "v3"
 
 // canonicalIdentity renders an Identity as an unambiguous string.
 //
@@ -80,6 +89,7 @@ func canonicalIdentity(id Identity) string {
 		id.SessionID,
 		id.RequestID,
 		strconv.Itoa(id.MessageIndex),
+		id.SourceRole,
 		strconv.Itoa(id.StartByte),
 		strconv.Itoa(id.EndByte),
 		strconv.Itoa(id.LocalStartByte),
@@ -103,6 +113,7 @@ func canonicalJob(j JobIdentity) string {
 		SessionID:      j.SessionID,
 		RequestID:      j.RequestID,
 		MessageIndex:   j.MessageIndex,
+		SourceRole:     j.SourceRole,
 		StartByte:      j.StartByte,
 		EndByte:        j.EndByte,
 		LocalStartByte: j.LocalStartByte,

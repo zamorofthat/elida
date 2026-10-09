@@ -525,6 +525,7 @@ func (r *Runner) Verdicts(sessionID, requestID string, in decision.Input, a deci
 				SessionID:    sessionID,
 				RequestID:    requestID,
 				MessageIndex: in.MessageIndex,
+				SourceRole:   in.SourceRole,
 				Signal:       d.Signal,
 				ModelVersion: r.cfg.Model.Version,
 			}.WithWindow(w)),

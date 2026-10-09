@@ -1042,6 +1042,7 @@ func jobIDFor(req Request, in decision.Input, w WindowedText) string {
 		SessionID:      req.SessionID,
 		RequestID:      req.RequestID,
 		MessageIndex:   in.MessageIndex,
+		SourceRole:     in.SourceRole,
 		StartByte:      w.Window.StartByte,
 		EndByte:        w.Window.EndByte,
 		LocalStartByte: w.Window.LocalStartByte,
