@@ -545,7 +545,7 @@ The allowlist applies to the regex policy engine only. Semantic injection detect
 
 The `decision` block in `configs/elida.yaml` documents every key inline. This
 section covers the rules that span several keys. Known limits of the detector
-itself are listed in [SECURITY_LIMITATIONS.md](SECURITY_LIMITATIONS.md#semantic-detection).
+itself are listed in [Semantic injection detection](semantic-detection.md#limitations).
 
 ### `decision.require_inline`
 

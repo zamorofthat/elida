@@ -1,14 +1,17 @@
-# Security Limitations
+# Semantic injection detection: behaviour, configuration and limits
 
-Known limits of ELIDA's detection, stated so operators can weigh them. Each
-entry says what is not caught or not guaranteed, and how it fails.
+> The limitations list below will be folded into the root
+> `SECURITY_LIMITATIONS.md` once PR #181 merges.
 
-## Semantic detection
+Semantic prompt-injection detection (`decision.*`) runs a packaged MiniLM
+classifier over request content and its decoded representations. Its
+behaviour and configuration rules (`require_inline`, the `max_concurrency`
+split, when enforcement is refused, allowlisted tools, retained sessions) are
+in [Configuration](configuration.md#semantic-injection-detection-decision).
 
-Semantic prompt-injection detection (`decision.*`, see
-[configuration](configuration.md#semantic-injection-detection-decision)) runs a
-packaged MiniLM classifier over request content and its decoded
-representations. Its known limits:
+## Limitations
+
+Each entry says what is not caught or not guaranteed, and how it fails.
 
 - **Encoded-payload scan is bounded to 4 runs.** Preprocessing decodes at most
   four base64/hex candidate runs per message. A decoy placed before the real
