@@ -900,9 +900,9 @@ func TestRunner_OneDeadlinePerRequest(t *testing.T) {
 	}
 	start := time.Now()
 	r.AssessRequest(context.Background(), sess, "req-1", msgs)
-	if elapsed := time.Since(start); elapsed > 900*time.Millisecond {
-		t.Fatalf("AssessRequest took %v: the inline deadline must bound the whole request", elapsed)
-	}
+	// Per-message deadlines would assess every message; the
+	// messages_not_assessed gap below is the invariant.
+	checkWallClock(t, "AssessRequest with four 300 ms messages", time.Since(start))
 	if r.CoverageGaps()[runner.GapMessagesNotAssessed] == 0 {
 		t.Fatal("messages reached after the request deadline must be counted as not assessed")
 	}

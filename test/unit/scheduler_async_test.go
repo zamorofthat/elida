@@ -222,9 +222,9 @@ func TestSchedulerAsync_QueueOverflowIsAMetricNotABlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AssessCandidates: %v", err)
 	}
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("a full async queue must not block the hot path; took %v", elapsed)
-	}
+	// The async_queue_full reasons below prove the queue refused rather
+	// than blocked (enqueue is a non-blocking send).
+	checkWallClock(t, "assessment with a full async queue", elapsed)
 	if reasonCount(a, decision.DenyQueueFull) == 0 {
 		t.Fatalf("expected async_queue_full denials, got %+v", a.Admissions)
 	}

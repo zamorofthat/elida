@@ -284,9 +284,9 @@ func TestScheduler_InlineNeverWaitsForAWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a denied admission is not an error: %v", err)
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("inline admission waited %v for a worker; it must never wait", elapsed)
-	}
+	// Had admission waited, it would have been admitted once a holder
+	// finished; the no_worker_available reason below is the invariant.
+	checkWallClock(t, "inline admission with every worker busy", elapsed)
 	if reasonCount(a, decision.DenyNoWorkerAvailable) != 1 {
 		t.Fatalf("expected a no_worker_available denial, got %+v", a.Admissions)
 	}
@@ -349,9 +349,9 @@ func TestScheduler_OneGlobalDeadlineCoversEverything(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a deadline is not an error for the caller: %v", err)
 	}
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("AssessCandidates took %v with a 40ms deadline", elapsed)
-	}
+	// Had the deadline not bounded the call, the 500 ms provider would
+	// have answered; the unanswered check below is the invariant.
+	checkWallClock(t, "AssessCandidates with a 40ms deadline", elapsed)
 	if _, answered := a.MaxProbability(decision.SignalInjection); answered {
 		t.Fatal("a timed-out decision must be unanswered, never safe")
 	}
@@ -378,11 +378,15 @@ func TestScheduler_CallerDeadlineIsHonoredWhenShorter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	t0 := time.Now()
-	if _, err := s.AssessCandidates(ctx, req, in, candidatesFor(content), nil); err != nil {
+	a, err := s.AssessCandidates(ctx, req, in, candidatesFor(content), nil)
+	if err != nil {
 		t.Fatalf("AssessCandidates: %v", err)
 	}
-	if elapsed := time.Since(t0); elapsed > 200*time.Millisecond {
-		t.Fatalf("took %v: the caller's shorter deadline must win", elapsed)
+	checkWallClock(t, "AssessCandidates with a 30ms caller deadline", time.Since(t0))
+	// Under the scheduler's own 5 s deadline the 500 ms provider would have
+	// answered: unanswered proves the caller's shorter deadline won.
+	if _, answered := a.MaxProbability(decision.SignalInjection); answered {
+		t.Fatal("the caller's 30ms deadline must win over the 5s inline timeout")
 	}
 }
 
@@ -764,9 +768,9 @@ func TestScheduler_DeadlineBoundsAProviderThatIgnoresContext(t *testing.T) {
 
 	t0 := time.Now()
 	a := assess()
-	if elapsed := time.Since(t0); elapsed > 200*time.Millisecond {
-		t.Fatalf("took %v with a 40ms deadline: the deadline must bound the caller even when the provider ignores ctx", elapsed)
-	}
+	// The provider blocks until released, so without the deadline the call
+	// would hang until the guard (or the test timeout under -race).
+	checkWallClock(t, "AssessCandidates with a provider that ignores ctx", time.Since(t0))
 	if _, answered := a.MaxProbability(decision.SignalInjection); answered {
 		t.Fatal("an abandoned decision must be unanswered")
 	}

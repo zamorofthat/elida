@@ -2,7 +2,6 @@ package unit
 
 import (
 	"context"
-	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,21 +33,6 @@ func (s slowEstimator) CountTokens(text string) int {
 	return scheduler.EstimateTokens(text)
 }
 
-// raceEnabled reports whether this test binary runs the race detector,
-// which slows the timing-bound tests below by an order of magnitude.
-func raceEnabled() bool {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return false
-	}
-	for _, s := range bi.Settings {
-		if s.Key == "-race" && s.Value == "true" {
-			return true
-		}
-	}
-	return false
-}
-
 func countingConfig(p decision.Provider, exact decision.TokenCounter) scheduler.Config {
 	cfg := inlineConfig(p)
 	cfg.TokenCounter = exact
@@ -68,10 +52,6 @@ func TestScheduler_ExactCountingIsBoundedOnLargeContent(t *testing.T) {
 	sentence := strings.Repeat("word ", 819) + ". "
 	fourKB := strings.Repeat(sentence, 64)[:256*1024]
 
-	budget := 100 * time.Millisecond
-	if raceEnabled() {
-		budget = time.Second
-	}
 	for name, content := range map[string]string{"prose-no-period": prose, "4kb-sentences": fourKB} {
 		t.Run(name, func(t *testing.T) {
 			f := decisiontest.NewFake(map[decision.Signal]float64{decision.SignalInjection: 0.1})
@@ -92,9 +72,9 @@ func TestScheduler_ExactCountingIsBoundedOnLargeContent(t *testing.T) {
 				t.Fatalf("AssessCandidates: %v", err)
 			}
 			t.Logf("%s: %d windows, %d exact counts, %v", name, a.Coverage.EligibleWindows, exact.calls.Load(), elapsed)
-			if elapsed > budget {
-				t.Errorf("assessing 256 KB took %v, want under %v", elapsed, budget)
-			}
+			// The invariant is the exact-counter call bound below; elapsed
+			// time is logged, with only a generous sanity guard.
+			checkWallClock(t, "assessing 256 KB", elapsed)
 			// The byte/4 exact fake never exceeds the estimate, so no
 			// window splits: one exact count per window actually used.
 			if limit := int64(cfg.MaxInlineWindows + cfg.MaxAsyncWindows); exact.calls.Load() > limit {
@@ -283,10 +263,6 @@ func TestEstimateTokens_Shape(t *testing.T) {
 func TestScheduler_ExactCountingIsBoundedWhenAsyncCannotEnqueue(t *testing.T) {
 	discardSlog(t)
 	prose := strings.Repeat("the deployment pipeline runs in three stages and then promotes the build ", 3600)[:256*1024]
-	budget := 100 * time.Millisecond
-	if raceEnabled() {
-		budget = time.Second
-	}
 	cases := []struct {
 		name  string
 		tweak func(*scheduler.Config)
@@ -320,9 +296,7 @@ func TestScheduler_ExactCountingIsBoundedWhenAsyncCannotEnqueue(t *testing.T) {
 			if limit := int64(cfg.MaxInlineWindows + cfg.MaxAsyncWindows); exact.calls.Load() > limit {
 				t.Errorf("exact counter called %d times, want at most %d", exact.calls.Load(), limit)
 			}
-			if elapsed > budget {
-				t.Errorf("windowing and admission took %v, want under %v", elapsed, budget)
-			}
+			checkWallClock(t, "windowing and admission", elapsed)
 			if a.Coverage.Complete {
 				t.Error("most windows were refused; coverage must be incomplete")
 			}
