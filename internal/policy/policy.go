@@ -1771,8 +1771,9 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 //
 // Bound: roughly 1 KB per entry plus a few hundred bytes per distinct rule
 // that fired, so MaxRetainedFlaggedSessions entries stay in the low MB. The
-// violations slice is replaced, not edited in place, because
-// GetFlaggedSession copies share its backing array. The caller holds mu.
+// violations slice is replaced rather than edited in place; views returned
+// by GetFlaggedSession are deep copies (clone), so this is for clarity only.
+// The caller holds mu.
 func (e *Engine) slimRetainedLocked(sessionID string, flagged *FlaggedSession) {
 	slim := make([]Violation, len(flagged.Violations))
 	for i, v := range flagged.Violations {
@@ -1853,6 +1854,21 @@ func (e *Engine) Stats() map[string]interface{} {
 }
 
 // GetSessionRiskScore returns the risk score for a session
+// GetFlaggedSessionRisk returns a flagged session's cached risk score and
+// current action without copying the session. ok is false when the session
+// is not flagged; unlike GetSessionRiskScore, nothing is filled in for it,
+// so a caller can leave an unflagged session's fields empty exactly as a nil
+// GetFlaggedSession would.
+func (e *Engine) GetFlaggedSessionRisk(sessionID string) (riskScore float64, action string, ok bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	flagged, ok := e.flaggedSessions[sessionID]
+	if !ok {
+		return 0, "", false
+	}
+	return flagged.RiskScore, flagged.CurrentAction, true
+}
+
 func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

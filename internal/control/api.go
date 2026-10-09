@@ -653,11 +653,12 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 		info.EndTime = snap.EndTime
 	}
 
-	// Enrich with policy engine data
+	// Enrich with policy engine data. Only two fields are needed, so read
+	// them directly rather than deep-copying the flagged session per row.
 	if h.policyEngine != nil {
-		if flagged := h.policyEngine.GetFlaggedSession(snap.ID); flagged != nil {
-			info.RiskScore = flagged.RiskScore
-			info.CurrentAction = flagged.CurrentAction
+		if score, action, ok := h.policyEngine.GetFlaggedSessionRisk(snap.ID); ok {
+			info.RiskScore = score
+			info.CurrentAction = action
 		}
 	}
 
