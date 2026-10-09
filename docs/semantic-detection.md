@@ -35,9 +35,18 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   upstream's.
 - **arm64 is async-only.** Accelerated inference kernels are gated to
   linux/amd64 built with `GOEXPERIMENT=simd`. Every other target, arm64
-  included, reports `async_only`: results arrive after the request was
-  forwarded and cannot protect it. `decision.require_inline: true` refuses to
-  start on such builds.
+  included, reports `async_only`. On those builds the inline lane is never
+  tried: every eligible window goes straight to the async lane in suspicion
+  order (admission reason `capability_async_only`, bounded by
+  `decision.max_async_windows`), so results arrive after the request was
+  forwarded and cannot protect it, and `inline_completion_ratio` is 0.
+  `decision.require_inline: true` refuses to start on such builds.
+- **An inline window that misses the deadline is re-queued async.** On an
+  inline build, a window whose inference does not finish inside
+  `decision.inline_timeout` is handed to the async lane (bounded by
+  `decision.max_async_windows`) instead of being dropped. Its result protects
+  later activity only. The abandoned inline call may still be computing on its
+  slot, so a miss can briefly cost two inferences.
 - **One inference uses about 4.7 CPUs.** The embedded backend runs each
   inference over an intra-op worker pool, measured at about 4.7 CPUs of work
   per wall-clock second on an 8-core machine. Size `decision.max_concurrency`

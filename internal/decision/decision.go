@@ -177,6 +177,12 @@ const (
 	// accept the window. The window goes unscored and Coverage reports it
 	// as short.
 	DenyQueueFull AdmissionReason = "async_queue_full"
+	// DenyCapabilityAsyncOnly means the provider cannot meet an inline
+	// budget on this build (the embedded provider's async_only capability:
+	// any build other than linux/amd64 with GOEXPERIMENT=simd). The inline
+	// lane is never tried; the window goes straight to the async lane in
+	// suspicion order, bounded by the async cap like any capacity denial.
+	DenyCapabilityAsyncOnly AdmissionReason = "capability_async_only"
 )
 
 // Admission is the admission controller's record for one window.

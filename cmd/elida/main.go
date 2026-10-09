@@ -73,6 +73,12 @@ type app struct {
 	// decisionPipeline overrides the embedded provider's inference backend.
 	// Nil in production (the pure-Go Hugot backend); tests set a fake.
 	decisionPipeline embedded.PipelineFactory
+	// decisionArch and decisionSIMD override the architecture and SIMD
+	// facts the provider judges its capability on. Empty/nil in production
+	// (the running binary's own); tests set them to pin a capability
+	// independent of the host.
+	decisionArch string
+	decisionSIMD *bool
 	// decisionSchedulerCfg is the configuration decisionScheduler was built
 	// with, kept for inspection.
 	decisionSchedulerCfg scheduler.Config

@@ -138,10 +138,24 @@ type Config struct {
 	// Shutdown, just as it outlives an inline deadline.
 	MaxConcurrency int
 
+	// InlineCapable reports whether the provider can meet an inline budget
+	// on this build; production wiring passes the embedded provider's
+	// Capability() == inline. Nil means capable. When it reports false the
+	// inline lane is never tried: every eligible window goes straight to the
+	// async lane in suspicion order, recorded with DenyCapabilityAsyncOnly
+	// and bounded by MaxAsyncWindows like any other async continuation, so
+	// an async_only host never spends the request's deadline on an
+	// inference that cannot finish inside it.
+	InlineCapable func() bool
+
 	// InlineTimeout is the one global deadline for an inline assessment. It
 	// covers admission, windowing, tokenization and inference together. An
-	// inline window that times out is a coverage gap and is not re-queued
-	// async.
+	// inline window whose attempt misses the deadline is re-queued to the
+	// async lane (bounded by MaxAsyncWindows and the request's Spend, and
+	// counted in Metrics.InlineRequeued), so a timed-out window is scored
+	// later rather than lost. The abandoned inline call may still be
+	// computing on its slot, so a re-queued window can briefly cost two
+	// inferences; both are bounded by their lanes' slots.
 	InlineTimeout time.Duration
 
 	// MaxInlineTokens caps the tokens one request may send inline. Windows
@@ -258,6 +272,10 @@ type Metrics struct {
 	// AsyncWorkers is the async lane's share of MaxConcurrency; 0 means
 	// async continuation is disabled.
 	AsyncWorkers int
+	// InlineRequeued counts inline attempts that missed the deadline and
+	// were re-queued to the async lane (each is also counted in
+	// AsyncQueued).
+	InlineRequeued int64
 }
 
 // poolSplit returns the inline and async shares of a MaxConcurrency pool.
@@ -351,6 +369,7 @@ type Inline struct {
 	asyncCanceled   atomic.Int64
 	asyncPanics     atomic.Int64
 	callbackPanics  atomic.Int64
+	inlineRequeued  atomic.Int64
 
 	reasonsMu sync.Mutex
 	reasons   map[decision.AdmissionReason]int64
@@ -479,10 +498,16 @@ func (s *Inline) Assess(ctx context.Context, in decision.Input, signals []decisi
 // error or a provider panic: all of those are "unknown", which is a
 // coverage and answeredness fact, not a request failure.
 //
-// A window admitted inline that does not answer (timeout, error, panic)
-// stays a coverage gap and is not re-queued async: its slot may still be
-// computing, and re-queueing would double the work exactly when the system
-// is saturated. Its dedup claim is released, so a retry can score it.
+// A window admitted inline whose attempt misses the deadline is re-queued
+// to the async lane (bounded by MaxAsyncWindows and the request's Spend): an
+// async_only-class provider, or a saturated host, must not turn the most
+// suspicious window into a permanent gap. A window that fails inline for
+// any other reason (provider error, panic, all-unanswered) is a coverage
+// gap; its dedup claim is released, so a retry can score it.
+//
+// When Config.InlineCapable reports false, no window is ever attempted
+// inline: every eligible window goes to the async lane in suspicion order
+// with DenyCapabilityAsyncOnly.
 func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.Input, cands []decision.Candidate, signals []decision.Signal) (decision.Assessment, error) {
 	if len(signals) == 0 {
 		signals = s.cfg.Signals
@@ -530,6 +555,9 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	ordered := OrderWindows(all)
 
 	eligible, eligibleReason := s.eligible(req, in, ordered)
+	// capable is read once per call: a provider that cannot meet an inline
+	// budget never gets an inline attempt it is bound to miss.
+	capable := s.cfg.InlineCapable == nil || s.cfg.InlineCapable()
 
 	var inlineWindows, inlineTokens, asyncWindows int
 	// Exact counting is bounded by attempts, not outcomes: at most
@@ -578,7 +606,7 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		// or queued async. Windowing used the estimate; this is the count
 		// the model will actually see. An over-limit window is hard-split
 		// by exact count and its pieces join the queue in its place.
-		inlineOpen := inlineWindows < s.cfg.MaxInlineWindows && ctx.Err() == nil
+		inlineOpen := capable && inlineWindows < s.cfg.MaxInlineWindows && ctx.Err() == nil
 		asyncOpen := s.asyncWorkers > 0 && !asyncRefused && asyncWindows < s.cfg.MaxAsyncWindows
 		if !exact[i] && (inlineOpen || asyncOpen) && considered < maxConsidered {
 			considered++
@@ -597,6 +625,10 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 
 		var denied decision.AdmissionReason
 		switch {
+		// The provider cannot meet an inline budget on this build: the
+		// inline lane is never tried, whatever budget or deadline is left.
+		case !capable:
+			denied = decision.DenyCapabilityAsyncOnly
 		// A window that was never counted exactly is never scored: its
 		// token count is only an estimate. It is a capacity denial.
 		case !exact[i] && ctx.Err() != nil:
@@ -638,7 +670,7 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 			}
 			lastDenied = denied
 			// 5. Bounded async continuation for capacity denials.
-			switch s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows) {
+			switch s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows, true) {
 			case asyncQueued:
 				asyncWindows++
 			case asyncRefusedByQueue:
@@ -668,6 +700,19 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 			s.inlineCompleted.Add(1)
 			a.Coverage.ScoredInline++
 			a.Coverage.ScoredBytes += len(w.Text)
+		} else if ctx.Err() != nil && !asyncRefused {
+			// The attempt missed the deadline. Re-queue the window to the
+			// async lane rather than lose it: ordering put it first, so it
+			// is the window most worth scoring. Its unanswered inline
+			// decisions stay on this assessment (unknown, never safe); the
+			// async result arrives with ScopeFutureActivity.
+			switch s.continueAsync(&a, &tmpl, req, in, w, signals, decision.DenyDeadlineSpent, asyncWindows, false) {
+			case asyncQueued:
+				asyncWindows++
+				s.inlineRequeued.Add(1)
+			case asyncRefusedByQueue:
+				asyncRefused = true
+			}
 		}
 		a.Decisions = append(a.Decisions, ds...)
 	}
@@ -974,6 +1019,7 @@ func (s *Inline) Metrics() Metrics {
 		AsyncCallbackPanics:  s.callbackPanics.Load(),
 		InlineSlots:          s.inlineSlots,
 		AsyncWorkers:         s.asyncWorkers,
+		InlineRequeued:       s.inlineRequeued.Load(),
 	}
 }
 
@@ -1002,15 +1048,25 @@ const (
 // tmpl holds this assessment's private copies of the caller's slices, made
 // once on first use, so a caller reusing its slices after AssessCandidates
 // returns cannot race a queued job.
-func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, w WindowedText, sigs []decision.Signal, denied decision.AdmissionReason, queuedSoFar int) asyncOutcome {
+//
+// record is false when the window already has its admission record (an
+// inline attempt that missed the deadline): the outcome is then reflected
+// in Coverage.QueuedAsync and the metrics only, never as a second record
+// or an InlineDenied count for a window that was in fact admitted.
+func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, w WindowedText, sigs []decision.Signal, denied decision.AdmissionReason, queuedSoFar int, record bool) asyncOutcome {
+	deny := func(reason decision.AdmissionReason) {
+		if record {
+			s.deny(a, w, reason)
+		}
+	}
 	if s.asyncWorkers == 0 || queuedSoFar >= s.cfg.MaxAsyncWindows {
-		s.deny(a, w, denied)
+		deny(denied)
 		return asyncNotOffered
 	}
 	id := jobIDFor(req, in, w)
 	if id != "" && !s.claim(id) {
 		s.duplicates.Add(1)
-		s.deny(a, w, denied)
+		deny(denied)
 		return asyncNotOffered
 	}
 	if !tmpl.ready {
@@ -1029,11 +1085,11 @@ func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req 
 		if id != "" {
 			s.unclaim(id)
 		}
-		s.deny(a, w, decision.DenyQueueFull)
+		deny(decision.DenyQueueFull)
 		return asyncRefusedByQueue
 	}
 	a.Coverage.QueuedAsync++
-	s.deny(a, w, denied)
+	deny(denied)
 	return asyncQueued
 }
 

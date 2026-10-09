@@ -552,7 +552,9 @@ itself are listed in [Semantic injection detection](semantic-detection.md#limita
 `true` fails startup unless the computed capability is `inline`: the model
 loaded and verified, and the build has accelerated inference kernels. Those
 kernels are gated to linux/amd64 built with `GOEXPERIMENT=simd`, so every other
-target (arm64 included) reports `async_only` and fails the gate. An unmet gate
+target (arm64 included) reports `async_only` and fails the gate. With the gate
+off, an `async_only` build never tries the inline lane: eligible windows go
+straight to the async lane (admission reason `capability_async_only`). An unmet gate
 fails startup whatever `decision.required` says, including when the model does
 not load; the error names the architecture, whether SIMD kernels are compiled
 in, and which builds can be inline.

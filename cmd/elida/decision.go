@@ -104,6 +104,8 @@ func (a *app) setupDecision(ctx context.Context) error {
 		ModelPath:     d.ModelPath,
 		ThresholdSet:  d.ThresholdSet,
 		NewPipeline:   a.decisionPipeline,
+		Arch:          a.decisionArch,
+		SIMD:          a.decisionSIMD,
 	})
 	if err != nil {
 		// Only reachable with required: true or require_inline: true, both
@@ -252,6 +254,9 @@ const decisionPolicyDisabledReason = "policy engine disabled"
 
 // decisionSchedulerConfig is the production scheduler configuration.
 //
+// InlineCapable is the provider's capability: an async_only provider gets no
+// inline attempts at all (scheduler.DenyCapabilityAsyncOnly).
+//
 // The provider is the EXACT TokenCounter (its tokenizer). Estimator is left
 // nil so the scheduler uses its cheap default for windowing: passing the
 // provider as Estimator would run the tokenizer over whole messages on the
@@ -268,6 +273,10 @@ func decisionSchedulerConfig(d config.DecisionConfig, provider *embedded.Provide
 		MaxInlineWindows: d.MaxInlineWindows,
 		MaxAsyncWindows:  d.MaxAsyncWindows,
 		AsyncQueueSize:   d.AsyncQueueSize,
+		// The inline lane exists only where the provider can meet an inline
+		// budget. On async_only builds every eligible window goes straight
+		// to the async lane instead of missing the deadline inline.
+		InlineCapable: func() bool { return provider.Capability() == embedded.CapabilityInline },
 		Admission: scheduler.AdmissionPolicy{
 			UntrustedToolResults: d.InlineAdmission.UntrustedToolResults,
 			EncodedOrObfuscated:  d.InlineAdmission.EncodedOrObfuscated,

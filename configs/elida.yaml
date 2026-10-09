@@ -446,7 +446,9 @@ decision:
   # model fails to load: the operator explicitly demanded inline protection.
   #
   # false (default): async_only is permitted and reported at
-  # /control/decision. Async results cannot protect the request that
+  # /control/decision. On an async_only build the inline lane is never tried:
+  # eligible windows go straight to the async lane (admission reason
+  # capability_async_only). Async results cannot protect the request that
   # triggered them; under mode: enforce they raise session risk and affect
   # later activity.
   #

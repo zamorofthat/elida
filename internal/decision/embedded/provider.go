@@ -452,6 +452,15 @@ func (p *Provider) CountTokens(text string) int {
 	return (len(text) + 3) / 4
 }
 
+// Capability returns the computed capability without building a full
+// Health snapshot. The scheduler reads it on every assessment to decide
+// whether the inline lane exists at all on this build.
+func (p *Provider) Capability() Capability {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.capability
+}
+
 // Health returns the current status.
 func (p *Provider) Health() Health {
 	p.mu.RLock()
