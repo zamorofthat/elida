@@ -43,9 +43,11 @@ func (a *app) initDecision() {
 //     WARN is logged, and the effective mode is off; the provider stays set
 //     so /control/decision reports the capability and reason.
 //
-// Nothing here can create a violation: the runner starts in the configured
-// mode (default shadow), capped by policy.mode, and the effective mode is
-// logged once.
+// The runner starts in the configured mode (default shadow), capped by
+// policy.mode, and the effective mode is logged once. It records through the
+// policy engine (initPolicyEngine runs first): shadow records nothing there;
+// audit, and enforce until Task 29, record evidence-only violations that add
+// no risk. Without a policy engine the runner behaves as shadow.
 //
 // decision.require_inline is not handled here: the key and its startup gate
 // are added by Task 30.
@@ -118,6 +120,12 @@ func (a *app) setupDecision(ctx context.Context) error {
 		policyMode = a.cfg.Policy.Mode
 	}
 	pe := a.policyEngine
+	// A nil engine must reach the runner as a nil interface, not a typed
+	// nil: no policy engine means shadow-only behavior.
+	var recorder runner.PolicyRecorder
+	if pe != nil {
+		recorder = pe
+	}
 	r, err := runner.New(runner.Config{
 		Mode:       d.Mode,
 		PolicyMode: policyMode,
@@ -139,6 +147,7 @@ func (a *app) setupDecision(ctx context.Context) error {
 		},
 		Strict:     d.InlineAdmission.BroadStrictMode,
 		RiskLookup: riskLookup(pe),
+		Policy:     recorder,
 	})
 	if err != nil {
 		return a.abandonDecision(ctx, fmt.Errorf("semantic runner configuration is invalid: %w", err))

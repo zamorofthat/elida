@@ -5,8 +5,11 @@
 //   - disabled: nothing runs, nothing is recorded.
 //   - shadow:   decisions are recorded on the session for calibration. No
 //     violations, no risk.
-//   - audit:    evidence-only violations with diagnostic points (Task 28).
+//   - audit:    evidence-only violations with diagnostic points, recorded
+//     through Config.Policy (nil Policy means shadow-only behavior).
 //   - enforce:  calibrated violations drive the existing ladder (Task 29).
+//     Until Task 29 lands, enforce records exactly what audit does, so
+//     nothing semantic contributes risk in any mode.
 //
 // policy.mode caps decision.mode: with policy.mode audit, enforce behaves
 // as audit. Nothing here maintains a risk score of its own.
@@ -79,6 +82,56 @@ import (
 	"elida/internal/session"
 )
 
+// Rule names and event categories semantic decisions record under.
+//
+// RuleSemanticInjection is an evidence-only violation in audit mode (and,
+// until Task 29 lands, in enforce mode too). RuleInjectionElevated is always
+// evidence-only: it exists so a repeated-category correlation rule can
+// accumulate weak signals that individually mean nothing.
+const (
+	// RuleSemanticInjection names a score at or above Thresholds.Main.
+	RuleSemanticInjection = "semantic_injection"
+	// RuleInjectionElevated names a score in [Thresholds.Elevated, Main).
+	RuleInjectionElevated = "injection_elevated"
+
+	// CategorySemanticInjection is RuleSemanticInjection's event category.
+	CategorySemanticInjection = "semantic_injection"
+	// CategoryInjectionElevated is RuleInjectionElevated's event category.
+	CategoryInjectionElevated = "injection_elevated"
+)
+
+// PolicyRecorder is the policy engine seen from here: one method, which
+// routes a semantic decision into the existing violation machinery.
+//
+// Narrow on purpose. The runner must not be able to reach
+// AddExternalRiskPoints or anything else that would let semantic detection
+// maintain a score of its own. *policy.Engine satisfies it.
+type PolicyRecorder interface {
+	RecordSemanticViolation(sessionID string, v policy.Violation)
+}
+
+// WouldContributePoints is what a violation of this severity from this
+// source role would add to the session risk score at the moment it fired,
+// before decay.
+//
+// It is a diagnostic shown in the UI and telemetry for audit mode. It uses
+// the policy engine's own weight tables with the engine's fallbacks (an
+// unknown severity or role weighs 1.0), so the number an operator sees is
+// what enforcement would actually add; a test pins it to the value the
+// engine stores. It is never a second authoritative score and nothing reads
+// it to enforce.
+func WouldContributePoints(severity policy.Severity, sourceRole string) float64 {
+	sev := policy.SeverityWeights[severity]
+	if sev == 0 {
+		sev = 1.0
+	}
+	role := policy.SourceRoleWeights[sourceRole]
+	if role == 0 {
+		role = 1.0
+	}
+	return sev * role
+}
+
 // Thresholds maps calibrated probabilities onto severities.
 //
 // These are not free-form numbers: they arrive from the loaded model's
@@ -90,7 +143,10 @@ type Thresholds struct {
 	// Aux is the human_directed veto threshold. At or above it, an
 	// injection score from the same window is rescued.
 	Aux float64
-	// Elevated emits evidence-only injection_elevated events (Task 28).
+	// Elevated is the lower edge of the injection_elevated band: a score in
+	// [Elevated, Main) that was not vetoed records an evidence-only
+	// injection_elevated event in audit and enforce modes. Zero or less
+	// disables the band (otherwise every score would qualify).
 	Elevated float64
 	// Warning maps a probability at or above it onto a warning severity.
 	Warning float64
@@ -166,6 +222,11 @@ type Config struct {
 	// same deadline the scheduler applies per call, scoped to the request;
 	// it never extends the scheduler's.
 	InlineTimeout time.Duration
+	// Policy records violations. Nil means shadow-only behavior regardless
+	// of Mode, which is how the runner is tested without a policy engine.
+	// Callers must not pass a typed nil (a nil *policy.Engine): that is a
+	// non-nil interface and would be called.
+	Policy PolicyRecorder
 }
 
 // maxBoundSessions caps the session registry. An async result has to find
@@ -969,21 +1030,151 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 
 // handle records verdicts according to the effective mode.
 //
-// shadow is the only mode implemented here. audit and enforce are added in
-// Tasks 28 and 29; until then they record the shadow surface too, which is
-// strictly less than they will do and never more.
+//   - shadow:  the bounded session list only. No violations, no risk.
+//   - audit:   the shadow list plus an evidence-only violation carrying
+//     diagnostic would-contribute points. No risk.
+//   - enforce: for now exactly audit (evidence-only, no risk). Task 29 makes
+//     a semantic_injection finding an ordinary, contributing violation;
+//     until it lands nothing semantic contributes risk in any mode.
+//
+// A non-vetoed score in [Thresholds.Elevated, Thresholds.Main) records an
+// evidence-only injection_elevated event in audit and enforce alike: it is
+// evidence for correlation, never a finding on its own.
+//
+// One claim per verdict. claimDecision is taken once per DecisionID and
+// gates BOTH the shadow entry and the violation, so a retry, an async
+// redelivery or an inline+async pair for the same window records neither
+// twice. Each verdict is complete when it is built (probability, veto and
+// coverage are all final), so what the policy engine receives for a
+// DecisionID is its final value; the engine's own first-wins dedup is only a
+// backstop.
 func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment) {
 	for _, v := range r.Verdicts(sess.ID, requestID, in, a) {
+		if !r.claimDecision(v.DecisionID) {
+			continue
+		}
+		// Shadow data is recorded for every answered decision, whatever the
+		// mode and whatever the score: calibration needs the whole
+		// distribution, including the vetoes and the quiet scores.
 		r.recordShadow(sess, in, v)
+
+		if r.mode == config.DecisionModeShadow || r.cfg.Policy == nil {
+			continue
+		}
+		// A vetoed decision is not a finding in any mode. The aux head
+		// decided this directive is aimed at a person; the rescue is
+		// recorded above so it stays explainable.
+		if v.Vetoed {
+			continue
+		}
+
+		switch {
+		case v.Probability >= r.cfg.Thresholds.Main:
+			// Over the violation threshold. Evidence-only in audit mode, and
+			// in enforce mode until Task 29 makes it contribute.
+			r.recordViolation(sess.ID, in, v, RuleSemanticInjection, CategorySemanticInjection, true)
+		case r.cfg.Thresholds.Elevated > 0 && v.Probability >= r.cfg.Thresholds.Elevated:
+			// Sub-threshold but notable. Always evidence-only: on its own
+			// this contributes nothing, and a repeated-category correlation
+			// rule is what gives it meaning.
+			r.recordViolation(sess.ID, in, v, RuleInjectionElevated, CategoryInjectionElevated, true)
+		}
 	}
 }
 
-// recordShadow appends one bounded shadow entry, once per DecisionID. It
-// never touches the risk score and carries no content.
-func (r *Runner) recordShadow(sess *session.Session, in decision.Input, v Verdict) {
-	if !r.claimDecision(v.DecisionID) {
-		return
+// recordViolation builds the policy violation for one verdict and records it
+// through the ordinary violation path. The caller holds the verdict's claim.
+func (r *Runner) recordViolation(sessionID string, in decision.Input, v Verdict, ruleName, category string, evidenceOnly bool) {
+	severity := policy.Severity(v.Severity)
+	if severity == "" {
+		severity = policy.SeverityInfo
 	}
+
+	pv := policy.Violation{
+		RuleName:      ruleName,
+		Description:   r.describe(v, ruleName),
+		Severity:      severity,
+		Action:        "flag",
+		Timestamp:     r.cfg.Clock(),
+		SourceRole:    in.SourceRole,
+		MessageIndex:  in.MessageIndex,
+		EventCategory: category,
+		FrameworkRef:  "OWASP-LLM01",
+		EvidenceOnly:  evidenceOnly,
+		Semantic: &policy.SemanticEvidence{
+			Signal:           string(v.Signal),
+			Probability:      v.Probability,
+			AuxProbability:   v.AuxProbability,
+			Vetoed:           v.Vetoed,
+			Model:            r.cfg.Model.Name,
+			ModelVersion:     r.cfg.Model.Version,
+			ModelChecksum:    r.cfg.Model.Checksum,
+			ThresholdSet:     r.cfg.Model.ThresholdSet,
+			DecisionID:       v.DecisionID,
+			Transform:        v.Window.Transform,
+			TransformDepth:   v.Window.TransformDepth,
+			WindowStartByte:  v.Window.StartByte,
+			WindowEndByte:    v.Window.EndByte,
+			CoverageComplete: v.Coverage.Complete,
+			ExecutionMode:    v.ExecutionMode,
+			ProtectionScope:  string(v.Scope),
+		},
+	}
+	if evidenceOnly {
+		// The diagnostic the UI shows: what this would have added had it
+		// contributed. The engine recomputes it from the same weights; it is
+		// set here too so the value is present on what the runner sends.
+		pv.WouldContributePoints = WouldContributePoints(severity, in.SourceRole)
+	}
+
+	// SourceContent and MatchedText are deliberately left empty. Raw content
+	// is persisted or exported only under the existing capture and redaction
+	// policy, and the window offsets above already say where to look.
+	r.cfg.Policy.RecordSemanticViolation(sessionID, pv)
+
+	// A finding is logged at info; elevated evidence, which can be frequent
+	// and means nothing on its own, at debug. Never content.
+	level := slog.LevelInfo
+	if ruleName == RuleInjectionElevated {
+		level = slog.LevelDebug
+	}
+	slog.Log(context.Background(), level, "semantic decision recorded",
+		"session_id", sessionID,
+		"rule", ruleName,
+		"severity", severity,
+		"evidence_only", evidenceOnly,
+		"would_contribute_points", pv.WouldContributePoints,
+		"probability", v.Probability,
+		"aux_probability", v.AuxProbability,
+		"transform", v.Window.Transform,
+		"execution_mode", v.ExecutionMode,
+		"protection_scope", v.Scope,
+		"coverage_complete", v.Coverage.Complete,
+		"decision_id", v.DecisionID,
+		"threshold_set", r.cfg.Model.ThresholdSet,
+		"mode", r.mode,
+	)
+}
+
+// describe writes the human-readable violation description. It names the
+// representation and the thresholds, never the content.
+func (r *Runner) describe(v Verdict, ruleName string) string {
+	where := "original content"
+	if v.Window.Transform != "" {
+		where = "the " + v.Window.Transform + " representation"
+	}
+	if ruleName == RuleInjectionElevated {
+		return fmt.Sprintf("semantic injection signal %.3f in %s: above the elevated threshold %.2f but below the violation threshold %.2f (evidence only, contributes no risk)",
+			v.Probability, where, r.cfg.Thresholds.Elevated, r.cfg.Thresholds.Main)
+	}
+	return fmt.Sprintf("semantic injection signal %.3f in %s: at or above the violation threshold %.2f (threshold set %s)",
+		v.Probability, where, r.cfg.Thresholds.Main, r.cfg.Model.ThresholdSet)
+}
+
+// recordShadow appends one bounded shadow entry. The caller holds the
+// verdict's claim (handle), so it runs once per DecisionID. It never touches
+// the risk score and carries no content.
+func (r *Runner) recordShadow(sess *session.Session, in decision.Input, v Verdict) {
 	sess.RecordSemanticShadow(session.SemanticShadow{
 		Timestamp:        r.cfg.Clock(),
 		DecisionID:       v.DecisionID,

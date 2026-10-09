@@ -101,3 +101,34 @@ func TestExecutionModeFromScope(t *testing.T) {
 		t.Errorf("executionMode(remaining_stream) = %q, want async", got)
 	}
 }
+
+func TestDescribeMentionsTheTransform(t *testing.T) {
+	r := &Runner{cfg: Config{
+		Thresholds: testThresholds(),
+		Model:      ModelIdentity{ThresholdSet: "v1"},
+	}}
+	plain := r.describe(Verdict{Probability: 0.91}, RuleSemanticInjection)
+	if !containsStr(plain, "original content") {
+		t.Errorf("describe = %q, want it to mention the original content", plain)
+	}
+	derived := r.describe(Verdict{
+		Probability: 0.91,
+		Window:      decision.Window{Transform: "base64_decode"},
+	}, RuleSemanticInjection)
+	if !containsStr(derived, "base64_decode") {
+		t.Errorf("describe = %q, want it to name the transform", derived)
+	}
+	elevated := r.describe(Verdict{Probability: 0.35}, RuleInjectionElevated)
+	if !containsStr(elevated, "evidence only") {
+		t.Errorf("describe = %q, want it to say the event contributes no risk", elevated)
+	}
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
