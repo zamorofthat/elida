@@ -7,9 +7,13 @@
 //     violations, no risk.
 //   - audit:    evidence-only violations with diagnostic points, recorded
 //     through Config.Policy (nil Policy means shadow-only behavior).
-//   - enforce:  calibrated violations drive the existing ladder (Task 29).
-//     Until Task 29 lands, enforce records exactly what audit does, so
-//     nothing semantic contributes risk in any mode.
+//   - enforce:  a non-vetoed score at or above Thresholds.Main records an
+//     ORDINARY semantic_injection violation, which adds risk through the
+//     policy engine's existing flag -> throttle -> block -> kill ladder. The
+//     runner adds no action, threshold or proxy path of its own.
+//     injection_elevated stays evidence-only. New refuses enforce unless
+//     Config.ThresholdSetMatches: enforcement needs calibration evidence for
+//     the exact model and threshold set in use.
 //
 // policy.mode caps decision.mode: with policy.mode audit, enforce behaves
 // as audit. Nothing here maintains a risk score of its own.
@@ -85,10 +89,11 @@ import (
 
 // Rule names and event categories semantic decisions record under.
 //
-// RuleSemanticInjection is an evidence-only violation in audit mode (and,
-// until Task 29 lands, in enforce mode too). RuleInjectionElevated is always
-// evidence-only: it exists so a repeated-category correlation rule can
-// accumulate weak signals that individually mean nothing.
+// RuleSemanticInjection is an evidence-only violation in audit mode and an
+// ordinary, risk-contributing one in effective enforce mode.
+// RuleInjectionElevated is always evidence-only: it exists so a
+// repeated-category correlation rule can accumulate weak signals that
+// individually mean nothing.
 const (
 	// RuleSemanticInjection names a score at or above Thresholds.Main.
 	RuleSemanticInjection = "semantic_injection"
@@ -230,6 +235,12 @@ type Config struct {
 	// New rejects a typed nil (a nil *policy.Engine behind the interface),
 	// which would otherwise be called on the first finding.
 	Policy PolicyRecorder
+	// ThresholdSetMatches reports whether the configured threshold set
+	// matches the loaded model's own. Enforce mode is refused when it does
+	// not: strict enforcement requires calibration evidence for the exact
+	// model and threshold-set versions in use, and a threshold selected for
+	// a different model is not evidence.
+	ThresholdSetMatches bool
 }
 
 // maxBoundSessions caps the session registry. An async result has to find
@@ -411,6 +422,12 @@ func New(cfg Config) (*Runner, error) {
 		}
 		if cfg.Model.ThresholdSet == "" {
 			return nil, errors.New("runner: Model.ThresholdSet is required")
+		}
+		// Checked on the configured mode, before the policy cap: a refused
+		// enforce must surface as the configuration error it is, never as a
+		// quiet downgrade the operator cannot see.
+		if cfg.Mode == config.DecisionModeEnforce && !cfg.ThresholdSetMatches {
+			return nil, fmt.Errorf("runner: enforce mode refused: the configured threshold set %q does not match the loaded model; strict enforcement requires calibration evidence for the exact model and threshold-set versions in use", cfg.Model.ThresholdSet)
 		}
 	}
 	if cfg.Policy != nil {
@@ -1043,13 +1060,19 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 //   - shadow:  the bounded session list only. No violations, no risk.
 //   - audit:   the shadow list plus an evidence-only violation carrying
 //     diagnostic would-contribute points. No risk.
-//   - enforce: for now exactly audit (evidence-only, no risk). Task 29 makes
-//     a semantic_injection finding an ordinary, contributing violation;
-//     until it lands nothing semantic contributes risk in any mode.
+//   - enforce: the shadow list plus an ORDINARY semantic_injection
+//     violation, which contributes risk through the existing ladder; the
+//     ladder, not this package, decides whether that throttles or blocks.
 //
 // A non-vetoed score in [Thresholds.Elevated, Thresholds.Main) records an
 // evidence-only injection_elevated event in audit and enforce alike: it is
 // evidence for correlation, never a finding on its own.
+//
+// Only answered windows produce verdicts, so an ordinary violation is only
+// ever recorded for a window the provider actually scored over the
+// threshold. Incomplete coverage is carried on the evidence and the shadow
+// entry (coverage_complete false); the part that went unscored is never
+// turned into a violation, and it is never treated as safe either.
 //
 // One claim per verdict. claimDecision is taken once per DecisionID and
 // gates BOTH the shadow entry and the violation, so a retry, an async
@@ -1080,9 +1103,11 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 
 		switch {
 		case v.Probability >= r.cfg.Thresholds.Main:
-			// Over the violation threshold. Evidence-only in audit mode, and
-			// in enforce mode until Task 29 makes it contribute.
-			r.recordViolation(sess.ID, in, v, RuleSemanticInjection, CategorySemanticInjection, true)
+			// Over the violation threshold. Evidence-only in audit mode; an
+			// ordinary violation in effective enforce mode, so the existing
+			// risk ladder does the rest.
+			evidenceOnly := r.mode != config.DecisionModeEnforce
+			r.recordViolation(sess.ID, in, v, RuleSemanticInjection, CategorySemanticInjection, evidenceOnly)
 		case r.cfg.Thresholds.Elevated > 0 && v.Probability >= r.cfg.Thresholds.Elevated:
 			// Sub-threshold but notable. Always evidence-only: on its own
 			// this contributes nothing, and a repeated-category correlation

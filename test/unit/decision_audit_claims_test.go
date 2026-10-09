@@ -70,7 +70,9 @@ func recorderRunner(t *testing.T, mode string, elevated float64, rec runner.Poli
 		Thresholds: runner.Thresholds{Main: 0.5, Aux: 0.64, Elevated: elevated, Warning: 0.5, Critical: 0.8},
 		Model:      runner.ModelIdentity{Name: "minilm-multihead", Version: "v5-fp32", Checksum: "abc123", ThresholdSet: "v1"},
 		Policy:     rec,
-		RiskLookup: func(string) (float64, string) { return 0, "observe" },
+		// The fixture is the calibrated pairing, so enforce is not refused.
+		ThresholdSetMatches: true,
+		RiskLookup:          func(string) (float64, string) { return 0, "observe" },
 	})
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
@@ -188,7 +190,7 @@ func TestAuditClaims_ShadowModeNeverCallsThePolicy(t *testing.T) {
 	}
 }
 
-func TestAuditClaims_EnforceIsEvidenceOnlyUntilTask29(t *testing.T) {
+func TestAuditClaims_EnforceRecordsOrdinaryInjectionAndEvidenceOnlyElevated(t *testing.T) {
 	rec := &recordingPolicy{}
 	r := recorderRunner(t, "enforce", 0.3, rec, nil)
 	if r.EffectiveMode() != "enforce" {
@@ -203,13 +205,18 @@ func TestAuditClaims_EnforceIsEvidenceOnlyUntilTask29(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("expected two violations, got %d", len(calls))
 	}
-	for _, v := range calls {
-		if !v.EvidenceOnly {
-			t.Errorf("%s: enforce must be evidence-only until Task 29 lands", v.RuleName)
-		}
-	}
 	if calls[0].RuleName != runner.RuleSemanticInjection || calls[1].RuleName != runner.RuleInjectionElevated {
-		t.Errorf("rules = %q, %q", calls[0].RuleName, calls[1].RuleName)
+		t.Fatalf("rules = %q, %q", calls[0].RuleName, calls[1].RuleName)
+	}
+	if calls[0].EvidenceOnly || calls[0].WouldContributePoints != 0 {
+		t.Errorf("enforce must record semantic_injection as an ordinary violation: evidence_only=%v would_contribute=%v",
+			calls[0].EvidenceOnly, calls[0].WouldContributePoints)
+	}
+	if calls[0].Semantic == nil || calls[0].EventCategory != runner.CategorySemanticInjection {
+		t.Errorf("an ordinary violation still carries full semantic evidence: %+v", calls[0])
+	}
+	if !calls[1].EvidenceOnly {
+		t.Error("injection_elevated must stay evidence-only in enforce mode")
 	}
 }
 

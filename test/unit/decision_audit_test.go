@@ -50,6 +50,9 @@ func auditRunner(t *testing.T, mode, policyMode string, scores map[decision.Sign
 			score, action, _ := pe.GetSessionRiskScore(sessionID)
 			return score, action
 		},
+		// The fixture is the calibrated pairing, so a configured enforce is
+		// not refused before the policy cap applies.
+		ThresholdSetMatches: true,
 	})
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)

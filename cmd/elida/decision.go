@@ -46,8 +46,16 @@ func (a *app) initDecision() {
 // The runner starts in the configured mode (default shadow), capped by
 // policy.mode, and the effective mode is logged once. It records through the
 // policy engine (initPolicyEngine runs first): shadow records nothing there;
-// audit, and enforce until Task 29, record evidence-only violations that add
-// no risk. Without a policy engine the runner behaves as shadow.
+// audit records evidence-only violations that add no risk; enforce records
+// ordinary semantic_injection violations that drive the existing risk
+// ladder. Without a policy engine the runner behaves as shadow.
+//
+// Enforce is refused when decision.threshold_set does not match the loaded
+// model's threshold set (runner.New): there is no calibration evidence for
+// that pairing. Under the same required semantics as a bad model, required
+// true fails startup; required false starts the runner in audit and logs a
+// WARN, and /control/decision shows mode enforce next to effective_mode
+// audit, so the downgrade is visible rather than silent.
 //
 // decision.require_inline is not handled here: the key and its startup gate
 // are added by Task 30.
@@ -126,7 +134,8 @@ func (a *app) setupDecision(ctx context.Context) error {
 	if pe != nil {
 		recorder = pe
 	}
-	r, err := runner.New(runner.Config{
+	h := provider.Health()
+	rcfg := runner.Config{
 		Mode:       d.Mode,
 		PolicyMode: policyMode,
 		Scheduler:  sch,
@@ -145,10 +154,25 @@ func (a *app) setupDecision(ctx context.Context) error {
 			Checksum:     m.Checksum(),
 			ThresholdSet: d.ThresholdSet,
 		},
-		Strict:     d.InlineAdmission.BroadStrictMode,
-		RiskLookup: riskLookup(pe),
-		Policy:     recorder,
-	})
+		Strict:              d.InlineAdmission.BroadStrictMode,
+		RiskLookup:          riskLookup(pe),
+		Policy:              recorder,
+		ThresholdSetMatches: h.ThresholdSetMatches,
+	}
+	r, err := runner.New(rcfg)
+	if err != nil && d.Mode == config.DecisionModeEnforce && !h.ThresholdSetMatches && !d.Required {
+		// A refused enforce is an operator configuration error. Without
+		// decision.required it does not stop the proxy, but it must not be
+		// quiet either: run audit (evidence only, no risk) and say so.
+		slog.Warn("semantic detection: enforce mode refused; running in audit (evidence only, no risk contribution)",
+			"error", err,
+			"configured_threshold_set", d.ThresholdSet,
+			"model_threshold_set", m.Calibration.ThresholdSet,
+			"effective_mode", config.DecisionModeAudit,
+			"hint", "select a threshold set matching the loaded model, or set decision.mode: audit")
+		rcfg.Mode = config.DecisionModeAudit
+		r, err = runner.New(rcfg)
+	}
 	if err != nil {
 		return a.abandonDecision(ctx, fmt.Errorf("semantic runner configuration is invalid: %w", err))
 	}
@@ -156,7 +180,6 @@ func (a *app) setupDecision(ctx context.Context) error {
 	a.decisionRunner = r
 	warnEmptyElevatedBand(d.ElevatedThreshold, m.Calibration.MainThreshold)
 
-	h := provider.Health()
 	slog.Info("semantic injection detection initialized",
 		"mode", d.Mode,
 		"effective_mode", r.EffectiveMode(),

@@ -1036,3 +1036,72 @@ func TestSessionEnd_RetainedReuseExportsNoCarriedViolations(t *testing.T) {
 		t.Fatalf("SQLite must still hold the carried violation, stored %v", got)
 	}
 }
+
+// TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch: enforce needs
+// calibration evidence for the loaded model. With decision.required true a
+// mismatched threshold set fails startup; otherwise the runner starts in
+// audit with a WARN, and the status shows the configured enforce next to the
+// effective audit, so nobody is left believing enforcement is active.
+func TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch(t *testing.T) {
+	t.Run("required fails startup", func(t *testing.T) {
+		quietLogs(t)
+		cfg := decisionTestConfig(t)
+		cfg.Decision.Mode = config.DecisionModeEnforce
+		cfg.Decision.ThresholdSet = "v2-other-model"
+		cfg.Decision.Required = true
+		a := newDecisionApp(t, cfg, &gate{})
+		err := a.setupDecision(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "threshold set") {
+			t.Fatalf("enforce with a mismatched threshold set and required true must fail startup naming the threshold set, got %v", err)
+		}
+		if a.decisionRunner != nil || a.decisionScheduler != nil || a.decisionProvider != nil {
+			t.Fatal("a failed startup must not leave semantic components behind")
+		}
+	})
+
+	t.Run("not required degrades to audit with a warning", func(t *testing.T) {
+		var buf strings.Builder
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		cfg := decisionTestConfig(t)
+		cfg.Policy.Enabled = true
+		cfg.Policy.Mode = "enforce"
+		cfg.Decision.Mode = config.DecisionModeEnforce
+		cfg.Decision.ThresholdSet = "v2-other-model"
+		cfg.Decision.Required = false
+		a := newDecisionApp(t, cfg, &gate{})
+		if err := a.setupDecision(context.Background()); err != nil {
+			t.Fatalf("required false must not fail startup: %v", err)
+		}
+		t.Cleanup(func() { a.shutdownDecision(context.Background()) })
+		if a.decisionRunner == nil {
+			t.Fatal("required false must still run detection, in audit")
+		}
+		if got := a.decisionRunner.EffectiveMode(); got != config.DecisionModeAudit {
+			t.Fatalf("effective mode = %q, want audit", got)
+		}
+		st := a.DecisionStatus()
+		if st.Mode != config.DecisionModeEnforce || st.EffectiveMode != config.DecisionModeAudit || st.ThresholdSetMatches {
+			t.Fatalf("status must show configured enforce, effective audit, mismatch: %+v", st)
+		}
+		if !strings.Contains(buf.String(), "enforce mode refused") {
+			t.Fatalf("the downgrade must be logged as a WARN:\n%s", buf.String())
+		}
+	})
+
+	t.Run("matching threshold set enforces", func(t *testing.T) {
+		quietLogs(t)
+		cfg := decisionTestConfig(t)
+		cfg.Decision.Mode = config.DecisionModeEnforce
+		cfg.Decision.Required = true
+		a := newDecisionApp(t, cfg, &gate{})
+		if err := a.setupDecision(context.Background()); err != nil {
+			t.Fatalf("setupDecision: %v", err)
+		}
+		t.Cleanup(func() { a.shutdownDecision(context.Background()) })
+		if got := a.decisionRunner.EffectiveMode(); got != config.DecisionModeEnforce {
+			t.Fatalf("effective mode = %q, want enforce", got)
+		}
+	})
+}
