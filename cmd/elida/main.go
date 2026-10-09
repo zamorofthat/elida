@@ -434,6 +434,7 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
 			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
 		})
 	}
 }

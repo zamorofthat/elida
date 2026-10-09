@@ -51,6 +51,10 @@ type Violation struct {
 	// ordinary violation. It lives in the violations JSON column: rows
 	// written before it existed have no key and restore as false.
 	EvidenceOnly bool `json:"evidence_only,omitempty"`
+	// EventID is the policy engine's stable ID for the occurrence behind
+	// this violation. SaveSession uses it to deduplicate history carried
+	// from an earlier session with the same ID. Absent on older rows.
+	EventID string `json:"event_id,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
@@ -352,11 +356,47 @@ func (s *SQLiteStore) migrate() error {
 	// Add the semantic shadow column (idempotent — ignore "duplicate column" errors)
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN semantic_shadow TEXT DEFAULT ''")
 
+	// History carried from earlier sessions with the same ID (see
+	// SaveSession). Idempotent — ignore "duplicate column" errors.
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN prior_history TEXT DEFAULT ''")
+
 	return nil
 }
 
-// SaveSession saves a completed session record
+// SaveSession saves a session record, keyed by session ID.
+//
+// Session IDs are reusable: a TimedOut or Completed session's ID can start a
+// new session (session.Manager.GetOrCreate). A plain replace would then
+// erase the earlier session's history. So, inside one transaction,
+// SaveSession reads the stored row. When its start_time differs from
+// record.StartTime the stored row belongs to an earlier session, and its
+// violations, captured content and semantic shadow decisions become the
+// carried "prior history". A save of the same session (equal start_time,
+// e.g. the proxy's flagged-session save followed by the session-end save)
+// keeps the prior history already carried. The written lists are the
+// record's own entries merged with the prior history; mergeHistory documents
+// the deduplication and the caps.
+//
+// The Redis session store (session.RedisStore) holds live session state
+// only, never this history (no violations, captures or shadow decisions),
+// so there is nothing to merge there.
 func (s *SQLiteStore) SaveSession(record SessionRecord) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prior, err := loadPriorHistory(tx, record.ID, record.StartTime)
+	if err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+	record, prior = mergeHistory(record, prior)
+	priorJSON, err := json.Marshal(prior)
+	if err != nil {
+		priorJSON = []byte("{}")
+	}
+
 	metadata, err := json.Marshal(record.Metadata)
 	if err != nil {
 		metadata = []byte("{}")
@@ -377,10 +417,10 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		semanticShadow = []byte("[]")
 	}
 
-	_, err = s.db.Exec(`
+	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, prior_history)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -398,8 +438,12 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		record.FingerprintBucket,
 		record.FingerprintClass,
 		string(semanticShadow),
+		string(priorJSON),
 	)
 	if err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 

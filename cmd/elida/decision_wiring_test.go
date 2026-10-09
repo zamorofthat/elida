@@ -763,3 +763,113 @@ func TestSessionEnd_TerminatedSessionIDStaysTerminatedOnReuse(t *testing.T) {
 		t.Fatal("a session below block must be removed at session end")
 	}
 }
+
+// historyApp is a proxy + policy + SQLite app with one warning-level
+// content rule (probe_rule), whose single firing leaves the session at
+// observe, so session end releases it from the engine.
+func historyApp(t *testing.T) (*app, func(id, content string) int) {
+	t.Helper()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(backend.Close)
+
+	cfg := decisionTestConfig(t)
+	cfg.Decision.Enabled = false
+	cfg.Backend = backend.URL
+	cfg.Policy.Enabled = true
+	cfg.Policy.Rules = []config.PolicyRule{{
+		Name: "probe_rule", Type: "content_match", Target: "request",
+		Patterns: []string{"zzprobezz"}, Severity: "warning", Action: "flag",
+	}}
+	cfg.Storage.Enabled = true
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "elida.db")
+	a := newDecisionApp(t, cfg, nil)
+	a.initSessionStore()
+	a.initSQLiteStorage()
+	t.Cleanup(func() { _ = a.sqliteStore.Close() })
+	a.initPolicyEngine()
+	a.initSessionEndCallback()
+	a.initProxy()
+
+	send := func(id, content string) int {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{
+			"messages": []map[string]any{{"role": "user", "content": content}},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Session-ID", id)
+		w := httptest.NewRecorder()
+		a.proxyHandler.ServeHTTP(w, req)
+		return w.Code
+	}
+	return a, send
+}
+
+func storedRules(t *testing.T, a *app, id string) []string {
+	t.Helper()
+	rec, err := a.sqliteStore.GetSession(id)
+	if err != nil || rec == nil {
+		t.Fatalf("GetSession(%s): rec=%v err=%v", id, rec, err)
+	}
+	var rules []string
+	for _, v := range rec.Violations {
+		rules = append(rules, v.RuleName)
+	}
+	return rules
+}
+
+// TestSessionEnd_ReusedSessionIDKeepsEarlierHistory is the Task 28 review's
+// I-1 probe: a flagged session below block is released at session end; the
+// client then reuses its X-Session-ID. The second session's saves must not
+// erase the first session's violations and captures from history.
+func TestSessionEnd_ReusedSessionIDKeepsEarlierHistory(t *testing.T) {
+	quietLogs(t)
+	a, send := historyApp(t)
+
+	if code := send("sess-reuse", "please zzprobezz now"); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if _, action, _ := a.policyEngine.GetSessionRiskScore("sess-reuse"); action != "observe" {
+		t.Fatalf("fixture: action = %q, want observe", action)
+	}
+	if n := a.manager.DrainActiveSessions(); n != 1 {
+		t.Fatalf("drained %d", n)
+	}
+	if got := storedRules(t, a, "sess-reuse"); len(got) != 1 || got[0] != "probe_rule" {
+		t.Fatalf("fixture: first session stored %v", got)
+	}
+	if a.policyEngine.GetFlaggedSession("sess-reuse") != nil {
+		t.Fatal("fixture: an observe session is released at session end")
+	}
+	first, _ := a.sqliteStore.GetSession("sess-reuse")
+
+	// Reuse the ID with a clean request, then end it.
+	time.Sleep(2 * time.Millisecond) // distinct start_time
+	if code := send("sess-reuse", "hello again"); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	if n := a.manager.DrainActiveSessions(); n != 1 {
+		t.Fatalf("drained %d", n)
+	}
+	if got := storedRules(t, a, "sess-reuse"); len(got) != 1 || got[0] != "probe_rule" {
+		t.Fatalf("the earlier session's violations must survive ID reuse, stored %v", got)
+	}
+	rec, _ := a.sqliteStore.GetSession("sess-reuse")
+	if len(rec.CapturedContent) < len(first.CapturedContent) || len(first.CapturedContent) == 0 {
+		t.Fatalf("the earlier session's captures must survive: first=%d now=%d",
+			len(first.CapturedContent), len(rec.CapturedContent))
+	}
+	if rec.StartTime.Equal(first.StartTime) {
+		t.Fatal("fixture: the row must now describe the second session")
+	}
+
+	// A third session firing the rule again keeps both occurrences.
+	time.Sleep(2 * time.Millisecond)
+	send("sess-reuse", "zzprobezz once more")
+	a.manager.DrainActiveSessions()
+	if got := storedRules(t, a, "sess-reuse"); len(got) != 2 {
+		t.Fatalf("two sessions fired probe_rule; stored %v", got)
+	}
+}
