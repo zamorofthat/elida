@@ -1708,7 +1708,7 @@ const MaxRetainedFlaggedSessions = 4096
 //
 // Retention rule: a session whose current ladder action is block or
 // terminate keeps a slim entry (action, score, max severity, timestamps and
-// content-free violations; see slimRetainedLocked, about 1 KB), so a client
+// content-free violations; see slimRetainedLocked, about 1.4 KB), so a client
 // that reuses that session ID after the session ended still meets the same
 // action. Call it only after the session's full record has been persisted:
 // captured content and events are dropped here. Every other flagged entry
@@ -1769,7 +1769,7 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 // the semantic dedup set are dropped. The session-end save has already
 // persisted the full record, which SQLite keeps across ID reuse.
 //
-// Bound: roughly 1 KB per entry plus a few hundred bytes per distinct rule
+// Bound: roughly 1.4 KB per entry (measured) plus a few hundred bytes per distinct rule
 // that fired, so MaxRetainedFlaggedSessions entries stay in the low MB. The
 // violations slice is replaced rather than edited in place; views returned
 // by GetFlaggedSession are deep copies (clone), so this is for clarity only.

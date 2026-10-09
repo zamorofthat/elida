@@ -632,7 +632,7 @@ allowlisted tool's output is still assessed (see
 When a session ends, the policy engine forgets its flagged entry, with one
 exception: a session whose ladder action is `block` or `terminate` keeps a slim
 entry (action, score, maximum severity, timestamps and content-free violations;
-about 1 KB). A client that reuses that session ID after the session ended still
+about 1.4 KB, measured). A client that reuses that session ID after the session ended still
 meets the same action. At most 4096 ended sessions are retained, oldest evicted
 first; an evicted ID no longer meets its old action. The full session record
 has already been persisted at session end.

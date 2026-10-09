@@ -56,6 +56,14 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   message counts as assessed for the session, so its remaining windows are not
   revisited on later requests. The gap is visible in `coverage_gaps` and as
   `coverage_complete: false` on that message's decisions.
+- **Raising `max_input_bytes` costs request latency.** Preprocessing runs on
+  the request path and does not check the inline deadline. One 8 MiB message
+  with `decision.preprocessing.max_input_bytes` / `max_analysis_bytes` at their
+  ceilings (8 MiB / 32 MiB) measured 410 ms and 258 MB allocated end to end on
+  darwin/arm64 (preprocessing alone 335 ms and 250 MB), against a 50 ms inline
+  budget. At the defaults the same message costs 68 ms and 29 MB, because the
+  input is truncated (an `input_truncated` gap). Raise the limits only with
+  that cost in mind.
 - **Async results need a live session binding.** The runner keeps a binding
   for every live session (removed only when the session ends), capped at
   65,536 live bindings as a hard safety limit; there is no session-manager

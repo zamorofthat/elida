@@ -537,7 +537,11 @@ decision:
 
   # Analysis-only preprocessing bounds. Derived representations are scored
   # but never forwarded to the backend. Hitting a limit is a coverage gap,
-  # not a violation.
+  # not a violation. Preprocessing runs on the request path and is not
+  # deadline-aware, so raising max_input_bytes above the default costs
+  # request latency: one 8 MiB message at the ceilings (8 MiB input / 32 MiB
+  # analysis) measured 410 ms and 258 MB allocated on darwin/arm64, against
+  # 68 ms and 29 MB at these defaults.
   preprocessing:
     max_input_bytes: 262144
     max_analysis_bytes: 524288
