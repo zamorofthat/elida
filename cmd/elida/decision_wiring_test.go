@@ -20,6 +20,7 @@ import (
 	"elida/internal/decision/embedded"
 	"elida/internal/decision/runner"
 	"elida/internal/session"
+	"elida/internal/storage"
 )
 
 // goodModelPath is the checksummed fixture model directory. Its manifest
@@ -871,5 +872,70 @@ func TestSessionEnd_ReusedSessionIDKeepsEarlierHistory(t *testing.T) {
 	a.manager.DrainActiveSessions()
 	if got := storedRules(t, a, "sess-reuse"); len(got) != 2 {
 		t.Fatalf("two sessions fired probe_rule; stored %v", got)
+	}
+}
+
+func violationEvents(t *testing.T, a *app, id string) int {
+	t.Helper()
+	evs, err := a.sqliteStore.GetSessionEvents(id)
+	if err != nil {
+		t.Fatalf("GetSessionEvents: %v", err)
+	}
+	n := 0
+	for _, ev := range evs {
+		if ev.Type == storage.EventViolationDetected {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSessionEnd_RetainedReuseKeepsHistoryAndEmitsNoDuplicateEvents: a
+// terminated session is retained as a slim entry; reusing its ID is refused,
+// and when that reused session ends its record neither re-emits the old
+// violation_detected event (review M-1) nor overwrites the stored captures
+// with the slim entry (review I-1/I-2).
+func TestSessionEnd_RetainedReuseKeepsHistoryAndEmitsNoDuplicateEvents(t *testing.T) {
+	quietLogs(t)
+	a, send := historyApp(t)
+
+	if code := send("sess-term-hist", "please zzprobezz now"); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	a.policyEngine.AddExternalRiskPoints("sess-term-hist", 60, "test")
+	a.manager.DrainActiveSessions()
+	if n := violationEvents(t, a, "sess-term-hist"); n != 1 {
+		t.Fatalf("fixture: violation_detected events = %d, want 1", n)
+	}
+	first, _ := a.sqliteStore.GetSession("sess-term-hist")
+	if first == nil || len(first.CapturedContent) == 0 {
+		t.Fatal("fixture: the first session's captures are stored")
+	}
+	fs := a.policyEngine.GetFlaggedSession("sess-term-hist")
+	if fs == nil || fs.CurrentAction != "terminate" {
+		t.Fatalf("fixture: retained entry expected, got %+v", fs)
+	}
+	if len(fs.CapturedContent) != 0 || len(fs.ViolationEvents) != 0 {
+		t.Fatal("a retained entry must be slim")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	if code := send("sess-term-hist", "hello again"); code != http.StatusForbidden {
+		t.Fatalf("reuse: status %d, want 403", code)
+	}
+	a.manager.DrainActiveSessions()
+
+	if n := violationEvents(t, a, "sess-term-hist"); n != 1 {
+		t.Fatalf("reusing a retained ID must not re-emit old violations: events = %d", n)
+	}
+	rec, _ := a.sqliteStore.GetSession("sess-term-hist")
+	if got := storedRules(t, a, "sess-term-hist"); len(got) != 1 || got[0] != "probe_rule" {
+		t.Fatalf("stored violations = %v, want probe_rule once", got)
+	}
+	if len(rec.CapturedContent) != len(first.CapturedContent) {
+		t.Fatalf("the first session's captures must survive: %d -> %d", len(first.CapturedContent), len(rec.CapturedContent))
+	}
+	if a.policyEngine.ShouldBlockByRisk("sess-term-hist") != true {
+		t.Fatal("the ID must still be refused")
 	}
 }

@@ -55,6 +55,11 @@ type Violation struct {
 	// this violation. SaveSession uses it to deduplicate history carried
 	// from an earlier session with the same ID. Absent on older rows.
 	EventID string `json:"event_id,omitempty"`
+	// Timestamp is when the rule last fired. The session-end path uses it
+	// to tell violations of the ending session from ones a retained policy
+	// entry carried over from an earlier session with the same ID. Absent
+	// on older rows.
+	Timestamp time.Time `json:"timestamp,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session

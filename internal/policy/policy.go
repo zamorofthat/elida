@@ -1673,10 +1673,13 @@ const MaxRetainedFlaggedSessions = 4096
 // the engine forget an ended session, with one retention rule.
 //
 // Retention rule: a session whose current ladder action is block or
-// terminate keeps its whole entry (score, action, violations, events), so a
-// client that reuses that session ID after the session ended still meets
-// the same action. Every other flagged entry (observe, warn/flag, throttle,
-// or no ladder action) is removed, together with its semantic dedup set.
+// terminate keeps a slim entry (action, score, max severity, timestamps and
+// content-free violations; see slimRetainedLocked, about 1 KB), so a client
+// that reuses that session ID after the session ended still meets the same
+// action. Call it only after the session's full record has been persisted:
+// captured content and events are dropped here. Every other flagged entry
+// (observe, warn/flag, throttle, or no ladder action) is removed, together
+// with its semantic dedup set.
 // Retained entries are bounded by MaxRetainedFlaggedSessions, oldest
 // evicted first. A retained entry that is released again with a lower
 // action is removed.
@@ -1700,6 +1703,7 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 	if _, already := e.retained[sessionID]; already {
 		return true
 	}
+	e.slimRetainedLocked(sessionID, flagged)
 	e.retainedSeq++
 	e.retained[sessionID] = e.retainedSeq
 	e.retainedOrder = append(e.retainedOrder, retainedRef{id: sessionID, seq: e.retainedSeq})
@@ -1722,6 +1726,30 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 		e.retainedOrder = kept
 	}
 	return true
+}
+
+// slimRetainedLocked reduces a retained entry to what enforcement on a
+// reused ID needs: action, throttle rate, score, max severity, timestamps,
+// per-rule counts, and the violations with their content fields
+// (MatchedText, SourceContent) cleared. Captured content, the event list and
+// the semantic dedup set are dropped. The session-end save has already
+// persisted the full record, which SQLite keeps across ID reuse.
+//
+// Bound: roughly 1 KB per entry plus a few hundred bytes per distinct rule
+// that fired, so MaxRetainedFlaggedSessions entries stay in the low MB. The
+// violations slice is replaced, not edited in place, because
+// GetFlaggedSession copies share its backing array. The caller holds mu.
+func (e *Engine) slimRetainedLocked(sessionID string, flagged *FlaggedSession) {
+	slim := make([]Violation, len(flagged.Violations))
+	for i, v := range flagged.Violations {
+		v.MatchedText = ""
+		v.SourceContent = ""
+		slim[i] = v
+	}
+	flagged.Violations = slim
+	flagged.CapturedContent = nil
+	flagged.ViolationEvents = nil
+	delete(e.seenSemanticEvents, sessionID)
 }
 
 // retainedRef is one entry of the retention FIFO. seq tells a current entry

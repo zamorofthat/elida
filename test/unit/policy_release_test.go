@@ -1,9 +1,11 @@
 package unit
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"elida/internal/policy"
@@ -142,5 +144,57 @@ func TestReleaseFlaggedSession_StaleOrderEntryEvictsNothing(t *testing.T) {
 	}
 	if n := pe.RetainedFlaggedSessions(); n != policy.MaxRetainedFlaggedSessions {
 		t.Fatalf("retained = %d", n)
+	}
+}
+
+func TestReleaseFlaggedSession_RetainedEntryHoldsNoContent(t *testing.T) {
+	quietSlog(t)
+	pe := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	const sid = "sess-slim"
+	const body = "request body zzmarkerzz with private words"
+	res := pe.EvaluateMessages(sid, []policy.MessageToScan{{Role: "user", Index: 0, Content: body}})
+	if res == nil || len(res.Violations) == 0 {
+		t.Fatal("fixture: the marker must fire baseline_marker")
+	}
+	pe.CaptureRequest(sid, policy.CapturedRequest{Method: "POST", Path: "/v1", RequestBody: body})
+	pe.AddExternalRiskPoints(sid, 60, "test")
+
+	before := pe.GetFlaggedSession(sid)
+	if len(before.CapturedContent) == 0 || len(before.ViolationEvents) == 0 {
+		t.Fatal("fixture: the live entry holds captures and events")
+	}
+	if !pe.ReleaseFlaggedSession(sid) {
+		t.Fatal("a terminate session must be retained")
+	}
+
+	fs := pe.GetFlaggedSession(sid)
+	if fs == nil {
+		t.Fatal("retained entry missing")
+	}
+	if len(fs.CapturedContent) != 0 || len(fs.ViolationEvents) != 0 {
+		t.Fatalf("retained entry keeps captures=%d events=%d", len(fs.CapturedContent), len(fs.ViolationEvents))
+	}
+	raw, err := json.Marshal(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MatchedPattern is the rule's own regex (configuration, not request
+	// content), so the check looks for the request's other words.
+	if strings.Contains(string(raw), "request body") || strings.Contains(string(raw), "private words") {
+		t.Fatalf("retained entry holds content: %s", raw)
+	}
+	if len(raw) > 2048 {
+		t.Errorf("retained entry is %d bytes, want about 1 KB", len(raw))
+	}
+	if len(fs.Violations) == 0 || fs.Violations[0].RuleName != "baseline_marker" {
+		t.Fatalf("violations must stay (content-free): %+v", fs.Violations)
+	}
+	// The reused ID still meets terminate.
+	if _, action, _ := pe.GetSessionRiskScore(sid); action != "terminate" || !pe.ShouldBlockByRisk(sid) {
+		t.Fatalf("reused ID action = %q", action)
+	}
+	// The copy taken before the release is untouched (no in-place edit).
+	if before.Violations[0].MatchedText == "" {
+		t.Error("slimming must not edit a previously returned copy in place")
 	}
 }

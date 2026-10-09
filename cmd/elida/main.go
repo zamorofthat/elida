@@ -435,6 +435,7 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			SourceRole:    v.SourceRole,
 			EvidenceOnly:  v.EvidenceOnly,
 			EventID:       v.EventID,
+			Timestamp:     v.Timestamp,
 		})
 	}
 }
@@ -564,6 +565,13 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 	}
 
 	for _, v := range record.Violations {
+		// A violation that last fired before this session started was
+		// carried over by a retained policy entry (a reused block/terminate
+		// session ID); its violation_detected event was emitted by the
+		// session it belongs to.
+		if !v.Timestamp.IsZero() && v.Timestamp.Before(snap.StartTime) {
+			continue
+		}
 		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
 			RuleName:    v.RuleName,
 			Description: v.Description,
