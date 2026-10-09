@@ -1816,6 +1816,7 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
 		})
 	}
 

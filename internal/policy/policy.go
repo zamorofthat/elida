@@ -1734,8 +1734,11 @@ func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
 // An evidence-only violation does NOT change RiskScore, CurrentAction,
 // ThrottleRate or MaxSeverity. It DOES flag the session (IsFlagged becomes
 // true), as every recorded violation does, so the session's content is
-// captured and persisted as flagged; evidence-only findings are marked as
-// such in the stored violation (storage.Violation.EvidenceOnly).
+// captured and persisted as flagged. Both save paths (the session-end
+// callback in cmd/elida and the proxy's flagged-session save) copy
+// v.EvidenceOnly into storage.Violation.EvidenceOnly, so history marks
+// evidence-only findings as such. WouldContributePoints, EventID and
+// Semantic are not persisted by those paths.
 //
 // MatchedText and SourceContent are cleared: a semantic violation records
 // scores and identifiers, never request content.

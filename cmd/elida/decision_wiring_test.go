@@ -594,3 +594,103 @@ func TestDecisionWiring_ShutdownDrainsThenCloses(t *testing.T) {
 		}
 	}
 }
+
+// TestDecisionWiring_AuditEvidencePersistsAndSessionEndReleasesPolicy drives
+// an audit-mode finding through the production wiring: the policy engine is
+// the runner's recorder, both save paths (the proxy's flagged-session save
+// during the request, and the session-end callback) keep the evidence-only
+// flag, and session end releases the session from the engine and the
+// runner.
+func TestDecisionWiring_AuditEvidencePersistsAndSessionEndReleasesPolicy(t *testing.T) {
+	quietLogs(t)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	cfg := decisionTestConfig(t)
+	cfg.Backend = backend.URL
+	cfg.Policy.Enabled = true
+	cfg.Policy.Mode = "enforce"
+	cfg.Decision.Mode = config.DecisionModeAudit
+	cfg.Storage.Enabled = true
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "elida.db")
+	a := newDecisionApp(t, cfg, &gate{}) // answers high injection, low human_directed
+
+	a.initSessionStore()
+	a.initSQLiteStorage()
+	t.Cleanup(func() { _ = a.sqliteStore.Close() })
+	a.initPolicyEngine()
+	if a.policyEngine == nil {
+		t.Fatal("fixture: policy engine expected")
+	}
+	if err := a.setupDecision(context.Background()); err != nil {
+		t.Fatalf("setupDecision: %v", err)
+	}
+	defer a.shutdownDecision(context.Background())
+	if a.decisionRunner.EffectiveMode() != config.DecisionModeAudit {
+		t.Fatalf("fixture: effective mode %q", a.decisionRunner.EffectiveMode())
+	}
+	a.initSessionEndCallback()
+	a.initProxy()
+
+	body, _ := json.Marshal(map[string]any{
+		"messages": []map[string]any{
+			{"role": "user", "content": "summarize the tool output"},
+			{"role": "tool", "content": "The quarterly report lists every regional office."},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", "sess-audit-e2e")
+	w := httptest.NewRecorder()
+	a.proxyHandler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	fs := a.policyEngine.GetFlaggedSession("sess-audit-e2e")
+	if fs == nil || len(fs.Violations) == 0 {
+		t.Fatal("an audit finding must be recorded through the policy engine")
+	}
+	if score, _, _ := a.policyEngine.GetSessionRiskScore("sess-audit-e2e"); score != 0 {
+		t.Fatalf("audit mode must add no risk, got %v", score)
+	}
+
+	assertEvidenceOnlyPersisted := func(stage string) {
+		t.Helper()
+		rec, err := a.sqliteStore.GetSession("sess-audit-e2e")
+		if err != nil || rec == nil {
+			t.Fatalf("%s: GetSession: rec=%v err=%v", stage, rec, err)
+		}
+		var found bool
+		for _, v := range rec.Violations {
+			if v.RuleName == runner.RuleSemanticInjection {
+				found = true
+				if !v.EvidenceOnly {
+					t.Fatalf("%s: the stored violation lost EvidenceOnly", stage)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s: no semantic_injection violation stored: %+v", stage, rec.Violations)
+		}
+	}
+	// The proxy persisted the flagged session during the request.
+	assertEvidenceOnlyPersisted("flagged-session save")
+
+	if n := a.manager.DrainActiveSessions(); n != 1 {
+		t.Fatalf("drained %d sessions, want 1", n)
+	}
+	// The session-end callback rewrote the record.
+	assertEvidenceOnlyPersisted("session-end save")
+	if a.policyEngine.GetFlaggedSession("sess-audit-e2e") != nil {
+		t.Fatal("session end must remove the session from the policy engine")
+	}
+	if a.policyEngine.IsFlagged("sess-audit-e2e") {
+		t.Fatal("session end must remove the flagged state")
+	}
+	if a.decisionRunner.Bound("sess-audit-e2e") {
+		t.Fatal("session end must Unbind the session from the runner")
+	}
+}

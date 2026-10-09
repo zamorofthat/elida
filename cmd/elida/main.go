@@ -391,6 +391,14 @@ func (a *app) initSessionEndCallback() {
 		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
+
+		// The record is saved and exported, so the policy engine can let go
+		// of the session: its flagged entry, events and semantic dedup set
+		// would otherwise live for the whole process (alongside Unbind
+		// above, which releases the runner's side).
+		if a.policyEngine != nil {
+			a.policyEngine.RemoveFlaggedSession(sess.ID)
+		}
 	})
 }
 
@@ -423,6 +431,7 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
 		})
 	}
 }
