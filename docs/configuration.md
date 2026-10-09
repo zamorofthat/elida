@@ -599,7 +599,12 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   request). An async finding affects later requests only.
   `decision.inline_admission.broad_strict_mode` only widens which messages may
   try the inline lane; it does not change what a finding does.
-- **`policy.mode: audit` caps `enforce` to `audit`.** Validation warns.
+- **`policy.mode: audit` caps `enforce` to `audit`.** Validation warns. The cap
+  is computed once, at startup, like every `decision.*` key: changing
+  `policy.mode` at runtime (dashboard or settings API) does not change the
+  semantic effective mode until restart, and ELIDA logs a WARN when the two
+  disagree. The policy engine's own mode still decides whether the ladder
+  acts.
 - **No policy engine caps `audit` and `enforce` to `shadow`.** With
   `policy.enabled: false` nothing can be recorded. Validation warns, the
   startup log gives the reason, and `/control/decision` reports

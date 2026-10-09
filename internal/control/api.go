@@ -340,6 +340,35 @@ func (h *Handler) reloadPolicyEngine() {
 	}
 
 	h.policyEngine.ReloadConfig(cfg)
+	h.warnStaleDecisionCap(mode)
+}
+
+// warnStaleDecisionCap logs a WARN when a runtime policy.mode change no
+// longer matches semantic detection's effective mode. The policy.mode cap on
+// decision.mode is computed once at startup (decision.* keys are
+// restart-only), so after such a change the effective mode reported at
+// /control/decision is stale until restart. The policy engine's own mode
+// still governs whether its ladder acts.
+func (h *Handler) warnStaleDecisionCap(policyMode string) {
+	if h.decisionProvider == nil {
+		return
+	}
+	st := h.decisionProvider.DecisionStatus()
+	if st.Mode != "enforce" || (st.EffectiveMode != "enforce" && st.EffectiveMode != "audit") {
+		return
+	}
+	want := "enforce"
+	if policyMode == "audit" {
+		want = "audit"
+	}
+	if want != st.EffectiveMode {
+		slog.Warn("policy.mode changed at runtime; semantic detection keeps the effective mode computed at startup until restart",
+			"policy_mode", policyMode,
+			"decision_mode", st.Mode,
+			"decision_effective_mode", st.EffectiveMode,
+			"effective_mode_after_restart", want,
+		)
+	}
 }
 
 // ServeHTTP implements http.Handler
