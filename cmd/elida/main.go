@@ -381,7 +381,7 @@ func (a *app) initSessionEndCallback() {
 			SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
 		}
 
-		a.enrichRecordFromPolicy(&record, snap.ID)
+		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
 		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
@@ -404,7 +404,17 @@ func (a *app) initSessionEndCallback() {
 	})
 }
 
-func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string) {
+// enrichRecordFromPolicy adds the policy engine's captures and violations
+// for the ending session to its record.
+//
+// Only this session instance's violations are added. A violation that last
+// fired before start was carried over by a retained block/terminate entry
+// from an earlier session with the same ID; it is skipped here, at the
+// source, so neither SQLite events nor the OTEL/OCSF export (which are built
+// from this record) report it again for a session whose requests were all
+// refused. SQLite history still holds it: SaveSession carries it from the
+// stored row.
+func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string, start time.Time) {
 	if a.policyEngine == nil {
 		return
 	}
@@ -424,6 +434,9 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 		})
 	}
 	for _, v := range flagged.Violations {
+		if !v.Timestamp.IsZero() && v.Timestamp.Before(start) {
+			continue
+		}
 		record.Violations = append(record.Violations, storage.Violation{
 			RuleName:      v.RuleName,
 			Description:   v.Description,
@@ -565,10 +578,10 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 	}
 
 	for _, v := range record.Violations {
-		// A violation that last fired before this session started was
+		// Defense in depth: enrichRecordFromPolicy already drops violations
 		// carried over by a retained policy entry (a reused block/terminate
-		// session ID); its violation_detected event was emitted by the
-		// session it belongs to.
+		// session ID); their violation_detected event was emitted by the
+		// session they belong to.
 		if !v.Timestamp.IsZero() && v.Timestamp.Before(snap.StartTime) {
 			continue
 		}

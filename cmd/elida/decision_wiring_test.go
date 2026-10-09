@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"elida/internal/decision/runner"
 	"elida/internal/session"
 	"elida/internal/storage"
+	"elida/internal/telemetry"
 )
 
 // goodModelPath is the checksummed fixture model directory. Its manifest
@@ -967,5 +969,70 @@ func TestSessionEnd_RetainedReuseKeepsHistoryAndEmitsNoDuplicateEvents(t *testin
 	}
 	if a.policyEngine.ShouldBlockByRisk("sess-term-hist") != true {
 		t.Fatal("the ID must still be refused")
+	}
+}
+
+// recordingNozzle keeps every OCSF event the emitter fans out.
+type recordingNozzle struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (n *recordingNozzle) Emit(_ context.Context, event []byte) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.events = append(n.events, string(event))
+	return nil
+}
+
+func (n *recordingNozzle) Close() error { return nil }
+
+func (n *recordingNozzle) count(sub string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	c := 0
+	for _, e := range n.events {
+		if strings.Contains(e, sub) {
+			c++
+		}
+	}
+	return c
+}
+
+// TestSessionEnd_RetainedReuseExportsNoCarriedViolations (review M-5): when
+// a retained terminate ID is reused and that refused session ends, the
+// telemetry export (OCSF Detection Findings, and the OTEL span events and
+// logs built from the same record) carries none of the earlier session's
+// violations, while SQLite history still holds them.
+func TestSessionEnd_RetainedReuseExportsNoCarriedViolations(t *testing.T) {
+	quietLogs(t)
+	a, send := historyApp(t)
+	nozzle := &recordingNozzle{}
+	a.ocsfEmitter = telemetry.NewOCSFEmitterForTest([]telemetry.OCSFNozzle{nozzle})
+	a.tp = telemetry.NoopProvider()
+	a.tp.SetOCSFEmitter(a.ocsfEmitter)
+
+	if code := send("sess-term-otel", "please zzprobezz now"); code != http.StatusOK {
+		t.Fatalf("status = %d", code)
+	}
+	a.policyEngine.AddExternalRiskPoints("sess-term-otel", 60, "test")
+	a.manager.DrainActiveSessions()
+	if n := nozzle.count(`"probe_rule"`); n != 1 {
+		t.Fatalf("fixture: the first session exports its finding once, got %d", n)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	for i := 0; i < 2; i++ {
+		if code := send("sess-term-otel", "hello again"); code != http.StatusForbidden {
+			t.Fatalf("reuse: status %d, want 403", code)
+		}
+	}
+	a.manager.DrainActiveSessions()
+
+	if n := nozzle.count(`"probe_rule"`); n != 1 {
+		t.Fatalf("the refused reused session must export no carried violation, findings = %d", n)
+	}
+	if got := storedRules(t, a, "sess-term-otel"); len(got) != 1 || got[0] != "probe_rule" {
+		t.Fatalf("SQLite must still hold the carried violation, stored %v", got)
 	}
 }
