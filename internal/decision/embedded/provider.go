@@ -263,8 +263,12 @@ func (p *Provider) enforceRequireInline(required bool, cause error) error {
 	}
 	const remedy = "Set decision.require_inline: false to permit async-only operation, or deploy on linux/amd64 built with GOEXPERIMENT=simd"
 	if cause != nil {
-		return fmt.Errorf("%w: decision.require_inline is true but the computed capability is %q (%w); arch=%s simd=%v. Fix the model assets, or set decision.require_inline: false",
-			ErrInlineRequired, p.capability, cause, p.arch, p.simd)
+		// Always name the architecture half too: on a build without
+		// accelerated kernels, fixing the assets only gets as far as
+		// async_only, and the operator should learn that now rather than
+		// after the next restart.
+		return fmt.Errorf("%w: decision.require_inline is true but the computed capability is %q (%w); arch=%s simd=%v. Fix the model assets (or the inference backend); note that even with valid assets only linux/amd64 builds with GOEXPERIMENT=simd can be inline. %s",
+			ErrInlineRequired, p.capability, cause, p.arch, p.simd, remedy)
 	}
 	return fmt.Errorf("%w: decision.require_inline is true but the computed capability is %q (%s); arch=%s simd=%v. %s",
 		ErrInlineRequired, p.capability, p.reason, p.arch, p.simd, remedy)

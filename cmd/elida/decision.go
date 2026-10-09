@@ -194,16 +194,26 @@ func (a *app) setupDecision(ctx context.Context) error {
 	a.decisionRunner = r
 	warnEmptyElevatedBand(d.ElevatedThreshold, m.Calibration.MainThreshold)
 
-	slog.Info("semantic injection detection initialized",
+	// Without an engine, policyMode is only a fill-in: log "none" rather
+	// than an enforce that nothing applies, and say why the mode is capped.
+	logPolicyMode := policyMode
+	if pe == nil {
+		logPolicyMode = "none"
+	}
+	initAttrs := []any{
 		"mode", d.Mode,
 		"effective_mode", r.EffectiveMode(),
-		"policy_mode", policyMode,
+		"policy_mode", logPolicyMode,
 		"capability", h.Capability,
 		"model", h.Model,
 		"version", h.Version,
 		"threshold_set", h.ThresholdSet,
 		"threshold_set_matches", h.ThresholdSetMatches,
-	)
+	}
+	if pe == nil && r.EffectiveMode() != d.Mode {
+		initAttrs = append(initAttrs, "reason", decisionPolicyDisabledReason+": "+d.Mode+" is capped to shadow")
+	}
+	slog.Info("semantic injection detection initialized", initAttrs...)
 	if !h.ThresholdSetMatches {
 		slog.Warn("decision.threshold_set does not match the loaded model's threshold set",
 			"configured", d.ThresholdSet, "model", m.Calibration.ThresholdSet)
@@ -412,9 +422,10 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 
 	if a.decisionRunner != nil {
 		st.EffectiveMode = a.decisionRunner.EffectiveMode()
-		if a.policyEngine == nil {
+		if a.policyEngine == nil && st.EffectiveMode != st.Mode {
 			// Nothing can be recorded, so the runner is shadow-only whatever
-			// decision.mode says (runner.capMode).
+			// decision.mode says (runner.capMode). Reported only when that
+			// cap actually applied: shadow has nothing to cap.
 			if st.Reason == "" {
 				st.Reason = decisionPolicyDisabledReason
 			} else {

@@ -170,6 +170,95 @@ func TestRequireInline_StartupFailsOnDegraded(t *testing.T) {
 	}
 }
 
+func TestRequireInline_DegradedErrorNamesTheArchitectureRemedy(t *testing.T) {
+	// On arm64, fixing the model assets only reaches async_only. The
+	// degraded refusal must say so up front, with the architecture, whether
+	// SIMD kernels are compiled in, and which builds can be inline.
+	dir := copyFixture(t)
+	if err := os.Remove(filepath.Join(dir, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := embedded.New(context.Background(), embedded.Options{
+		Enabled:       true,
+		RequireInline: true,
+		ModelPath:     dir,
+		ThresholdSet:  "v1",
+		Arch:          "arm64",
+		SIMD:          embedded.Bool(false),
+		NewPipeline:   fakeFactory(),
+	})
+	if !errors.Is(err, embedded.ErrInlineRequired) {
+		t.Fatalf("error = %v, want ErrInlineRequired", err)
+	}
+	for _, want := range []string{"arch=arm64", "simd=false", "Fix the model assets", "linux/amd64", "GOEXPERIMENT=simd", "decision.require_inline: false"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("degraded refusal must contain %q: %v", want, err)
+		}
+	}
+}
+
+func TestRequireInline_ValidationWarnsWhenInert(t *testing.T) {
+	// require_inline does nothing while decision is off (no model is
+	// loaded, startup succeeds). That must be said, not left silent or
+	// described as a startup gate.
+	cases := []struct {
+		name    string
+		enabled bool
+		mode    string
+	}{
+		{"decision.enabled false", false, config.DecisionModeShadow},
+		{"decision.mode disabled", true, config.DecisionModeDisabled},
+	}
+	for _, tc := range cases {
+		c := config.DefaultConfig()
+		c.Listen = ":8080"
+		c.Backend = "https://api.example.com"
+		c.Decision.Enabled = tc.enabled
+		c.Decision.Mode = tc.mode
+		c.Decision.RequireInline = true
+		res := c.Validate()
+		if !res.Valid {
+			t.Fatalf("%s: require_inline must not make a config invalid: %+v", tc.name, res.Errors)
+		}
+		var inert, gate bool
+		for _, w := range res.Warnings {
+			if w.Field != "decision.require_inline" {
+				continue
+			}
+			if strings.Contains(w.Message, "has no effect while decision is disabled") {
+				inert = true
+			}
+			if strings.Contains(w.Message, "startup will fail") {
+				gate = true
+			}
+		}
+		if !inert || gate {
+			t.Fatalf("%s: want the inert warning and not the startup-gate one, got %+v", tc.name, res.Warnings)
+		}
+	}
+}
+
+func TestDecisionValidation_WarnsWhenNoPolicyEngineCapsTheMode(t *testing.T) {
+	for _, mode := range []string{config.DecisionModeAudit, config.DecisionModeEnforce, config.DecisionModeShadow} {
+		c := config.DefaultConfig()
+		c.Listen = ":8080"
+		c.Backend = "https://api.example.com"
+		c.Policy.Enabled = false
+		c.Decision.Enabled = true
+		c.Decision.Mode = mode
+		res := c.Validate()
+		var capped bool
+		for _, w := range res.Warnings {
+			if w.Field == "decision.mode" && strings.Contains(w.Message, "capped to shadow because the policy engine is disabled") {
+				capped = true
+			}
+		}
+		if want := mode != config.DecisionModeShadow; capped != want {
+			t.Fatalf("mode %s: no-policy cap warning = %v, want %v; warnings %+v", mode, capped, want, res.Warnings)
+		}
+	}
+}
+
 func TestRequireInline_FalsePermitsAsyncOnly(t *testing.T) {
 	quietSlog(t)
 	p, err := embedded.New(context.Background(), embedded.Options{

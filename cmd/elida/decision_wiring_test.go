@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1120,6 +1121,11 @@ func TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch(t *testing.T) {
 		if got := a.decisionRunner.EffectiveMode(); got != config.DecisionModeAudit {
 			t.Fatalf("effective mode = %q, want audit", got)
 		}
+		// The operator-visible signal that audit is running on an
+		// unmatched threshold set.
+		if a.DecisionStatus().ThresholdSetMatches {
+			t.Fatal("status must report threshold_set_matches false for a mismatched threshold set")
+		}
 	})
 
 	t.Run("matching threshold set enforces", func(t *testing.T) {
@@ -1148,8 +1154,8 @@ func TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch(t *testing.T) {
 // nothing can be recorded, so the effective mode is shadow and the status
 // says why.
 func TestDecisionWiring_NoPolicyEngineCapsToShadow(t *testing.T) {
-	quietLogs(t)
 	for _, mode := range []string{config.DecisionModeAudit, config.DecisionModeEnforce} {
+		logs := captureLogs(t)
 		cfg := decisionTestConfig(t) // policy disabled
 		cfg.Decision.Mode = mode
 		a := newDecisionApp(t, cfg, &gate{})
@@ -1168,7 +1174,65 @@ func TestDecisionWiring_NoPolicyEngineCapsToShadow(t *testing.T) {
 			t.Errorf("mode %s: status mode=%q effective=%q reason=%q, want effective shadow with reason %q",
 				mode, st.Mode, st.EffectiveMode, st.Reason, "policy engine disabled")
 		}
+		// The startup log says why, and does not claim a policy mode no
+		// engine applies.
+		out := logs.String()
+		if !strings.Contains(out, "reason=\"policy engine disabled: "+mode+" is capped to shadow\"") ||
+			!strings.Contains(out, "policy_mode=none") || strings.Contains(out, "policy_mode=enforce") {
+			t.Errorf("mode %s: init log must give the cap reason and policy_mode=none:\n%s", mode, out)
+		}
 	}
+}
+
+// TestDecisionWiring_ShadowWithoutPolicyEngineReportsNoCap: shadow is never
+// capped, so neither the status nor the startup log may claim a
+// degradation because the policy engine is disabled.
+func TestDecisionWiring_ShadowWithoutPolicyEngineReportsNoCap(t *testing.T) {
+	logs := captureLogs(t)
+	cfg := decisionTestConfig(t) // policy disabled
+	cfg.Decision.Mode = config.DecisionModeShadow
+	a := newDecisionApp(t, cfg, &gate{})
+	a.initPolicyEngine()
+	if err := a.setupDecision(context.Background()); err != nil {
+		t.Fatalf("setupDecision: %v", err)
+	}
+	st := a.DecisionStatus()
+	a.shutdownDecision(context.Background())
+	if st.EffectiveMode != config.DecisionModeShadow || strings.Contains(st.Reason, decisionPolicyDisabledReason) {
+		t.Fatalf("status effective=%q reason=%q: shadow caps nothing, so no policy reason", st.EffectiveMode, st.Reason)
+	}
+	if out := logs.String(); strings.Contains(out, "capped to shadow") {
+		t.Fatalf("init log must not report a cap for shadow:\n%s", out)
+	}
+}
+
+// lockedBuffer is a bytes.Buffer safe for the concurrent writes of a slog
+// handler shared with background goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLogs routes the default slog logger to a buffer for the test.
+func captureLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+	prev := slog.Default()
+	buf := &lockedBuffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
 }
 
 // TestDecisionWiring_RequireInlineGatesStartup: setupDecision passes
@@ -1232,6 +1296,19 @@ func TestDecisionWiring_RequireInlineGatesStartup(t *testing.T) {
 		a.cfg.Decision.RequireInline = true
 		if !a.DecisionStatus().RequireInline {
 			t.Fatal("/control/decision must echo decision.require_inline")
+		}
+		// The wire key, not only the Go field: a renamed json tag must fail
+		// here, not only in the amd64 container smoke job.
+		raw, err := json.Marshal(a.DecisionStatus())
+		if err != nil {
+			t.Fatalf("marshal status: %v", err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(raw, &wire); err != nil {
+			t.Fatalf("unmarshal status: %v", err)
+		}
+		if v, ok := wire["require_inline"].(bool); !ok || !v {
+			t.Fatalf(`/control/decision JSON must carry "require_inline": true, got %s`, raw)
 		}
 	})
 }

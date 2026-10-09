@@ -1362,9 +1362,21 @@ func (c *Config) Validate() *ValidationResult {
 // errors and warnings to append to the ValidationResult. A disabled feature
 // is not validated: nothing is loaded and nothing runs, so its settings are
 // inert and must not be able to fail startup.
+// requireInlineInertWarning is the decision.require_inline advisory when
+// semantic detection is off: no model is loaded, so the startup gate never
+// runs and startup succeeds.
+var requireInlineInertWarning = ValidationError{
+	Field:   "decision.require_inline",
+	Message: "require_inline has no effect while decision is disabled (decision.enabled false or decision.mode disabled): no model is loaded and startup does not check the capability",
+	Hint:    "enable decision with mode shadow, audit or enforce for the gate to apply, or set require_inline: false",
+}
+
 func validateDecision(c *Config) (errs, warns []ValidationError) {
 	d := c.Decision
 	if !d.Enabled {
+		if d.RequireInline {
+			return nil, []ValidationError{requireInlineInertWarning}
+		}
 		return nil, nil
 	}
 
@@ -1409,7 +1421,9 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 		})
 	}
 
-	if d.RequireInline {
+	if d.RequireInline && d.Mode == DecisionModeDisabled {
+		warns = append(warns, requireInlineInertWarning)
+	} else if d.RequireInline {
 		// Not an error: the same elida.yaml is deployed to every
 		// architecture, and whether a build has accelerated kernels is not
 		// knowable from the config (config deliberately does not import the
@@ -1491,6 +1505,16 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 		errs = append(errs, ValidationError{
 			Field:   "decision.preprocessing.max_analysis_bytes",
 			Message: fmt.Sprintf("%d is below max_input_bytes (%d): the original representation alone would exceed the aggregate budget", d.Preprocessing.MaxAnalysisBytes, d.Preprocessing.MaxInputBytes),
+		})
+	}
+
+	// Without a policy engine nothing can be recorded, so audit and
+	// enforce run as shadow.
+	if (d.Mode == DecisionModeAudit || d.Mode == DecisionModeEnforce) && !c.Policy.Enabled {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: fmt.Sprintf("%s is capped to shadow because the policy engine is disabled (policy.enabled: false): semantic violations have nowhere to be recorded", d.Mode),
+			Hint:    "set policy.enabled: true, or set decision.mode: shadow",
 		})
 	}
 
