@@ -66,7 +66,7 @@ func (g gatedPipeline) CountTokens(text string) int {
 	g.counts.Add(1)
 	return (len(text) + 3) / 4
 }
-func (g gatedPipeline) Close() error                { return nil }
+func (g gatedPipeline) Close() error { return nil }
 
 type gate struct {
 	blocked atomic.Bool
