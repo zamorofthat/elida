@@ -605,6 +605,16 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   startup log gives the reason, and `/control/decision` reports
   `effective_mode: shadow` with reason `policy engine disabled`. Shadow is
   never capped, so it carries no such reason.
+- **Audit evidence flags the session.** An `audit` finding (and any
+  `injection_elevated` event, in `audit` or `enforce`) is recorded as an
+  evidence-only violation. It adds no risk, but it makes the session flagged,
+  so the session is persisted as a flagged session on every response and its
+  captured content follows the flagged-content capture and export path. The
+  evidence is visible on purpose. It never raises the session's maximum
+  severity. Every export marks it: OTEL span events and logs carry
+  `evidence_only`, OCSF findings carry `elida.evidence_only` with `severity_id`
+  1 (Informational), and SQLite `violation_detected` rows carry
+  `evidence_only`. The exported `elida.violations.max_severity` ignores it.
 
 ### Allowlisted tools
 

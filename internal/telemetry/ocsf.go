@@ -100,6 +100,10 @@ type OCSFUnmapped struct {
 	SDREventHash  string  `json:"elida.sdr_event_hash,omitempty"`
 	SDREventIndex *int    `json:"elida.sdr_event_index,omitempty"`
 	SDRProof      any     `json:"elida.sdr_proof,omitempty"`
+	// EvidenceOnly marks a finding recorded as evidence for correlation
+	// that contributed no risk. Such a finding is exported at severity_id
+	// Informational whatever its rule severity.
+	EvidenceOnly bool `json:"elida.evidence_only,omitempty"`
 }
 
 // OCSFDetectionFinding represents OCSF class 2004 — Detection Finding
@@ -155,7 +159,13 @@ func nowMillis() int64 {
 // BuildPolicyDetection builds a Detection Finding (class 2004) for session-end policy violations.
 // Replaces the former BuildSecurityFinding (class 2001, deprecated in OCSF 1.8).
 func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) OCSFDetectionFinding {
-	severityID := MapSeverityToOCSF(v.Severity)
+	// Evidence-only violations are exported as informational: they
+	// contributed no risk and must not read as a finding in a SIEM.
+	severityID := MapSeverityToOCSF(v.exportedSeverity())
+	message := "Policy violation: " + v.RuleName
+	if v.EvidenceOnly {
+		message = "Policy evidence (no risk contributed): " + v.RuleName
+	}
 
 	eventCategory := v.EventCategory
 	if eventCategory == "" {
@@ -169,7 +179,7 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 		ActivityID:  OCSFActivityCreate,
 		SeverityID:  severityID,
 		Time:        nowMillis(),
-		Message:     "Policy violation: " + v.RuleName,
+		Message:     message,
 		Metadata:    newMetadata(),
 		FindingInfo: OCSFFinding{
 			Title: v.RuleName,
@@ -185,12 +195,13 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 			Session: OCSFSession{UID: sessionID},
 		},
 		Unmapped: OCSFUnmapped{
-			Backend:     record.Backend,
-			Action:      v.Action,
-			MatchedText: v.MatchedText,
-			SourceRole:  v.SourceRole,
-			Model:       record.Model,
-			SDRRootHash: record.SDRRootHash,
+			Backend:      record.Backend,
+			Action:       v.Action,
+			MatchedText:  v.MatchedText,
+			SourceRole:   v.SourceRole,
+			Model:        record.Model,
+			SDRRootHash:  record.SDRRootHash,
+			EvidenceOnly: v.EvidenceOnly,
 		},
 	}
 

@@ -592,11 +592,12 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 			continue
 		}
 		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    v.Severity,
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:     v.RuleName,
+			Description:  v.Description,
+			Severity:     v.Severity,
+			MatchedText:  v.MatchedText,
+			Action:       v.Action,
+			EvidenceOnly: v.EvidenceOnly,
 		}); eventErr != nil {
 			slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
 		}
@@ -697,6 +698,7 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
 		})
 	}
 	for _, c := range record.CapturedContent {
