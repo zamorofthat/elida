@@ -16,7 +16,9 @@
 //     the exact model and threshold set in use.
 //
 // policy.mode caps decision.mode: with policy.mode audit, enforce behaves
-// as audit. Nothing here maintains a risk score of its own.
+// as audit. Without a policy engine (nil Config.Policy) nothing can be
+// recorded, so audit and enforce are capped to shadow and EffectiveMode says
+// so. Nothing here maintains a risk score of its own.
 //
 // Unknown is never safe. A window the provider did not answer produces no
 // verdict and no shadow entry; the runner never synthesizes a low
@@ -230,8 +232,9 @@ type Config struct {
 	// same deadline the scheduler applies per call, scoped to the request;
 	// it never extends the scheduler's.
 	InlineTimeout time.Duration
-	// Policy records violations. Nil means shadow-only behavior regardless
-	// of Mode, which is how the runner is tested without a policy engine.
+	// Policy records violations. Nil caps the effective mode at shadow
+	// (EffectiveMode reports it), which is also how the runner is tested
+	// without a policy engine.
 	// New rejects a typed nil (a nil *policy.Engine behind the interface),
 	// which would otherwise be called on the first finding.
 	Policy PolicyRecorder
@@ -240,6 +243,12 @@ type Config struct {
 	// not: strict enforcement requires calibration evidence for the exact
 	// model and threshold-set versions in use, and a threshold selected for
 	// a different model is not evidence.
+	//
+	// The refusal applies to the CONFIGURED mode, before any cap, and it is
+	// a startup failure whatever decision.required says: an operator who
+	// asked for enforcement must never be left running something else while
+	// believing they are protected. decision.required governs only model and
+	// capability availability, never a calibration mismatch.
 	ThresholdSetMatches bool
 }
 
@@ -450,7 +459,7 @@ func New(cfg Config) (*Runner, error) {
 
 	r := &Runner{
 		cfg:          cfg,
-		mode:         capMode(cfg.Mode, cfg.PolicyMode),
+		mode:         capMode(cfg.Mode, cfg.PolicyMode, cfg.Policy != nil),
 		timeout:      cfg.InlineTimeout,
 		bound:        make(map[string]*boundSession, maxBoundSessions),
 		boundRing:    make([]string, maxBoundSessions),
@@ -467,16 +476,23 @@ func New(cfg Config) (*Runner, error) {
 	return r, nil
 }
 
-// capMode applies the policy.mode cap: policy.mode audit caps decision.mode
-// enforce down to audit. A lower decision mode is never raised.
+// capMode applies the caps: policy.mode audit caps decision.mode enforce
+// down to audit, and without a policy engine nothing can be recorded, so
+// audit and enforce cap down to shadow. A lower decision mode is never
+// raised.
 //
-//	mode      policy.mode  effective
-//	enforce   enforce      enforce
-//	enforce   audit        audit
-//	audit     any          audit
-//	shadow    any          shadow
-//	disabled  any          disabled
-func capMode(mode, policyMode string) string {
+//	mode      policy engine  policy.mode  effective
+//	enforce   yes            enforce      enforce
+//	enforce   yes            audit        audit
+//	audit     yes            any          audit
+//	enforce   no             any          shadow
+//	audit     no             any          shadow
+//	shadow    any            any          shadow
+//	disabled  any            any          disabled
+func capMode(mode, policyMode string, hasPolicy bool) string {
+	if !hasPolicy && (mode == config.DecisionModeEnforce || mode == config.DecisionModeAudit) {
+		return config.DecisionModeShadow
+	}
 	if mode == config.DecisionModeEnforce && policyMode == "audit" {
 		return config.DecisionModeAudit
 	}

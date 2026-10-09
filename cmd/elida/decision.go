@@ -25,10 +25,14 @@ import (
 var decisionSignals = []decision.Signal{decision.SignalInjection, decision.SignalHumanDirected}
 
 // initDecision brings up semantic injection detection, or exits when
-// decision.required makes a startup failure fatal.
+// setupDecision reports a fatal startup error: a model or capability failure
+// with decision.required true, or an enforce mode refused for a threshold-set
+// mismatch (fatal whatever decision.required says).
 func (a *app) initDecision() {
 	if err := a.setupDecision(context.Background()); err != nil {
-		slog.Error("semantic detection failed to start and decision.required is true", "error", err)
+		slog.Error("semantic detection failed to start", "error", err,
+			"decision_required", a.cfg.Decision.Required,
+			"decision_mode", a.cfg.Decision.Mode)
 		os.Exit(1)
 	}
 }
@@ -48,14 +52,15 @@ func (a *app) initDecision() {
 // policy engine (initPolicyEngine runs first): shadow records nothing there;
 // audit records evidence-only violations that add no risk; enforce records
 // ordinary semantic_injection violations that drive the existing risk
-// ladder. Without a policy engine the runner behaves as shadow.
+// ladder. Without a policy engine the effective mode is capped at shadow,
+// and /control/decision gives the reason.
 //
-// Enforce is refused when decision.threshold_set does not match the loaded
-// model's threshold set (runner.New): there is no calibration evidence for
-// that pairing. Under the same required semantics as a bad model, required
-// true fails startup; required false starts the runner in audit and logs a
-// WARN, and /control/decision shows mode enforce next to effective_mode
-// audit, so the downgrade is visible rather than silent.
+// decision.mode enforce with a decision.threshold_set that does not match
+// the loaded model's threshold set is ALWAYS a startup error, whatever
+// decision.required says: there is no calibration evidence for that pairing,
+// and an operator who asked for enforcement must not be left running audit
+// while believing they are protected. decision.required governs only model
+// and capability availability.
 //
 // decision.require_inline is not handled here: the key and its startup gate
 // are added by Task 30.
@@ -135,6 +140,13 @@ func (a *app) setupDecision(ctx context.Context) error {
 		recorder = pe
 	}
 	h := provider.Health()
+	if d.Mode == config.DecisionModeEnforce && !h.ThresholdSetMatches {
+		// Not routed through abandonDecision: that degrades when required is
+		// false, and a calibration mismatch must never degrade silently.
+		a.teardownDecision(ctx)
+		return fmt.Errorf("decision.mode enforce refused: the configured threshold set %q does not match the loaded model's threshold set %q (model %s %s); enforcement requires calibration evidence for the exact model and threshold-set versions in use. Select the matching decision.threshold_set, or set decision.mode: audit",
+			d.ThresholdSet, m.Calibration.ThresholdSet, m.Name, m.Version)
+	}
 	rcfg := runner.Config{
 		Mode:       d.Mode,
 		PolicyMode: policyMode,
@@ -160,19 +172,6 @@ func (a *app) setupDecision(ctx context.Context) error {
 		ThresholdSetMatches: h.ThresholdSetMatches,
 	}
 	r, err := runner.New(rcfg)
-	if err != nil && d.Mode == config.DecisionModeEnforce && !h.ThresholdSetMatches && !d.Required {
-		// A refused enforce is an operator configuration error. Without
-		// decision.required it does not stop the proxy, but it must not be
-		// quiet either: run audit (evidence only, no risk) and say so.
-		slog.Warn("semantic detection: enforce mode refused; running in audit (evidence only, no risk contribution)",
-			"error", err,
-			"configured_threshold_set", d.ThresholdSet,
-			"model_threshold_set", m.Calibration.ThresholdSet,
-			"effective_mode", config.DecisionModeAudit,
-			"hint", "select a threshold set matching the loaded model, or set decision.mode: audit")
-		rcfg.Mode = config.DecisionModeAudit
-		r, err = runner.New(rcfg)
-	}
 	if err != nil {
 		return a.abandonDecision(ctx, fmt.Errorf("semantic runner configuration is invalid: %w", err))
 	}
@@ -201,6 +200,16 @@ func (a *app) setupDecision(ctx context.Context) error {
 // error is returned and startup fails; otherwise it is logged and semantic
 // detection stays off.
 func (a *app) abandonDecision(ctx context.Context, err error) error {
+	a.teardownDecision(ctx)
+	if a.cfg.Decision.Required {
+		return err
+	}
+	slog.Error("semantic detection disabled", "error", err)
+	return nil
+}
+
+// teardownDecision stops and releases whatever setupDecision built so far.
+func (a *app) teardownDecision(ctx context.Context) {
 	if a.decisionScheduler != nil {
 		_ = a.decisionScheduler.Shutdown(ctx)
 	}
@@ -208,12 +217,12 @@ func (a *app) abandonDecision(ctx context.Context, err error) error {
 		_ = a.decisionProvider.Close()
 	}
 	a.decisionScheduler, a.decisionProvider, a.decisionRunner = nil, nil, nil
-	if a.cfg.Decision.Required {
-		return err
-	}
-	slog.Error("semantic detection disabled", "error", err)
-	return nil
 }
+
+// decisionPolicyDisabledReason is the /control/decision reason when the
+// runner has no policy engine to record through, so its effective mode is
+// capped at shadow.
+const decisionPolicyDisabledReason = "policy engine disabled"
 
 // decisionSchedulerConfig is the production scheduler configuration.
 //
@@ -386,6 +395,15 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 
 	if a.decisionRunner != nil {
 		st.EffectiveMode = a.decisionRunner.EffectiveMode()
+		if a.policyEngine == nil {
+			// Nothing can be recorded, so the runner is shadow-only whatever
+			// decision.mode says (runner.capMode).
+			if st.Reason == "" {
+				st.Reason = decisionPolicyDisabledReason
+			} else {
+				st.Reason += "; " + decisionPolicyDisabledReason
+			}
+		}
 		st.CoverageGaps[runner.GapMessagesNotAssessed] = 0
 		for k, v := range a.decisionRunner.CoverageGaps() {
 			st.CoverageGaps[k] = v

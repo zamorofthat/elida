@@ -434,7 +434,8 @@ decision:
 
   # true: missing, invalid, or unsupported model assets fail startup.
   # false: start in degraded mode and report an unhealthy capability.
-  # Restart required.
+  # Governs model/capability availability only: an enforce threshold-set
+  # mismatch (see mode) fails startup either way. Restart required.
   required: false
 
   # disabled | shadow | audit | enforce
@@ -442,6 +443,10 @@ decision:
   #   audit   — create evidence-only violations with diagnostic points only
   #   enforce — calibrated violations drive the existing risk ladder
   # policy.mode caps this: with policy.mode: audit, enforce behaves as audit.
+  # With the policy engine disabled nothing can be recorded, so audit and
+  # enforce run as shadow (/control/decision reports the reason).
+  # enforce requires threshold_set to match the loaded model's threshold set;
+  # a mismatch fails startup whatever `required` says.
   mode: shadow
 
   # embedded (in-process, air-gapped) or systemone (HTTP). Restart required —
@@ -456,7 +461,8 @@ decision:
   # endpoint: https://decide.internal/v1/score
 
   # Versioned threshold artifact. Never a free-form number — thresholds are
-  # selected by version, not typed in.
+  # selected by version, not typed in. Must match the loaded model's
+  # threshold set for mode: enforce (startup fails otherwise).
   threshold_set: v1
 
   # Probability above which a sub-threshold injection score emits an

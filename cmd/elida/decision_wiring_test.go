@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -364,13 +365,16 @@ func TestDecisionWiring_PolicyModeCapsDecisionMode(t *testing.T) {
 		{true, "audit", config.DecisionModeEnforce, config.DecisionModeAudit},
 		{true, "enforce", config.DecisionModeEnforce, config.DecisionModeEnforce},
 		{true, "audit", config.DecisionModeShadow, config.DecisionModeShadow},
-		{false, "audit", config.DecisionModeEnforce, config.DecisionModeEnforce},
+		// No policy engine: nothing can be recorded, so shadow.
+		{false, "audit", config.DecisionModeEnforce, config.DecisionModeShadow},
+		{false, "enforce", config.DecisionModeAudit, config.DecisionModeShadow},
 	} {
 		cfg := decisionTestConfig(t)
 		cfg.Policy.Enabled = tc.policyEnabled
 		cfg.Policy.Mode = tc.policyMode
 		cfg.Decision.Mode = tc.mode
 		a := newDecisionApp(t, cfg, &gate{})
+		a.initPolicyEngine()
 		if err := a.setupDecision(context.Background()); err != nil {
 			t.Fatalf("setupDecision: %v", err)
 		}
@@ -1038,64 +1042,62 @@ func TestSessionEnd_RetainedReuseExportsNoCarriedViolations(t *testing.T) {
 }
 
 // TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch: enforce needs
-// calibration evidence for the loaded model. With decision.required true a
-// mismatched threshold set fails startup; otherwise the runner starts in
-// audit with a WARN, and the status shows the configured enforce next to the
-// effective audit, so nobody is left believing enforcement is active.
+// calibration evidence for the loaded model. A mismatched threshold set fails
+// startup whatever decision.required says (required governs model and
+// capability availability only), and the error names both threshold sets.
 func TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch(t *testing.T) {
-	t.Run("required fails startup", func(t *testing.T) {
+	for _, required := range []bool{true, false} {
+		t.Run(fmt.Sprintf("required=%v fails startup", required), func(t *testing.T) {
+			quietLogs(t)
+			cfg := decisionTestConfig(t)
+			cfg.Policy.Enabled = true
+			cfg.Policy.Mode = "enforce"
+			cfg.Decision.Mode = config.DecisionModeEnforce
+			cfg.Decision.ThresholdSet = "v2-other-model"
+			cfg.Decision.Required = required
+			a := newDecisionApp(t, cfg, &gate{})
+			a.initPolicyEngine()
+			err := a.setupDecision(context.Background())
+			if err == nil {
+				t.Fatal("enforce with a mismatched threshold set must fail startup")
+			}
+			for _, want := range []string{"threshold set", `"v2-other-model"`, `"v1"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error must name the configured and loaded threshold sets; missing %s in %q", want, err)
+				}
+			}
+			if a.decisionRunner != nil || a.decisionScheduler != nil || a.decisionProvider != nil {
+				t.Fatal("a failed startup must not leave semantic components behind")
+			}
+		})
+	}
+
+	t.Run("audit with a mismatch still starts", func(t *testing.T) {
 		quietLogs(t)
 		cfg := decisionTestConfig(t)
-		cfg.Decision.Mode = config.DecisionModeEnforce
-		cfg.Decision.ThresholdSet = "v2-other-model"
-		cfg.Decision.Required = true
-		a := newDecisionApp(t, cfg, &gate{})
-		err := a.setupDecision(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "threshold set") {
-			t.Fatalf("enforce with a mismatched threshold set and required true must fail startup naming the threshold set, got %v", err)
-		}
-		if a.decisionRunner != nil || a.decisionScheduler != nil || a.decisionProvider != nil {
-			t.Fatal("a failed startup must not leave semantic components behind")
-		}
-	})
-
-	t.Run("not required degrades to audit with a warning", func(t *testing.T) {
-		var buf strings.Builder
-		prev := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-		t.Cleanup(func() { slog.SetDefault(prev) })
-		cfg := decisionTestConfig(t)
 		cfg.Policy.Enabled = true
-		cfg.Policy.Mode = "enforce"
-		cfg.Decision.Mode = config.DecisionModeEnforce
+		cfg.Decision.Mode = config.DecisionModeAudit
 		cfg.Decision.ThresholdSet = "v2-other-model"
-		cfg.Decision.Required = false
 		a := newDecisionApp(t, cfg, &gate{})
+		a.initPolicyEngine()
 		if err := a.setupDecision(context.Background()); err != nil {
-			t.Fatalf("required false must not fail startup: %v", err)
+			t.Fatalf("only enforce is refused on a mismatch: %v", err)
 		}
 		t.Cleanup(func() { a.shutdownDecision(context.Background()) })
-		if a.decisionRunner == nil {
-			t.Fatal("required false must still run detection, in audit")
-		}
 		if got := a.decisionRunner.EffectiveMode(); got != config.DecisionModeAudit {
 			t.Fatalf("effective mode = %q, want audit", got)
-		}
-		st := a.DecisionStatus()
-		if st.Mode != config.DecisionModeEnforce || st.EffectiveMode != config.DecisionModeAudit || st.ThresholdSetMatches {
-			t.Fatalf("status must show configured enforce, effective audit, mismatch: %+v", st)
-		}
-		if !strings.Contains(buf.String(), "enforce mode refused") {
-			t.Fatalf("the downgrade must be logged as a WARN:\n%s", buf.String())
 		}
 	})
 
 	t.Run("matching threshold set enforces", func(t *testing.T) {
 		quietLogs(t)
 		cfg := decisionTestConfig(t)
+		cfg.Policy.Enabled = true
+		cfg.Policy.Mode = "enforce"
 		cfg.Decision.Mode = config.DecisionModeEnforce
 		cfg.Decision.Required = true
 		a := newDecisionApp(t, cfg, &gate{})
+		a.initPolicyEngine()
 		if err := a.setupDecision(context.Background()); err != nil {
 			t.Fatalf("setupDecision: %v", err)
 		}
@@ -1103,5 +1105,35 @@ func TestDecisionWiring_EnforceRefusedOnThresholdSetMismatch(t *testing.T) {
 		if got := a.decisionRunner.EffectiveMode(); got != config.DecisionModeEnforce {
 			t.Fatalf("effective mode = %q, want enforce", got)
 		}
+		if st := a.DecisionStatus(); st.EffectiveMode != config.DecisionModeEnforce || strings.Contains(st.Reason, "policy engine disabled") {
+			t.Fatalf("status: effective=%q reason=%q", st.EffectiveMode, st.Reason)
+		}
 	})
+}
+
+// TestDecisionWiring_NoPolicyEngineCapsToShadow: without a policy engine
+// nothing can be recorded, so the effective mode is shadow and the status
+// says why.
+func TestDecisionWiring_NoPolicyEngineCapsToShadow(t *testing.T) {
+	quietLogs(t)
+	for _, mode := range []string{config.DecisionModeAudit, config.DecisionModeEnforce} {
+		cfg := decisionTestConfig(t) // policy disabled
+		cfg.Decision.Mode = mode
+		a := newDecisionApp(t, cfg, &gate{})
+		a.initPolicyEngine()
+		if a.policyEngine != nil {
+			t.Fatal("fixture: policy engine must be disabled")
+		}
+		if err := a.setupDecision(context.Background()); err != nil {
+			t.Fatalf("mode %s: setupDecision: %v", mode, err)
+		}
+		st := a.DecisionStatus()
+		a.shutdownDecision(context.Background())
+		// The reason may also carry the provider's own note (e.g. the
+		// platform's SIMD status); the policy one is appended.
+		if st.Mode != mode || st.EffectiveMode != config.DecisionModeShadow || !strings.Contains(st.Reason, "policy engine disabled") {
+			t.Errorf("mode %s: status mode=%q effective=%q reason=%q, want effective shadow with reason %q",
+				mode, st.Mode, st.EffectiveMode, st.Reason, "policy engine disabled")
+		}
+	}
 }

@@ -59,20 +59,28 @@ func TestApplyVeto(t *testing.T) {
 
 func TestEffectiveModeCap(t *testing.T) {
 	cases := []struct {
-		mode, policyMode, want string
+		mode, policyMode string
+		hasPolicy        bool
+		want             string
 	}{
-		{"enforce", "enforce", "enforce"},
-		{"enforce", "audit", "audit"},
-		{"audit", "audit", "audit"},
-		{"audit", "enforce", "audit"},
-		{"shadow", "audit", "shadow"},
-		{"shadow", "enforce", "shadow"},
-		{"disabled", "enforce", "disabled"},
-		{"disabled", "audit", "disabled"},
+		{"enforce", "enforce", true, "enforce"},
+		{"enforce", "audit", true, "audit"},
+		{"audit", "audit", true, "audit"},
+		{"audit", "enforce", true, "audit"},
+		{"shadow", "audit", true, "shadow"},
+		{"shadow", "enforce", true, "shadow"},
+		{"disabled", "enforce", true, "disabled"},
+		{"disabled", "audit", true, "disabled"},
+		// Without a policy engine nothing can be recorded.
+		{"enforce", "enforce", false, "shadow"},
+		{"enforce", "audit", false, "shadow"},
+		{"audit", "enforce", false, "shadow"},
+		{"shadow", "enforce", false, "shadow"},
+		{"disabled", "enforce", false, "disabled"},
 	}
 	for _, tc := range cases {
-		if got := capMode(tc.mode, tc.policyMode); got != tc.want {
-			t.Errorf("capMode(%q, %q) = %q, want %q", tc.mode, tc.policyMode, got, tc.want)
+		if got := capMode(tc.mode, tc.policyMode, tc.hasPolicy); got != tc.want {
+			t.Errorf("capMode(%q, %q, policy=%v) = %q, want %q", tc.mode, tc.policyMode, tc.hasPolicy, got, tc.want)
 		}
 	}
 }

@@ -307,3 +307,41 @@ func TestEnforce_AsyncResultAffectsLaterActivityOnly(t *testing.T) {
 		t.Fatalf("the violation must record future_activity scope: %+v", fs.Violations)
 	}
 }
+
+func TestEnforce_NoPolicyEngineCapsEffectiveModeToShadow(t *testing.T) {
+	// Without a policy engine nothing can be recorded, so neither enforce
+	// nor audit may be reported as in force.
+	f := decisiontest.NewFake(map[decision.Signal]float64{decision.SignalInjection: 0.9})
+	sch, err := scheduler.New(scheduler.Config{
+		Provider:         f,
+		TokenCounter:     decisiontest.ByteTokenCounter{BytesPerToken: 4},
+		Signals:          []decision.Signal{decision.SignalInjection, decision.SignalHumanDirected},
+		MaxConcurrency:   2,
+		InlineTimeout:    2 * time.Second,
+		MaxInlineTokens:  4096,
+		MaxInlineWindows: 8,
+		AsyncQueueSize:   8,
+		MaxWindowTokens:  64,
+		Admission:        scheduler.AdmissionPolicy{UntrustedToolResults: true},
+	})
+	if err != nil {
+		t.Fatalf("scheduler.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sch.Shutdown(context.Background()) })
+
+	for _, mode := range []string{"enforce", "audit"} {
+		r, err := runner.New(runner.Config{
+			Mode: mode, PolicyMode: "enforce", Scheduler: sch, Budget: runnerBudget(),
+			Signals:             []decision.Signal{decision.SignalInjection, decision.SignalHumanDirected},
+			Thresholds:          runner.Thresholds{Main: 0.5, Aux: 0.64, Elevated: 0.3, Warning: 0.5, Critical: 0.8},
+			Model:               runner.ModelIdentity{Name: "m", Version: "v", ThresholdSet: "v1"},
+			ThresholdSetMatches: true,
+		})
+		if err != nil {
+			t.Fatalf("%s: runner.New: %v", mode, err)
+		}
+		if got := r.EffectiveMode(); got != "shadow" {
+			t.Errorf("%s without a policy engine: EffectiveMode = %q, want shadow", mode, got)
+		}
+	}
+}

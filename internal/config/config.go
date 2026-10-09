@@ -468,13 +468,13 @@ const (
 // Settings (see settings.go: DecisionSettings).
 type DecisionConfig struct {
 	Enabled   bool   `yaml:"enabled"`    // Load model assets (default: false)
-	Required  bool   `yaml:"required"`   // true: bad assets fail startup; false: degraded mode
-	Mode      string `yaml:"mode"`       // disabled, shadow, audit, enforce (default: shadow)
+	Required  bool   `yaml:"required"`   // true: bad assets fail startup; false: degraded mode (availability only, never a calibration mismatch)
+	Mode      string `yaml:"mode"`       // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
 	Provider  string `yaml:"provider"`   // embedded or systemone (default: embedded)
 	ModelPath string `yaml:"model_path"` // Model directory (default: /etc/elida/models/injection)
 	Endpoint  string `yaml:"endpoint"`   // systemone only; content leaves the deployment
 
-	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1)
+	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
 	InlineTimeout     time.Duration `yaml:"inline_timeout"`     // Global inline deadline: admission, preprocessing, tokenization and inference (default: 50ms)
 	// MaxConcurrency is the physical inference worker pool size (default: 2).
