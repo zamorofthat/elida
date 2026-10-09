@@ -3,10 +3,12 @@ package unit
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"elida/internal/policy"
+	"elida/internal/storage"
 )
 
 func semanticViolation(name string, sev policy.Severity, evidenceOnly bool, prob float64) policy.Violation {
@@ -382,5 +384,148 @@ func TestEvidenceOnly_EvidenceEventsReturnsACopy(t *testing.T) {
 	}
 	if e.EvidenceEvents("no-such-session") != nil {
 		t.Fatal("an unknown session has no evidence events")
+	}
+}
+
+func TestEvidenceOnly_DoesNotEraseExternalPointsOrStepDownTheLadder(t *testing.T) {
+	// Review I1: an evidence-only event must not trigger a recompute. The
+	// stored score also holds AddExternalRiskPoints, which an event-only
+	// recompute would erase (60/terminate -> 0/observe).
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	e.AddExternalRiskPoints("sess-ext", 60, "m3-lite")
+	before, beforeAction, beforeThrottle := e.GetSessionRiskScore("sess-ext")
+	if before != 60 || beforeAction != string(policy.ActionTerminate) {
+		t.Fatalf("setup: score=%v action=%s, want 60/terminate", before, beforeAction)
+	}
+
+	v := semanticViolation("injection_elevated", policy.SeverityInfo, true, 0.35)
+	v.Semantic.DecisionID = "dec_ext_ev"
+	e.RecordSemanticViolation("sess-ext", v)
+
+	after, afterAction, afterThrottle := e.GetSessionRiskScore("sess-ext")
+	if after != before || afterAction != beforeAction || afterThrottle != beforeThrottle {
+		t.Fatalf("evidence-only event moved the ladder: %v/%s/%d -> %v/%s/%d",
+			before, beforeAction, beforeThrottle, after, afterAction, afterThrottle)
+	}
+	if got := e.EvidenceEvents("sess-ext"); len(got) != 1 {
+		t.Fatalf("the evidence event must still be recorded, got %d", len(got))
+	}
+}
+
+func TestEvidenceOnly_DuplicateDecisionDoesNotTouchTheSession(t *testing.T) {
+	// Review I1: a refused duplicate must leave the score, action,
+	// LastFlagged and MaxSeverity exactly as they were (43/block stayed
+	// 43/block, not 3.0/observe).
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	v := semanticViolation("semantic_injection", policy.SeverityWarning, false, 0.82)
+	v.Semantic.DecisionID = "dec_dup_ext"
+	e.RecordSemanticViolation("sess-dup-ext", v)
+	e.AddExternalRiskPoints("sess-dup-ext", 40, "m3-lite")
+
+	before, beforeAction, _ := e.GetSessionRiskScore("sess-dup-ext")
+	if beforeAction != string(policy.ActionBlock) {
+		t.Fatalf("setup: action=%s (score %v), want block", beforeAction, before)
+	}
+	fsBefore := e.GetFlaggedSession("sess-dup-ext")
+	lastBefore, maxBefore := fsBefore.LastFlagged, fsBefore.MaxSeverity
+
+	e.RecordSemanticViolation("sess-dup-ext", v)
+
+	after, afterAction, _ := e.GetSessionRiskScore("sess-dup-ext")
+	if after != before || afterAction != beforeAction {
+		t.Fatalf("duplicate DecisionID moved the ladder: %v/%s -> %v/%s", before, beforeAction, after, afterAction)
+	}
+	fsAfter := e.GetFlaggedSession("sess-dup-ext")
+	if !fsAfter.LastFlagged.Equal(lastBefore) {
+		t.Fatalf("duplicate DecisionID touched LastFlagged: %v -> %v", lastBefore, fsAfter.LastFlagged)
+	}
+	if fsAfter.MaxSeverity != maxBefore {
+		t.Fatalf("duplicate DecisionID touched MaxSeverity: %s -> %s", maxBefore, fsAfter.MaxSeverity)
+	}
+}
+
+func TestEvidenceOnly_NewSessionGetsTheObserveAction(t *testing.T) {
+	// A session first flagged by an evidence-only event still gets a ladder
+	// action, as a session first flagged by any other violation does.
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	e.RecordSemanticViolation("sess-new-ev", semanticViolation("injection_elevated", policy.SeverityCritical, true, 0.35))
+	score, action, throttle := e.GetSessionRiskScore("sess-new-ev")
+	if score != 0 || action != string(policy.ActionObserve) || throttle != 0 {
+		t.Fatalf("got %v/%s/%d, want 0/observe/0", score, action, throttle)
+	}
+}
+
+func TestEvidenceOnly_DoesNotRaiseMaxSeverity(t *testing.T) {
+	// Review M2: an audit or sub-threshold finding must not show as a real
+	// critical violation on the session badge.
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	e.EvaluateMessages("sess-maxsev", []policy.MessageToScan{
+		{Role: "user", Index: 0, Content: "zzmarkerzz"},
+	})
+	if fs := e.GetFlaggedSession("sess-maxsev"); fs.MaxSeverity != policy.SeverityWarning {
+		t.Fatalf("setup: MaxSeverity=%s, want warning", fs.MaxSeverity)
+	}
+	e.RecordSemanticViolation("sess-maxsev", semanticViolation("injection_elevated", policy.SeverityCritical, true, 0.35))
+	if fs := e.GetFlaggedSession("sess-maxsev"); fs.MaxSeverity != policy.SeverityWarning {
+		t.Fatalf("an evidence-only critical raised MaxSeverity to %s", fs.MaxSeverity)
+	}
+
+	// A contributing critical still raises it.
+	e.RecordSemanticViolation("sess-maxsev", semanticViolation("semantic_injection", policy.SeverityCritical, false, 0.95))
+	if fs := e.GetFlaggedSession("sess-maxsev"); fs.MaxSeverity != policy.SeverityCritical {
+		t.Fatalf("a contributing critical must raise MaxSeverity, got %s", fs.MaxSeverity)
+	}
+}
+
+func TestEvidenceOnly_StorageViolationPersistsTheFlag(t *testing.T) {
+	// Review M2: history must not show evidence as an ordinary violation.
+	store, err := storage.NewSQLiteStore(filepath.Join(t.TempDir(), "evidence.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	record := storage.SessionRecord{
+		ID:        "sess-store-ev",
+		State:     "completed",
+		StartTime: now.Add(-time.Minute),
+		EndTime:   now,
+		Violations: []storage.Violation{
+			{RuleName: "injection_elevated", Severity: "critical", EvidenceOnly: true},
+			{RuleName: "semantic_injection", Severity: "warning"},
+		},
+	}
+	if err = store.SaveSession(record); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := store.GetSession("sess-store-ev")
+	if err != nil || got == nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.Violations) != 2 {
+		t.Fatalf("expected 2 violations, got %d", len(got.Violations))
+	}
+	if !got.Violations[0].EvidenceOnly {
+		t.Error("evidence_only was not persisted and restored")
+	}
+	if got.Violations[1].EvidenceOnly {
+		t.Error("an ordinary violation must restore as contributing")
+	}
+
+	// A row written before the field existed has no key: it restores false.
+	var legacy storage.Violation
+	if err = json.Unmarshal([]byte(`{"rule_name":"prompt_injection","severity":"critical","action":"flag"}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy: %v", err)
+	}
+	if legacy.EvidenceOnly {
+		t.Fatal("a legacy stored violation must default to contributing")
+	}
+	out, err := json.Marshal(storage.Violation{RuleName: "x", Severity: "info"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if contains(string(out), "evidence_only") {
+		t.Fatalf("a contributing stored violation must not serialize evidence_only: %s", out)
 	}
 }

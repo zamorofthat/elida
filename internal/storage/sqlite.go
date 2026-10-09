@@ -46,6 +46,11 @@ type Violation struct {
 	EventCategory string `json:"event_category,omitempty"`
 	FrameworkRef  string `json:"framework_ref,omitempty"`
 	SourceRole    string `json:"source_role,omitempty"`
+	// EvidenceOnly marks a violation recorded as evidence for correlation
+	// that contributed no risk, so history does not present it as an
+	// ordinary violation. It lives in the violations JSON column: rows
+	// written before it existed have no key and restore as false.
+	EvidenceOnly bool `json:"evidence_only,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
