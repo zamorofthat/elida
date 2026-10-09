@@ -221,7 +221,7 @@ func TestEmbeddedProvider_AppliesCalibrationTemperature(t *testing.T) {
 	// sigmoid(6.0/2.41) = 0.9234...; the raw sigmoid(6.0) would be 0.9975,
 	// so this assertion fails if temperature is skipped.
 	if inj.Probability < 0.92 || inj.Probability > 0.93 {
-		t.Fatalf("injection probability = %v, want ~0.926 (sigmoid(6.0/2.41))", inj.Probability)
+		t.Fatalf("injection probability = %v, want ~0.9234 (sigmoid(6.0/2.41))", inj.Probability)
 	}
 	aux := byKind[decision.SignalHumanDirected]
 	if aux.Probability < 0.07 || aux.Probability > 0.08 {

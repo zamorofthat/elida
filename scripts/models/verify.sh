@@ -3,9 +3,10 @@
 #
 # Checks, in order: manifest.json against MANIFEST_SHA256, model.onnx
 # against MODEL_ONNX_SHA256, then every file the manifest lists against its
-# recorded sha256. The manifest is pinned and lists every other shipped
-# file, so a pass means the whole artifact is the pinned one, not merely
-# self-consistent. Used by build.sh (before it installs a build), the
+# recorded sha256, and finally that the directory holds nothing the
+# manifest does not list. The manifest is pinned and lists every other
+# shipped file, so a pass means the whole artifact is the pinned one, not
+# merely self-consistent, and nothing unlisted ships alongside it. Used by build.sh (before it installs a build), the
 # Dockerfile's model-builder stage, CI and the release workflow.
 #
 # Usage: [PYTHON=python3] scripts/models/verify.sh <model_dir>
@@ -48,13 +49,18 @@ failed=0
 check "$DIR/manifest.json" "$MANIFEST_SHA256" MANIFEST_SHA256 || failed=1
 check "$DIR/model.onnx" "$MODEL_ONNX_SHA256" MODEL_ONNX_SHA256 || failed=1
 
-# Every file the (now pinned) manifest lists, at its recorded digest.
-listing="$("$PYTHON" -I - "$DIR/manifest.json" <<'PY'
-import json, sys
+# Every file the (now pinned) manifest lists, at its recorded digest, and
+# nothing else: an unlisted file (say a second .onnx) would otherwise ship
+# in a release archive as part of a "verified" artifact.
+listing="$("$PYTHON" -I - "$DIR/manifest.json" "$DIR" <<'PY'
+import json, os, sys
 with open(sys.argv[1]) as fh:
     files = json.load(fh)["files"]
 if not files:
     sys.exit("error: manifest lists no files")
+extra = sorted(set(os.listdir(sys.argv[2])) - {"manifest.json"} - set(files))
+if extra:
+    sys.exit(f"error: {sys.argv[2]} holds files the manifest does not list: {extra}")
 for name, digest in sorted(files.items()):
     if "/" in name or "\\" in name or name.startswith("."):
         sys.exit(f"error: manifest lists an unsafe path {name!r}")
