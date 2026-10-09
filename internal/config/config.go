@@ -490,12 +490,22 @@ type DecisionConfig struct {
 	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
 	InlineTimeout     time.Duration `yaml:"inline_timeout"`     // Global inline deadline: admission, preprocessing, tokenization and inference (default: 50ms)
-	// MaxConcurrency is the physical inference worker pool size (default: 2).
+	// MaxConcurrency is the physical inference worker pool size (default: 4).
+	// It is split into an inline lane and an async lane that never share
+	// slots (async = 0 at 1, else max(1, n/4); inline = the rest):
+	//
+	//	max_concurrency | inline | async
+	//	1               | 1      | 0 (async continuation disabled)
+	//	2               | 1      | 1
+	//	4               | 3      | 1
+	//	8               | 6      | 2
+	//	16              | 12     | 4
+	//
 	// A worker slot is not one CPU: the embedded pure-Go backend runs each
 	// inference over an intra-op worker pool, measured at about 4.7 CPUs of
-	// work per wall-clock second on an 8-core M1 Pro, so two slots can occupy
-	// most of such a machine. Capping intra-op parallelism is a follow-up
-	// pending Hugot support.
+	// work per wall-clock second on an 8-core M1 Pro, so even two busy slots
+	// can occupy most of such a machine. Capping intra-op parallelism is a
+	// follow-up pending Hugot support.
 	MaxConcurrency   int           `yaml:"max_concurrency"`
 	InlineQueueWait  time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
 	MaxInlineTokens  int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
@@ -705,7 +715,7 @@ func defaults() *Config {
 			ThresholdSet:      "v1",
 			ElevatedThreshold: 0.3,
 			InlineTimeout:     50 * time.Millisecond,
-			MaxConcurrency:    2,
+			MaxConcurrency:    4,
 			InlineQueueWait:   0, // Phase 1: inline never waits for a worker
 			MaxInlineTokens:   128,
 			MaxInlineWindows:  1,

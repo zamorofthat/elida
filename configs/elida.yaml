@@ -488,10 +488,20 @@ decision:
   # inference all draw from this one budget.
   inline_timeout: 50ms
 
-  # Physical inference worker pool size. A slot is not one CPU: one
-  # embedded inference runs over an intra-op worker pool and measured about
-  # 4.7 CPUs of work per wall-clock second on an 8-core machine.
-  max_concurrency: 2
+  # Physical inference worker pool size, split into an inline lane and an
+  # async lane that never share slots (async = 0 at 1, else max(1, n/4)):
+  #
+  #   max_concurrency | inline | async
+  #   1               | 1      | 0 (async continuation disabled)
+  #   2               | 1      | 1
+  #   4               | 3      | 1
+  #   8               | 6      | 2
+  #   16              | 12     | 4
+  #
+  # A slot is not one CPU: one embedded inference runs over an intra-op
+  # worker pool and measured about 4.7 CPUs of work per wall-clock second on
+  # an 8-core machine.
+  max_concurrency: 4
 
   # Must be 0ms: inline inference never waits for worker capacity. A message
   # that cannot be admitted immediately falls back to the async path. A

@@ -23,7 +23,7 @@ func TestDecisionSettings_DefaultsMirrorConfig(t *testing.T) {
 	if d.ElevatedThreshold == nil || *d.ElevatedThreshold != 0.3 {
 		t.Fatalf("default elevated_threshold not mirrored: %+v", d.ElevatedThreshold)
 	}
-	if d.MaxConcurrency == nil || *d.MaxConcurrency != 2 {
+	if d.MaxConcurrency == nil || *d.MaxConcurrency != 4 {
 		t.Fatalf("default max_concurrency not mirrored: %+v", d.MaxConcurrency)
 	}
 	if d.Preprocessing == nil || d.Preprocessing.MaxDecodeDepth == nil || *d.Preprocessing.MaxDecodeDepth != 2 {
