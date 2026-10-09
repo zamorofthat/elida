@@ -78,6 +78,35 @@ type Spend struct {
 	// attempt bound carry it, so the admission record names the capacity
 	// that actually ran out rather than always DenyInlineBudgetSpent.
 	LastDenied decision.AdmissionReason
+
+	// deferred holds the not-eligible windows of this request's messages,
+	// waiting for FlushDeferred: they take the async lane at the lowest
+	// priority, after every capacity-denied window of the request.
+	deferred []deferredMsg
+}
+
+// deferredMsg is one message's not-eligible windows, held in a Spend until
+// FlushDeferred.
+type deferredMsg struct {
+	req  Request
+	in   decision.Input
+	sigs []decision.Signal
+	wins []WindowedText
+}
+
+// DeferredOutcome is what FlushDeferred did with one message's not-eligible
+// windows.
+type DeferredOutcome struct {
+	// In is the message the windows came from.
+	In decision.Input
+	// Queued is the async jobs queued for it; each is delivered to OnAsync
+	// exactly once, like any other async job.
+	Queued int
+	// NotAssessed is the windows left unscored and unqueued: the async cap,
+	// the exact-count attempt bound, a full queue, or async disabled. Each
+	// is a coverage gap. A window deduplicated against a job already
+	// claimed is neither queued nor counted here.
+	NotAssessed int
 }
 
 // Config configures the scheduler.
@@ -555,6 +584,12 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	ordered := OrderWindows(all)
 
 	eligible, eligibleReason := s.eligible(req, in, ordered)
+	// Untrusted content (user, tool) that misses inline admission is still
+	// analyzed: its windows take the async lane at the lowest priority.
+	// Inline eligibility is a hot-path budget decision, not a decision
+	// about what gets scored. Trusted roles are never queued.
+	lowPriority := !eligible && untrustedRole(in.SourceRole)
+	var low []WindowedText
 	// capable is read once per call: a provider that cannot meet an inline
 	// budget never gets an inline attempt it is bound to miss.
 	capable := s.cfg.InlineCapable == nil || s.cfg.InlineCapable()
@@ -593,12 +628,15 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	exact := make([]bool, len(queue))
 	for i := 0; i < len(queue); i++ {
 		w := queue[i]
-		// 1. Is this message eligible at all? not_eligible means we are not
-		// analyzing this content, so it is never queued either: async
-		// capacity is for work we wanted to do and could not, not for work
-		// we declined.
+		// 1. Is this message eligible for the inline lane at all? A
+		// not_eligible window of untrusted content is held for the async
+		// lane at the lowest priority (after this request's capacity-denied
+		// windows); trusted content is never queued.
 		if !eligible {
 			s.deny(&a, w, eligibleReason)
+			if lowPriority {
+				low = append(low, w)
+			}
 			continue
 		}
 
@@ -717,9 +755,82 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		a.Decisions = append(a.Decisions, ds...)
 	}
 
+	if len(low) > 0 {
+		if sp := req.Spent; sp != nil {
+			// Request-scoped: wait until every message of the request has
+			// queued its capacity-denied windows (FlushDeferred).
+			sp.deferred = append(sp.deferred, deferredMsg{req: req, in: in, sigs: signals, wins: low})
+		} else {
+			// No request scope: this message is the whole request, so its
+			// windows are queued now, within this call's budget.
+			tmp := Spend{AsyncWindows: asyncWindows, Considered: considered, AsyncRefused: asyncRefused}
+			s.queueLowPriority(&tmp, &a, &tmpl, req, in, signals, low)
+			asyncWindows, considered, asyncRefused = tmp.AsyncWindows, tmp.Considered, tmp.AsyncRefused
+		}
+	}
+
 	a.Coverage.Complete = a.Coverage.IsComplete()
 	a.TotalLatency = s.cfg.Clock().Sub(start)
 	return a, nil
+}
+
+// FlushDeferred queues the not-eligible windows that AssessCandidates held
+// in sp, message by message in the order they were assessed, after every
+// capacity-denied window of the request: they are the lowest-priority async
+// work. The request's async cap, exact-count attempt bound and queue state
+// in sp all apply. It never blocks, and returns one outcome per message so
+// the caller can settle each message's claim and count what was left
+// unassessed. sp's held windows are consumed.
+func (s *Inline) FlushDeferred(sp *Spend) []DeferredOutcome {
+	if sp == nil || len(sp.deferred) == 0 {
+		return nil
+	}
+	held := sp.deferred
+	sp.deferred = nil
+	out := make([]DeferredOutcome, 0, len(held))
+	for _, d := range held {
+		var scratch decision.Assessment
+		var tmpl asyncTemplate
+		q, n := s.queueLowPriority(sp, &scratch, &tmpl, d.req, d.in, d.sigs, d.wins)
+		out = append(out, DeferredOutcome{In: d.in, Queued: q, NotAssessed: n})
+	}
+	return out
+}
+
+// queueLowPriority offers not-eligible windows to the async lane within
+// sp's request budget. Each window is exact-counted (and hard-split if it
+// must be) before it is queued, exactly like a capacity-denied window. The
+// windows already carry their not_eligible admission record, so nothing
+// more is recorded on a beyond Coverage.QueuedAsync.
+func (s *Inline) queueLowPriority(sp *Spend, a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, sigs []decision.Signal, wins []WindowedText) (queued, notAssessed int) {
+	maxConsidered := s.cfg.MaxInlineWindows + s.cfg.MaxAsyncWindows
+	closed := func() bool {
+		return s.asyncWorkers == 0 || sp.AsyncRefused || sp.AsyncWindows >= s.cfg.MaxAsyncWindows
+	}
+	for i, w := range wins {
+		if closed() || sp.Considered >= maxConsidered {
+			notAssessed += len(wins) - i
+			return queued, notAssessed
+		}
+		sp.Considered++
+		pieces := s.exactPieces(w)
+		a.Coverage.EligibleWindows += len(pieces) - 1
+		for j, p := range pieces {
+			if closed() {
+				notAssessed += len(pieces) - j
+				break
+			}
+			switch s.continueAsync(a, tmpl, req, in, p, sigs, decision.DenyNotEligible, sp.AsyncWindows, false) {
+			case asyncQueued:
+				sp.AsyncWindows++
+				queued++
+			case asyncRefusedByQueue:
+				sp.AsyncRefused = true
+				notAssessed++
+			}
+		}
+	}
+	return queued, notAssessed
 }
 
 // exactPieces counts w with the exact counter and, when it exceeds
@@ -775,6 +886,17 @@ func remainderWindow(c decision.Candidate, rest int) WindowedText {
 	return WindowedText{Window: w, Text: c.Content[rest:]}
 }
 
+// untrustedRole reports whether content from this role is ever analyzed:
+// user messages and tool results (and an unspecified role, which Assess
+// callers use). System and assistant content is trusted and never queued.
+func untrustedRole(role string) bool {
+	switch role {
+	case "user", "tool", "":
+		return true
+	}
+	return false
+}
+
 // eligible decides whether this message may attempt the inline fast lane,
 // and returns the reason — an admit reason when eligible, DenyNotEligible
 // otherwise.
@@ -784,9 +906,7 @@ func remainderWindow(c decision.Candidate, rest int) WindowedText {
 // not analyzed unless an operator configures it, which Phase 1 does not
 // expose.
 func (s *Inline) eligible(req Request, in decision.Input, ws []WindowedText) (bool, decision.AdmissionReason) {
-	switch in.SourceRole {
-	case "user", "tool", "":
-	default:
+	if !untrustedRole(in.SourceRole) {
 		return false, decision.DenyNotEligible
 	}
 

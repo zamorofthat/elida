@@ -41,6 +41,21 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   `decision.max_async_windows`), so results arrive after the request was
   forwarded and cannot protect it, and `inline_completion_ratio` is 0.
   `decision.require_inline: true` refuses to start on such builds.
+- **Content without an inline admission reason is scored async, last.** User
+  and tool content that no `decision.inline_admission` rule admits (for
+  example, a paraphrased injection with no lexical cue in an unelevated
+  session) is still scored, on the async lane at the lowest priority: after
+  every window of the request that was denied the inline lane for capacity.
+  Its result protects later activity only. When `decision.max_async_windows`
+  is spent first, the windows left out are counted as the `not_assessed`
+  coverage gap and the message is retried on the next request that carries
+  it.
+- **A long message can stay partly scored.** A message with more windows than
+  the request's inline and async caps has some windows scored and the rest
+  counted as `not_assessed`. Once any window of the message has answered, the
+  message counts as assessed for the session, so its remaining windows are not
+  revisited on later requests. The gap is visible in `coverage_gaps` and as
+  `coverage_complete: false` on that message's decisions.
 - **An inline window that misses the deadline is re-queued async.** On an
   inline build, a window whose inference does not finish inside
   `decision.inline_timeout` is handed to the async lane (bounded by

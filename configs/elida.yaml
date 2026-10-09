@@ -516,12 +516,18 @@ decision:
   max_inline_windows: 1
 
   # Bounded async continuation. Async results cannot block or recall a
-  # request that was already forwarded; they affect later activity.
+  # request that was already forwarded; they affect later activity. The cap
+  # is per request and is spent in priority order: windows denied the inline
+  # lane for capacity first, then user/tool windows that had no inline
+  # admission reason (not_eligible). What the cap leaves out is counted as
+  # the not_assessed coverage gap at /control/decision.
   max_async_windows: 8
   async_queue_size: 100
 
   # Which messages may attempt the inline fast lane. Admission also requires
-  # an immediately free worker and enough remaining deadline.
+  # an immediately free worker and enough remaining deadline. These decide
+  # the hot-path budget only, not what gets scored: user and tool content
+  # that is not admitted still takes the async lane at the lowest priority.
   inline_admission:
     untrusted_tool_results: true
     encoded_or_obfuscated: true

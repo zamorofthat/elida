@@ -442,6 +442,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 			}
 		}
 		st.CoverageGaps[runner.GapMessagesNotAssessed] = 0
+		st.CoverageGaps[runner.GapNotAssessed] = 0
 		for k, v := range a.decisionRunner.CoverageGaps() {
 			st.CoverageGaps[k] = v
 		}

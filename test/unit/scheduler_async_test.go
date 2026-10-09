@@ -115,14 +115,14 @@ func TestSchedulerAsync_DeniedWindowsAreQueuedAndCompleteLater(t *testing.T) {
 	}
 }
 
-func TestSchedulerAsync_IneligibleWindowsAreNotQueued(t *testing.T) {
-	// not_eligible means "we are not analyzing this content", not "we ran
-	// out of capacity". Queueing it would spend workers on trusted content.
+func TestSchedulerAsync_IneligibleUntrustedWindowsAreQueuedAsync(t *testing.T) {
+	// not_eligible is an inline-lane budget decision, not a decision about
+	// what gets scored: a user message with no admission reason still takes
+	// the async lane (lowest priority). Trusted content is never queued.
 	f := decisiontest.NewFake(map[decision.Signal]float64{decision.SignalInjection: 0.5})
+	coll := newCollector(1)
 	cfg := inlineConfig(f)
-	cfg.OnAsync = func(scheduler.Request, decision.Input, decision.Assessment) {
-		t.Fatal("an ineligible window must never be queued")
-	}
+	cfg.OnAsync = coll.OnAsync
 	s, err := scheduler.New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -136,16 +136,27 @@ func TestSchedulerAsync_IneligibleWindowsAreNotQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AssessCandidates: %v", err)
 	}
-	if a.Coverage.QueuedAsync != 0 {
-		t.Fatalf("QueuedAsync = %d, want 0", a.Coverage.QueuedAsync)
+	if a.Coverage.QueuedAsync != 1 || a.Coverage.ScoredInline != 0 {
+		t.Fatalf("coverage = %+v, want the one window queued async and none inline", a.Coverage)
 	}
-	// Drain: any stray enqueue has run (or been refused) once Shutdown
-	// returns, so the call count below is final.
-	if err := s.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
+	if reasonCount(a, decision.DenyNotEligible) != 1 {
+		t.Fatalf("admissions = %+v, want one not_eligible record", a.Admissions)
 	}
-	if f.Calls() != 0 {
-		t.Fatalf("provider calls = %d, want 0", f.Calls())
+	got := coll.wait(t, 3*time.Second)
+	if got[0].Admissions[0].Reason != decision.DenyNotEligible {
+		t.Fatalf("async admission reason = %q, want not_eligible", got[0].Admissions[0].Reason)
+	}
+
+	// A trusted role is never queued.
+	sys := in
+	sys.SourceRole = "system"
+	before := s.Metrics().AsyncQueued
+	a, err = s.AssessCandidates(context.Background(), scheduler.Request{SessionID: "sess-1", RequestID: "req-2"}, sys, candidatesFor(content), nil)
+	if err != nil {
+		t.Fatalf("AssessCandidates: %v", err)
+	}
+	if a.Coverage.QueuedAsync != 0 || s.Metrics().AsyncQueued != before {
+		t.Fatalf("a system message was queued: coverage=%+v", a.Coverage)
 	}
 }
 

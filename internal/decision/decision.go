@@ -157,9 +157,12 @@ const (
 	// more windows than the default policy would.
 	AdmitBroadStrictMode AdmissionReason = "broad_strict_mode"
 
-	// DenyNotEligible means the window never qualified for scoring at all
-	// (for example, content outside the signals' scope). It is not queued
-	// async either; it is simply never scored.
+	// DenyNotEligible means the window did not qualify for the inline fast
+	// lane: untrusted content (user, tool) with no admission reason. It is
+	// still scored, on the async lane at the lowest priority (after the
+	// request's capacity-denied windows), within the request's async cap;
+	// what the cap leaves out is a not_assessed coverage gap. Trusted
+	// content (system, assistant) is never queued.
 	DenyNotEligible AdmissionReason = "not_eligible"
 	// DenyNoWorkerAvailable means the window qualified for async scoring
 	// but no worker was free to take it. The window goes unscored and

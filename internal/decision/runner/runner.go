@@ -37,6 +37,11 @@
 //   - messages_not_assessed: eligible new messages past
 //     MaxMessagesPerRequest, or reached after the request deadline. They are
 //     retried on the next request that carries them.
+//   - not_assessed: windows of an assessed message neither scored inline nor
+//     queued async (the request's async cap or attempt bound, a full queue,
+//     a failed inline attempt). Not-eligible user and tool windows are
+//     queued async at the lowest priority, after the request's
+//     capacity-denied windows, and counted here when the cap leaves them out.
 //   - preprocessing gap reasons (input_truncated, ...): content the
 //     scheduler never saw; that message's coverage_complete is false.
 //   - original_only: the scheduler could not take derived representations,
@@ -287,6 +292,16 @@ const (
 	// could not be rendered as text (images, documents, nested non-text
 	// tool_result blocks), so were never analyzed.
 	GapUnsupportedBlock = "unsupported_block"
+	// GapNotAssessed counts windows of assessed messages that were neither
+	// scored inline nor queued async: past the request's async cap or
+	// exact-count attempt bound, refused by a full queue, or an inline
+	// attempt that failed without being re-queued. This includes the
+	// lowest-priority not-eligible windows (user content with no inline
+	// admission reason) that the cap left out. A message with nothing
+	// answered is retried on the next request carrying it; a message with
+	// at least one answered window keeps its claim, so its remaining windows
+	// are not revisited and stay counted here.
+	GapNotAssessed = "not_assessed"
 	// ReasonAlreadyAssessed counts messages skipped because this session
 	// already had them scored. It is not a gap; see AlreadyAssessed.
 	ReasonAlreadyAssessed = "already_assessed"
@@ -402,6 +417,13 @@ func (s *assessedSet) remove(k msgKey) {
 // preprocessed representation of one message at once.
 type candidateAssessor interface {
 	AssessCandidates(ctx context.Context, req scheduler.Request, in decision.Input, cands []decision.Candidate, signals []decision.Signal) (decision.Assessment, error)
+}
+
+// deferredFlusher is a scheduler that holds not-eligible windows in the
+// request's Spend and queues them, at the lowest priority, once every
+// message of the request has been assessed.
+type deferredFlusher interface {
+	FlushDeferred(sp *scheduler.Spend) []scheduler.DeferredOutcome
 }
 
 // timeoutReporter is a scheduler that reports its inline deadline.
@@ -916,6 +938,15 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 	elevated := isElevated(r.cfg.RiskLookup(sess.ID))
 	spent := &scheduler.Spend{}
 
+	// settled is what each assessed message's request-time work produced.
+	// Claims are settled only after the request's lowest-priority
+	// (not-eligible) windows have been queued, since those jobs count too.
+	type settled struct {
+		k                 msgKey
+		tracked, answered bool
+		queued            int
+	}
+	var done []settled
 	var assessed, notAssessed int64
 	for _, msg := range eligible {
 		k := msgKey{index: msg.Index, sum: sha256.Sum256([]byte(msg.Content))}
@@ -937,15 +968,38 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 		tracked := r.openPending(sess.ID, k)
 		answered, queued, contributed := r.assessMessage(ctx, sess, requestID, msg, elevated, spent)
 		protect = protect || contributed
+		done = append(done, settled{k: k, tracked: tracked, answered: answered, queued: queued})
+	}
+
+	// The lowest-priority async work: not-eligible windows, after every
+	// capacity-denied window of the request.
+	if fl, ok := r.cfg.Scheduler.(deferredFlusher); ok {
+		var left int64
+		for _, o := range fl.FlushDeferred(spent) {
+			k := msgKey{index: o.In.MessageIndex, sum: sha256.Sum256([]byte(o.In.Content))}
+			for i := range done {
+				if done[i].k == k {
+					done[i].queued += o.Queued
+					break
+				}
+			}
+			left += int64(o.NotAssessed)
+		}
+		if left > 0 {
+			r.countGap(GapNotAssessed, left)
+		}
+	}
+
+	for _, d := range done {
 		switch {
-		case tracked:
+		case d.tracked:
 			// Settles now if nothing was queued, or once every queued job
 			// has been delivered (OnAsync); released if nothing answered.
-			r.closePending(sess.ID, k, answered, queued)
-		case !answered && queued == 0:
+			r.closePending(sess.ID, d.k, d.answered, d.queued)
+		case !d.answered && d.queued == 0:
 			// Untracked (pending set full): settle from what is known now.
 			// Unknown is never "already assessed".
-			r.releaseMessage(sess.ID, k)
+			r.releaseMessage(sess.ID, d.k)
 		}
 	}
 	if notAssessed > 0 {
@@ -1063,6 +1117,20 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 	if msg.SkippedBlocks > 0 {
 		r.countGap(GapUnsupportedBlock, int64(msg.SkippedBlocks))
 		a.Coverage.Complete = false
+	}
+	if r.assessor != nil {
+		// Windows neither scored inline nor queued async are a gap. The
+		// not-eligible windows are held for the request's lowest-priority
+		// async pass and counted there if the cap leaves them out.
+		left := a.Coverage.EligibleWindows - a.Coverage.ScoredInline - a.Coverage.QueuedAsync
+		for _, ad := range a.Admissions {
+			if !ad.Admitted && ad.Reason == decision.DenyNotEligible {
+				left--
+			}
+		}
+		if left > 0 {
+			r.countGap(GapNotAssessed, int64(left))
+		}
 	}
 
 	contributed = r.handle(sess, requestID, in, a)
