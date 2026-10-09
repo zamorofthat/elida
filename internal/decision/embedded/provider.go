@@ -504,6 +504,27 @@ func (p *Provider) Close() error {
 	return pipe.Close()
 }
 
+// CloseContext is Close bounded by ctx. The pipeline's Close waits for
+// every in-flight inference to finish, which a hung backend could stretch
+// past the shutdown budget; CloseContext stops waiting when ctx ends, logs a
+// content-free WARN and returns ctx.Err(). The close keeps running in the
+// background (the process is exiting), and the provider already answers
+// unknown because the pipeline was detached first.
+func (p *Provider) CloseContext(ctx context.Context) error {
+	done := make(chan error, 1)
+	go func() { done <- p.Close() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		slog.Warn("semantic provider close did not finish within the shutdown budget; giving up waiting",
+			"error_class", fmt.Sprintf("%T", ctx.Err()),
+			"consequence", "an in-flight inference is still running; the process exits without waiting for it",
+		)
+		return ctx.Err()
+	}
+}
+
 // breakerOpen reports whether the circuit breaker is currently open. It is
 // read-only, so Health can call it without affecting admission.
 func (p *Provider) breakerOpen() bool {

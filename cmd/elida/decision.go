@@ -365,6 +365,8 @@ func decisionDrainContext(parent context.Context) (context.Context, context.Canc
 // A provider call that ignores its context may still be running on a
 // worker when Close runs; the embedded provider answers unknown after
 // Close, and the process is exiting, so that call's result is dropped.
+// Close itself waits for in-flight inference, so it is bounded by its own
+// sub-deadline (embedded.Provider.CloseContext logs when it gives up).
 func (a *app) shutdownDecision(ctx context.Context) {
 	if a.decisionScheduler != nil {
 		drainCtx, cancel := decisionDrainContext(ctx)
@@ -375,7 +377,13 @@ func (a *app) shutdownDecision(ctx context.Context) {
 		}
 	}
 	if a.decisionProvider != nil {
-		if err := a.decisionProvider.Close(); err != nil {
+		// Close waits for in-flight inference; bound that wait by its own
+		// sub-deadline of what remains, so a hung backend cannot consume the
+		// budget the session drain and telemetry flush still need.
+		closeCtx, cancel := decisionDrainContext(ctx)
+		err := a.decisionProvider.CloseContext(closeCtx)
+		cancel()
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			slog.Error("semantic provider close error", "error", err)
 		}
 	}
