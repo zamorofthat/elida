@@ -16,6 +16,7 @@ import (
 	"elida/internal/decision/scheduler"
 	"elida/internal/policy"
 	"elida/internal/proxy"
+	"elida/internal/session"
 )
 
 // enforceProxyRig is the reviewer's I1 probe: a proxy with a real policy
@@ -28,6 +29,19 @@ type enforceProxyRig struct {
 	sch       *scheduler.Inline
 	forwarded atomic.Int64
 	delivered atomic.Int64
+	sessions  atomic.Pointer[session.Session]
+}
+
+// sessionCapturingAssessor is runnerAssessor that also remembers the last
+// session it was handed, so a test can read that session's shadow list.
+type sessionCapturingAssessor struct {
+	runnerAssessor
+	last *atomic.Pointer[session.Session]
+}
+
+func (a sessionCapturingAssessor) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) bool {
+	a.last.Store(sess)
+	return a.runnerAssessor.AssessRequest(ctx, sess, requestID, msgs)
 }
 
 func newEnforceProxyRig(t *testing.T, mode string, capable bool) *enforceProxyRig {
@@ -95,7 +109,7 @@ func newEnforceProxyRig(t *testing.T, mode string, capable bool) *enforceProxyRi
 		t.Fatalf("runner.New: %v", err)
 	}
 	rp.Store(r)
-	rig.p = proxyWithAssessor(t, backend, runnerAssessor{r: r}, rig.pe)
+	rig.p = proxyWithAssessor(t, backend, sessionCapturingAssessor{runnerAssessor: runnerAssessor{r: r}, last: &rig.sessions}, rig.pe)
 	return rig
 }
 
@@ -159,15 +173,21 @@ func TestDecisionProxyEnforce_InlineFindingProtectsTheCurrentRequest(t *testing.
 		t.Fatalf("request 1 body = %q, want the risk ladder's block response", w1.Body.String())
 	}
 
-	fs := rig.pe.GetFlaggedSession("sess-i1")
+	// The policy engine keeps one merged entry per rule, so the per-decision
+	// record is the session's shadow list: the tool findings were inline,
+	// current_request.
+	sess := rig.sessions.Load()
+	if sess == nil {
+		t.Fatal("fixture: the assessor saw no session")
+	}
 	var inline int
-	for _, v := range fs.Violations {
-		if v.Semantic != nil && v.Semantic.ProtectionScope == string(decision.ScopeCurrentRequest) {
+	for _, e := range sess.GetSemanticShadow() {
+		if e.SourceRole == "tool" && e.ExecutionMode == "inline" && e.ProtectionScope == string(decision.ScopeCurrentRequest) {
 			inline++
 		}
 	}
-	if inline == 0 {
-		t.Fatalf("expected current_request semantic violations, got %+v", fs.Violations)
+	if inline != 2 {
+		t.Fatalf("inline current_request tool decisions = %d, want 2: %+v", inline, sess.GetSemanticShadow())
 	}
 }
 
