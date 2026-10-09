@@ -290,13 +290,8 @@ func TestEnforce_AsyncResultAffectsLaterActivityOnly(t *testing.T) {
 		t.Fatal("the async result should have raised session risk")
 	}
 
-	// Let the remaining async windows land before reading the violations:
-	// GetFlaggedSession is a shallow copy whose Violations slice a later
-	// delivery would still be writing.
-	if err := sch.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-
+	// Later async windows may still be landing; GetFlaggedSession returns a
+	// deep copy, so reading it here does not race with them.
 	// Its scope says so: future_activity, not current_request.
 	fs := pe.GetFlaggedSession("sess-async-enf")
 	var found bool

@@ -1595,33 +1595,68 @@ func (e *Engine) IsFlagged(sessionID string) bool {
 	return exists
 }
 
-// GetFlaggedSession returns a flagged session by ID
+// GetFlaggedSession returns a deep copy of a flagged session by ID, or nil.
+// The copy shares no slice, map or pointer with the engine, so the caller may
+// read or change it while the engine keeps recording.
 func (e *Engine) GetFlaggedSession(sessionID string) *FlaggedSession {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	if flagged, exists := e.flaggedSessions[sessionID]; exists {
-		// Return a copy
-		copy := *flagged
-		return &copy
+		return flagged.clone()
 	}
 	return nil
 }
 
-// GetFlaggedSessions returns all flagged sessions
+// clone returns a deep copy of fs. The caller holds the engine's lock (read
+// is enough). Every slice, map and pointer is copied: a shallow struct copy
+// would share Violations, ViolationEvents and CapturedContent backing arrays
+// and the ViolationCounts map with the engine, which recordViolations and the
+// capture methods keep appending to and updating in place.
+func (fs *FlaggedSession) clone() *FlaggedSession {
+	c := *fs
+	if fs.Violations != nil {
+		c.Violations = make([]Violation, len(fs.Violations))
+		copy(c.Violations, fs.Violations)
+		for i := range c.Violations {
+			if sem := c.Violations[i].Semantic; sem != nil {
+				semCopy := *sem
+				c.Violations[i].Semantic = &semCopy
+			}
+		}
+	}
+	if fs.CapturedContent != nil {
+		c.CapturedContent = make([]CapturedRequest, len(fs.CapturedContent))
+		copy(c.CapturedContent, fs.CapturedContent)
+	}
+	if fs.ViolationEvents != nil {
+		c.ViolationEvents = make([]ViolationEvent, len(fs.ViolationEvents))
+		copy(c.ViolationEvents, fs.ViolationEvents)
+	}
+	if fs.ViolationCounts != nil {
+		c.ViolationCounts = make(map[string]int, len(fs.ViolationCounts))
+		for k, v := range fs.ViolationCounts {
+			c.ViolationCounts[k] = v
+		}
+	}
+	return &c
+}
+
+// GetFlaggedSessions returns deep copies of all flagged sessions (see
+// GetFlaggedSession).
 func (e *Engine) GetFlaggedSessions() []*FlaggedSession {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	result := make([]*FlaggedSession, 0, len(e.flaggedSessions))
 	for _, flagged := range e.flaggedSessions {
-		copy := *flagged
-		result = append(result, &copy)
+		result = append(result, flagged.clone())
 	}
 	return result
 }
 
-// GetFlaggedSessionsBySeverity returns flagged sessions filtered by minimum severity
+// GetFlaggedSessionsBySeverity returns deep copies of the flagged sessions
+// at or above a minimum severity (see GetFlaggedSession).
 func (e *Engine) GetFlaggedSessionsBySeverity(minSeverity Severity) []*FlaggedSession {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -1629,8 +1664,7 @@ func (e *Engine) GetFlaggedSessionsBySeverity(minSeverity Severity) []*FlaggedSe
 	result := make([]*FlaggedSession, 0)
 	for _, flagged := range e.flaggedSessions {
 		if e.severityMeetsMinimum(flagged.MaxSeverity, minSeverity) {
-			copy := *flagged
-			result = append(result, &copy)
+			result = append(result, flagged.clone())
 		}
 	}
 	return result
