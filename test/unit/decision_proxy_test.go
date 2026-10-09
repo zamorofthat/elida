@@ -29,7 +29,7 @@ type recordingAssessor struct {
 	panics   bool
 }
 
-func (a *recordingAssessor) AssessRequest(_ context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) {
+func (a *recordingAssessor) AssessRequest(_ context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) bool {
 	if a.panics {
 		panic("assessor exploded")
 	}
@@ -42,6 +42,7 @@ func (a *recordingAssessor) AssessRequest(_ context.Context, sess *session.Sessi
 	a.messages = append(a.messages, msgs...)
 	a.sessions = append(a.sessions, sess.ID)
 	a.requests = append(a.requests, requestID)
+	return false
 }
 
 func (a *recordingAssessor) snapshot() (int, []policy.MessageToScan, []string) {
@@ -257,8 +258,9 @@ func TestDecisionProxy_AssessorRunsBeforeForwarding(t *testing.T) {
 
 type orderingAssessor struct{ record func() }
 
-func (o *orderingAssessor) AssessRequest(context.Context, *session.Session, string, []policy.MessageToScan) {
+func (o *orderingAssessor) AssessRequest(context.Context, *session.Session, string, []policy.MessageToScan) bool {
 	o.record()
+	return false
 }
 
 // stubDecisionProvider is a control.DecisionProvider for the status test.

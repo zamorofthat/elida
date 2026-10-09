@@ -107,8 +107,14 @@ func WithRedactor(r redaction.Redactor) ProxyOption {
 // own configured inline deadline, and must treat a failure to analyze as a
 // coverage fact rather than a request failure. A nil assessor means the
 // feature is disabled and the request path does nothing.
+//
+// AssessRequest reports protect: true when it recorded a risk-contributing
+// finding for THIS request (an inline result in effective enforce mode). The
+// proxy then re-checks the risk ladder before forwarding, through the same
+// path as the pre-request ladder check. Shadow, audit and async results
+// never report it.
 type SemanticAssessor interface {
-	AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan)
+	AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) (protect bool)
 }
 
 // WithSemanticAssessor sets the semantic injection assessor.
@@ -401,24 +407,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(p.config.Session.Header, sess.ID)
 
 	// Risk ladder enforcement — check cumulative risk score before processing
+	var throttled bool
 	if p.policy != nil {
-		if p.policy.ShouldBlockByRisk(sess.ID) {
-			slog.Warn("request blocked by risk ladder",
-				"session_id", sess.ID,
-			)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			if _, err := w.Write([]byte(`{"error":"risk_threshold_exceeded","message":"Session risk score too high"}`)); err != nil {
-				slog.Warn("write failed", "session_id", sess.ID, "error", err)
-			}
+		var blocked bool
+		if blocked, throttled = p.applyRiskLadder(w, sess, false); blocked {
 			return
-		}
-		if shouldThrottle, delayMs := p.policy.ShouldThrottle(sess.ID); shouldThrottle {
-			slog.Info("request throttled by risk ladder",
-				"session_id", sess.ID,
-				"delay_ms", delayMs,
-			)
-			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 		}
 	}
 
@@ -526,7 +519,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// not an error.
 	if p.semantic != nil && len(requestBody) > 0 {
 		if msgs := extractSemanticMessages(requestBody, p.trustedTagRegexs); len(msgs) > 0 {
-			p.runSemanticAssessment(ctx, sess, msgs)
+			// An inline enforce finding was recorded as an ordinary
+			// violation: re-read the ladder so it protects THIS request,
+			// through the same path as the check above. Shadow, audit and
+			// async results never ask for it.
+			if p.runSemanticAssessment(ctx, sess, msgs) && p.policy != nil {
+				if blocked, _ := p.applyRiskLadder(w, sess, throttled); blocked {
+					return
+				}
+			}
 		}
 	}
 
@@ -2052,9 +2053,10 @@ func extractToolResultContent(content any) (text string, skipped int) {
 // The assessor touches a model, a worker pool and a queue. None of that may
 // ever take down a proxied request: a failure to analyze is a coverage gap.
 // The panic value is not logged: it could quote request content.
-func (p *Proxy) runSemanticAssessment(ctx context.Context, sess *session.Session, messages []policy.MessageToScan) {
+func (p *Proxy) runSemanticAssessment(ctx context.Context, sess *session.Session, messages []policy.MessageToScan) (protect bool) {
 	defer func() {
 		if r := recover(); r != nil {
+			protect = false
 			slog.Error("semantic assessment panicked; request continues unanalyzed",
 				"session_id", sess.ID,
 				"panic_type", fmt.Sprintf("%T", r),
@@ -2065,7 +2067,40 @@ func (p *Proxy) runSemanticAssessment(ctx context.Context, sess *session.Session
 	// request ID of its own, so a fresh one is minted here; unlike the
 	// session's request counter it cannot collide between two concurrent
 	// requests on one session, and it needs no session lock.
-	p.semantic.AssessRequest(ctx, sess, uuid.New().String(), messages)
+	return p.semantic.AssessRequest(ctx, sess, uuid.New().String(), messages)
+}
+
+// applyRiskLadder applies the session's current risk-ladder action: block
+// (and terminate, which the ladder also treats as block) writes the 403
+// risk_threshold_exceeded response and reports blocked; throttle sleeps for
+// the ladder's delay unless alreadyThrottled (this request already slept
+// once) and reports throttled. It is the one ladder enforcement path, used
+// before the request is processed and again after an inline semantic
+// finding.
+func (p *Proxy) applyRiskLadder(w http.ResponseWriter, sess *session.Session, alreadyThrottled bool) (blocked, throttled bool) {
+	if p.policy.ShouldBlockByRisk(sess.ID) {
+		slog.Warn("request blocked by risk ladder",
+			"session_id", sess.ID,
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		if _, err := w.Write([]byte(`{"error":"risk_threshold_exceeded","message":"Session risk score too high"}`)); err != nil {
+			slog.Warn("write failed", "session_id", sess.ID, "error", err)
+		}
+		return true, alreadyThrottled
+	}
+	if shouldThrottle, delayMs := p.policy.ShouldThrottle(sess.ID); shouldThrottle {
+		if alreadyThrottled {
+			return false, true
+		}
+		slog.Info("request throttled by risk ladder",
+			"session_id", sess.ID,
+			"delay_ms", delayMs,
+		)
+		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		return false, true
+	}
+	return false, alreadyThrottled
 }
 
 // systemMessageIfChanged returns a MessageToScan for the system prompt only if it's new or changed.

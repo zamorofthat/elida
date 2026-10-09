@@ -385,11 +385,11 @@ func (a *app) shutdownDecision(ctx context.Context) {
 // runner's adapter method is named AssessPolicyMessages so its
 // policy-specific conversion is obvious at the call site; the proxy's
 // interface method is AssessRequest.
-type semanticAssessorFunc func(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan)
+type semanticAssessorFunc func(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) bool
 
 // AssessRequest implements proxy.SemanticAssessor.
-func (f semanticAssessorFunc) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) {
-	f(ctx, sess, requestID, msgs)
+func (f semanticAssessorFunc) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) bool {
+	return f(ctx, sess, requestID, msgs)
 }
 
 // DecisionStatus implements control.DecisionProvider. Ratios are derived

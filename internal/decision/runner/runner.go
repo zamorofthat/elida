@@ -868,9 +868,17 @@ func (r *Runner) claimDecision(id string) bool {
 // session already had scored are skipped; of the rest, at most
 // MaxMessagesPerRequest are assessed, newest first. It must be called BEFORE
 // the request is forwarded, so an inline result can still protect it.
-func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []Message) {
+//
+// protect reports whether this call recorded at least one ORDINARY
+// (risk-contributing) violation from an inline result, which only happens
+// in effective enforce mode. The caller then re-checks the session's risk
+// ladder before forwarding, so the request that carried the finding meets
+// the ladder's action (ProtectionScope current_request). Shadow, audit,
+// evidence-only events and async results never set it: an async result
+// arrives with ScopeFutureActivity and affects later requests only.
+func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []Message) (protect bool) {
 	if r.mode == config.DecisionModeDisabled || sess == nil || len(msgs) == 0 {
-		return
+		return false
 	}
 	if r.timeout > 0 {
 		var cancel context.CancelFunc
@@ -893,7 +901,7 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 		}
 	}
 	if len(eligible) == 0 && len(unanalyzable) == 0 {
-		return
+		return false
 	}
 	r.Bind(sess)
 	for _, m := range unanalyzable {
@@ -902,7 +910,7 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 		}
 	}
 	if len(eligible) == 0 {
-		return
+		return false
 	}
 
 	elevated := isElevated(r.cfg.RiskLookup(sess.ID))
@@ -927,7 +935,8 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 		}
 		assessed++
 		tracked := r.openPending(sess.ID, k)
-		answered, queued := r.assessMessage(ctx, sess, requestID, msg, elevated, spent)
+		answered, queued, contributed := r.assessMessage(ctx, sess, requestID, msg, elevated, spent)
+		protect = protect || contributed
 		switch {
 		case tracked:
 			// Settles now if nothing was queued, or once every queued job
@@ -945,6 +954,7 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 			"session_id", sess.ID, "request_id", requestID,
 			"skipped", notAssessed, "reason", GapMessagesNotAssessed)
 	}
+	return protect
 }
 
 // AssessPolicyMessages adapts the policy engine's per-message view to this
@@ -954,15 +964,15 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 //
 // This is the only place runner depends on the policy package, and it is a
 // one-way value conversion.
-func (r *Runner) AssessPolicyMessages(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) {
+func (r *Runner) AssessPolicyMessages(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) (protect bool) {
 	if r.mode == config.DecisionModeDisabled || len(msgs) == 0 {
-		return
+		return false
 	}
 	converted := make([]Message, 0, len(msgs))
 	for _, m := range msgs {
 		converted = append(converted, Message{Role: m.Role, Index: m.Index, Content: m.Content, SkippedBlocks: m.SkippedBlocks})
 	}
-	r.AssessRequest(ctx, sess, requestID, converted)
+	return r.AssessRequest(ctx, sess, requestID, converted)
 }
 
 // Bound reports whether a session is currently in the registry. It exists so
@@ -985,9 +995,10 @@ func (r *Runner) alreadyClaimed(sessionID string, k msgKey) bool {
 }
 
 // assessMessage preprocesses, assesses and records one message. It reports
-// whether any window was answered inline, and how many async jobs were
-// queued whose deliveries will reach OnAsync for this session.
-func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.Spend) (answered bool, queued int) {
+// whether any window was answered inline, how many async jobs were queued
+// whose deliveries will reach OnAsync for this session, and whether an
+// ordinary (risk-contributing) violation was recorded from the inline result.
+func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.Spend) (answered bool, queued int, contributed bool) {
 	// Analysis-only preprocessing, inside the request deadline: the loop
 	// in AssessRequest checks the deadline before each message. Nothing
 	// here is forwarded.
@@ -1029,7 +1040,7 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 		slog.Debug("semantic assessment did not complete",
 			"session_id", sess.ID, "request_id", requestID,
 			"error_type", fmt.Sprintf("%T", err))
-		return false, 0
+		return false, 0, false
 	}
 
 	for _, g := range pre.Gaps {
@@ -1054,8 +1065,8 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 		a.Coverage.Complete = false
 	}
 
-	r.handle(sess, requestID, in, a)
-	return answeredAny(a), a.Coverage.QueuedAsync
+	contributed = r.handle(sess, requestID, in, a)
+	return answeredAny(a), a.Coverage.QueuedAsync, contributed
 }
 
 // OnAsync handles an async completion. It is the scheduler's OnAsync
@@ -1085,7 +1096,7 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 		return
 	}
 	a.Scope = decision.ScopeFutureActivity
-	r.handle(sess, req.RequestID, in, a)
+	_ = r.handle(sess, req.RequestID, in, a)
 }
 
 // handle records verdicts according to the effective mode.
@@ -1114,7 +1125,12 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 // coverage are all final), so what the policy engine receives for a
 // DecisionID is its final value; the engine's own first-wins dedup is only a
 // backstop.
-func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment) {
+//
+// contributed reports whether an ordinary, risk-contributing violation was
+// recorded for a verdict whose scope is current_request (an inline result in
+// effective enforce mode): the request being assessed can still be stopped
+// by the ladder.
+func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment) (contributed bool) {
 	for _, v := range r.Verdicts(sess.ID, requestID, in, a) {
 		if !r.claimDecision(v.DecisionID) {
 			continue
@@ -1141,6 +1157,9 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 			// risk ladder does the rest.
 			evidenceOnly := r.mode != config.DecisionModeEnforce
 			r.recordViolation(sess.ID, in, v, RuleSemanticInjection, CategorySemanticInjection, evidenceOnly)
+			if !evidenceOnly && v.Scope == decision.ScopeCurrentRequest {
+				contributed = true
+			}
 		case r.cfg.Thresholds.Elevated > 0 && v.Probability >= r.cfg.Thresholds.Elevated:
 			// Sub-threshold but notable. Always evidence-only: on its own
 			// this contributes nothing, and a repeated-category correlation
@@ -1148,6 +1167,7 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 			r.recordViolation(sess.ID, in, v, RuleInjectionElevated, CategoryInjectionElevated, true)
 		}
 	}
+	return contributed
 }
 
 // recordViolation builds the policy violation for one verdict and records it

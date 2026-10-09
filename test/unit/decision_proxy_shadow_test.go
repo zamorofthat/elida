@@ -27,8 +27,8 @@ import (
 // does: through AssessPolicyMessages.
 type runnerAssessor struct{ r *runner.Runner }
 
-func (a runnerAssessor) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) {
-	a.r.AssessPolicyMessages(ctx, sess, requestID, msgs)
+func (a runnerAssessor) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) bool {
+	return a.r.AssessPolicyMessages(ctx, sess, requestID, msgs)
 }
 
 // flagEverythingRunner is a shadow-mode runner over a provider that calls
@@ -369,13 +369,14 @@ func TestDecisionProxy_ToolResultsDoNotChangeWhatPolicySees(t *testing.T) {
 // the runner so the persistence path can be tested on its own.
 type shadowRecordingAssessor struct{}
 
-func (shadowRecordingAssessor) AssessRequest(_ context.Context, sess *session.Session, requestID string, _ []policy.MessageToScan) {
+func (shadowRecordingAssessor) AssessRequest(_ context.Context, sess *session.Session, requestID string, _ []policy.MessageToScan) bool {
 	sess.RecordSemanticShadow(session.SemanticShadow{
 		Timestamp: time.Now(), DecisionID: "dec-" + requestID, Signal: "injection",
 		Probability: 0.9, SourceRole: "user", MessageIndex: 0, Model: "fake", ModelVersion: "v0",
 		ModelChecksum: "c0", ThresholdSet: "v1", ExecutionMode: "inline",
 		ProtectionScope: string(decision.ScopeCurrentRequest), CoverageComplete: true,
 	})
+	return false
 }
 
 func TestDecisionProxy_FlaggedSessionPersistsShadowList(t *testing.T) {

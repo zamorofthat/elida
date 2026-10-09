@@ -593,6 +593,10 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   starts, and `/control/decision` reports `threshold_set_matches: false`.
 - **"Strict" enforcement means `decision.mode: enforce`.** Only `enforce` lets
   semantic violations drive the risk ladder to block or terminate.
+  An inline finding is recorded before the request is forwarded, and the proxy
+  then re-checks the ladder, so the request that carried the finding meets the
+  ladder's action (the same `risk_threshold_exceeded` 403 as any later
+  request). An async finding affects later requests only.
   `decision.inline_admission.broad_strict_mode` only widens which messages may
   try the inline lane; it does not change what a finding does.
 - **`policy.mode: audit` caps `enforce` to `audit`.** Validation warns.
