@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1136,4 +1137,69 @@ func TestDecisionWiring_NoPolicyEngineCapsToShadow(t *testing.T) {
 				mode, st.Mode, st.EffectiveMode, st.Reason, "policy engine disabled")
 		}
 	}
+}
+
+// TestDecisionWiring_RequireInlineGatesStartup: setupDecision passes
+// decision.require_inline to embedded.New and an unmet gate fails startup
+// whatever decision.required says. Which outcome is expected follows this
+// binary's own capability (embedded.SIMDEnabled), so the same test covers
+// the async_only refusal on arm64 and the inline start on amd64+simd.
+func TestDecisionWiring_RequireInlineGatesStartup(t *testing.T) {
+	inline := embedded.DefaultArch() == "amd64" && embedded.SIMDEnabled()
+	for _, required := range []bool{true, false} {
+		t.Run(fmt.Sprintf("required=%v", required), func(t *testing.T) {
+			quietLogs(t)
+			cfg := decisionTestConfig(t)
+			cfg.Decision.Required = required
+			cfg.Decision.RequireInline = true
+			a := newDecisionApp(t, cfg, &gate{})
+			err := a.setupDecision(context.Background())
+			if inline {
+				if err != nil {
+					t.Fatalf("this build is inline; the gate must pass: %v", err)
+				}
+				t.Cleanup(func() { a.shutdownDecision(context.Background()) })
+				st := a.DecisionStatus()
+				if !st.RequireInline || st.Capability != string(embedded.CapabilityInline) {
+					t.Fatalf("status require_inline=%v capability=%q", st.RequireInline, st.Capability)
+				}
+				return
+			}
+			if !errors.Is(err, embedded.ErrInlineRequired) {
+				t.Fatalf("error = %v, want ErrInlineRequired on a non-inline build", err)
+			}
+			if a.decisionRunner != nil || a.decisionScheduler != nil || a.decisionProvider != nil {
+				t.Fatal("a failed startup must not leave semantic components behind")
+			}
+		})
+	}
+
+	t.Run("bad model with required false is still refused", func(t *testing.T) {
+		quietLogs(t)
+		cfg := decisionTestConfig(t)
+		cfg.Decision.RequireInline = true
+		cfg.Decision.ModelPath = filepath.Join(t.TempDir(), "missing")
+		a := newDecisionApp(t, cfg, &gate{})
+		err := a.setupDecision(context.Background())
+		if !errors.Is(err, embedded.ErrInlineRequired) || !strings.Contains(err.Error(), "degraded") {
+			t.Fatalf("error = %v, want ErrInlineRequired naming the degraded capability", err)
+		}
+	})
+
+	t.Run("status reports the flag", func(t *testing.T) {
+		quietLogs(t)
+		cfg := decisionTestConfig(t)
+		a := newDecisionApp(t, cfg, &gate{})
+		if err := a.setupDecision(context.Background()); err != nil {
+			t.Fatalf("the default (require_inline false) must start: %v", err)
+		}
+		t.Cleanup(func() { a.shutdownDecision(context.Background()) })
+		if a.DecisionStatus().RequireInline {
+			t.Fatal("require_inline defaults to false in the status")
+		}
+		a.cfg.Decision.RequireInline = true
+		if !a.DecisionStatus().RequireInline {
+			t.Fatal("/control/decision must echo decision.require_inline")
+		}
+	})
 }

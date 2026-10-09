@@ -462,17 +462,30 @@ const (
 
 // DecisionConfig holds semantic injection-detection configuration.
 //
-// Restart-required keys (enabled, required, provider, model_path, endpoint)
-// load model assets or move the network boundary and live only here and in
-// ELIDA_DECISION_* env vars. Every other key is runtime-editable through
+// Restart-required keys (enabled, required, require_inline, provider,
+// model_path, endpoint) load model assets, gate startup or move the network
+// boundary, and live only here and in ELIDA_DECISION_* env vars. Every other key is runtime-editable through
 // Settings (see settings.go: DecisionSettings).
 type DecisionConfig struct {
-	Enabled   bool   `yaml:"enabled"`    // Load model assets (default: false)
-	Required  bool   `yaml:"required"`   // true: bad assets fail startup; false: degraded mode (availability only, never a calibration mismatch)
-	Mode      string `yaml:"mode"`       // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
-	Provider  string `yaml:"provider"`   // embedded or systemone (default: embedded)
-	ModelPath string `yaml:"model_path"` // Model directory (default: /etc/elida/models/injection)
-	Endpoint  string `yaml:"endpoint"`   // systemone only; content leaves the deployment
+	Enabled  bool `yaml:"enabled"`  // Load model assets (default: false)
+	Required bool `yaml:"required"` // true: bad assets fail startup; false: degraded mode (availability only, never a calibration mismatch)
+	// RequireInline fails startup unless the computed capability is
+	// "inline": the model loaded and verified, and this build has GoMLX's
+	// accelerated kernels (amd64 with GOEXPERIMENT=simd). Set it when a
+	// deployment needs inline protection and must not silently fall back to
+	// async-only on an architecture that cannot meet an inline budget.
+	//
+	// Stronger than Required: an unmet require_inline fails startup
+	// whatever Required says, including when the model fails to load,
+	// because the operator explicitly demanded inline protection. Inert
+	// when Enabled is false or Mode is disabled (nothing is loaded).
+	//
+	// Restart-required: the capability is computed once, at load.
+	RequireInline bool   `yaml:"require_inline"` // default: false
+	Mode          string `yaml:"mode"`           // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
+	Provider      string `yaml:"provider"`       // embedded or systemone (default: embedded)
+	ModelPath     string `yaml:"model_path"`     // Model directory (default: /etc/elida/models/injection)
+	Endpoint      string `yaml:"endpoint"`       // systemone only; content leaves the deployment
 
 	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
@@ -685,6 +698,7 @@ func defaults() *Config {
 		Decision: DecisionConfig{
 			Enabled:           false, // loads ~90 MiB of model assets; opt-in only
 			Required:          false, // degraded mode rather than fail-startup
+			RequireInline:     false, // async_only is permitted unless an operator says otherwise
 			Mode:              DecisionModeShadow,
 			Provider:          "embedded",
 			ModelPath:         "/etc/elida/models/injection",
@@ -932,6 +946,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("ELIDA_DECISION_REQUIRED") == "true" {
 		c.Decision.Required = true
+	}
+	if os.Getenv("ELIDA_DECISION_REQUIRE_INLINE") == "true" {
+		c.Decision.RequireInline = true
 	}
 	if v := os.Getenv("ELIDA_DECISION_PROVIDER"); v != "" {
 		c.Decision.Provider = v
@@ -1379,6 +1396,19 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 			Field:   "decision.provider",
 			Message: fmt.Sprintf("unknown provider %q", d.Provider),
 			Hint:    "one of: embedded, systemone",
+		})
+	}
+
+	if d.RequireInline {
+		// Not an error: the same elida.yaml is deployed to every
+		// architecture, and whether a build has accelerated kernels is not
+		// knowable from the config (config deliberately does not import the
+		// embedded provider and its inference backend). The hard failure
+		// happens at startup, in embedded.New, where it is known.
+		warns = append(warns, ValidationError{
+			Field:   "decision.require_inline",
+			Message: "startup will fail unless the computed capability is inline (a verified model plus GoMLX accelerated kernels, which are gated to amd64 with GOEXPERIMENT=simd), whatever decision.required says",
+			Hint:    "set false to permit async-only operation on architectures without accelerated kernels",
 		})
 	}
 

@@ -438,6 +438,21 @@ decision:
   # mismatch (see mode) fails startup either way. Restart required.
   required: false
 
+  # true: fail startup unless semantic detection can run inline, meaning the
+  # model loaded and verified AND this build has accelerated inference
+  # kernels. Those are gated to linux/amd64 built with GOEXPERIMENT=simd, so
+  # every other target reports async_only and would fail this gate. An unmet
+  # require_inline fails startup whatever `required` says, including when the
+  # model fails to load: the operator explicitly demanded inline protection.
+  #
+  # false (default): async_only is permitted and reported at
+  # /control/decision. Async results cannot protect the request that
+  # triggered them; under mode: enforce they raise session risk and affect
+  # later activity.
+  #
+  # Restart required.
+  require_inline: false
+
   # disabled | shadow | audit | enforce
   #   shadow  — decide and record for calibration; no violations, no risk
   #   audit   — create evidence-only violations with diagnostic points only

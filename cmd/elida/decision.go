@@ -26,13 +26,19 @@ var decisionSignals = []decision.Signal{decision.SignalInjection, decision.Signa
 
 // initDecision brings up semantic injection detection, or exits when
 // setupDecision reports a fatal startup error: a model or capability failure
-// with decision.required true, or an enforce mode refused for a threshold-set
-// mismatch (fatal whatever decision.required says).
+// with decision.required true, an unmet decision.require_inline, or an
+// enforce mode refused for a threshold-set mismatch (the last two fatal
+// whatever decision.required says).
 func (a *app) initDecision() {
 	if err := a.setupDecision(context.Background()); err != nil {
+		// Every path here is an explicit operator request to fail rather
+		// than run without the protection they asked for.
 		slog.Error("semantic detection failed to start", "error", err,
 			"decision_required", a.cfg.Decision.Required,
-			"decision_mode", a.cfg.Decision.Mode)
+			"decision_require_inline", a.cfg.Decision.RequireInline,
+			"decision_mode", a.cfg.Decision.Mode,
+			"arch", embedded.DefaultArch(),
+			"simd", embedded.SIMDEnabled())
 		os.Exit(1)
 	}
 }
@@ -62,8 +68,12 @@ func (a *app) initDecision() {
 // while believing they are protected. decision.required governs only model
 // and capability availability.
 //
-// decision.require_inline is not handled here: the key and its startup gate
-// are added by Task 30.
+// decision.require_inline true is ALWAYS a startup error unless the
+// provider's computed capability is inline, whatever decision.required says,
+// for the same reason: the operator explicitly demanded inline protection.
+// The gate itself lives in embedded.New, where capability is computed, so
+// the gate and the reported capability cannot disagree; this function only
+// passes the flag and makes sure no later failure degrades silently.
 func (a *app) setupDecision(ctx context.Context) error {
 	d := a.cfg.Decision
 	if !d.Enabled {
@@ -75,6 +85,10 @@ func (a *app) setupDecision(ctx context.Context) error {
 	}
 	if d.Provider != "" && d.Provider != "embedded" {
 		err := fmt.Errorf("decision.provider %q is not available in this build", d.Provider)
+		if d.RequireInline {
+			// No provider runs, so there is no inline capability at all.
+			return fmt.Errorf("%w: %w", embedded.ErrInlineRequired, err)
+		}
 		if d.Required {
 			return err
 		}
@@ -84,15 +98,16 @@ func (a *app) setupDecision(ctx context.Context) error {
 	}
 
 	provider, err := embedded.New(ctx, embedded.Options{
-		Enabled:      true,
-		Required:     d.Required,
-		ModelPath:    d.ModelPath,
-		ThresholdSet: d.ThresholdSet,
-		NewPipeline:  a.decisionPipeline,
+		Enabled:       true,
+		Required:      d.Required,
+		RequireInline: d.RequireInline,
+		ModelPath:     d.ModelPath,
+		ThresholdSet:  d.ThresholdSet,
+		NewPipeline:   a.decisionPipeline,
 	})
 	if err != nil {
-		// Only reachable with required: true, an explicit operator request
-		// to fail rather than run unprotected.
+		// Only reachable with required: true or require_inline: true, both
+		// explicit operator requests to fail rather than run unprotected.
 		return err
 	}
 	a.decisionProvider = provider
@@ -196,12 +211,13 @@ func (a *app) setupDecision(ctx context.Context) error {
 	return nil
 }
 
-// abandonDecision undoes a partial setup. With decision.required true the
-// error is returned and startup fails; otherwise it is logged and semantic
-// detection stays off.
+// abandonDecision undoes a partial setup. With decision.required or
+// decision.require_inline true the error is returned and startup fails (an
+// operator who demanded inline protection must not be left running none);
+// otherwise it is logged and semantic detection stays off.
 func (a *app) abandonDecision(ctx context.Context, err error) error {
 	a.teardownDecision(ctx)
-	if a.cfg.Decision.Required {
+	if a.cfg.Decision.Required || a.cfg.Decision.RequireInline {
 		return err
 	}
 	slog.Error("semantic detection disabled", "error", err)
@@ -367,6 +383,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		Mode:          d.Mode,
 		EffectiveMode: config.DecisionModeDisabled,
 		Capability:    string(embedded.CapabilityDisabled),
+		RequireInline: d.RequireInline,
 		// Pinned: Phase 1 inline admission never waits for a worker, and
 		// validation rejects any other value.
 		InlineQueueWaitMs: 0,

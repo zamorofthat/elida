@@ -319,6 +319,7 @@ jobs:
           echo "::add-mask::$key"
           docker run -d --name elida-smoke -p 127.0.0.1:19090:9090 \
             -e ELIDA_DECISION_ENABLED=true -e ELIDA_DECISION_REQUIRED=true \
+            -e ELIDA_DECISION_REQUIRE_INLINE=true \
             -e ELIDA_CONTROL_API_KEY="$key" -e ELIDA_BACKEND=http://127.0.0.1:1 \
             elida:ci-smoke
           ready=""
@@ -336,8 +337,8 @@ jobs:
           test "$code" = "401"
 
           status=$(curl -fsS -H "Authorization: Bearer $key" http://127.0.0.1:19090/control/decision)
-          echo "$status" | jq '{capability, arch, simd, effective_mode, model, model_version, model_checksum, threshold_set_matches}'
-          echo "$status" | jq -e '.capability == "inline" and .arch == "amd64" and .simd == true and .effective_mode == "shadow" and .threshold_set_matches == true'
+          echo "$status" | jq '{capability, require_inline, arch, simd, effective_mode, model, model_version, model_checksum, threshold_set_matches}'
+          echo "$status" | jq -e '.capability == "inline" and .require_inline == true and .arch == "amd64" and .simd == true and .effective_mode == "shadow" and .threshold_set_matches == true'
           echo "$status" | jq -e --arg sum "$MANIFEST_SHA256" '.model_checksum == $sum'
 
       - name: Remove the smoke container

@@ -51,9 +51,13 @@ type DecisionStatus struct {
 	EffectiveMode string `json:"effective_mode"`
 	// Capability is inline, async_only, degraded or disabled.
 	Capability string `json:"capability"`
-	Reason     string `json:"reason,omitempty"`
-	Arch       string `json:"arch"`
-	SIMD       bool   `json:"simd"`
+	// RequireInline echoes decision.require_inline, so a dashboard can
+	// distinguish "async_only and that is fine" from a deployment that
+	// demanded inline protection (which would not have started without it).
+	RequireInline bool   `json:"require_inline"`
+	Reason        string `json:"reason,omitempty"`
+	Arch          string `json:"arch"`
+	SIMD          bool   `json:"simd"`
 
 	// InlineQueueWaitMs is reported read-only. Phase 1 requires it to be
 	// zero, so it is not in the editable settings surface; an operator sees

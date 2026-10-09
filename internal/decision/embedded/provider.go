@@ -21,6 +21,11 @@ const maxBatch = 1
 // errInferencePanic marks an error produced by a recovered pipeline panic.
 var errInferencePanic = errors.New("embedded: inference panicked")
 
+// ErrInlineRequired means decision.require_inline is true but the computed
+// capability is not inline. New wraps it with the computed capability, the
+// reason, the architecture and whether SIMD kernels are compiled in.
+var ErrInlineRequired = errors.New("embedded: inline capability required but not available")
+
 // Capability is what a deployment can honestly claim about semantic
 // detection.
 type Capability string
@@ -65,10 +70,17 @@ func Bool(v bool) *bool { return &v }
 
 // Options configures the embedded provider.
 type Options struct {
-	Enabled      bool
-	Required     bool
-	ModelPath    string
-	ThresholdSet string
+	Enabled  bool
+	Required bool
+	// RequireInline fails construction unless the computed capability is
+	// CapabilityInline, whatever Required says: a model that fails to load
+	// is refused rather than degraded. It is checked where capability is
+	// computed, so the gate and the reported capability can never disagree.
+	// With Enabled false it is inert: nothing is loaded, so a disabled
+	// feature never fails startup.
+	RequireInline bool
+	ModelPath     string
+	ThresholdSet  string
 	// Arch defaults to DefaultArch() and SIMD, when nil, defaults to
 	// SIMDEnabled(); tests set them to
 	// exercise the capability matrix.
@@ -120,6 +132,9 @@ type Provider struct {
 //     startup failure and returns an error.
 //   - Enabled true, Required false: a load failure logs a prominent
 //     operational event and returns a degraded provider with a nil error.
+//   - Enabled true, RequireInline true: any computed capability other than
+//     CapabilityInline (async_only, or degraded after a load failure)
+//     returns an error wrapping ErrInlineRequired, whatever Required says.
 func New(ctx context.Context, opts Options) (*Provider, error) {
 	if opts.Clock == nil {
 		opts.Clock = time.Now
@@ -160,11 +175,14 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 
 	m, err := Load(opts.ModelPath)
 	if err != nil {
+		p.capability = CapabilityDegraded
+		p.reason = err.Error()
+		if gateErr := p.enforceRequireInline(opts.RequireInline, err); gateErr != nil {
+			return nil, gateErr
+		}
 		if opts.Required {
 			return nil, fmt.Errorf("embedded: decision.required is true and the model could not be loaded: %w", err)
 		}
-		p.capability = CapabilityDegraded
-		p.reason = err.Error()
 		slog.Error("semantic detection is DEGRADED: the model could not be loaded and decision.required is false",
 			"model_path", opts.ModelPath,
 			"error", err,
@@ -175,11 +193,14 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 
 	pipe, err := factory(ctx, opts.ModelPath, m)
 	if err != nil {
+		p.capability = CapabilityDegraded
+		p.reason = err.Error()
+		if gateErr := p.enforceRequireInline(opts.RequireInline, err); gateErr != nil {
+			return nil, gateErr
+		}
 		if opts.Required {
 			return nil, fmt.Errorf("embedded: decision.required is true and the pipeline could not be built: %w", err)
 		}
-		p.capability = CapabilityDegraded
-		p.reason = err.Error()
 		slog.Error("semantic detection is DEGRADED: the inference pipeline could not be built and decision.required is false",
 			"model_path", opts.ModelPath,
 			"error", err,
@@ -203,6 +224,18 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		p.reason = fmt.Sprintf("%s simd=%v: GoMLX accelerated kernels are gated to amd64 && goexperiment.simd, so this build runs the scalar path and cannot meet an inline budget", opts.Arch, simd)
 	}
 
+	// The require_inline gate. It sits immediately after capability is
+	// computed, so there is exactly one place that decides what "inline"
+	// means; checking it in main or in config validation would derive the
+	// answer twice.
+	if err := p.enforceRequireInline(opts.RequireInline, nil); err != nil {
+		p.manifest, p.pipeline = nil, nil
+		if closeErr := pipe.Close(); closeErr != nil {
+			slog.Warn("closing the pipeline after a failed require_inline gate", "error", closeErr)
+		}
+		return nil, err
+	}
+
 	slog.Info("semantic detection enabled",
 		"capability", p.capability,
 		"reason", p.reason,
@@ -214,6 +247,27 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 		"signals", m.Signals,
 	)
 	return p, nil
+}
+
+// enforceRequireInline fails when inline capability was demanded and the
+// computed capability is anything else. cause, when non-nil, is the load
+// error behind a degraded capability; it is wrapped so callers can still
+// match it with errors.Is.
+//
+// The error has to be actionable without reading the source, so it names
+// the computed capability, the reason behind it, the architecture, and
+// whether accelerated kernels are compiled in.
+func (p *Provider) enforceRequireInline(required bool, cause error) error {
+	if !required || p.capability == CapabilityInline {
+		return nil
+	}
+	const remedy = "Set decision.require_inline: false to permit async-only operation, or deploy on linux/amd64 built with GOEXPERIMENT=simd"
+	if cause != nil {
+		return fmt.Errorf("%w: decision.require_inline is true but the computed capability is %q (%w); arch=%s simd=%v. Fix the model assets, or set decision.require_inline: false",
+			ErrInlineRequired, p.capability, cause, p.arch, p.simd)
+	}
+	return fmt.Errorf("%w: decision.require_inline is true but the computed capability is %q (%s); arch=%s simd=%v. %s",
+		ErrInlineRequired, p.capability, p.reason, p.arch, p.simd, remedy)
 }
 
 // Name implements decision.Provider.
