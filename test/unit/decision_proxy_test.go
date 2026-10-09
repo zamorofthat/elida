@@ -390,3 +390,42 @@ func TestDecisionControl_HealthStaysMinimal(t *testing.T) {
 		t.Fatalf("/control/health must not expose model identity: %s", body)
 	}
 }
+
+func TestDecisionControl_HealthReportsCapabilityAndReasonOnly(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	h := control.New(store, manager)
+	h.SetDecisionProvider(stubDecisionProvider{status: control.DecisionStatus{
+		Enabled: true, Capability: "degraded", Arch: "arm64",
+		Reason:        "open /etc/elida/models/injection/manifest.json: no such file or directory",
+		Model:         "minilm-multihead",
+		ModelChecksum: "abc123",
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/control/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var resp struct {
+		Decision map[string]string `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Decision["capability"] != "degraded" || resp.Decision["reason"] == "" || len(resp.Decision) != 2 {
+		t.Fatalf("decision = %v, want exactly capability and reason", resp.Decision)
+	}
+	body := w.Body.String()
+	for _, leak := range []string{"/etc/elida", "manifest.json", "minilm", "abc123", "arm64"} {
+		if strings.Contains(body, leak) {
+			t.Fatalf("/control/health leaks %q: %s", leak, body)
+		}
+	}
+
+	// Without a decision provider the health payload is unchanged.
+	plain := control.New(store, manager)
+	w = httptest.NewRecorder()
+	plain.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/control/health", nil))
+	if strings.Contains(w.Body.String(), "decision") {
+		t.Fatalf("health without semantic detection must not mention it: %s", w.Body.String())
+	}
+}

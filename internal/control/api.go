@@ -415,6 +415,12 @@ func secureCompare(a, b string) bool {
 // handleHealth handles GET /control/health
 // Returns minimal payload (status + timestamp) for liveness probes.
 // Version/CaptureMode available only via authenticated endpoints (/control/stats, /control/settings).
+//
+// When semantic detection is wired, it adds "decision": the capability enum
+// and a fixed, content-free reason for it, so an orchestrator can see a
+// degraded or async-only deployment. Model identity, checksums, the
+// architecture detail and every counter stay on the authenticated
+// /control/decision.
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -425,8 +431,33 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now(),
 	}
+	if h.decisionProvider != nil {
+		capability := h.decisionProvider.DecisionStatus().Capability
+		response["decision"] = map[string]string{
+			"capability": capability,
+			"reason":     healthCapabilityReason(capability),
+		}
+	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+// healthCapabilityReason is the unauthenticated, content-free reason for a
+// capability. It never carries the provider's own reason, which can name
+// file paths or load errors; /control/decision has that.
+func healthCapabilityReason(capability string) string {
+	switch capability {
+	case "inline":
+		return "accelerated inference is available; inline results can protect the current request"
+	case "async_only":
+		return "this build cannot meet an inline budget; results protect later activity only"
+	case "degraded":
+		return "semantic detection was enabled but the model could not be loaded or verified; no detection is active"
+	case "disabled":
+		return "semantic detection is off"
+	default:
+		return "unknown capability"
+	}
 }
 
 // handleStats handles GET /control/stats
