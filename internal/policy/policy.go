@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"math"
 	"path/filepath"
@@ -110,6 +112,19 @@ type Violation struct {
 	// Framework/SIEM classification
 	EventCategory string `json:"event_category,omitempty"` // "prompt_injection", "data_exfil", "rate_limit", etc.
 	FrameworkRef  string `json:"framework_ref,omitempty"`  // "OWASP-LLM01", "NIST-AI-600-1", etc.
+
+	// EvidenceOnly marks a violation whose event contributes no risk. Used
+	// by feature-level audit mode and by sub-threshold semantic evidence.
+	EvidenceOnly bool `json:"evidence_only,omitempty"`
+	// WouldContributePoints is a diagnostic: what this violation would have
+	// added had it contributed. It is shown in the UI and telemetry and is
+	// never a second authoritative score; nothing reads it to enforce.
+	WouldContributePoints float64 `json:"would_contribute_points,omitempty"`
+	// EventID matches the ViolationEvent this violation produced.
+	EventID string `json:"event_id,omitempty"`
+	// Semantic carries the decision metadata when this violation came from
+	// a semantic signal.
+	Semantic *SemanticEvidence `json:"semantic,omitempty"`
 }
 
 // SessionMetrics contains the metrics needed for policy evaluation
@@ -151,12 +166,52 @@ type FlaggedSession struct {
 	ViolationEvents []ViolationEvent `json:"violation_events,omitempty"`
 }
 
-// ViolationEvent is a lightweight record of a single violation occurrence for decay calculation
+// ViolationEvent is a lightweight record of a single violation occurrence
+// for decay calculation and temporal correlation.
+//
+// EvidenceOnly events are visible to correlation but contribute no risk.
+// Its zero value is false, so events stored before this field existed, and
+// every ordinary event created since, keep contributing without a migration.
 type ViolationEvent struct {
-	RuleName   string    `json:"rule_name"`
-	Severity   Severity  `json:"severity"`
-	SourceRole string    `json:"source_role"`
-	Timestamp  time.Time `json:"timestamp"`
+	// EventID is a stable identity for this occurrence. Correlation matches
+	// cite the contributing event IDs, which is how a match can be
+	// deduplicated and explained.
+	EventID       string   `json:"event_id,omitempty"`
+	RuleName      string   `json:"rule_name"`
+	Severity      Severity `json:"severity"`
+	SourceRole    string   `json:"source_role"`
+	EventCategory string   `json:"event_category,omitempty"`
+	// EvidenceOnly excludes this event from calculateRiskScore AND from
+	// scoreAt (which ComputeRiskCurve walks). Skipping it in one and not
+	// the other would make the dashboard curve disagree with the
+	// authoritative score.
+	EvidenceOnly bool      `json:"evidence_only,omitempty"`
+	Timestamp    time.Time `json:"timestamp"`
+}
+
+// SemanticEvidence is the semantic decision metadata behind a violation.
+//
+// It is plain strings and numbers rather than decision package types: the
+// policy engine must not depend on the decision packages, which is what
+// keeps the risk ladder independent of how a signal was produced. It
+// carries no request content: only scores, identifiers and byte offsets.
+type SemanticEvidence struct {
+	Signal           string  `json:"signal"`
+	Probability      float64 `json:"probability"`
+	AuxProbability   float64 `json:"aux_probability,omitempty"`
+	Vetoed           bool    `json:"vetoed,omitempty"`
+	Model            string  `json:"model"`
+	ModelVersion     string  `json:"model_version"`
+	ModelChecksum    string  `json:"model_checksum,omitempty"`
+	ThresholdSet     string  `json:"threshold_set"`
+	DecisionID       string  `json:"decision_id"`
+	Transform        string  `json:"transform,omitempty"`
+	TransformDepth   int     `json:"transform_depth,omitempty"`
+	WindowStartByte  int     `json:"window_start_byte"`
+	WindowEndByte    int     `json:"window_end_byte"`
+	CoverageComplete bool    `json:"coverage_complete"`
+	ExecutionMode    string  `json:"execution_mode"`
+	ProtectionScope  string  `json:"protection_scope"`
 }
 
 // MaxRiskScore is the saturation cap for cumulative risk scores
@@ -245,6 +300,15 @@ type Engine struct {
 	maxCaptureSize    int             // Max bytes to capture per request
 	auditMode         bool            // If true, log but don't enforce (dry-run)
 	observeRules      map[string]bool // rule name -> observe-only (excluded from risk scoring)
+
+	// seenSemanticEvents makes RecordSemanticViolation idempotent per
+	// DecisionID: session ID -> set of event IDs derived from a semantic
+	// DecisionID that have already been recorded. Bound: it grows by exactly
+	// one entry per accepted semantic violation, i.e. it is never larger than
+	// that session's semantic ViolationEvents (the engine applies no other
+	// cap to per-session events), and it shares the flagged session's
+	// lifetime: RemoveFlaggedSession deletes both. Guarded by mu.
+	seenSemanticEvents map[string]map[string]struct{}
 
 	// Risk ladder configuration
 	riskLadderEnabled bool
@@ -345,6 +409,8 @@ func NewEngine(cfg Config) *Engine {
 		riskThresholds:    thresholds,
 		detectors:         make(map[string]*SessionDetector),
 		observeRules:      observeRulesFrom(cfg.Rules),
+
+		seenSemanticEvents: make(map[string]map[string]struct{}),
 	}
 
 	// Compile regex patterns for content rules
@@ -1076,6 +1142,43 @@ func truncateMatch(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// eventIDFor derives a stable identity for one violation occurrence.
+//
+// A semantic violation's identity is its decision ID: the same decision
+// arriving twice (a retry, inline then async) is one event and must
+// contribute once. Everything else is identified by rule, role and
+// timestamp, because two firings of the same rule at different moments are
+// genuinely two events and cumulative risk depends on counting both. The
+// material is identifiers only, never request content, and the ID is a
+// truncated SHA-256 of it.
+func eventIDFor(sessionID string, v Violation) string {
+	var material string
+	if v.Semantic != nil && v.Semantic.DecisionID != "" {
+		material = "semantic\x00" + sessionID + "\x00" + v.Semantic.DecisionID
+	} else {
+		material = "rule\x00" + sessionID + "\x00" + v.RuleName + "\x00" +
+			v.SourceRole + "\x00" + v.Timestamp.UTC().Format(time.RFC3339Nano)
+	}
+	sum := sha256.Sum256([]byte("elida.event.v1\x00" + material))
+	return "ev_" + hex.EncodeToString(sum[:16])
+}
+
+// eventWeight is the undecayed points one event contributes:
+// severityWeight x sourceRoleWeight. calculateRiskScore, scoreAt and the
+// WouldContributePoints diagnostic all use it, so the diagnostic can never
+// drift from the real weighting.
+func eventWeight(severity Severity, sourceRole string) float64 {
+	severityWeight := SeverityWeights[severity]
+	if severityWeight == 0 {
+		severityWeight = 1.0
+	}
+	sourceWeight := SourceRoleWeights[sourceRole]
+	if sourceWeight == 0 {
+		sourceWeight = 1.0 // Unknown source — full weight
+	}
+	return severityWeight * sourceWeight
+}
+
 // recordViolations records violations for a session
 func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	e.mu.Lock()
@@ -1104,18 +1207,39 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	}
 
 	for _, v := range violations {
+		if v.EventID == "" {
+			v.EventID = eventIDFor(sessionID, v)
+		}
+
+		// A semantic decision is one event however many times it arrives:
+		// refuse a DecisionID this session has already recorded.
+		if v.Semantic != nil && v.Semantic.DecisionID != "" {
+			seen := e.seenSemanticEvents[sessionID]
+			if seen == nil {
+				seen = make(map[string]struct{})
+				e.seenSemanticEvents[sessionID] = seen
+			}
+			if _, dup := seen[v.EventID]; dup {
+				continue
+			}
+			seen[v.EventID] = struct{}{}
+		}
+
 		// Always increment count (don't deduplicate)
 		flagged.ViolationCounts[v.RuleName]++
 
-		// Record event for decay calculation — observe-only rules are
-		// visible in the violation list but contribute nothing to the risk
-		// score.
+		// Record an event for decay calculation. Observe-only rules record
+		// nothing at all; evidence-only violations record an event that
+		// correlation can see but that contributes no risk.
 		if !e.observeRules[v.RuleName] {
 			flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
-				RuleName:   v.RuleName,
-				Severity:   v.Severity,
-				SourceRole: v.SourceRole,
-				Timestamp:  v.Timestamp,
+				EventID:       v.EventID,
+				RuleName:      v.RuleName,
+				Severity:      v.Severity,
+				SourceRole:    v.SourceRole,
+				EventCategory: v.EventCategory,
+				EvidenceOnly:  v.EvidenceOnly,
+				Timestamp:     v.Timestamp,
 			})
 		}
 
@@ -1128,6 +1252,10 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 				if flagged.Violations[i].RuleName == v.RuleName {
 					flagged.Violations[i].ActualValue = v.ActualValue
 					flagged.Violations[i].Timestamp = v.Timestamp
+					flagged.Violations[i].EventID = v.EventID
+					flagged.Violations[i].EvidenceOnly = v.EvidenceOnly
+					flagged.Violations[i].WouldContributePoints = v.WouldContributePoints
+					flagged.Violations[i].Semantic = v.Semantic
 					break
 				}
 			}
@@ -1165,21 +1293,17 @@ func (e *Engine) calculateRiskScore(fs *FlaggedSession) float64 {
 	var score float64
 
 	for _, event := range fs.ViolationEvents {
-		severityWeight := SeverityWeights[event.Severity]
-		if severityWeight == 0 {
-			severityWeight = 1.0
-		}
-
-		sourceWeight := SourceRoleWeights[event.SourceRole]
-		if sourceWeight == 0 {
-			sourceWeight = 1.0 // Unknown source — full weight
+		// Evidence-only events are available to temporal correlation but
+		// contribute nothing to the authoritative score.
+		if event.EvidenceOnly {
+			continue
 		}
 
 		// Exponential decay: e^(-λt) where t is seconds since event
 		elapsed := now.Sub(event.Timestamp).Seconds()
 		decay := math.Exp(-DefaultDecayLambda * elapsed)
 
-		score += severityWeight * sourceWeight * decay
+		score += eventWeight(event.Severity, event.SourceRole) * decay
 	}
 
 	if score > MaxRiskScore {
@@ -1245,20 +1369,15 @@ func (e *Engine) ComputeRiskCurve(sessionID string) []RiskScorePoint {
 func (e *Engine) scoreAt(events []ViolationEvent, at time.Time) float64 {
 	var score float64
 	for _, event := range events {
+		if event.EvidenceOnly {
+			continue // excluded here too, so the curve matches the score
+		}
 		if event.Timestamp.After(at) {
 			continue // Event hasn't happened yet at this time
 		}
-		severityWeight := SeverityWeights[event.Severity]
-		if severityWeight == 0 {
-			severityWeight = 1.0
-		}
-		sourceWeight := SourceRoleWeights[event.SourceRole]
-		if sourceWeight == 0 {
-			sourceWeight = 1.0
-		}
 		elapsed := at.Sub(event.Timestamp).Seconds()
 		decay := math.Exp(-DefaultDecayLambda * elapsed)
-		score += severityWeight * sourceWeight * decay
+		score += eventWeight(event.Severity, event.SourceRole) * decay
 	}
 	if score > MaxRiskScore {
 		score = MaxRiskScore
@@ -1437,6 +1556,7 @@ func (e *Engine) RemoveFlaggedSession(sessionID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.flaggedSessions, sessionID)
+	delete(e.seenSemanticEvents, sessionID)
 }
 
 // Stats returns policy engine statistics
@@ -1499,6 +1619,73 @@ func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
 		return flagged.RiskScore, flagged.CurrentAction, flagged.ThrottleRate
 	}
 	return 0, string(ActionObserve), 0
+}
+
+// RecordSemanticViolation records a semantic decision as a policy violation.
+//
+// This is the only path semantic signals use. It goes through the ordinary
+// recordViolations machinery, so semantic findings get the same decay,
+// source-role weighting, cumulative session risk and ladder treatment as
+// every other violation. It deliberately does NOT use
+// AddExternalRiskPoints: semantic detection maintains no risk score of its
+// own, and a parallel score is exactly what the design forbids.
+//
+// Set v.EvidenceOnly to record an event that correlation can see but that
+// contributes no risk; the engine then sets v.WouldContributePoints to the
+// undecayed points it would have added, using the same weighting the score
+// uses (any caller-supplied value is replaced). Contributing violations
+// carry no WouldContributePoints.
+//
+// It is idempotent per v.Semantic.DecisionID: recording the same decision
+// twice for a session yields one Violation and one ViolationEvent.
+//
+// MatchedText and SourceContent are cleared: a semantic violation records
+// scores and identifiers, never request content.
+func (e *Engine) RecordSemanticViolation(sessionID string, v Violation) {
+	if v.RuleName == "" {
+		return
+	}
+	if v.Timestamp.IsZero() {
+		v.Timestamp = time.Now()
+	}
+	if v.EffectiveSeverity == "" {
+		v.EffectiveSeverity = effectiveSeverity(v.Severity, v.SourceRole)
+	}
+	v.MatchedText = ""
+	v.SourceContent = ""
+	if v.Semantic != nil {
+		sem := *v.Semantic // the stored violation must not alias the caller's struct
+		v.Semantic = &sem
+	}
+	if v.EvidenceOnly {
+		v.WouldContributePoints = eventWeight(v.Severity, v.SourceRole)
+	} else {
+		v.WouldContributePoints = 0
+	}
+	v.EventID = eventIDFor(sessionID, v)
+	e.recordViolations(sessionID, []Violation{v})
+}
+
+// EvidenceEvents returns a copy of the session's evidence-only events,
+// oldest first, or nil when there are none.
+//
+// Temporal correlation reads these: an evidence-only event contributes no
+// risk by itself, but a repeated-category rule over several of them can.
+func (e *Engine) EvidenceEvents(sessionID string) []ViolationEvent {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	fs := e.flaggedSessions[sessionID]
+	if fs == nil {
+		return nil
+	}
+	var out []ViolationEvent
+	for _, ev := range fs.ViolationEvents {
+		if ev.EvidenceOnly {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 // AddExternalRiskPoints adds risk points from an external source (e.g., M3-lite behavioral fingerprinting).
