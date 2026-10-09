@@ -73,6 +73,11 @@ type Spend struct {
 	// AsyncRefused records that the async queue refused this request's
 	// work; later windows are dropped without being counted.
 	AsyncRefused bool
+	// LastDenied is the capacity reason of the most recent exact-counted
+	// window that was denied the inline lane. Windows left uncounted by the
+	// attempt bound carry it, so the admission record names the capacity
+	// that actually ran out rather than always DenyInlineBudgetSpent.
+	LastDenied decision.AdmissionReason
 }
 
 // Config configures the scheduler.
@@ -119,10 +124,12 @@ type Config struct {
 	//	8              | 6      | 2
 	//	16             | 12     | 4
 	//
-	// MaxConcurrency 1 disables async continuation entirely: every window
-	// that misses the inline lane is refused with DenyQueueFull and counted
-	// in AsyncDropped. Metrics.InlineSlots and Metrics.AsyncWorkers report
-	// the split.
+	// MaxConcurrency 1 disables async continuation entirely, exactly like
+	// MaxAsyncWindows 0: every window that misses the inline lane keeps its
+	// real capacity reason (DenyInlineBudgetSpent, DenyDeadlineSpent or
+	// DenyNoWorkerAvailable), is a coverage gap, and is never counted in
+	// AsyncDropped. Metrics.InlineSlots and Metrics.AsyncWorkers report the
+	// split.
 	//
 	// A slot is held until its provider call actually returns, which is what
 	// keeps a timed-out inference from creating an unbounded compute
@@ -435,7 +442,7 @@ func New(cfg Config) (*Inline, error) {
 			"max_concurrency", cfg.MaxConcurrency,
 			"inline_slots", inlineSlots,
 			"async_workers", asyncWorkers,
-			"consequence", "windows that miss the inline lane are refused as async_queue_full and are coverage gaps",
+			"consequence", "windows that miss the inline lane are coverage gaps, recorded with their capacity reason",
 		)
 	}
 	return s, nil
@@ -533,15 +540,21 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 	// without being counted.
 	var considered int
 	var asyncRefused bool
+	// lastDenied is the capacity reason of the most recent counted window
+	// denied the inline lane; windows left uncounted by the attempt bound
+	// carry it (see Spend.LastDenied).
+	var lastDenied decision.AdmissionReason
 	if sp := req.Spent; sp != nil {
 		// A request-scoped budget: start from what earlier messages of this
 		// request spent, and hand back what this one spends, so every bound
 		// below is per request rather than per message.
 		inlineWindows, inlineTokens = sp.InlineWindows, sp.InlineTokens
 		asyncWindows, considered, asyncRefused = sp.AsyncWindows, sp.Considered, sp.AsyncRefused
+		lastDenied = sp.LastDenied
 		defer func() {
 			sp.InlineWindows, sp.InlineTokens = inlineWindows, inlineTokens
 			sp.AsyncWindows, sp.Considered, sp.AsyncRefused = asyncWindows, considered, asyncRefused
+			sp.LastDenied = lastDenied
 		}()
 	}
 	maxConsidered := s.cfg.MaxInlineWindows + s.cfg.MaxAsyncWindows
@@ -588,6 +601,11 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		// token count is only an estimate. It is a capacity denial.
 		case !exact[i] && ctx.Err() != nil:
 			denied = decision.DenyDeadlineSpent
+		case !exact[i] && considered >= maxConsidered && lastDenied != "":
+			// Past the attempt bound: name the capacity the counted
+			// attempts were actually denied for (a worker, the token
+			// budget), not always the inline budget.
+			denied = lastDenied
 		case !exact[i]:
 			denied = decision.DenyInlineBudgetSpent
 		// 2. Is there inline budget left?
@@ -607,12 +625,6 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		if denied != "" {
 			if !exact[i] {
 				switch {
-				case s.asyncWorkers == 0:
-					// Async disabled: continueAsync refuses it exactly as
-					// it would any window (async_queue_full, counted in
-					// AsyncDropped); nothing can be enqueued, so no exact
-					// count is needed.
-					s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows)
 				case asyncRefused:
 					// The queue already refused this request's work.
 					s.asyncDropped.Add(1)
@@ -624,6 +636,7 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 				}
 				continue
 			}
+			lastDenied = denied
 			// 5. Bounded async continuation for capacity denials.
 			switch s.continueAsync(&a, &tmpl, req, in, w, signals, denied, asyncWindows) {
 			case asyncQueued:
@@ -970,10 +983,10 @@ type asyncOutcome int
 const (
 	// asyncQueued: the job was accepted onto the async queue.
 	asyncQueued asyncOutcome = iota
-	// asyncNotOffered: past MaxAsyncWindows, or a duplicate of a claimed job.
+	// asyncNotOffered: async disabled (no async workers), past
+	// MaxAsyncWindows, or a duplicate of a claimed job.
 	asyncNotOffered
-	// asyncRefusedByQueue: the queue refused it (full, shut down, or async
-	// disabled).
+	// asyncRefusedByQueue: the queue refused it (full or shut down).
 	asyncRefusedByQueue
 )
 
@@ -981,15 +994,16 @@ const (
 // capacity reason (budget, deadline or worker) to the bounded async queue,
 // and records its admission. It reports what happened to the window.
 //
-// It never blocks. A window past MaxAsyncWindows, or a duplicate of a job
-// already claimed, keeps its capacity denial reason; a window the queue
+// It never blocks. A window offered while async is disabled (no async
+// workers, as at MaxConcurrency 1) or past MaxAsyncWindows, or a duplicate
+// of a job already claimed, keeps its capacity denial reason; a window the queue
 // refuses is recorded as DenyQueueFull. Either way it is a coverage gap.
 //
 // tmpl holds this assessment's private copies of the caller's slices, made
 // once on first use, so a caller reusing its slices after AssessCandidates
 // returns cannot race a queued job.
 func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, w WindowedText, sigs []decision.Signal, denied decision.AdmissionReason, queuedSoFar int) asyncOutcome {
-	if queuedSoFar >= s.cfg.MaxAsyncWindows {
+	if s.asyncWorkers == 0 || queuedSoFar >= s.cfg.MaxAsyncWindows {
 		s.deny(a, w, denied)
 		return asyncNotOffered
 	}

@@ -799,13 +799,17 @@ func TestSchedulerAsync_MaxConcurrencyOneDisablesAsync(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AssessCandidates: %v", err)
 		}
-		if a.Coverage.QueuedAsync != 0 || reasonCount(a, decision.DenyQueueFull) != 2 {
-			t.Fatalf("QueuedAsync = %d, Admissions = %+v; want 0 queued and 2 async_queue_full", a.Coverage.QueuedAsync, a.Admissions)
+		// No async workers behaves like MaxAsyncWindows 0: the two windows
+		// that miss the inline lane keep their real capacity reason and are
+		// never refused as async_queue_full.
+		if a.Coverage.QueuedAsync != 0 || reasonCount(a, decision.DenyQueueFull) != 0 ||
+			reasonCount(a, decision.DenyInlineBudgetSpent) != 2 {
+			t.Fatalf("QueuedAsync = %d, Admissions = %+v; want 0 queued, 0 async_queue_full and 2 inline_budget_spent", a.Coverage.QueuedAsync, a.Admissions)
 		}
 	}
 	drain(t, s)
-	if m := s.Metrics(); m.AsyncDropped != 4 || m.AsyncQueued != 0 {
-		t.Fatalf("AsyncDropped/AsyncQueued = %d/%d, want 4/0", m.AsyncDropped, m.AsyncQueued)
+	if m := s.Metrics(); m.AsyncDropped != 0 || m.AsyncQueued != 0 || m.AdmissionReasons[decision.DenyQueueFull] != 0 {
+		t.Fatalf("AsyncDropped/AsyncQueued/queue_full = %d/%d/%d, want 0/0/0", m.AsyncDropped, m.AsyncQueued, m.AdmissionReasons[decision.DenyQueueFull])
 	}
 	if n := strings.Count(buf.String(), "async continuation disabled: max_concurrency=1"); n != 1 {
 		t.Fatalf("the disabled-async notice must be logged exactly once, at New; got %d:\n%s", n, buf.String())
