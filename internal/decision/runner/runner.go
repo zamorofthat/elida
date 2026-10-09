@@ -42,7 +42,9 @@
 //   - original_only: the scheduler could not take derived representations,
 //     so only the original was scored; coverage_complete is false.
 //   - unsupported_block: content blocks of the message the proxy could not
-//     render as text (images, documents); coverage_complete is false.
+//     render as text (images, documents); coverage_complete is false. A
+//     message with no text at all (an image-only tool_result) records no
+//     decision but still counts its blocks here, once per session.
 //
 // already_assessed is not a gap and is counted separately
 // (AlreadyAssessed). Chat clients resend the whole history, so a message
@@ -877,16 +879,31 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 	}
 
 	// Newest first: in a chat request the last messages are the new ones.
-	var eligible []Message
+	// A message with no text but skipped blocks (an image-only tool_result)
+	// has nothing to score, but its blocks were never analyzed: it is an
+	// unsupported_block gap, counted once per session like any assessment.
+	var eligible, unanalyzable []Message
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if eligibleRole(msgs[i].Role) && msgs[i].Content != "" {
-			eligible = append(eligible, msgs[i])
+		switch m := msgs[i]; {
+		case !eligibleRole(m.Role):
+		case m.Content != "":
+			eligible = append(eligible, m)
+		case m.SkippedBlocks > 0:
+			unanalyzable = append(unanalyzable, m)
+		}
+	}
+	if len(eligible) == 0 && len(unanalyzable) == 0 {
+		return
+	}
+	r.Bind(sess)
+	for _, m := range unanalyzable {
+		if r.claimMessage(sess.ID, msgKey{index: m.Index, sum: sha256.Sum256(nil)}) {
+			r.countGap(GapUnsupportedBlock, int64(m.SkippedBlocks))
 		}
 	}
 	if len(eligible) == 0 {
 		return
 	}
-	r.Bind(sess)
 
 	elevated := isElevated(r.cfg.RiskLookup(sess.ID))
 	spent := &scheduler.Spend{}

@@ -1952,18 +1952,22 @@ func extractSemanticMessages(body []byte, trustedTagRegexs []*regexp.Regexp) []p
 		if msg.Role == "system" {
 			continue
 		}
-		if content := extractMessageContent(msg.Content); content != "" {
-			if len(trustedTagRegexs) > 0 {
+		// A message whose blocks are all images or documents still gets an
+		// entry, with empty content, so its skipped blocks are counted as an
+		// unsupported_block gap rather than silently never analyzed.
+		content := extractMessageContent(msg.Content)
+		if skipped := unsupportedMessageBlocks(msg.Content); content != "" || skipped > 0 {
+			if content != "" && len(trustedTagRegexs) > 0 {
 				content = stripTrustedTags(content, trustedTagRegexs)
 			}
 			out = append(out, policy.MessageToScan{
 				Role:          msg.Role,
 				Index:         i,
 				Content:       content,
-				SkippedBlocks: unsupportedMessageBlocks(msg.Content),
+				SkippedBlocks: skipped,
 			})
 		}
-		if tr, skipped := extractToolResultContent(msg.Content); tr != "" {
+		if tr, skipped := extractToolResultContent(msg.Content); tr != "" || skipped > 0 {
 			out = append(out, policy.MessageToScan{
 				Role:          "tool",
 				Index:         i,
