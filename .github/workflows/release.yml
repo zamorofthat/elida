@@ -34,7 +34,7 @@ jobs:
         # The image's model-builder stage builds its own copy and checks it
         # against the same pins (Dockerfile), so this image and the
         # GoReleaser archives carry the same pinned artifact.
-        run: grep -E '^[A-Z0-9_]+=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

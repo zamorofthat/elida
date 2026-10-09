@@ -186,8 +186,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Load the model pins
-        # KEY=hex lines only; anything else in pins.env is a comment.
-        run: grep -E '^[A-Z0-9_]+=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+        # The three named pin keys only, as KEY=hex: no other key (PATH,
+        # BASH_ENV, ...) can reach $GITHUB_ENV through pins.env.
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
 
       - name: Restore the model artifact
         id: model-cache
@@ -293,7 +294,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load the model pins
-        run: grep -E '^[A-Z0-9_]+=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -309,7 +310,13 @@ jobs:
           build-args: |
             VERSION=ci-smoke
             DEFENDER_COMMIT=${{ env.PINNED_DEFENDER_COMMIT }}
-          cache-from: type=gha
+          # Read the release/docker cache and this job's own scope; write
+          # only its own scope, so PR builds stay warm without overwriting
+          # the multi-arch cache.
+          cache-from: |
+            type=gha
+            type=gha,scope=smoke
+          cache-to: type=gha,mode=max,scope=smoke
 
       - name: Semantic detection starts inline and reports its model
         timeout-minutes: 5
@@ -496,7 +503,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Load the model pins
-        run: grep -E '^[A-Z0-9_]+=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
