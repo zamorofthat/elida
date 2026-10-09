@@ -105,6 +105,10 @@ type DecisionStatus struct {
 	// AlreadyAssessed counts messages skipped because their session already
 	// had them scored. It is not a gap: the content was analyzed earlier.
 	AlreadyAssessed int64 `json:"already_assessed"`
+	// AsyncDroppedNoSession counts async results that arrived for a session
+	// the runner no longer (or never) had bound: ended sessions, and
+	// sessions refused because the live-binding safety limit was reached.
+	AsyncDroppedNoSession int64 `json:"async_dropped_no_session"`
 }
 
 // Handler handles control API requests

@@ -447,6 +447,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 			st.CoverageGaps[k] = v
 		}
 		st.AlreadyAssessed = a.decisionRunner.AlreadyAssessed()
+		st.AsyncDroppedNoSession = a.decisionRunner.AsyncDroppedNoSession()
 	}
 	if a.decisionScheduler != nil {
 		m := a.decisionScheduler.Metrics()

@@ -56,6 +56,14 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   message counts as assessed for the session, so its remaining windows are not
   revisited on later requests. The gap is visible in `coverage_gaps` and as
   `coverage_complete: false` on that message's decisions.
+- **Async results need a live session binding.** The runner keeps a binding
+  for every live session (removed only when the session ends), capped at
+  65,536 live bindings as a hard safety limit; there is no session-manager
+  maximum to derive it from. Past the cap a new session is assessed without
+  per-session history and its async results are dropped. Every async result
+  that finds no bound session (ended, or refused at the cap) is counted in
+  `async_dropped_no_session` at `/control/decision` and logged at WARN at most
+  once a minute, without content.
 - **An inline window that misses the deadline is re-queued async.** On an
   inline build, a window whose inference does not finish inside
   `decision.inline_timeout` is handed to the async lane (bounded by

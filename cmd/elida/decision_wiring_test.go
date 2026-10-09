@@ -604,7 +604,7 @@ func TestDecisionWiring_StatusEndpointIsAuthenticatedAndComplete(t *testing.T) {
 		"inline_completion_ratio", "inline_admission_ratio", "async_fallback_ratio",
 		"async_queue_depth", "async_dropped", "max_in_flight", "admission_reasons",
 		"inline_slots", "async_workers", "inline_panics", "async_canceled", "input_rejected",
-		"coverage_gaps", "already_assessed",
+		"coverage_gaps", "already_assessed", "async_dropped_no_session",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("/control/decision is missing %q: %s", key, w.Body.String())

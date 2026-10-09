@@ -67,9 +67,15 @@
 // progress can overrun it, at most once per request.
 //
 // Sessions. Bind registers a session so async results and the per-session
-// assessed-message set can find it; the registry is bounded. The session-end
-// path must call Unbind, so an ended session is neither retained nor written
-// to by a late async result. One benign race remains: an OnAsync that looked
+// assessed-message set can find it. A live binding is never evicted: only
+// Unbind (the session-end path) removes one, so a client spamming session
+// IDs cannot push a live session's async results out. MaxBoundSessions is a
+// hard safety limit on live bindings; past it a new session is not bound
+// (its messages are assessed without history, and its async results are
+// dropped and counted). An async result for a session that is not bound is
+// counted in AsyncDroppedNoSession and logged at WARN at most once a minute,
+// without content. The session-end path must call Unbind, so an ended
+// session is neither retained nor written to by a late async result. One benign race remains: an OnAsync that looked
 // the session up just before Unbind can still record onto it, so at most one
 // in-flight result per job can land on a session that is being persisted.
 //
@@ -259,10 +265,20 @@ type Config struct {
 	ThresholdSetMatches bool
 }
 
-// maxBoundSessions caps the session registry. An async result has to find
-// its session, and a map keyed by session ID that nothing prunes is an
-// unbounded retained history.
-const maxBoundSessions = 1024
+// MaxBoundSessions is the hard safety limit on live session bindings. The
+// session manager has no maximum concurrent session count to derive it
+// from, so it is fixed. Live bindings are never evicted (Unbind at session
+// end is what removes them); past the limit a new session is simply not
+// bound. A binding holds a pointer and a per-session assessed set that grows
+// on demand to MaxAssessedPerSession keys (40 bytes each), so the limit
+// bounds the registry at a few megabytes for sessions with a handful of
+// messages.
+const MaxBoundSessions = 65536
+
+// dropLogInterval is how often, at most, a dropped async result (or a
+// refused binding) is logged. Every drop is counted; the log only has to say
+// it is happening.
+const dropLogInterval = time.Minute
 
 // MaxAssessedPerSession caps the per-session set of messages already
 // assessed. Past it the oldest entry is evicted, and that message is
@@ -317,12 +333,11 @@ type Runner struct {
 	timeout time.Duration
 
 	// bound is the session registry: async results and the per-session
-	// assessed-message set find their session through it. It is bounded and
-	// evicted in insertion order; boundMu also guards every assessedSet.
-	boundMu   sync.Mutex
-	bound     map[string]*boundSession
-	boundRing []string
-	boundNext int
+	// assessed-message set find their session through it. Entries leave only
+	// through Unbind; MaxBoundSessions caps it. boundMu also guards every
+	// assessedSet.
+	boundMu sync.Mutex
+	bound   map[string]*boundSession
 
 	// recorded is the bounded set of decision IDs already recorded.
 	recordedMu   sync.Mutex
@@ -335,6 +350,19 @@ type Runner struct {
 	gaps   map[string]int64
 
 	alreadyAssessed atomic.Int64
+	// asyncDroppedNoSession counts async results that arrived for a session
+	// not in the registry (ended and unbound, never bound, or refused at
+	// MaxBoundSessions).
+	asyncDroppedNoSession atomic.Int64
+	// bindRefused counts sessions not bound because the registry was full.
+	bindRefused atomic.Int64
+
+	// dropLogMu guards the rate limit of the drop and refusal WARNs.
+	dropLogMu       sync.Mutex
+	lastDropLog     time.Time
+	droppedSinceLog int64
+	lastRefuseLog   time.Time
+	refusedSinceLog int64
 }
 
 // boundSession is one registry entry.
@@ -369,7 +397,9 @@ type msgKey struct {
 	sum   [sha256.Size]byte
 }
 
-// assessedSet is a bounded set of message keys, evicted oldest first.
+// assessedSet is a bounded set of message keys, evicted oldest first. Its
+// ring grows on demand up to MaxAssessedPerSession, so a session with a few
+// messages costs a few keys, not the whole ring.
 type assessedSet struct {
 	seen map[msgKey]int // key -> ring slot
 	ring []msgKey
@@ -378,17 +408,21 @@ type assessedSet struct {
 }
 
 func newAssessedSet() *assessedSet {
-	return &assessedSet{
-		seen: make(map[msgKey]int),
-		ring: make([]msgKey, MaxAssessedPerSession),
-		used: make([]bool, MaxAssessedPerSession),
-	}
+	return &assessedSet{seen: make(map[msgKey]int)}
 }
 
 // add reports whether k is new, and records it.
 func (s *assessedSet) add(k msgKey) bool {
 	if _, dup := s.seen[k]; dup {
 		return false
+	}
+	if len(s.ring) < MaxAssessedPerSession {
+		// Still growing: append; the ring wraps only once it is full.
+		s.ring = append(s.ring, k)
+		s.used = append(s.used, true)
+		s.seen[k] = len(s.ring) - 1
+		s.next = len(s.ring) % MaxAssessedPerSession
+		return true
 	}
 	slot := s.next
 	if s.used[slot] {
@@ -485,8 +519,7 @@ func New(cfg Config) (*Runner, error) {
 		cfg:          cfg,
 		mode:         capMode(cfg.Mode, cfg.PolicyMode, cfg.Policy != nil),
 		timeout:      cfg.InlineTimeout,
-		bound:        make(map[string]*boundSession, maxBoundSessions),
-		boundRing:    make([]string, maxBoundSessions),
+		bound:        make(map[string]*boundSession),
 		recorded:     make(map[string]int, maxRecordedDecisions),
 		recordedRing: make([]string, maxRecordedDecisions),
 		gaps:         make(map[string]int64),
@@ -705,32 +738,65 @@ func (r *Runner) CoverageGaps() map[string]int64 {
 func (r *Runner) AlreadyAssessed() int64 { return r.alreadyAssessed.Load() }
 
 // Bind registers a session so an async completion and the assessed-message
-// set can find it. The registry is bounded: past maxBoundSessions the oldest
-// binding is evicted, an async result for it is dropped, and its history is
-// assessed again if it is resent.
+// set can find it. A live binding is never evicted. At MaxBoundSessions live
+// bindings a new session is not bound: it is counted, logged at WARN at most
+// once a minute, assessed without history, and its async results are
+// dropped (AsyncDroppedNoSession).
 func (r *Runner) Bind(sess *session.Session) {
 	if sess == nil {
 		return
 	}
 	r.boundMu.Lock()
-	defer r.boundMu.Unlock()
 	if b, ok := r.bound[sess.ID]; ok {
 		// Refresh the pointer: a session re-created under the same ID must
 		// not leave async results landing on the stale one.
 		b.sess = sess
+		r.boundMu.Unlock()
 		return
 	}
-	if old := r.boundRing[r.boundNext]; old != "" {
-		delete(r.bound, old)
+	if len(r.bound) >= MaxBoundSessions {
+		r.boundMu.Unlock()
+		r.bindRefused.Add(1)
+		r.logRateLimited(&r.lastRefuseLog, &r.refusedSinceLog,
+			"semantic session registry is full; new sessions are assessed without history and their async results are dropped",
+			"max_bound_sessions", MaxBoundSessions)
+		return
 	}
-	r.boundRing[r.boundNext] = sess.ID
-	r.boundNext = (r.boundNext + 1) % len(r.boundRing)
 	r.bound[sess.ID] = &boundSession{
 		sess:     sess,
 		assessed: newAssessedSet(),
 		pending:  make(map[msgKey]*pendingMsg),
 	}
+	r.boundMu.Unlock()
 }
+
+// logRateLimited logs one content-free WARN at most once per
+// dropLogInterval for the counter at since, carrying how many events it
+// summarizes.
+func (r *Runner) logRateLimited(last *time.Time, since *int64, msg string, attrs ...any) {
+	r.dropLogMu.Lock()
+	*since++
+	now := time.Now()
+	if !last.IsZero() && now.Sub(*last) < dropLogInterval {
+		r.dropLogMu.Unlock()
+		return
+	}
+	n := *since
+	*since = 0
+	*last = now
+	r.dropLogMu.Unlock()
+	slog.Warn(msg, append([]any{"count", n}, attrs...)...)
+}
+
+// AsyncDroppedNoSession returns how many async results arrived for a session
+// that was not bound (ended and unbound, never bound, or refused because the
+// registry was full). Each is semantic analysis that was done and could not
+// be recorded.
+func (r *Runner) AsyncDroppedNoSession() int64 { return r.asyncDroppedNoSession.Load() }
+
+// BindRefused returns how many sessions were not bound because
+// MaxBoundSessions live bindings already existed.
+func (r *Runner) BindRefused() int64 { return r.bindRefused.Load() }
 
 // Unbind drops a session from the registry, with its assessed-message set.
 // The session-end callback must call it (Task 26): an ended session is then
@@ -748,12 +814,6 @@ func (r *Runner) Unbind(sess *session.Session) {
 		return
 	}
 	delete(r.bound, sess.ID)
-	for i, id := range r.boundRing {
-		if id == sess.ID {
-			r.boundRing[i] = ""
-			break
-		}
-	}
 }
 
 func (r *Runner) lookupSession(id string) *session.Session {
@@ -1156,11 +1216,13 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 	defer r.asyncDelivered(req.SessionID, k, answeredAny(a))
 	sess := r.lookupSession(req.SessionID)
 	if sess == nil {
-		// The session ended (Unbind), was evicted from the bounded registry,
-		// or was never bound. The result has nowhere to land; that is a
-		// bounded-history consequence, not an error.
-		slog.Debug("async semantic result has no bound session",
-			"session_id", req.SessionID, "request_id", req.RequestID)
+		// The session ended (Unbind), was never bound, or was refused at
+		// MaxBoundSessions. The result has nowhere to land: count it, and
+		// say so at most once a minute (no content, no identifiers).
+		r.asyncDroppedNoSession.Add(1)
+		r.logRateLimited(&r.lastDropLog, &r.droppedSinceLog,
+			"async semantic results dropped: their session is not bound",
+			"consequence", "the dropped results are recorded nowhere and contribute no risk")
 		return
 	}
 	a.Scope = decision.ScopeFutureActivity
