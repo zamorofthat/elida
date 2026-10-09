@@ -79,6 +79,10 @@ type Spend struct {
 	// that actually ran out rather than always DenyInlineBudgetSpent.
 	LastDenied decision.AdmissionReason
 
+	// lowRefused records that the LOW queue refused this request's
+	// not-eligible work; later not-eligible windows are not offered.
+	lowRefused bool
+
 	// deferred holds the not-eligible windows of this request's messages,
 	// waiting for FlushDeferred: they take the async lane at the lowest
 	// priority, after every capacity-denied window of the request.
@@ -210,6 +214,13 @@ type Config struct {
 	MaxAsyncWindows int
 	// AsyncQueueSize is the async job queue capacity. Must be at least 1. A
 	// full queue drops the window (DenyQueueFull) rather than blocking.
+	//
+	// There are two async queues of this size each. The HIGH queue takes
+	// windows denied the inline lane for capacity, capability or a missed
+	// deadline (content that had an admission reason). The LOW queue takes
+	// not-eligible windows (DenyNotEligible). Async workers always drain
+	// HIGH first and take a LOW job only while HIGH is empty, so a flood of
+	// plain messages can never crowd suspicious windows out of the queue.
 	AsyncQueueSize int
 
 	// AsyncTimeout bounds one async job's lifetime. It is not an operator
@@ -262,11 +273,20 @@ type Metrics struct {
 	// OnAsync, answered or not (a provider error or panic is a delivered
 	// unknown, not a cancellation).
 	AsyncCompleted int64
-	// AsyncDropped counts windows the async queue refused: the queue was
-	// full, or the scheduler was shut down. Each is a coverage gap.
+	// AsyncDropped counts windows the HIGH async queue refused: the queue
+	// was full, or the scheduler was shut down. Each is a coverage gap.
 	AsyncDropped int64
-	// AsyncQueueDepth is the current async queue length.
+	// AsyncQueueDepth is the current HIGH async queue length.
 	AsyncQueueDepth int
+	// AsyncLowQueued counts not-eligible windows accepted onto the LOW
+	// queue (also counted in AsyncQueued; each ends as exactly one of
+	// AsyncCompleted or AsyncCanceled like any queued job).
+	AsyncLowQueued int64
+	// AsyncLowDropped counts not-eligible windows the LOW queue refused
+	// (full, or shut down). Each is a not_assessed coverage gap.
+	AsyncLowDropped int64
+	// AsyncLowDepth is the current LOW async queue length.
+	AsyncLowDepth int
 	// DuplicatesSuppressed counts windows not queued because the same job
 	// (decision.JobID) was already claimed inline or async.
 	DuplicatesSuppressed int64
@@ -336,6 +356,7 @@ type asyncJob struct {
 	win    WindowedText
 	sigs   []decision.Signal
 	denied decision.AdmissionReason // why the window missed the inline lane
+	low    bool                     // queued on the LOW queue (not eligible)
 }
 
 // Inline is the scheduler. It is safe for concurrent use.
@@ -364,6 +385,9 @@ type Inline struct {
 	// queue is the bounded async continuation queue. A full queue drops the
 	// job (counted and reported) rather than blocking the hot path.
 	queue chan asyncJob
+	// lowQueue is the LOW priority queue for not-eligible windows. Workers
+	// take from it only while queue (HIGH) is empty.
+	lowQueue chan asyncJob
 	// lifeMu guards closed and the close of queue: enqueue sends under the
 	// read lock, Shutdown closes under the write lock, so a send can never
 	// race the close into a panic.
@@ -391,6 +415,8 @@ type Inline struct {
 	asyncQueued     atomic.Int64
 	asyncCompleted  atomic.Int64
 	asyncDropped    atomic.Int64
+	asyncLowQueued  atomic.Int64
+	asyncLowDropped atomic.Int64
 	duplicates      atomic.Int64
 	inFlight        atomic.Int64
 	maxInFlight     atomic.Int64
@@ -467,6 +493,7 @@ func New(cfg Config) (*Inline, error) {
 		asyncWorkers: asyncWorkers,
 		inlineSlots:  inlineSlots,
 		queue:        make(chan asyncJob, cfg.AsyncQueueSize),
+		lowQueue:     make(chan asyncJob, cfg.AsyncQueueSize),
 		baseCtx:      baseCtx,
 		cancelBase:   cancelBase,
 		drained:      make(chan struct{}),
@@ -763,9 +790,9 @@ func (s *Inline) AssessCandidates(ctx context.Context, req Request, in decision.
 		} else {
 			// No request scope: this message is the whole request, so its
 			// windows are queued now, within this call's budget.
-			tmp := Spend{AsyncWindows: asyncWindows, Considered: considered, AsyncRefused: asyncRefused}
+			tmp := Spend{AsyncWindows: asyncWindows, Considered: considered}
 			s.queueLowPriority(&tmp, &a, &tmpl, req, in, signals, low)
-			asyncWindows, considered, asyncRefused = tmp.AsyncWindows, tmp.Considered, tmp.AsyncRefused
+			asyncWindows, considered = tmp.AsyncWindows, tmp.Considered
 		}
 	}
 
@@ -805,7 +832,7 @@ func (s *Inline) FlushDeferred(sp *Spend) []DeferredOutcome {
 func (s *Inline) queueLowPriority(sp *Spend, a *decision.Assessment, tmpl *asyncTemplate, req Request, in decision.Input, sigs []decision.Signal, wins []WindowedText) (queued, notAssessed int) {
 	maxConsidered := s.cfg.MaxInlineWindows + s.cfg.MaxAsyncWindows
 	closed := func() bool {
-		return s.asyncWorkers == 0 || sp.AsyncRefused || sp.AsyncWindows >= s.cfg.MaxAsyncWindows
+		return s.asyncWorkers == 0 || sp.lowRefused || sp.AsyncWindows >= s.cfg.MaxAsyncWindows
 	}
 	for i, w := range wins {
 		if closed() || sp.Considered >= maxConsidered {
@@ -825,7 +852,9 @@ func (s *Inline) queueLowPriority(sp *Spend, a *decision.Assessment, tmpl *async
 				sp.AsyncWindows++
 				queued++
 			case asyncRefusedByQueue:
-				sp.AsyncRefused = true
+				// The LOW queue is full: a not_assessed gap, exactly like
+				// the cap-exhausted case. HIGH work is unaffected.
+				sp.lowRefused = true
 				notAssessed++
 			}
 		}
@@ -1129,6 +1158,9 @@ func (s *Inline) Metrics() Metrics {
 		AsyncCompleted:       s.asyncCompleted.Load(),
 		AsyncDropped:         s.asyncDropped.Load(),
 		AsyncQueueDepth:      len(s.queue),
+		AsyncLowQueued:       s.asyncLowQueued.Load(),
+		AsyncLowDropped:      s.asyncLowDropped.Load(),
+		AsyncLowDepth:        len(s.lowQueue),
 		DuplicatesSuppressed: s.duplicates.Load(),
 		MaxInFlight:          s.maxInFlight.Load(),
 		AdmissionReasons:     reasons,
@@ -1198,7 +1230,7 @@ func (s *Inline) continueAsync(a *decision.Assessment, tmpl *asyncTemplate, req 
 		tmpl.sigs = append([]decision.Signal(nil), sigs...)
 		tmpl.ready = true
 	}
-	job := asyncJob{id: id, req: tmpl.req, in: in, win: w, sigs: tmpl.sigs, denied: denied}
+	job := asyncJob{id: id, req: tmpl.req, in: in, win: w, sigs: tmpl.sigs, denied: denied, low: denied == decision.DenyNotEligible}
 	if !s.enqueue(job) {
 		// Release the claim: the job never ran, so a retry must be free to
 		// queue it rather than be suppressed as a duplicate of nothing.
@@ -1284,23 +1316,36 @@ func (s *Inline) unclaim(id string) {
 // without content, not back-pressure on the proxied request. After Shutdown
 // it refuses everything. The read lock is held across the non-blocking send
 // so Shutdown cannot close the queue underneath it.
+//
+// A not-eligible job goes to the LOW queue and its refusals are counted in
+// AsyncLowDropped; every other job goes to the HIGH queue (AsyncDropped).
 func (s *Inline) enqueue(job asyncJob) bool {
+	q, dropped := s.queue, &s.asyncDropped
+	if job.low {
+		q, dropped = s.lowQueue, &s.asyncLowDropped
+	}
 	s.lifeMu.RLock()
 	defer s.lifeMu.RUnlock()
 	if s.closed || s.asyncWorkers == 0 {
 		// Shut down, or async disabled (logged once at New).
-		s.asyncDropped.Add(1)
+		dropped.Add(1)
 		return false
 	}
 	// Count before the send so a fast worker can never make AsyncCompleted
 	// exceed AsyncQueued in a snapshot.
 	s.asyncQueued.Add(1)
+	if job.low {
+		s.asyncLowQueued.Add(1)
+	}
 	select {
-	case s.queue <- job:
+	case q <- job:
 		return true
 	default:
 		s.asyncQueued.Add(-1)
-		s.asyncDropped.Add(1)
+		if job.low {
+			s.asyncLowQueued.Add(-1)
+		}
+		dropped.Add(1)
 		s.logQueueFull(job)
 		return false
 	}
@@ -1322,8 +1367,13 @@ func (s *Inline) logQueueFull(job asyncJob) {
 	s.lastDropLog = now
 	s.dropLogMu.Unlock()
 
+	queue := "high"
+	if job.low {
+		queue = "low"
+	}
 	slog.Warn("semantic async queue is full; windows dropped",
 		"dropped", dropped,
+		"queue", queue,
 		"session_id", job.req.SessionID,
 		"request_id", job.req.RequestID,
 		"queue_size", cap(s.queue),
@@ -1331,11 +1381,42 @@ func (s *Inline) logQueueFull(job asyncJob) {
 	)
 }
 
-// asyncWorker runs queued jobs until Shutdown closes the queue.
+// asyncWorker runs queued jobs until Shutdown has closed both queues and
+// they are empty. HIGH always comes first: a LOW job is taken only when HIGH
+// had nothing ready, and HIGH is checked again before every job, so during
+// a Shutdown drain HIGH empties before LOW.
 func (s *Inline) asyncWorker() {
 	defer s.asyncWG.Done()
-	for job := range s.queue {
-		s.runAsync(job)
+	high, low := s.queue, s.lowQueue
+	for high != nil || low != nil {
+		if high != nil {
+			select {
+			case job, ok := <-high:
+				if !ok {
+					high = nil
+					continue
+				}
+				s.runAsync(job)
+				continue
+			default:
+			}
+		}
+		// HIGH is empty (or closed and drained): wait on both, so a HIGH
+		// job arriving now is still taken. A nil channel never fires.
+		select {
+		case job, ok := <-high:
+			if !ok {
+				high = nil
+				continue
+			}
+			s.runAsync(job)
+		case job, ok := <-low:
+			if !ok {
+				low = nil
+				continue
+			}
+			s.runAsync(job)
+		}
 	}
 }
 
@@ -1493,6 +1574,7 @@ func (s *Inline) Shutdown(ctx context.Context) error {
 		s.lifeMu.Lock()
 		s.closed = true
 		close(s.queue)
+		close(s.lowQueue)
 		s.lifeMu.Unlock()
 
 		go func() {
@@ -1516,6 +1598,7 @@ func (s *Inline) Shutdown(ctx context.Context) error {
 		s.cancelBase()
 		slog.Warn("semantic scheduler shutdown deadline passed with async work outstanding",
 			"queue_depth", len(s.queue),
+			"low_queue_depth", len(s.lowQueue),
 			"error_class", errorClass(ctx.Err()),
 		)
 		return ctx.Err()

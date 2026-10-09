@@ -461,6 +461,8 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		m := a.decisionScheduler.Metrics()
 		st.AsyncQueueDepth = m.AsyncQueueDepth
 		st.AsyncDropped = m.AsyncDropped
+		st.AsyncLowDepth = m.AsyncLowDepth
+		st.AsyncLowDropped = m.AsyncLowDropped
 		st.MaxInFlight = m.MaxInFlight
 		st.InlineSlots = m.InlineSlots
 		st.AsyncWorkers = m.AsyncWorkers

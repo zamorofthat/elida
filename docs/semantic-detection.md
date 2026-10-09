@@ -46,6 +46,10 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   example, a paraphrased injection with no lexical cue in an unelevated
   session) is still scored, on the async lane at the lowest priority: after
   every window of the request that was denied the inline lane for capacity.
+  These windows wait in a separate LOW async queue (same `async_queue_size`)
+  that workers serve only while the HIGH queue of admitted work is empty, so
+  a flood of plain messages cannot crowd suspicious windows out; LOW overflow
+  is counted in `async_low_dropped` and as `not_assessed`.
   Its result protects later activity only. When `decision.max_async_windows`
   is spent first, the windows left out are counted as the `not_assessed`
   coverage gap and the message is retried on the next request that carries

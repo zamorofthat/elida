@@ -76,13 +76,18 @@ type DecisionStatus struct {
 
 	// Capacity signals. These, not a fixed requests-per-second figure, are
 	// what tell an operator to add replicas or lower concurrency.
-	InlineCompletionRatio float64          `json:"inline_completion_ratio"`
-	InlineAdmissionRatio  float64          `json:"inline_admission_ratio"`
-	AsyncFallbackRatio    float64          `json:"async_fallback_ratio"`
-	AsyncQueueDepth       int              `json:"async_queue_depth"`
-	AsyncDropped          int64            `json:"async_dropped"`
-	MaxInFlight           int64            `json:"max_in_flight"`
-	AdmissionReasons      map[string]int64 `json:"admission_reasons,omitempty"`
+	InlineCompletionRatio float64 `json:"inline_completion_ratio"`
+	InlineAdmissionRatio  float64 `json:"inline_admission_ratio"`
+	AsyncFallbackRatio    float64 `json:"async_fallback_ratio"`
+	AsyncQueueDepth       int     `json:"async_queue_depth"`
+	AsyncDropped          int64   `json:"async_dropped"`
+	// AsyncLowDepth and AsyncLowDropped are the LOW async queue's depth and
+	// refusals: not-eligible windows, served only while the HIGH queue
+	// (async_queue_depth, async_dropped) is empty.
+	AsyncLowDepth    int              `json:"async_low_depth"`
+	AsyncLowDropped  int64            `json:"async_low_dropped"`
+	MaxInFlight      int64            `json:"max_in_flight"`
+	AdmissionReasons map[string]int64 `json:"admission_reasons,omitempty"`
 
 	// InlineSlots and AsyncWorkers are the two lanes of max_concurrency;
 	// AsyncWorkers 0 means async continuation is disabled.

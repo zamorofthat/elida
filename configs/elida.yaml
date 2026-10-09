@@ -522,6 +522,9 @@ decision:
   # admission reason (not_eligible). What the cap leaves out is counted as
   # the not_assessed coverage gap at /control/decision.
   max_async_windows: 8
+  # Capacity of each of the two async queues: HIGH (windows with an
+  # admission reason that missed the inline lane) and LOW (not_eligible
+  # windows). Workers serve LOW only while HIGH is empty.
   async_queue_size: 100
 
   # Which messages may attempt the inline fast lane. Admission also requires
