@@ -1,0 +1,25 @@
+{
+  "name": "minilm-multihead",
+  "version": "v5-fp32",
+  "head_order": ["injection", "human_directed"],
+  "signals": ["injection", "human_directed"],
+  "calibration": {
+    "temperature": 2.41,
+    "main_threshold": 0.5,
+    "aux_threshold": 0.64,
+    "single_head_threshold": 0.4,
+    "ece": 0.09,
+    "threshold_set": "v1",
+    "fitted_on": "labeled plugin events 2026-05-13"
+  },
+  "files": {
+    "model.onnx": "c62986f0cb9718317cf32d4b733666d80d8cbe9afa5126e0e46ae397cfbb0189",
+    "tokenizer.json": "85006bb068c98711fac0321a4a92bcd6bd53a2f72a919cdf971ffe81d447ce9f",
+    "tokenizer_config.json": "3df8e514a1e35e6e6699fedef54fae69f37085b9ad6174fc85c0c602ac9efeb0",
+    "config.json": "cce37fcdca037f1010d29eecaaabae793c6aa7815b0e5524b9b8585c6dd8ecd6"
+  },
+  "license": "Apache-2.0",
+  "source": "https://github.com/StackOneHQ/defender",
+  "source_commit": "0000000000000000000000000000000000000000",
+  "conversion": "scripts/models/dequantize.py"
+}

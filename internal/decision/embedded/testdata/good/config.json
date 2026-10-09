@@ -1,0 +1,1 @@
+{"architectures":["BertForSequenceClassification"],"problem_type":"multi_label_classification","id2label":{"0":"INJECTION","1":"AUX"},"label2id":{"INJECTION":0,"AUX":1}}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"elida/internal/instruction"
+	"elida/internal/session"
 
 	_ "modernc.org/sqlite"
 )
@@ -45,6 +46,20 @@ type Violation struct {
 	EventCategory string `json:"event_category,omitempty"`
 	FrameworkRef  string `json:"framework_ref,omitempty"`
 	SourceRole    string `json:"source_role,omitempty"`
+	// EvidenceOnly marks a violation recorded as evidence for correlation
+	// that contributed no risk, so history does not present it as an
+	// ordinary violation. It lives in the violations JSON column: rows
+	// written before it existed have no key and restore as false.
+	EvidenceOnly bool `json:"evidence_only,omitempty"`
+	// EventID is the policy engine's stable ID for the occurrence behind
+	// this violation. SaveSession uses it to deduplicate history carried
+	// from an earlier session with the same ID. Absent on older rows.
+	EventID string `json:"event_id,omitempty"`
+	// Timestamp is when the rule last fired. The session-end path uses it
+	// to tell violations of the ending session from ones a retained policy
+	// entry carried over from an earlier session with the same ID. Absent
+	// on older rows.
+	Timestamp time.Time `json:"timestamp,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
@@ -111,6 +126,56 @@ type SessionRecord struct {
 	FingerprintDistance float64 `json:"fingerprint_distance"`
 	FingerprintBucket   string  `json:"fingerprint_bucket,omitempty"`
 	FingerprintClass    string  `json:"fingerprint_class,omitempty"`
+
+	// SemanticShadow holds shadow-mode semantic decisions, newest first.
+	// Loaded by GetSession only; ListSessions leaves it empty to keep list
+	// payloads small.
+	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+}
+
+// SemanticShadow mirrors session.SemanticShadow for persistence. The storage
+// package keeps its own copies of the types it writes (see Violation and
+// CapturedRequest) so the schema does not move every time an in-memory
+// struct does. It carries no request content.
+type SemanticShadow struct {
+	Timestamp        time.Time `json:"timestamp"`
+	DecisionID       string    `json:"decision_id"`
+	Signal           string    `json:"signal"`
+	Probability      float64   `json:"probability"`
+	AuxProbability   float64   `json:"aux_probability,omitempty"`
+	Vetoed           bool      `json:"vetoed,omitempty"`
+	SourceRole       string    `json:"source_role"`
+	MessageIndex     int       `json:"message_index"`
+	Transform        string    `json:"transform,omitempty"`
+	TransformDepth   int       `json:"transform_depth,omitempty"`
+	WindowStartByte  int       `json:"window_start_byte"`
+	WindowEndByte    int       `json:"window_end_byte"`
+	Model            string    `json:"model"`
+	ModelVersion     string    `json:"model_version"`
+	ModelChecksum    string    `json:"model_checksum,omitempty"`
+	ThresholdSet     string    `json:"threshold_set"`
+	ExecutionMode    string    `json:"execution_mode"`
+	ProtectionScope  string    `json:"protection_scope"`
+	CoverageComplete bool      `json:"coverage_complete"`
+	LatencyMs        int64     `json:"latency_ms"`
+}
+
+// SemanticShadowFromSession copies a session's shadow list into its
+// persisted form, preserving order (newest first). It returns nil for an
+// empty list so a record without shadow decisions stays unchanged.
+//
+// The conversion is field-for-field: it compiles only while the two structs
+// have identical fields, so the persisted form cannot silently drift from
+// the in-memory one.
+func SemanticShadowFromSession(in []session.SemanticShadow) []SemanticShadow {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SemanticShadow, len(in))
+	for i, s := range in {
+		out[i] = SemanticShadow(s)
+	}
+	return out
 }
 
 // SQLiteStore provides persistent storage for session history
@@ -168,6 +233,7 @@ func (s *SQLiteStore) migrate() error {
 		fingerprint_distance REAL DEFAULT 0,
 		fingerprint_bucket TEXT DEFAULT '',
 		fingerprint_class TEXT DEFAULT '',
+		semantic_shadow TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -292,11 +358,50 @@ func (s *SQLiteStore) migrate() error {
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_bucket TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN fingerprint_class TEXT DEFAULT ''")
 
+	// Add the semantic shadow column (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN semantic_shadow TEXT DEFAULT ''")
+
+	// History carried from earlier sessions with the same ID (see
+	// SaveSession). Idempotent — ignore "duplicate column" errors.
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN prior_history TEXT DEFAULT ''")
+
 	return nil
 }
 
-// SaveSession saves a completed session record
+// SaveSession saves a session record, keyed by session ID.
+//
+// Session IDs are reusable: a TimedOut or Completed session's ID can start a
+// new session (session.Manager.GetOrCreate). A plain replace would then
+// erase the earlier session's history. So, inside one transaction,
+// SaveSession reads the stored row. When its start_time differs from
+// record.StartTime the stored row belongs to an earlier session, and its
+// violations, captured content and semantic shadow decisions become the
+// carried "prior history". A save of the same session (equal start_time,
+// e.g. the proxy's flagged-session save followed by the session-end save)
+// keeps the prior history already carried. The written lists are the
+// record's own entries merged with the prior history; mergeHistory documents
+// the deduplication and the caps.
+//
+// The Redis session store (session.RedisStore) holds live session state
+// only, never this history (no violations, captures or shadow decisions),
+// so there is nothing to merge there.
 func (s *SQLiteStore) SaveSession(record SessionRecord) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prior, err := loadPriorHistory(tx, record.ID, record.StartTime)
+	if err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+	record, prior = mergeHistory(record, prior)
+	priorJSON, err := json.Marshal(prior)
+	if err != nil {
+		priorJSON = []byte("{}")
+	}
+
 	metadata, err := json.Marshal(record.Metadata)
 	if err != nil {
 		metadata = []byte("{}")
@@ -312,10 +417,15 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		violations = []byte("[]")
 	}
 
-	_, err = s.db.Exec(`
+	semanticShadow, err := json.Marshal(record.SemanticShadow)
+	if err != nil {
+		semanticShadow = []byte("[]")
+	}
+
+	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, prior_history)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -332,8 +442,13 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		record.FingerprintDistance,
 		record.FingerprintBucket,
 		record.FingerprintClass,
+		string(semanticShadow),
+		string(priorJSON),
 	)
 	if err != nil {
+		return fmt.Errorf("failed to save session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
@@ -354,13 +469,14 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 // GetSessionCtx retrieves a session by ID using the provided context.
 func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
 	var metadataStr, capturedStr, violationsStr sql.NullString
 	var fingerprintDistance sql.NullFloat64
 	var fingerprintBucket, fingerprintClass sql.NullString
+	var semanticShadowStr sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -378,6 +494,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 		&fingerprintDistance,
 		&fingerprintBucket,
 		&fingerprintClass,
+		&semanticShadowStr,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -398,6 +515,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 	unmarshalJSON(metadataStr, &record.Metadata, "metadata", record.ID)
 	unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
 	unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
+	unmarshalJSON(semanticShadowStr, &record.SemanticShadow, "semantic_shadow", record.ID)
 
 	integrity, integrityErr := s.GetSDRIntegrity(ctx, record.ID)
 	if integrityErr != nil {

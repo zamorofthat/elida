@@ -54,8 +54,17 @@ GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# The image's model-builder stage requires the pinned upstream model
+# commit. Default to the one scripts/models/pins.env pins (the only value
+# fetch.sh accepts) unless the caller overrides it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=models/pins.env
+source "$SCRIPT_DIR/models/pins.env"
+DEFENDER_COMMIT="${DEFENDER_COMMIT:-$PINNED_DEFENDER_COMMIT}"
+
 # Build the image with labels
 docker build \
+    --build-arg "DEFENDER_COMMIT=${DEFENDER_COMMIT}" \
     --label "org.opencontainers.image.version=${VERSION}" \
     --label "org.opencontainers.image.revision=${GIT_COMMIT}" \
     --label "org.opencontainers.image.created=${BUILD_DATE}" \

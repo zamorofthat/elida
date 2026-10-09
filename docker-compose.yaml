@@ -27,7 +27,18 @@ services:
 
   # ELIDA proxy (optional - can also run locally)
   elida:
-    build: .
+    build:
+      context: .
+      args:
+        # The image's model-builder stage requires the pinned upstream model
+        # commit; scripts/models/fetch.sh refuses any other value. Compose
+        # cannot read scripts/models/pins.env for a build-arg default, so
+        # TestModelPins_ComposeDefaultMatches keeps this literal in sync.
+        # Single source of truth: PINNED_DEFENDER_COMMIT in
+        # scripts/models/pins.env. Change the pin there first, then copy it
+        # here; the test fails until they match, and the Dockerfile verifies
+        # the built model against pins.env either way.
+        DEFENDER_COMMIT: ${DEFENDER_COMMIT:-ff83e70981099f9261520e0e9bc6cb85bb9789da}
     ports:
       - "8080:8080"
       - "9090:9090"

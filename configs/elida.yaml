@@ -242,6 +242,8 @@ policy:
       - "system-reminder"
     # Tool names that bypass request-side content scanning
     # Requests containing only these tools skip policy checks
+    # Regex policy only: semantic detection (decision.*) still assesses
+    # these tools' output, which is the untrusted content it exists to score.
     allowlisted_tools:
       - "Read"
       - "Glob"
@@ -432,14 +434,36 @@ decision:
 
   # true: missing, invalid, or unsupported model assets fail startup.
   # false: start in degraded mode and report an unhealthy capability.
-  # Restart required.
+  # Governs model/capability availability only: an enforce threshold-set
+  # mismatch (see mode) fails startup either way. Restart required.
   required: false
+
+  # true: fail startup unless semantic detection can run inline, meaning the
+  # model loaded and verified AND this build has accelerated inference
+  # kernels. Those are gated to linux/amd64 built with GOEXPERIMENT=simd, so
+  # every other target reports async_only and would fail this gate. An unmet
+  # require_inline fails startup whatever `required` says, including when the
+  # model fails to load: the operator explicitly demanded inline protection.
+  #
+  # false (default): async_only is permitted and reported at
+  # /control/decision. On an async_only build the inline lane is never tried:
+  # eligible windows go straight to the async lane (admission reason
+  # capability_async_only). Async results cannot protect the request that
+  # triggered them; under mode: enforce they raise session risk and affect
+  # later activity.
+  #
+  # Restart required.
+  require_inline: false
 
   # disabled | shadow | audit | enforce
   #   shadow  — decide and record for calibration; no violations, no risk
   #   audit   — create evidence-only violations with diagnostic points only
   #   enforce — calibrated violations drive the existing risk ladder
   # policy.mode caps this: with policy.mode: audit, enforce behaves as audit.
+  # With the policy engine disabled nothing can be recorded, so audit and
+  # enforce run as shadow (/control/decision reports the reason).
+  # enforce requires threshold_set to match the loaded model's threshold set;
+  # a mismatch fails startup whatever `required` says.
   mode: shadow
 
   # embedded (in-process, air-gapped) or systemone (HTTP). Restart required —
@@ -454,7 +478,8 @@ decision:
   # endpoint: https://decide.internal/v1/score
 
   # Versioned threshold artifact. Never a free-form number — thresholds are
-  # selected by version, not typed in.
+  # selected by version, not typed in. Must match the loaded model's
+  # threshold set for mode: enforce (startup fails otherwise).
   threshold_set: v1
 
   # Probability above which a sub-threshold injection score emits an
@@ -465,8 +490,20 @@ decision:
   # inference all draw from this one budget.
   inline_timeout: 50ms
 
-  # Physical inference worker pool size.
-  max_concurrency: 2
+  # Physical inference worker pool size, split into an inline lane and an
+  # async lane that never share slots (async = 0 at 1, else max(1, n/4)):
+  #
+  #   max_concurrency | inline | async
+  #   1               | 1      | 0 (async continuation disabled)
+  #   2               | 1      | 1
+  #   4               | 3      | 1
+  #   8               | 6      | 2
+  #   16              | 12     | 4
+  #
+  # A slot is not one CPU: one embedded inference runs over an intra-op
+  # worker pool and measured about 4.7 CPUs of work per wall-clock second on
+  # an 8-core machine.
+  max_concurrency: 4
 
   # Must be 0ms: inline inference never waits for worker capacity. A message
   # that cannot be admitted immediately falls back to the async path. A
@@ -479,12 +516,21 @@ decision:
   max_inline_windows: 1
 
   # Bounded async continuation. Async results cannot block or recall a
-  # request that was already forwarded; they affect later activity.
+  # request that was already forwarded; they affect later activity. The cap
+  # is per request and is spent in priority order: windows denied the inline
+  # lane for capacity first, then user/tool windows that had no inline
+  # admission reason (not_eligible). What the cap leaves out is counted as
+  # the not_assessed coverage gap at /control/decision.
   max_async_windows: 8
+  # Capacity of each of the two async queues: HIGH (windows with an
+  # admission reason that missed the inline lane) and LOW (not_eligible
+  # windows). Workers serve LOW only while HIGH is empty.
   async_queue_size: 100
 
   # Which messages may attempt the inline fast lane. Admission also requires
-  # an immediately free worker and enough remaining deadline.
+  # an immediately free worker and enough remaining deadline. These decide
+  # the hot-path budget only, not what gets scored: user and tool content
+  # that is not admitted still takes the async lane at the lowest priority.
   inline_admission:
     untrusted_tool_results: true
     encoded_or_obfuscated: true
@@ -494,7 +540,11 @@ decision:
 
   # Analysis-only preprocessing bounds. Derived representations are scored
   # but never forwarded to the backend. Hitting a limit is a coverage gap,
-  # not a violation.
+  # not a violation. Preprocessing runs on the request path and is not
+  # deadline-aware, so raising max_input_bytes above the default costs
+  # request latency: one 8 MiB message at the ceilings (8 MiB input / 32 MiB
+  # analysis) measured 410 ms and 258 MB allocated on darwin/arm64, against
+  # 68 ms and 29 MB at these defaults.
   preprocessing:
     max_input_bytes: 262144
     max_analysis_bytes: 524288

@@ -41,6 +41,14 @@ archives:
       - README.md
       - LICENSE
       - configs/elida.yaml
+      # Model assets ship beside the binary under models/injection/. The
+      # operator points decision.model_path at them, or uses the Docker
+      # image where they are already at /etc/elida/models/injection. The
+      # release workflow unpacks them from the CI-built, parity-tested
+      # artifact before GoReleaser runs; a release without them fails here.
+      - src: models/injection/*
+        dst: models/injection
+        strip_parent: true
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 sboms:
@@ -51,6 +59,10 @@ sboms:
 checksum:
   name_template: checksums.txt
   algorithm: sha256
+  # The standalone model tarball is in checksums.txt too, so the SLSA
+  # provenance generated from it covers the model.
+  extra_files:
+    - glob: ./build/release/models-injection-v5-fp32.tar.gz
 
 changelog:
   sort: asc
@@ -96,3 +108,8 @@ release:
     name: elida
   prerelease: auto
   name_template: "{{.Tag}}"
+  # The model artifact on its own, with its sha256, for operators who keep
+  # the binary and the model separately (built and verified in release.yml).
+  extra_files:
+    - glob: ./build/release/models-injection-v5-fp32.tar.gz
+    - glob: ./build/release/models-injection-v5-fp32.tar.gz.sha256

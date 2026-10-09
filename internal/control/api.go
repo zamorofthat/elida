@@ -34,6 +34,88 @@ type PanelProvider interface {
 	Members() []panel.MemberInfo
 }
 
+// DecisionProvider exposes semantic decision status for the control API.
+type DecisionProvider interface {
+	DecisionStatus() DecisionStatus
+}
+
+// DecisionStatus is the read-only operational view of semantic detection.
+//
+// This is deliberately on an authenticated route and not on
+// /control/health: model identity, checksums and threshold-set versions are
+// deployment detail, and /control/health is reachable without credentials so
+// liveness probes can use it.
+type DecisionStatus struct {
+	Enabled       bool   `json:"enabled"`
+	Mode          string `json:"mode"`
+	EffectiveMode string `json:"effective_mode"`
+	// Capability is inline, async_only, degraded or disabled.
+	Capability string `json:"capability"`
+	// RequireInline echoes decision.require_inline, so a dashboard can
+	// distinguish "async_only and that is fine" from a deployment that
+	// demanded inline protection (which would not have started without it).
+	RequireInline bool   `json:"require_inline"`
+	Reason        string `json:"reason,omitempty"`
+	Arch          string `json:"arch"`
+	SIMD          bool   `json:"simd"`
+
+	// InlineQueueWaitMs is reported read-only. Phase 1 requires it to be
+	// zero, so it is not in the editable settings surface; an operator sees
+	// the value in force here instead.
+	InlineQueueWaitMs int `json:"inline_queue_wait_ms"`
+
+	Model         string   `json:"model,omitempty"`
+	ModelVersion  string   `json:"model_version,omitempty"`
+	ModelChecksum string   `json:"model_checksum,omitempty"`
+	Signals       []string `json:"signals,omitempty"`
+
+	ThresholdSet        string `json:"threshold_set,omitempty"`
+	ThresholdSetMatches bool   `json:"threshold_set_matches"`
+
+	BreakerOpen bool `json:"breaker_open"`
+
+	// Capacity signals. These, not a fixed requests-per-second figure, are
+	// what tell an operator to add replicas or lower concurrency.
+	InlineCompletionRatio float64 `json:"inline_completion_ratio"`
+	InlineAdmissionRatio  float64 `json:"inline_admission_ratio"`
+	AsyncFallbackRatio    float64 `json:"async_fallback_ratio"`
+	AsyncQueueDepth       int     `json:"async_queue_depth"`
+	AsyncDropped          int64   `json:"async_dropped"`
+	// AsyncLowDepth and AsyncLowDropped are the LOW async queue's depth and
+	// refusals: not-eligible windows, served only while the HIGH queue
+	// (async_queue_depth, async_dropped) is empty.
+	AsyncLowDepth    int              `json:"async_low_depth"`
+	AsyncLowDropped  int64            `json:"async_low_dropped"`
+	MaxInFlight      int64            `json:"max_in_flight"`
+	AdmissionReasons map[string]int64 `json:"admission_reasons,omitempty"`
+
+	// InlineSlots and AsyncWorkers are the two lanes of max_concurrency;
+	// AsyncWorkers 0 means async continuation is disabled.
+	InlineSlots  int `json:"inline_slots"`
+	AsyncWorkers int `json:"async_workers"`
+	// InlinePanics counts provider panics recovered on the inline lane.
+	InlinePanics int64 `json:"inline_panics"`
+	// AsyncCanceled counts queued jobs whose async timeout or shutdown ended
+	// them before an answer: budget outcomes, not provider failures.
+	AsyncCanceled int64 `json:"async_canceled"`
+	// InputRejected counts windows the model had nothing to score in.
+	InputRejected int64 `json:"input_rejected"`
+
+	// CoverageGaps counts preprocessing budget exhaustions and messages not
+	// assessed, by reason. A gap is never a finding and adds no risk; it is
+	// reported so partial analysis is visible instead of being mistaken for a
+	// clean full scan. The key is always present; messages_not_assessed is
+	// present whenever semantic assessment is running.
+	CoverageGaps map[string]int64 `json:"coverage_gaps"`
+	// AlreadyAssessed counts messages skipped because their session already
+	// had them scored. It is not a gap: the content was analyzed earlier.
+	AlreadyAssessed int64 `json:"already_assessed"`
+	// AsyncDroppedNoSession counts async results that arrived for a session
+	// the runner no longer (or never) had bound: ended sessions, and
+	// sessions refused because the live-binding safety limit was reached.
+	AsyncDroppedNoSession int64 `json:"async_dropped_no_session"`
+}
+
 // Handler handles control API requests
 type Handler struct {
 	store         session.Store
@@ -45,7 +127,10 @@ type Handler struct {
 	settingsStore *config.SettingsStore
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
-	mux           *http.ServeMux
+	// decisionProvider reports semantic detection status; nil means the
+	// feature is off.
+	decisionProvider DecisionProvider
+	mux              *http.ServeMux
 
 	// Authentication
 	authEnabled bool
@@ -149,6 +234,10 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	// Behavioral panel roster (read-only)
 	h.mux.HandleFunc("/control/panel", h.handlePanel)
 
+	// Semantic decision status (read-only, authenticated like every
+	// /control/* route except /control/health)
+	h.mux.HandleFunc("/control/decision", h.handleDecision)
+
 	return h
 }
 
@@ -175,6 +264,12 @@ func (h *Handler) SetFingerprinter(fp FingerprintProvider) {
 // SetPanel sets the panel provider used to report the seated behavioral panel roster.
 func (h *Handler) SetPanel(p PanelProvider) {
 	h.panelProvider = p
+}
+
+// SetDecisionProvider sets the provider used to report semantic decision
+// status. Call it before serving starts.
+func (h *Handler) SetDecisionProvider(p DecisionProvider) {
+	h.decisionProvider = p
 }
 
 // reloadPolicyEngine applies current settings to the policy engine without restart
@@ -250,6 +345,35 @@ func (h *Handler) reloadPolicyEngine() {
 	}
 
 	h.policyEngine.ReloadConfig(cfg)
+	h.warnStaleDecisionCap(mode)
+}
+
+// warnStaleDecisionCap logs a WARN when a runtime policy.mode change no
+// longer matches semantic detection's effective mode. The policy.mode cap on
+// decision.mode is computed once at startup (decision.* keys are
+// restart-only), so after such a change the effective mode reported at
+// /control/decision is stale until restart. The policy engine's own mode
+// still governs whether its ladder acts.
+func (h *Handler) warnStaleDecisionCap(policyMode string) {
+	if h.decisionProvider == nil {
+		return
+	}
+	st := h.decisionProvider.DecisionStatus()
+	if st.Mode != "enforce" || (st.EffectiveMode != "enforce" && st.EffectiveMode != "audit") {
+		return
+	}
+	want := "enforce"
+	if policyMode == "audit" {
+		want = "audit"
+	}
+	if want != st.EffectiveMode {
+		slog.Warn("policy.mode changed at runtime; semantic detection keeps the effective mode computed at startup until restart",
+			"policy_mode", policyMode,
+			"decision_mode", st.Mode,
+			"decision_effective_mode", st.EffectiveMode,
+			"effective_mode_after_restart", want,
+		)
+	}
 }
 
 // ServeHTTP implements http.Handler
@@ -325,6 +449,12 @@ func secureCompare(a, b string) bool {
 // handleHealth handles GET /control/health
 // Returns minimal payload (status + timestamp) for liveness probes.
 // Version/CaptureMode available only via authenticated endpoints (/control/stats, /control/settings).
+//
+// When semantic detection is wired, it adds "decision": the capability enum
+// and a fixed, content-free reason for it, so an orchestrator can see a
+// degraded or async-only deployment. Model identity, checksums, the
+// architecture detail and every counter stay on the authenticated
+// /control/decision.
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -335,8 +465,33 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now(),
 	}
+	if h.decisionProvider != nil {
+		capability := h.decisionProvider.DecisionStatus().Capability
+		response["decision"] = map[string]string{
+			"capability": capability,
+			"reason":     healthCapabilityReason(capability),
+		}
+	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+// healthCapabilityReason is the unauthenticated, content-free reason for a
+// capability. It never carries the provider's own reason, which can name
+// file paths or load errors; /control/decision has that.
+func healthCapabilityReason(capability string) string {
+	switch capability {
+	case "inline":
+		return "accelerated inference is available; inline results can protect the current request"
+	case "async_only":
+		return "this build cannot meet an inline budget; results protect later activity only"
+	case "degraded":
+		return "semantic detection was enabled but the model could not be loaded or verified; no detection is active"
+	case "disabled":
+		return "semantic detection is off"
+	default:
+		return "unknown capability"
+	}
 }
 
 // handleStats handles GET /control/stats
@@ -435,6 +590,9 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 
 	snap := sess.Snapshot()
 	info := h.buildSessionInfo(&snap, sess)
+	// Detail path only: the snapshot already holds a deep copy taken under
+	// the session lock.
+	info.SemanticShadow = snap.SemanticShadow
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -529,6 +687,11 @@ type SessionInfo struct {
 	FailedBackends []string       `json:"failed_backends,omitempty"`
 	Terminated     bool           `json:"terminated,omitempty"`
 	MessageCount   int            `json:"message_count"`
+
+	// SemanticShadow is populated only on the single-session detail path.
+	// Fifty entries per session would bloat every list response, and
+	// calibration review happens one session at a time.
+	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
@@ -559,11 +722,12 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 		info.EndTime = snap.EndTime
 	}
 
-	// Enrich with policy engine data
+	// Enrich with policy engine data. Only two fields are needed, so read
+	// them directly rather than deep-copying the flagged session per row.
 	if h.policyEngine != nil {
-		if flagged := h.policyEngine.GetFlaggedSession(snap.ID); flagged != nil {
-			info.RiskScore = flagged.RiskScore
-			info.CurrentAction = flagged.CurrentAction
+		if score, action, ok := h.policyEngine.GetFlaggedSessionRisk(snap.ID); ok {
+			info.RiskScore = score
+			info.CurrentAction = action
 		}
 	}
 
@@ -733,6 +897,27 @@ type panelMemberOut struct {
 	Version string  `json:"version"`
 	Shadow  bool    `json:"shadow"`
 	Weight  float64 `json:"weight"`
+}
+
+// handleDecision handles GET /control/decision
+func (h *Handler) handleDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.decisionProvider == nil {
+		// Not wired means the feature is off. Report that, rather than 404:
+		// a dashboard needs to distinguish "disabled" from "missing route".
+		// The configured mode is unknown here; main always wires a provider
+		// that reports it.
+		writeJSON(w, http.StatusOK, DecisionStatus{
+			Capability:    "disabled",
+			EffectiveMode: "disabled",
+			CoverageGaps:  map[string]int64{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.decisionProvider.DecisionStatus())
 }
 
 // handlePanel handles GET /control/panel
@@ -995,6 +1180,12 @@ func (h *Handler) handlePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFlagged handles GET /control/flagged
+//
+// It lists the policy engine's flagged sessions: live sessions, plus ended
+// sessions retained because their ladder action was block or terminate
+// (policy.Engine.ReleaseFlaggedSession, bounded by
+// policy.MaxRetainedFlaggedSessions). Other ended sessions are released at
+// session end; their history is in SQLite when storage is enabled.
 func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

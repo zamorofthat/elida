@@ -65,6 +65,10 @@ type ViolationDetectedData struct {
 	Severity    string `json:"severity"`
 	Action      string `json:"action"`
 	MatchedText string `json:"matched_text,omitempty"` // May be redacted
+	// EvidenceOnly marks evidence recorded for correlation that contributed
+	// no risk (semantic audit mode, injection_elevated). Absent on older
+	// rows and on ordinary violations.
+	EvidenceOnly bool `json:"evidence_only,omitempty"`
 }
 
 // PolicyActionData contains data for policy_action events

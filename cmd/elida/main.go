@@ -24,6 +24,9 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/decision/embedded"
+	"elida/internal/decision/runner"
+	"elida/internal/decision/scheduler"
 	"elida/internal/fingerprint"
 	"elida/internal/instruction"
 	"elida/internal/instructionstore"
@@ -60,6 +63,25 @@ type app struct {
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
 	redactor            *redaction.PatternRedactor
+
+	// Semantic injection detection (see decision.go). All nil when
+	// decision.enabled is false; the provider alone is set when it started
+	// degraded, so its status stays visible.
+	decisionProvider  *embedded.Provider
+	decisionScheduler *scheduler.Inline
+	decisionRunner    *runner.Runner
+	// decisionPipeline overrides the embedded provider's inference backend.
+	// Nil in production (the pure-Go Hugot backend); tests set a fake.
+	decisionPipeline embedded.PipelineFactory
+	// decisionArch and decisionSIMD override the architecture and SIMD
+	// facts the provider judges its capability on. Empty/nil in production
+	// (the running binary's own); tests set them to pin a capability
+	// independent of the host.
+	decisionArch string
+	decisionSIMD *bool
+	// decisionSchedulerCfg is the configuration decisionScheduler was built
+	// with, kept for inspection.
+	decisionSchedulerCfg scheduler.Config
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -146,6 +168,7 @@ func main() {
 	a.initTelemetry()
 	a.initPolicyEngine()
 	a.initInstructionIntegrity()
+	a.initDecision()
 
 	// Start session manager (handles timeouts, cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -328,11 +351,18 @@ func (a *app) initPanel() {
 }
 
 func (a *app) initSessionEndCallback() {
-	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil && !a.cfg.Decision.Enabled {
 		return
 	}
 
 	a.manager.SetSessionEndCallback(func(sess *session.Session) {
+		// Release the session from the semantic runner first, so a late
+		// async result is dropped rather than recorded onto a session whose
+		// record is being built below.
+		if a.decisionRunner != nil {
+			a.decisionRunner.Unbind(sess)
+		}
+
 		snap := sess.Snapshot()
 		var endTime time.Time
 		if snap.EndTime != nil {
@@ -352,9 +382,12 @@ func (a *app) initSessionEndCallback() {
 			Backend:      snap.Backend,
 			ClientAddr:   snap.ClientAddr,
 			Metadata:     snap.Metadata,
+			// Shadow decisions carry no content, so redaction does not
+			// apply to them.
+			SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
 		}
 
-		a.enrichRecordFromPolicy(&record, snap.ID)
+		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
 		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
@@ -364,10 +397,30 @@ func (a *app) initSessionEndCallback() {
 		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
+
+		// The record is saved and exported, so the policy engine can let go
+		// of the session: its flagged entry, events and semantic dedup set
+		// would otherwise live for the whole process (alongside Unbind
+		// above, which releases the runner's side). A session at block or
+		// terminate is retained (bounded), so a client reusing its ID still
+		// meets that action; see policy.Engine.ReleaseFlaggedSession.
+		if a.policyEngine != nil {
+			a.policyEngine.ReleaseFlaggedSession(sess.ID)
+		}
 	})
 }
 
-func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string) {
+// enrichRecordFromPolicy adds the policy engine's captures and violations
+// for the ending session to its record.
+//
+// Only this session instance's violations are added. A violation that last
+// fired before start was carried over by a retained block/terminate entry
+// from an earlier session with the same ID; it is skipped here, at the
+// source, so neither SQLite events nor the OTEL/OCSF export (which are built
+// from this record) report it again for a session whose requests were all
+// refused. SQLite history still holds it: SaveSession carries it from the
+// stored row.
+func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string, start time.Time) {
 	if a.policyEngine == nil {
 		return
 	}
@@ -387,6 +440,9 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 		})
 	}
 	for _, v := range flagged.Violations {
+		if !v.Timestamp.IsZero() && v.Timestamp.Before(start) {
+			continue
+		}
 		record.Violations = append(record.Violations, storage.Violation{
 			RuleName:      v.RuleName,
 			Description:   v.Description,
@@ -396,6 +452,9 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			Timestamp:     v.Timestamp,
 		})
 	}
 }
@@ -525,12 +584,20 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 	}
 
 	for _, v := range record.Violations {
+		// Defense in depth: enrichRecordFromPolicy already drops violations
+		// carried over by a retained policy entry (a reused block/terminate
+		// session ID); their violation_detected event was emitted by the
+		// session they belong to.
+		if !v.Timestamp.IsZero() && v.Timestamp.Before(snap.StartTime) {
+			continue
+		}
 		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    v.Severity,
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:     v.RuleName,
+			Description:  v.Description,
+			Severity:     v.Severity,
+			MatchedText:  v.MatchedText,
+			Action:       v.Action,
+			EvidenceOnly: v.EvidenceOnly,
 		}); eventErr != nil {
 			slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
 		}
@@ -631,6 +698,7 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
 		})
 	}
 	for _, c := range record.CapturedContent {
@@ -822,6 +890,10 @@ func (a *app) initProxy() {
 	if a.redactor != nil {
 		proxyOpts = append(proxyOpts, proxy.WithRedactor(a.redactor))
 	}
+	if a.decisionRunner != nil {
+		proxyOpts = append(proxyOpts, proxy.WithSemanticAssessor(
+			semanticAssessorFunc(a.decisionRunner.AssessPolicyMessages)))
+	}
 	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
 		slog.Error("failed to create proxy", "error", err)
@@ -968,6 +1040,9 @@ func (a *app) initControlAPI() {
 	if a.panel != nil {
 		a.controlHandler.SetPanel(a.panel)
 	}
+	// Always wired, so the status reports the configured mode and why the
+	// feature is or is not running (disabled, degraded, mode-disabled).
+	a.controlHandler.SetDecisionProvider(a)
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
@@ -1049,6 +1124,12 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 			slog.Error("control server shutdown error", "error", err)
 		}
 	}
+
+	// Step 1b: No request can start semantic work any more. Drain queued
+	// semantic analysis, then close the provider. This runs before the
+	// session drain below, so async results still land on their sessions
+	// before those sessions are persisted.
+	a.shutdownDecision(shutdownCtx)
 
 	// Step 2: Stop the session manager background loop
 	cancel()
