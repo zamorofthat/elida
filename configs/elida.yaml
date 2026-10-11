@@ -416,3 +416,88 @@ websocket:
     #   - name: "my_bye"
     #     type: "bye"
     #     pattern: '"action":\s*"end_call"'
+
+# Semantic injection detection (disabled by default)
+#
+# Runs a local ONNX classifier over request-side user content and tool
+# results to catch paraphrased and encoded prompt injection that regex rules
+# miss. Decisions become ordinary policy violations and feed the existing
+# risk ladder; there is no second risk score.
+#
+# Enabling this loads ~90 MiB of model assets. With enabled: false nothing is
+# loaded and the request path is unchanged.
+decision:
+  # Load model assets and run assessments. Restart required.
+  enabled: false
+
+  # true: missing, invalid, or unsupported model assets fail startup.
+  # false: start in degraded mode and report an unhealthy capability.
+  # Restart required.
+  required: false
+
+  # disabled | shadow | audit | enforce
+  #   shadow  — decide and record for calibration; no violations, no risk
+  #   audit   — create evidence-only violations with diagnostic points only
+  #   enforce — calibrated violations drive the existing risk ladder
+  # policy.mode caps this: with policy.mode: audit, enforce behaves as audit.
+  mode: shadow
+
+  # embedded (in-process, air-gapped) or systemone (HTTP). Restart required —
+  # switching providers moves the data boundary.
+  provider: embedded
+
+  # Model directory: ONNX graph, tokenizer, config, manifest.json, model
+  # card, LICENSE. Restart required.
+  model_path: /etc/elida/models/injection
+
+  # systemone only. Setting this means request content leaves the deployment.
+  # endpoint: https://decide.internal/v1/score
+
+  # Versioned threshold artifact. Never a free-form number — thresholds are
+  # selected by version, not typed in.
+  threshold_set: v1
+
+  # Probability above which a sub-threshold injection score emits an
+  # injection_elevated evidence-only event. Contributes no risk.
+  elevated_threshold: 0.3
+
+  # Global inline deadline. Admission, preprocessing, tokenization and
+  # inference all draw from this one budget.
+  inline_timeout: 50ms
+
+  # Physical inference worker pool size.
+  max_concurrency: 2
+
+  # Must be 0ms: inline inference never waits for worker capacity. A message
+  # that cannot be admitted immediately falls back to the async path. A
+  # nonzero value is rejected at startup. Not editable at runtime in Phase 1;
+  # the value in force is shown read-only at /control/decision.
+  inline_queue_wait: 0ms
+
+  # Inline budget per request.
+  max_inline_tokens: 128
+  max_inline_windows: 1
+
+  # Bounded async continuation. Async results cannot block or recall a
+  # request that was already forwarded; they affect later activity.
+  max_async_windows: 8
+  async_queue_size: 100
+
+  # Which messages may attempt the inline fast lane. Admission also requires
+  # an immediately free worker and enough remaining deadline.
+  inline_admission:
+    untrusted_tool_results: true
+    encoded_or_obfuscated: true
+    weak_injection_signal: true
+    elevated_session_risk: true
+    broad_strict_mode: false
+
+  # Analysis-only preprocessing bounds. Derived representations are scored
+  # but never forwarded to the backend. Hitting a limit is a coverage gap,
+  # not a violation.
+  preprocessing:
+    max_input_bytes: 262144
+    max_analysis_bytes: 524288
+    max_representations: 8
+    max_decode_depth: 2
+    max_expansion_ratio: 4

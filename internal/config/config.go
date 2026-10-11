@@ -71,6 +71,7 @@ type Config struct {
 	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
 	Panel           PanelConfig              `yaml:"panel"`            // Behavioral panel configuration
 	Failover        FailoverConfig           `yaml:"failover"`         // Failover configuration
+	Decision        DecisionConfig           `yaml:"decision"`         // Semantic decision (injection detection) configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
 }
 
@@ -425,6 +426,84 @@ type FailoverConfig struct {
 	PreserveModel bool          `yaml:"preserve_model"` // Preserve model ID across failovers
 }
 
+// Decision operating modes. policy.mode caps decision.mode: with
+// policy.mode: audit, DecisionModeEnforce behaves as DecisionModeAudit.
+const (
+	DecisionModeDisabled = "disabled" // Do not load the provider or preprocess
+	DecisionModeShadow   = "shadow"   // Decide and record; no violations, no risk
+	DecisionModeAudit    = "audit"    // Evidence-only violations; no risk contribution
+	DecisionModeEnforce  = "enforce"  // Calibrated violations drive the existing ladder
+)
+
+// Ceilings on the runtime-editable decision settings. Validation refuses a
+// value that loosens a bound past its ceiling, so a dashboard edit cannot
+// turn a bounded resource into an unbounded one.
+//
+// The spec names two of these (max_decode_depth above 4, async_queue_size
+// above 10,000) and asks for "and similar" on the rest; the remaining
+// ceilings are chosen here and are not spec values.
+const (
+	MaxDecodeDepthCeiling     = 4
+	AsyncQueueSizeCeiling     = 10000
+	MaxConcurrencyCeiling     = 64
+	MaxInlineWindowsCeiling   = 64
+	MaxInlineTokensCeiling    = 8192
+	MaxAsyncWindowsCeiling    = 1024
+	MaxRepresentationsCeiling = 64
+	MaxExpansionRatioCeiling  = 64
+	MaxInputBytesCeiling      = 8 * 1024 * 1024
+	MaxAnalysisBytesCeiling   = 32 * 1024 * 1024
+)
+
+// DecisionConfig holds semantic injection-detection configuration.
+//
+// Restart-required keys (enabled, required, provider, model_path, endpoint)
+// load model assets or move the network boundary and live only here and in
+// ELIDA_DECISION_* env vars. Every other key is runtime-editable through
+// Settings (see settings.go: DecisionSettings).
+type DecisionConfig struct {
+	Enabled   bool   `yaml:"enabled"`    // Load model assets (default: false)
+	Required  bool   `yaml:"required"`   // true: bad assets fail startup; false: degraded mode
+	Mode      string `yaml:"mode"`       // disabled, shadow, audit, enforce (default: shadow)
+	Provider  string `yaml:"provider"`   // embedded or systemone (default: embedded)
+	ModelPath string `yaml:"model_path"` // Model directory (default: /etc/elida/models/injection)
+	Endpoint  string `yaml:"endpoint"`   // systemone only; content leaves the deployment
+
+	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1)
+	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
+	InlineTimeout     time.Duration `yaml:"inline_timeout"`     // Global inline deadline: admission, preprocessing, tokenization and inference (default: 50ms)
+	MaxConcurrency    int           `yaml:"max_concurrency"`    // Physical worker pool size (default: 2)
+	InlineQueueWait   time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
+	MaxInlineTokens   int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
+	MaxInlineWindows  int           `yaml:"max_inline_windows"` // Windows scored inline per request (default: 1)
+	MaxAsyncWindows   int           `yaml:"max_async_windows"`  // Windows queued per request (default: 8)
+	AsyncQueueSize    int           `yaml:"async_queue_size"`   // Bounded queue; overflow is a metric (default: 100)
+
+	InlineAdmission DecisionAdmissionConfig     `yaml:"inline_admission"`
+	Preprocessing   DecisionPreprocessingConfig `yaml:"preprocessing"`
+}
+
+// DecisionAdmissionConfig selects which messages may attempt the inline fast
+// lane. Admission also requires an immediately available worker and enough
+// remaining deadline; these flags only decide eligibility.
+type DecisionAdmissionConfig struct {
+	UntrustedToolResults bool `yaml:"untrusted_tool_results"` // default: true
+	EncodedOrObfuscated  bool `yaml:"encoded_or_obfuscated"`  // default: true
+	WeakInjectionSignal  bool `yaml:"weak_injection_signal"`  // default: true
+	ElevatedSessionRisk  bool `yaml:"elevated_session_risk"`  // default: true
+	BroadStrictMode      bool `yaml:"broad_strict_mode"`      // default: false
+}
+
+// DecisionPreprocessingConfig bounds analysis-only preprocessing. Hitting a
+// limit is a coverage gap, never a violation.
+type DecisionPreprocessingConfig struct {
+	MaxInputBytes      int `yaml:"max_input_bytes"`     // default: 262144
+	MaxAnalysisBytes   int `yaml:"max_analysis_bytes"`  // Aggregate across representations; default: 524288
+	MaxRepresentations int `yaml:"max_representations"` // Original plus derived; default: 8
+	MaxDecodeDepth     int `yaml:"max_decode_depth"`    // Nested decode recursion; default: 2
+	MaxExpansionRatio  int `yaml:"max_expansion_ratio"` // Decoded size relative to encoded; default: 4
+}
+
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
@@ -591,6 +670,36 @@ func defaults() *Config {
 		},
 		Panel: PanelConfig{
 			ToolChainArtifact: "", // not seated by default (unchanged behavior)
+		},
+		Decision: DecisionConfig{
+			Enabled:           false, // loads ~90 MiB of model assets; opt-in only
+			Required:          false, // degraded mode rather than fail-startup
+			Mode:              DecisionModeShadow,
+			Provider:          "embedded",
+			ModelPath:         "/etc/elida/models/injection",
+			ThresholdSet:      "v1",
+			ElevatedThreshold: 0.3,
+			InlineTimeout:     50 * time.Millisecond,
+			MaxConcurrency:    2,
+			InlineQueueWait:   0, // Phase 1: inline never waits for a worker
+			MaxInlineTokens:   128,
+			MaxInlineWindows:  1,
+			MaxAsyncWindows:   8,
+			AsyncQueueSize:    100,
+			InlineAdmission: DecisionAdmissionConfig{
+				UntrustedToolResults: true,
+				EncodedOrObfuscated:  true,
+				WeakInjectionSignal:  true,
+				ElevatedSessionRisk:  true,
+				BroadStrictMode:      false,
+			},
+			Preprocessing: DecisionPreprocessingConfig{
+				MaxInputBytes:      262144,
+				MaxAnalysisBytes:   524288,
+				MaxRepresentations: 8,
+				MaxDecodeDepth:     2,
+				MaxExpansionRatio:  4,
+			},
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -803,6 +912,24 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("ELIDA_OCSF_SYSLOG_INSECURE") == "true" {
 		c.OCSF.Syslog.TLS.InsecureSkipVerify = true
+	}
+
+	// Decision overrides — restart-required keys only. Runtime-editable keys
+	// (mode, thresholds, budgets) come from settings.yaml and the dashboard.
+	if os.Getenv("ELIDA_DECISION_ENABLED") == "true" {
+		c.Decision.Enabled = true
+	}
+	if os.Getenv("ELIDA_DECISION_REQUIRED") == "true" {
+		c.Decision.Required = true
+	}
+	if v := os.Getenv("ELIDA_DECISION_PROVIDER"); v != "" {
+		c.Decision.Provider = v
+	}
+	if v := os.Getenv("ELIDA_DECISION_MODEL_PATH"); v != "" {
+		c.Decision.ModelPath = v
+	}
+	if v := os.Getenv("ELIDA_DECISION_ENDPOINT"); v != "" {
+		c.Decision.Endpoint = v
 	}
 
 	// Storage overrides
@@ -1158,6 +1285,12 @@ func (c *Config) Validate() *ValidationResult {
 		}
 	}
 
+	// Semantic decision configuration
+	if de, dw := validateDecision(c); len(de) > 0 || len(dw) > 0 {
+		errors = append(errors, de...)
+		warnings = append(warnings, dw...)
+	}
+
 	// Build result
 	result.Errors = errors
 	result.Warnings = warnings
@@ -1185,6 +1318,147 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	return result
+}
+
+// validateDecision checks the semantic decision configuration. It returns
+// errors and warnings to append to the ValidationResult. A disabled feature
+// is not validated: nothing is loaded and nothing runs, so its settings are
+// inert and must not be able to fail startup.
+func validateDecision(c *Config) (errs, warns []ValidationError) {
+	d := c.Decision
+	if !d.Enabled {
+		return nil, nil
+	}
+
+	switch d.Mode {
+	case DecisionModeDisabled, DecisionModeShadow, DecisionModeAudit, DecisionModeEnforce:
+	default:
+		errs = append(errs, ValidationError{
+			Field:   "decision.mode",
+			Message: fmt.Sprintf("unknown mode %q", d.Mode),
+			Hint:    "one of: disabled, shadow, audit, enforce",
+		})
+	}
+
+	switch d.Provider {
+	case "embedded":
+		if d.ModelPath == "" {
+			errs = append(errs, ValidationError{
+				Field:   "decision.model_path",
+				Message: "required for the embedded provider",
+				Hint:    "e.g., /etc/elida/models/injection",
+			})
+		}
+	case "systemone":
+		if d.Endpoint == "" {
+			errs = append(errs, ValidationError{
+				Field:   "decision.endpoint",
+				Message: "required for the systemone provider",
+				Hint:    "e.g., https://decide.internal/v1/score",
+			})
+		} else {
+			warns = append(warns, ValidationError{
+				Field:   "decision.endpoint",
+				Message: "a network provider is configured: request content leaves the deployment boundary",
+				Hint:    "document the provider's retention and data-use terms before enabling",
+			})
+		}
+	default:
+		errs = append(errs, ValidationError{
+			Field:   "decision.provider",
+			Message: fmt.Sprintf("unknown provider %q", d.Provider),
+			Hint:    "one of: embedded, systemone",
+		})
+	}
+
+	if d.ThresholdSet == "" {
+		errs = append(errs, ValidationError{
+			Field:   "decision.threshold_set",
+			Message: "required: thresholds are a versioned artifact, never a free-form number",
+			Hint:    `e.g., "v1"`,
+		})
+	}
+	if d.ElevatedThreshold < 0 || d.ElevatedThreshold > 1 {
+		errs = append(errs, ValidationError{
+			Field:   "decision.elevated_threshold",
+			Message: fmt.Sprintf("%v is outside 0..1", d.ElevatedThreshold),
+		})
+	}
+	if d.InlineTimeout <= 0 {
+		errs = append(errs, ValidationError{
+			Field:   "decision.inline_timeout",
+			Message: fmt.Sprintf("%v must be greater than zero", d.InlineTimeout),
+			Hint:    "the global inline deadline covers admission, preprocessing and inference; e.g., 50ms",
+		})
+	}
+	if d.InlineQueueWait != 0 {
+		errs = append(errs, ValidationError{
+			Field:   "decision.inline_queue_wait",
+			Message: fmt.Sprintf("%v is invalid: inline inference must never wait for worker capacity in Phase 1", d.InlineQueueWait),
+			Hint:    "set 0ms; a message that cannot be admitted immediately falls back to the bounded async path",
+		})
+	}
+
+	// Bounded integers: every one has a floor of 1 and a ceiling, so no
+	// setting can be driven negative or made effectively unbounded.
+	type bound struct {
+		field   string
+		value   int
+		min     int
+		ceiling int
+	}
+	for _, b := range []bound{
+		{"decision.max_concurrency", d.MaxConcurrency, 1, MaxConcurrencyCeiling},
+		{"decision.max_inline_tokens", d.MaxInlineTokens, 1, MaxInlineTokensCeiling},
+		{"decision.max_inline_windows", d.MaxInlineWindows, 1, MaxInlineWindowsCeiling},
+		{"decision.max_async_windows", d.MaxAsyncWindows, 0, MaxAsyncWindowsCeiling},
+		{"decision.async_queue_size", d.AsyncQueueSize, 1, AsyncQueueSizeCeiling},
+		{"decision.preprocessing.max_input_bytes", d.Preprocessing.MaxInputBytes, 1, MaxInputBytesCeiling},
+		{"decision.preprocessing.max_analysis_bytes", d.Preprocessing.MaxAnalysisBytes, 1, MaxAnalysisBytesCeiling},
+		{"decision.preprocessing.max_representations", d.Preprocessing.MaxRepresentations, 1, MaxRepresentationsCeiling},
+		{"decision.preprocessing.max_decode_depth", d.Preprocessing.MaxDecodeDepth, 0, MaxDecodeDepthCeiling},
+		{"decision.preprocessing.max_expansion_ratio", d.Preprocessing.MaxExpansionRatio, 1, MaxExpansionRatioCeiling},
+	} {
+		if b.value < b.min {
+			errs = append(errs, ValidationError{
+				Field:   b.field,
+				Message: fmt.Sprintf("%d is below the minimum of %d", b.value, b.min),
+			})
+			continue
+		}
+		if b.value > b.ceiling {
+			errs = append(errs, ValidationError{
+				Field:   b.field,
+				Message: fmt.Sprintf("%d exceeds the ceiling of %d", b.value, b.ceiling),
+				Hint:    "bounds may be tightened but never loosened past their ceiling",
+			})
+		}
+	}
+
+	// Internal consistency.
+	if d.Preprocessing.MaxAnalysisBytes < d.Preprocessing.MaxInputBytes {
+		errs = append(errs, ValidationError{
+			Field:   "decision.preprocessing.max_analysis_bytes",
+			Message: fmt.Sprintf("%d is below max_input_bytes (%d): the original representation alone would exceed the aggregate budget", d.Preprocessing.MaxAnalysisBytes, d.Preprocessing.MaxInputBytes),
+		})
+	}
+
+	// policy.mode caps decision.mode.
+	if d.Mode == DecisionModeEnforce && c.Policy.Enabled && c.Policy.Mode == "audit" {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: "enforce is capped to audit because policy.mode is audit",
+			Hint:    "set policy.mode: enforce to let semantic violations drive the ladder",
+		})
+	}
+	if d.Mode == DecisionModeEnforce {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: "enforce requires recorded calibration evidence for the loaded model and threshold set",
+			Hint:    "run shadow, then audit, and have the threshold artifact reviewed before enforcing",
+		})
+	}
+	return errs, warns
 }
 
 // HasMultiBackend returns true if multi-backend configuration is present

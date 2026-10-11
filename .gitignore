@@ -67,6 +67,11 @@ credentials/
 .elida/
 /elida
 
+# Generated model artifacts (built by scripts/models/build.sh; ~90 MiB float32)
+/models/
+# Model build scratch (upstream downloads, the conversion virtualenv)
+/build/
+
 # Internal docs
 elida-internal/
 .claude/
