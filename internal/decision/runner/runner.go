@@ -678,6 +678,10 @@ func (r *Runner) validateLive(l Live) error {
 	return nil
 }
 
+// CheckLive reports whether Reconfigure(l) would succeed, without changing
+// anything. The settings API uses it to refuse a save before it is written.
+func (r *Runner) CheckLive(l Live) error { return r.validateLive(l) }
+
 // Reconfigure replaces the runtime-editable configuration. Thresholds, the
 // model identity, the scheduler and the policy recorder are fixed at New.
 // It is all-or-nothing: an invalid l is refused and the configuration in

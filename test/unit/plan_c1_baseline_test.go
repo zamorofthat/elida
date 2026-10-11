@@ -175,18 +175,3 @@ func TestBaselineC1_SettingsPUTReloadsPolicyMode(t *testing.T) {
 		t.Fatal("policy.mode audit must apply at runtime")
 	}
 }
-
-// FLIP in Task 6. Today a PUT may change a restart-only decision key; it
-// is saved to settings.yaml and silently never applied.
-func TestBaselineC1_SettingsPUTAcceptsRestartOnlyDecisionKeys(t *testing.T) {
-	h, ss := settingsHandler(t, nil)
-	w := doJSON(t, h, http.MethodPut, "/control/settings", map[string]any{
-		"decision": map[string]any{"max_concurrency": 2},
-	})
-	if w.Code != http.StatusOK {
-		t.Fatalf("PUT: %d %s", w.Code, w.Body.String())
-	}
-	if got := ss.GetMerged().Decision.MaxConcurrency; got == nil || *got != 2 {
-		t.Fatalf("today the value is saved: %v", got)
-	}
-}

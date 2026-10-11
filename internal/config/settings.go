@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -212,6 +213,105 @@ func (s DecisionSettings) ApplyTo(d DecisionConfig, policyMode string) (Decision
 	d.InlineQueueWait = 0
 	return d, rejected
 }
+
+// DecisionRestartOnlyKeys are the DecisionSettings keys that cannot change at
+// runtime (plan D5, D6). A settings save that changes one is refused; a stale
+// value already in settings.yaml never takes effect. The runtime-editable
+// keys are decision.mode and decision.preprocessing.*.
+var DecisionRestartOnlyKeys = map[string]bool{
+	"decision.threshold_set":      true,
+	"decision.elevated_threshold": true,
+	"decision.inline_timeout_ms":  true,
+	"decision.max_concurrency":    true,
+	"decision.max_inline_tokens":  true,
+	"decision.max_inline_windows": true,
+	"decision.max_async_windows":  true,
+	"decision.async_queue_size":   true,
+}
+
+// DecisionSettingChange is one changed decision key, values rendered with %v
+// ("" for unset). Values are configuration, never content.
+type DecisionSettingChange struct{ Key, Previous, New string }
+
+// flatDecision renders every DecisionSettings key as "decision.<json name>"
+// to its value ("" for unset).
+func flatDecision(s DecisionSettings) map[string]string {
+	str := func(p any) string {
+		switch v := p.(type) {
+		case *string:
+			if v != nil {
+				return *v
+			}
+		case *int:
+			if v != nil {
+				return fmt.Sprint(*v)
+			}
+		case *float64:
+			if v != nil {
+				return fmt.Sprint(*v)
+			}
+		}
+		return ""
+	}
+	m := map[string]string{
+		"decision.mode":               str(s.Mode),
+		"decision.threshold_set":      str(s.ThresholdSet),
+		"decision.elevated_threshold": str(s.ElevatedThreshold),
+		"decision.inline_timeout_ms":  str(s.InlineTimeoutMs),
+		"decision.max_concurrency":    str(s.MaxConcurrency),
+		"decision.max_inline_tokens":  str(s.MaxInlineTokens),
+		"decision.max_inline_windows": str(s.MaxInlineWindows),
+		"decision.max_async_windows":  str(s.MaxAsyncWindows),
+		"decision.async_queue_size":   str(s.AsyncQueueSize),
+	}
+	p := s.Preprocessing
+	if p == nil {
+		p = &DecisionPreprocessingSettings{}
+	}
+	m["decision.preprocessing.max_input_bytes"] = str(p.MaxInputBytes)
+	m["decision.preprocessing.max_analysis_bytes"] = str(p.MaxAnalysisBytes)
+	m["decision.preprocessing.max_representations"] = str(p.MaxRepresentations)
+	m["decision.preprocessing.max_decode_depth"] = str(p.MaxDecodeDepth)
+	m["decision.preprocessing.max_expansion_ratio"] = str(p.MaxExpansionRatio)
+	return m
+}
+
+// DecisionSettingsChanges lists the decision keys whose merged value differs
+// between prev and next, sorted by key.
+func DecisionSettingsChanges(prev, next DecisionSettings) []DecisionSettingChange {
+	a, b := flatDecision(prev), flatDecision(next)
+	var out []DecisionSettingChange
+	for k, nv := range b {
+		if a[k] != nv {
+			out = append(out, DecisionSettingChange{Key: k, Previous: a[k], New: nv})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
+// ValidateDecisionEdit returns why next cannot replace prev (empty when it
+// can): a restart-only key changed (plan D11), or decision.mode changed to
+// enforce while nextPolicyMode is audit (plan D8). Runtime facts (is
+// semantic detection running, does the threshold set match) are the
+// configurer's to check.
+func ValidateDecisionEdit(prev, next DecisionSettings, nextPolicyMode string) []string {
+	var problems []string
+	for _, c := range DecisionSettingsChanges(prev, next) {
+		if DecisionRestartOnlyKeys[c.Key] {
+			problems = append(problems, fmt.Sprintf("%s is restart-only: set it in elida.yaml and restart (it cannot change from %q to %q at runtime)", c.Key, c.Previous, c.New))
+		}
+		if c.Key == "decision.mode" && c.New == DecisionModeEnforce && nextPolicyMode == "audit" {
+			problems = append(problems, "decision.mode: enforce is refused while policy.mode is audit")
+		}
+	}
+	return problems
+}
+
+// ReservedRuleName reports whether name is a rule name the semantic decision
+// runner records violations under. No policy rule, from elida.yaml or from a
+// settings save, may use one.
+func ReservedRuleName(name string) bool { return reservedSemanticRuleNames[name] }
 
 // SettingsStore manages settings with layered configuration
 type SettingsStore struct {
@@ -436,6 +536,15 @@ func (s *SettingsStore) GetMerged() Settings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return mergeSettings(s.defaults, s.local)
+}
+
+// PreviewMerged returns what GetMerged would return after SaveLocal(local),
+// without saving.
+func (s *SettingsStore) PreviewMerged(local Settings) Settings {
+	s.mu.RLock()
+	defaults := s.defaults
+	s.mu.RUnlock()
+	return mergeSettings(defaults, local)
 }
 
 // SaveLocal saves user customizations
@@ -750,6 +859,13 @@ func mergeSettings(defaults, local Settings) Settings {
 
 	// Merge risk ladder
 	if local.Policy.RiskLadder != nil {
+		// Copy before writing: merged shares defaults' pointers, and
+		// writing through them would change the store's defaults (and race
+		// with readers holding only the read lock).
+		if merged.Policy.RiskLadder != nil {
+			cp := *merged.Policy.RiskLadder
+			merged.Policy.RiskLadder = &cp
+		}
 		if merged.Policy.RiskLadder == nil {
 			merged.Policy.RiskLadder = &RiskLadderSettings{}
 		}
@@ -773,6 +889,11 @@ func mergeSettings(defaults, local Settings) Settings {
 
 	// Merge instruction integrity settings
 	if local.Policy.InstructionIntegrity != nil {
+		// Copy before writing, as for the risk ladder above.
+		if merged.Policy.InstructionIntegrity != nil {
+			cp := *merged.Policy.InstructionIntegrity
+			merged.Policy.InstructionIntegrity = &cp
+		}
 		if merged.Policy.InstructionIntegrity == nil {
 			merged.Policy.InstructionIntegrity = &InstructionIntegritySettings{}
 		}
