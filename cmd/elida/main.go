@@ -675,7 +675,31 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	if !a.tp.Enabled() && a.ocsfEmitter == nil {
 		return
 	}
+	a.tp.ExportSessionRecord(context.Background(), telemetryRecordFrom(record, snap, endTime, integrity))
+}
 
+// telemetrySemantic converts stored semantic metadata for export. The fields
+// are listed explicitly rather than converted, so storage and telemetry can
+// evolve their mirror types independently.
+func telemetrySemantic(s *storage.SemanticEvidence) *telemetry.SemanticMetadata {
+	if s == nil {
+		return nil
+	}
+	m := telemetry.SemanticMetadata{
+		Signal: s.Signal, Probability: s.Probability, AuxProbability: s.AuxProbability, Vetoed: s.Vetoed,
+		Model: s.Model, ModelVersion: s.ModelVersion, ModelChecksum: s.ModelChecksum, ThresholdSet: s.ThresholdSet,
+		DecisionID: s.DecisionID, Transform: s.Transform, TransformDepth: s.TransformDepth,
+		WindowStartByte: s.WindowStartByte, WindowEndByte: s.WindowEndByte, CoverageComplete: s.CoverageComplete,
+		ExecutionMode: s.ExecutionMode, ProtectionScope: s.ProtectionScope,
+	}
+	return &m
+}
+
+// telemetryRecordFrom builds the telemetry export record from the stored
+// record. It is pure, so the content-free guarantee is testable without an
+// exporter. The record's violations are already limited to the ending
+// session instance (enrichRecordFromPolicy).
+func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, endTime time.Time, integrity *storage.SDRIntegrity) telemetry.SessionRecord {
 	telemRecord := telemetry.SessionRecord{
 		SessionID:    snap.ID,
 		State:        snap.State.String(),
@@ -706,6 +730,8 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
 			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			Semantic:      telemetrySemantic(v.Semantic),
 		})
 	}
 	for _, c := range record.CapturedContent {
@@ -718,7 +744,7 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			StatusCode:   c.StatusCode,
 		})
 	}
-	a.tp.ExportSessionRecord(context.Background(), telemRecord)
+	return telemRecord
 }
 
 func (a *app) initOCSF() {

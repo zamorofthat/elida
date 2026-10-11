@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -353,6 +354,10 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		attribute.String("elida.violation.description", v.Description),
 		attribute.Bool("elida.violation.evidence_only", v.EvidenceOnly),
 	)
+	if v.Semantic != nil {
+		rec.AddAttributes(attribute.String("elida.violation.event_id", safeToken(v.EventID)))
+		rec.AddAttributes(semanticAttributes("elida.semantic.", *v.Semantic)...)
+	}
 
 	// Trace correlation
 	setTraceContext(&rec, ctx)
@@ -630,6 +635,81 @@ type Violation struct {
 	// informational severity, and leave it out of the session's max
 	// severity, so a SIEM never reads audit evidence as a finding.
 	EvidenceOnly bool
+	// EventID is the policy engine's stable ID for the occurrence behind
+	// this violation. It is exported for semantic violations only.
+	EventID string
+	// Semantic is the representative decision's metadata for a semantic
+	// rule: scores, identifiers and offsets, never content. Every string in
+	// it is exported through safeToken.
+	Semantic *SemanticMetadata
+}
+
+// SemanticMetadata is a semantic decision's metadata for export, the
+// telemetry mirror of storage.SemanticEvidence: scores, identifiers and
+// offsets, never request content.
+type SemanticMetadata struct {
+	Signal           string
+	Probability      float64
+	AuxProbability   float64
+	Vetoed           bool
+	Model            string
+	ModelVersion     string
+	ModelChecksum    string
+	ThresholdSet     string
+	DecisionID       string
+	Transform        string
+	TransformDepth   int
+	WindowStartByte  int
+	WindowEndByte    int
+	CoverageComplete bool
+	ExecutionMode    string
+	ProtectionScope  string
+}
+
+// semanticTokenRE matches the identifier-shaped values semantic metadata
+// legitimately holds: decision IDs, model names and versions, checksums,
+// transform chains ("base64_decode>url_decode"), threshold sets, modes and
+// scopes. Free text (anything with a space, newline, quote or non-ASCII
+// letter) does not match.
+var semanticTokenRE = regexp.MustCompile(`^[A-Za-z0-9._:>+/=-]{1,128}$`)
+
+// safeToken returns s if it is identifier-shaped, else "". It is the
+// redaction guard for semantic metadata: whatever a future caller puts in a
+// string field, request content cannot leave through it.
+func safeToken(s string) string {
+	if semanticTokenRE.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+// semanticAttrNames is the export allowlist, in export order. Span events
+// prefix it with "semantic.", logs with "elida.semantic."; OCSF uses the
+// bare names inside unmapped."elida.semantic".
+var semanticAttrNames = []string{"signal", "probability", "aux_probability", "vetoed", "model", "model_version",
+	"model_checksum", "threshold_set", "decision_id", "transform", "transform_depth", "window_start_byte",
+	"window_end_byte", "coverage_complete", "execution_mode", "protection_scope"}
+
+// semanticAttributes renders m as attributes named prefix+semanticAttrNames.
+func semanticAttributes(prefix string, m SemanticMetadata) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(prefix+"signal", safeToken(m.Signal)),
+		attribute.Float64(prefix+"probability", m.Probability),
+		attribute.Float64(prefix+"aux_probability", m.AuxProbability),
+		attribute.Bool(prefix+"vetoed", m.Vetoed),
+		attribute.String(prefix+"model", safeToken(m.Model)),
+		attribute.String(prefix+"model_version", safeToken(m.ModelVersion)),
+		attribute.String(prefix+"model_checksum", safeToken(m.ModelChecksum)),
+		attribute.String(prefix+"threshold_set", safeToken(m.ThresholdSet)),
+		attribute.String(prefix+"decision_id", safeToken(m.DecisionID)),
+		attribute.String(prefix+"transform", safeToken(m.Transform)),
+		attribute.Int(prefix+"transform_depth", m.TransformDepth),
+		attribute.Int(prefix+"window_start_byte", m.WindowStartByte),
+		attribute.Int(prefix+"window_end_byte", m.WindowEndByte),
+		attribute.Bool(prefix+"coverage_complete", m.CoverageComplete),
+		attribute.String(prefix+"execution_mode", safeToken(m.ExecutionMode)),
+		attribute.String(prefix+"protection_scope", safeToken(m.ProtectionScope)),
+	}
 }
 
 // exportedSeverity is the severity a violation is exported at: its own,
@@ -815,16 +895,21 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 
 	// Add individual violation events for detailed tracking
 	for _, v := range record.Violations {
-		span.AddEvent("policy.violation",
-			trace.WithAttributes(
-				attribute.String("rule_name", v.RuleName),
-				attribute.String("description", v.Description),
-				attribute.String("severity", v.Severity),
-				attribute.String("matched_text", p.redact(v.MatchedText)),
-				attribute.String("action", v.Action),
-				attribute.Bool("evidence_only", v.EvidenceOnly),
-			),
-		)
+		attrs := []attribute.KeyValue{
+			attribute.String("rule_name", v.RuleName),
+			attribute.String("description", v.Description),
+			attribute.String("severity", v.Severity),
+			attribute.String("matched_text", p.redact(v.MatchedText)),
+			attribute.String("action", v.Action),
+			attribute.Bool("evidence_only", v.EvidenceOnly),
+		}
+		// Only a semantic violation carries semantic metadata, so a plain
+		// violation keeps exactly its key set.
+		if v.Semantic != nil {
+			attrs = append(attrs, attribute.String("event_id", safeToken(v.EventID)))
+			attrs = append(attrs, semanticAttributes("semantic.", *v.Semantic)...)
+		}
+		span.AddEvent("policy.violation", trace.WithAttributes(attrs...))
 	}
 
 	// Add captured request/response events
