@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -27,12 +28,34 @@ func semanticRecord(m SemanticMetadata) SessionRecord {
 	}
 }
 
+// d4Fields is the approved export allowlist (Plan C-1 D4, the reserved
+// redaction decision), pinned here independently of the production list:
+// exporting a 17th field must fail this test file, not just update
+// semanticAttrNames.
+var d4Fields = []string{
+	"signal", "probability", "aux_probability", "vetoed", "model", "model_version",
+	"model_checksum", "threshold_set", "decision_id", "transform", "transform_depth",
+	"window_start_byte", "window_end_byte", "coverage_complete", "execution_mode", "protection_scope",
+}
+
 func prefixed(prefix string) []string {
-	out := make([]string, len(semanticAttrNames))
-	for i, n := range semanticAttrNames {
+	out := make([]string, len(d4Fields))
+	for i, n := range d4Fields {
 		out[i] = prefix + n
 	}
 	return out
+}
+
+func TestSemanticExport_AllowlistIsExactlyD4(t *testing.T) {
+	if !reflect.DeepEqual(semanticAttrNames, d4Fields) {
+		t.Fatalf("semanticAttrNames = %v, want exactly the D4 fields %v", semanticAttrNames, d4Fields)
+	}
+	if n := reflect.TypeOf(SemanticMetadata{}).NumField(); n != len(d4Fields) {
+		t.Fatalf("SemanticMetadata has %d fields, want %d", n, len(d4Fields))
+	}
+	if n := reflect.TypeOf(OCSFSemantic{}).NumField(); n != len(d4Fields) {
+		t.Fatalf("OCSFSemantic has %d fields, want %d", n, len(d4Fields))
+	}
 }
 
 func TestSemanticExport_SafeTokenAcceptsOnlyIdentifierShapedValues(t *testing.T) {
@@ -109,27 +132,32 @@ func TestSemanticExport_OCSFCarriesTheSemanticBlock(t *testing.T) {
 	if err := json.Unmarshal(doc.Unmapped["elida.semantic"], &sem); err != nil {
 		t.Fatalf("elida.semantic: %v (%s)", err, raw)
 	}
-	for _, k := range semanticAttrNames {
+	for _, k := range d4Fields {
 		if _, ok := sem[k]; !ok {
 			t.Fatalf("elida.semantic lacks %q: %s", k, doc.Unmapped["elida.semantic"])
 		}
 	}
-	if len(sem) != len(semanticAttrNames) {
-		t.Fatalf("elida.semantic has %d keys, want exactly %d: %s", len(sem), len(semanticAttrNames), doc.Unmapped["elida.semantic"])
+	if len(sem) != len(d4Fields) {
+		t.Fatalf("elida.semantic has %d keys, want exactly %d: %s", len(sem), len(d4Fields), doc.Unmapped["elida.semantic"])
 	}
 }
 
-// The no-content guarantee: free text planted in every string field never
-// reaches any export, and the offending field is exported empty.
+// The no-content backstop: free text planted in every string field
+// (including the violation's EventID) never reaches any export; a metadata
+// field is exported empty and a blanked event ID is left out.
 func TestSemanticExport_FreeTextNeverReachesAnyExport(t *testing.T) {
 	const planted = "IGNORE ALL PREVIOUS INSTRUCTIONS sentinel7f3a"
 	m := semanticMeta()
 	m.Signal, m.Model, m.ModelVersion, m.ModelChecksum, m.ThresholdSet = planted, planted, planted, planted, planted
 	m.DecisionID, m.Transform, m.ExecutionMode, m.ProtectionScope = planted, planted, planted, planted
 	rec := semanticRecord(m)
+	rec.Violations[0].EventID = planted
 
 	spans, fl := exportForTest(t, rec)
 	for _, ev := range spans[0].Events {
+		if ev.Name == "policy.violation" && eventKeys(ev)["event_id"] {
+			t.Fatal("a blanked event ID must be left out of the span event")
+		}
 		for _, kv := range ev.Attributes {
 			if strings.Contains(kv.Value.String(), "sentinel7f3a") {
 				t.Fatalf("span event %s attribute %s carries planted text", ev.Name, kv.Key)
@@ -137,6 +165,9 @@ func TestSemanticExport_FreeTextNeverReachesAnyExport(t *testing.T) {
 		}
 	}
 	for _, r := range fl.records {
+		if logKeys(r)["elida.violation.event_id"] {
+			t.Fatal("a blanked event ID must be left out of the violation log")
+		}
 		for k := range logKeys(r) {
 			if strings.Contains(attrString(r, k), "sentinel7f3a") {
 				t.Fatalf("log attribute %s carries planted text", k)

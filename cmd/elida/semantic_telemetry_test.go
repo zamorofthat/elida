@@ -57,7 +57,21 @@ func semanticAuditApp(t *testing.T) (*app, string) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
-	return a, "sess-sem-telemetry"
+	// Both decisions this request produces (tool and user message) are
+	// scored async and delivered through Runner.OnAsync, which exposes no
+	// test gate, so wait for the policy engine to record them.
+	const id = "sess-sem-telemetry"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if fs := a.policyEngine.GetFlaggedSession(id); fs != nil && len(fs.SemanticDecisions) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("async semantic decisions never arrived")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return a, id
 }
 
 func TestTelemetryRecord_CarriesSemanticMetadataAndNoContent(t *testing.T) {

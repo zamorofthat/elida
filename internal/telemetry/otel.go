@@ -355,7 +355,10 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		attribute.Bool("elida.violation.evidence_only", v.EvidenceOnly),
 	)
 	if v.Semantic != nil {
-		rec.AddAttributes(attribute.String("elida.violation.event_id", safeToken(v.EventID)))
+		// A blanked event ID is left out, as in the OCSF finding.
+		if id := safeToken(v.EventID); id != "" {
+			rec.AddAttributes(attribute.String("elida.violation.event_id", id))
+		}
 		rec.AddAttributes(semanticAttributes("elida.semantic.", *v.Semantic)...)
 	}
 
@@ -673,9 +676,14 @@ type SemanticMetadata struct {
 // letter) does not match.
 var semanticTokenRE = regexp.MustCompile(`^[A-Za-z0-9._:>+/=-]{1,128}$`)
 
-// safeToken returns s if it is identifier-shaped, else "". It is the
-// redaction guard for semantic metadata: whatever a future caller puts in a
-// string field, request content cannot leave through it.
+// safeToken returns s if it is identifier-shaped, else "". It is a shape
+// backstop for semantic metadata, not a proof that content cannot leave: it
+// rejects free text (spaces, newlines and other control characters, quotes,
+// non-ASCII) and anything over 128 bytes, but an identifier-shaped string
+// passes whatever it encodes. The privacy argument is the sources: every
+// exported field comes from the model manifest, config, hex IDs or the
+// fixed preprocess transform names (the longest chain is 87 bytes), so the
+// fields must keep being populated only from those.
 func safeToken(s string) string {
 	if semanticTokenRE.MatchString(s) {
 		return s
@@ -906,7 +914,10 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 		// Only a semantic violation carries semantic metadata, so a plain
 		// violation keeps exactly its key set.
 		if v.Semantic != nil {
-			attrs = append(attrs, attribute.String("event_id", safeToken(v.EventID)))
+			// A blanked event ID is left out, as in the OCSF finding.
+			if id := safeToken(v.EventID); id != "" {
+				attrs = append(attrs, attribute.String("event_id", id))
+			}
 			attrs = append(attrs, semanticAttributes("semantic.", *v.Semantic)...)
 		}
 		span.AddEvent("policy.violation", trace.WithAttributes(attrs...))
