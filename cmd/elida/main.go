@@ -734,6 +734,23 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 			Semantic:      telemetrySemantic(v.Semantic),
 		})
 	}
+	for _, d := range record.SemanticDecisions {
+		// Decisions carried from before this session instance started were
+		// exported by the session they belong to (see enrichRecordFromPolicy).
+		if !d.Timestamp.IsZero() && d.Timestamp.Before(snap.StartTime) {
+			continue
+		}
+		var m telemetry.SemanticMetadata
+		if p := telemetrySemantic(&d.Evidence); p != nil {
+			m = *p
+		}
+		telemRecord.SemanticDecisions = append(telemRecord.SemanticDecisions, telemetry.SemanticDecision{
+			EventID: d.EventID, RuleName: d.RuleName, EventCategory: d.EventCategory, Severity: d.Severity,
+			SourceRole: d.SourceRole, MessageIndex: d.MessageIndex, EvidenceOnly: d.EvidenceOnly,
+			WouldContributePoints: d.WouldContributePoints, Timestamp: d.Timestamp, Metadata: m,
+		})
+	}
+	telemRecord.SemanticDecisionsDropped = record.SemanticDecisionsDropped
 	for _, c := range record.CapturedContent {
 		telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
 			Timestamp:    c.Timestamp.Format(time.RFC3339),

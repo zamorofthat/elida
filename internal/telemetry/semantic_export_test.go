@@ -5,6 +5,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	otellog "go.opentelemetry.io/otel/log"
 )
 
 func semanticMeta() SemanticMetadata {
@@ -177,5 +180,109 @@ func TestSemanticExport_FreeTextNeverReachesAnyExport(t *testing.T) {
 	raw, _ := json.Marshal(BuildPolicyDetection(rec.SessionID, rec.Violations[0], rec))
 	if strings.Contains(string(raw), "sentinel7f3a") {
 		t.Fatalf("OCSF finding carries planted text: %s", raw)
+	}
+}
+
+func decisionRecord(m SemanticMetadata) SessionRecord {
+	rec := semanticRecord(m)
+	rec.SemanticDecisions = []SemanticDecision{
+		{EventID: "evt_1", RuleName: "semantic_injection", EventCategory: "semantic_injection", Severity: "warning",
+			SourceRole: "tool", MessageIndex: 1, Timestamp: time.Now(), Metadata: m},
+		{EventID: "evt_2", RuleName: "injection_elevated", EventCategory: "injection_elevated", Severity: "critical",
+			SourceRole: "user", MessageIndex: 2, EvidenceOnly: true, WouldContributePoints: 10, Timestamp: time.Now(), Metadata: m},
+	}
+	rec.SemanticDecisionsDropped = 3
+	return rec
+}
+
+func TestSemanticExport_OneLogPerStoredDecision(t *testing.T) {
+	spans, fl := exportForTest(t, decisionRecord(semanticMeta()))
+
+	var count, dropped int64 = -1, -1
+	for _, kv := range spans[0].Attributes {
+		switch string(kv.Key) {
+		case AttrSemanticDecisionCount:
+			count = kv.Value.AsInt64()
+		case AttrSemanticDecisionDropped:
+			dropped = kv.Value.AsInt64()
+		}
+	}
+	if count != 2 || dropped != 3 {
+		t.Fatalf("span count=%d dropped=%d, want 2 and 3", count, dropped)
+	}
+
+	want := append([]string{
+		"gen_ai.conversation.id", "gen_ai.provider.name", "gen_ai.request.model",
+		"elida.semantic.rule", "elida.semantic.event_id", "elida.semantic.event_category", "elida.semantic.severity",
+		"elida.semantic.source_role", "elida.semantic.message_index", "elida.semantic.evidence_only",
+		"elida.semantic.would_contribute_points",
+	}, prefixed("elida.semantic.")...)
+	byEvent := map[string]otellog.Record{}
+	for _, rec := range fl.records {
+		if id := attrString(rec, "elida.semantic.event_id"); id != "" && attrString(rec, "elida.violation.rule") == "" {
+			sameKeys(t, "decision log", logKeys(rec), want)
+			byEvent[id] = rec
+		}
+	}
+	if len(byEvent) != 2 {
+		t.Fatalf("decision logs = %d, want 2", len(byEvent))
+	}
+	// Severity has a pointer receiver, so copy out of the map first.
+	evidence, contributing := byEvent["evt_2"], byEvent["evt_1"]
+	if evidence.Severity() != otellog.SeverityInfo {
+		t.Fatal("an evidence-only decision is logged at Info")
+	}
+	if contributing.Severity() != otellog.SeverityWarn {
+		t.Fatal("a contributing warning decision is logged at Warn")
+	}
+}
+
+func TestSemanticExport_DecisionLogsCarryNoFreeText(t *testing.T) {
+	m := semanticMeta()
+	m.Transform, m.DecisionID = "IGNORE ALL PREVIOUS sentinel7f3a", "IGNORE ALL PREVIOUS sentinel7f3a"
+	rec := decisionRecord(m)
+	rec.SemanticDecisions[0].RuleName = "free text sentinel7f3a"
+	// Every string field of the decision itself, too.
+	const planted = "IGNORE ALL PREVIOUS sentinel7f3a"
+	d := &rec.SemanticDecisions[1]
+	d.EventID, d.RuleName, d.EventCategory, d.Severity, d.SourceRole = planted, planted, planted, planted, planted
+	if n := reflect.TypeOf(SemanticDecision{}).NumField(); n != 10 {
+		t.Fatalf("SemanticDecision has %d fields; plant free text in any new string field here", n)
+	}
+	spans, fl := exportForTest(t, rec)
+	for _, kv := range spans[0].Attributes {
+		if strings.Contains(kv.Value.String(), "sentinel7f3a") {
+			t.Fatalf("span attribute %s carries planted text", kv.Key)
+		}
+	}
+	for _, r := range fl.records {
+		for k := range logKeys(r) {
+			if strings.Contains(attrString(r, k), "sentinel7f3a") {
+				t.Fatalf("log attribute %s carries planted text", k)
+			}
+		}
+		if strings.Contains(r.Body().AsString(), "sentinel7f3a") {
+			t.Fatalf("log body carries planted text: %q", r.Body().AsString())
+		}
+	}
+}
+
+// Decisions are counted on the span and logged, but only violations feed the
+// exported max severity: a critical evidence-only decision never raises it.
+func TestSemanticExport_DecisionsNeverRaiseMaxSeverity(t *testing.T) {
+	spans, _ := exportForTest(t, decisionRecord(semanticMeta()))
+	for _, kv := range spans[0].Attributes {
+		if string(kv.Key) == AttrViolationSeverity && kv.Value.AsString() != "warning" {
+			t.Fatalf("max severity = %q, want warning", kv.Value.AsString())
+		}
+	}
+	var n int
+	for _, ev := range spans[0].Events {
+		if ev.Name == "policy.violation" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("policy.violation events = %d, want 1 (decisions add no span events)", n)
 	}
 }

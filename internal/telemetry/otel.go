@@ -367,6 +367,46 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 	p.logger.Emit(ctx, rec)
 }
 
+// EmitSemanticDecisionLog emits one OTEL log record for one stored semantic
+// decision. Strings pass safeToken; there is no content to redact. An
+// evidence-only decision is logged at Info, as evidence-only violations are.
+func (p *Provider) EmitSemanticDecisionLog(ctx context.Context, sessionID string, d SemanticDecision, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+	rule := safeToken(d.RuleName)
+	var rec otellog.Record
+	ts := d.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	rec.SetTimestamp(ts)
+	sev := d.Severity
+	body := "semantic decision: " + rule
+	if d.EvidenceOnly {
+		sev = "info"
+		body += " (evidence only, no risk contributed)"
+	}
+	rec.SetSeverity(otelSeverity(sev))
+	rec.SetBody(attribute.StringValue(body))
+	rec.AddAttributes(
+		attribute.String("gen_ai.conversation.id", sessionID),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.String("elida.semantic.rule", rule),
+		attribute.String("elida.semantic.event_id", safeToken(d.EventID)),
+		attribute.String("elida.semantic.event_category", safeToken(d.EventCategory)),
+		attribute.String("elida.semantic.severity", safeToken(d.Severity)),
+		attribute.String("elida.semantic.source_role", safeToken(d.SourceRole)),
+		attribute.Int("elida.semantic.message_index", d.MessageIndex),
+		attribute.Bool("elida.semantic.evidence_only", d.EvidenceOnly),
+		attribute.Float64("elida.semantic.would_contribute_points", d.WouldContributePoints),
+	)
+	rec.AddAttributes(semanticAttributes("elida.semantic.", d.Metadata)...)
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
 // EmitSessionKilledLog emits a session kill/terminate OTEL log record
 func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, backend, model string, durationMs int64, requestCount int) {
 	if p.logger == nil {
@@ -620,6 +660,12 @@ const (
 	AttrSDRAlgorithm               = "elida.sdr.algorithm"
 	AttrSDRCanonicalizationVersion = "elida.sdr.canonicalization_version"
 	AttrSDREventCount              = "elida.sdr.event_count"
+
+	// Semantic decision attributes: how many stored semantic decisions the
+	// session exported as logs, and how many the policy engine dropped past
+	// its per-session cap.
+	AttrSemanticDecisionCount   = "elida.semantic.decisions.count"
+	AttrSemanticDecisionDropped = "elida.semantic.decisions.dropped"
 )
 
 // Violation represents a policy violation for telemetry export
@@ -720,6 +766,21 @@ func semanticAttributes(prefix string, m SemanticMetadata) []attribute.KeyValue 
 	}
 }
 
+// SemanticDecision is one stored semantic decision for export: identifiers,
+// scores and offsets, never content.
+type SemanticDecision struct {
+	EventID               string
+	RuleName              string
+	EventCategory         string
+	Severity              string
+	SourceRole            string
+	MessageIndex          int
+	EvidenceOnly          bool
+	WouldContributePoints float64
+	Timestamp             time.Time
+	Metadata              SemanticMetadata
+}
+
 // exportedSeverity is the severity a violation is exported at: its own,
 // except that evidence-only violations are informational.
 func (v Violation) exportedSeverity() string {
@@ -750,9 +811,15 @@ type SessionRecord struct {
 	BytesIn      int64
 	BytesOut     int64
 	Violations   []Violation
-	Captures     []CapturedRequest
-	CaptureCount int
-	Model        string // For GenAI semconv
+	// SemanticDecisions holds every stored semantic decision of the ending
+	// session instance (bounded by the policy engine's per-session cap);
+	// each is exported as one OTEL log. SemanticDecisionsDropped counts the
+	// decisions dropped past that cap.
+	SemanticDecisions        []SemanticDecision
+	SemanticDecisionsDropped int
+	Captures                 []CapturedRequest
+	CaptureCount             int
+	Model                    string // For GenAI semconv
 
 	// WebSocket fields
 	IsWebSocket  bool
@@ -884,6 +951,13 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 			attribute.Int(AttrSDREventCount, record.SDREventCount),
 		)
 	}
+	// Counts only: a session without semantic decisions keeps its key set.
+	if len(record.SemanticDecisions) > 0 || record.SemanticDecisionsDropped > 0 {
+		attrs = append(attrs,
+			attribute.Int(AttrSemanticDecisionCount, len(record.SemanticDecisions)),
+			attribute.Int(AttrSemanticDecisionDropped, record.SemanticDecisionsDropped),
+		)
+	}
 
 	// Add WebSocket attributes if this is a WebSocket session
 	if record.IsWebSocket {
@@ -943,6 +1017,13 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	// Emit OTEL logs for each violation
 	for _, v := range record.Violations {
 		p.EmitViolationLog(ctx, record.SessionID, v, record.Model, record.Backend)
+	}
+
+	// One log per stored semantic decision (bounded by the policy engine's
+	// per-session cap). No OCSF finding per decision: findings stay one per
+	// rule, carrying the representative decision.
+	for _, d := range record.SemanticDecisions {
+		p.EmitSemanticDecisionLog(ctx, record.SessionID, d, record.Model, record.Backend)
 	}
 
 	// Emit OCSF Detection Finding events for policy violations

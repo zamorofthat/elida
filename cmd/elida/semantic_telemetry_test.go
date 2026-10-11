@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"elida/internal/config"
+	"elida/internal/session"
 	"elida/internal/storage"
 	"elida/internal/telemetry"
 )
@@ -103,5 +104,37 @@ func TestTelemetryRecord_CarriesSemanticMetadataAndNoContent(t *testing.T) {
 		if strings.Contains(string(f), telemetrySentinel) {
 			t.Fatalf("request content reached an OCSF finding: %s", f)
 		}
+	}
+}
+
+func TestTelemetryRecord_CarriesStoredDecisions(t *testing.T) {
+	a, id := semanticAuditApp(t)
+	sess, _ := a.manager.Get(id)
+	snap := sess.Snapshot()
+	record := storage.SessionRecord{ID: id, StartTime: snap.StartTime}
+	a.enrichRecordFromPolicy(&record, id, snap.StartTime)
+
+	tr := telemetryRecordFrom(&record, &snap, time.Now(), nil)
+	if len(tr.SemanticDecisions) == 0 || tr.SemanticDecisions[0].Metadata.DecisionID == "" || tr.SemanticDecisions[0].EventID == "" {
+		t.Fatalf("stored decisions must reach the export record: %+v", tr.SemanticDecisions)
+	}
+	raw, _ := json.Marshal(tr.SemanticDecisions)
+	if strings.Contains(string(raw), telemetrySentinel) {
+		t.Fatalf("request content reached the exported decisions: %s", raw)
+	}
+}
+
+// Review Focus 3: a decision stamped before this session instance started
+// was carried by a retained entry and was exported by the session it
+// belongs to.
+func TestTelemetryRecord_SkipsDecisionsCarriedFromBeforeStart(t *testing.T) {
+	snap := session.NewSession("sess-carry", "https://backend", "127.0.0.1:1").Snapshot()
+	record := storage.SessionRecord{ID: "sess-carry", StartTime: snap.StartTime, SemanticDecisions: []storage.SemanticDecision{
+		{EventID: "evt_old", Timestamp: snap.StartTime.Add(-time.Minute)},
+		{EventID: "evt_new", Timestamp: snap.StartTime.Add(time.Second)},
+	}}
+	tr := telemetryRecordFrom(&record, &snap, time.Now(), nil)
+	if len(tr.SemanticDecisions) != 1 || tr.SemanticDecisions[0].EventID != "evt_new" {
+		t.Fatalf("exported %+v, want only evt_new", tr.SemanticDecisions)
 	}
 }

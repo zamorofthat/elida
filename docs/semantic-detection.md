@@ -9,6 +9,56 @@ behaviour and configuration rules (`require_inline`, the `max_concurrency`
 split, when enforcement is refused, allowlisted tools, retained sessions) are
 in [Configuration](configuration.md#semantic-injection-detection-decision).
 
+## Telemetry
+
+Semantic decisions are exported as metadata only. There is no switch for it:
+the metadata is exported whenever OTEL or OCSF export is on.
+
+**What is exported**
+
+- **Per semantic rule**, the representative decision's event ID and 16
+  metadata fields (`signal`, `probability`, `aux_probability`, `vetoed`,
+  `model`, `model_version`, `model_checksum`, `threshold_set`, `decision_id`,
+  `transform`, `transform_depth`, `window_start_byte`, `window_end_byte`,
+  `coverage_complete`, `execution_mode`, `protection_scope`):
+  - on the session span's `policy.violation` event as `event_id` and
+    `semantic.*`;
+  - on the violation log as `elida.violation.event_id` and `elida.semantic.*`;
+  - in the OCSF Detection Finding as `unmapped."elida.event_id"` and
+    `unmapped."elida.semantic"` (bare field names).
+- **Per stored decision**, one OTEL log record (body `semantic decision:
+  <rule>`), carrying `elida.semantic.rule`, `event_id`, `event_category`,
+  `severity`, `source_role`, `message_index`, `evidence_only`,
+  `would_contribute_points` and the same 16 `elida.semantic.*` fields, plus
+  `gen_ai.conversation.id`, `gen_ai.provider.name` and
+  `gen_ai.request.model`. An evidence-only decision is logged at Info severity.
+  There is no OCSF finding per decision: findings stay one per rule.
+- **On the session span**, `elida.semantic.decisions.count` (decision logs
+  exported) and `elida.semantic.decisions.dropped` (decisions dropped past the
+  per-session cap), set only when the session has semantic decisions.
+
+Decisions never raise `elida.violations.max_severity`; only violations feed
+it, and evidence-only violations are excluded from it. Decisions stamped
+before the ending session instance started (carried by a retained session
+entry that reused the ID) are not exported again, the same rule that applies
+to violations.
+
+**Volume.** The policy engine keeps at most 256 decisions per session, so a
+session end emits at most 256 decision logs in addition to its violation
+logs. Each carries 27 attributes, about 1 KB with typical values and under
+3 KB with every identifier at its 128-byte limit: roughly 0.3 MB, and at most
+about 0.7 MB, of log attributes per session end before exporter encoding.
+Decisions past the cap are counted in `elida.semantic.decisions.dropped`, not
+logged.
+
+**What is never exported**
+
+Request or response content of any kind: no message text, decoded payloads,
+window text or matched text. Every exported string is restricted to
+identifier-shaped values (letters, digits and `._:>+/=-`, at most 128 bytes)
+and exported empty otherwise; a violation's event ID that fails the check is
+left out.
+
 ## Limitations
 
 Each entry says what is not caught or not guaranteed, and how it fails.

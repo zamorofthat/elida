@@ -620,6 +620,8 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   `evidence_only`, OCSF findings carry `elida.evidence_only` with `severity_id`
   1 (Informational), and SQLite `violation_detected` rows carry
   `evidence_only`. The exported `elida.violations.max_severity` ignores it.
+  Semantic violations also carry their decision metadata (never content) in
+  every export; see [Telemetry](semantic-detection.md#telemetry).
 
 ### Allowlisted tools
 
