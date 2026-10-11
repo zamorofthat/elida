@@ -175,3 +175,27 @@ func TestBaselineC1_SettingsPUTReloadsPolicyMode(t *testing.T) {
 		t.Fatal("policy.mode audit must apply at runtime")
 	}
 }
+
+// The score assertion in SemanticFiringsScorePerDecision cannot see whether
+// calculateRiskScore counts an evidence-only event: the score is recomputed
+// only when a contributing event arrives, and there the evidence firing
+// comes last. Here a contributing firing follows the evidence one, so the
+// recompute runs with the evidence-only event stored and must leave it out.
+func TestBaselineC1_ScoreRecomputedAfterEvidenceExcludesIt(t *testing.T) {
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	e.RecordSemanticViolation("sess-c1-rescore", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_a", 1, "first"))
+	e.RecordSemanticViolation("sess-c1-rescore", decisionViolation("semantic_injection", policy.SeverityCritical, true, 0.95, "dec_b", 2, "evidence"))
+	e.RecordSemanticViolation("sess-c1-rescore", decisionViolation("semantic_injection", policy.SeverityCritical, false, 0.9, "dec_c", 3, "after evidence"))
+
+	score, _, _ := e.GetSessionRiskScore("sess-c1-rescore")
+	if !approxEqual(score, 13.0, 0.1) {
+		t.Fatalf("score = %v, want ~13.0 (3 + 10; the evidence-only critical adds nothing on recompute)", score)
+	}
+	points := e.ComputeRiskCurve("sess-c1-rescore")
+	if len(points) == 0 || !approxEqual(points[len(points)-1].Score, score, 0.1) {
+		t.Fatalf("curve tail disagrees with the score: %+v vs %v", points, score)
+	}
+	if n := len(e.GetFlaggedSession("sess-c1-rescore").ViolationEvents); n != 3 {
+		t.Fatalf("events = %d, want 3 (the evidence-only event is stored)", n)
+	}
+}
