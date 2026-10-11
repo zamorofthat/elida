@@ -125,8 +125,8 @@ func TestTelemetryRecord_CarriesStoredDecisions(t *testing.T) {
 }
 
 // Review Focus 3: a decision stamped before this session instance started
-// was carried by a retained entry and was exported by the session it
-// belongs to.
+// belongs to an earlier session and is not exported again (defense in depth;
+// a retained entry holds no decisions).
 func TestTelemetryRecord_SkipsDecisionsCarriedFromBeforeStart(t *testing.T) {
 	snap := session.NewSession("sess-carry", "https://backend", "127.0.0.1:1").Snapshot()
 	record := storage.SessionRecord{ID: "sess-carry", StartTime: snap.StartTime, SemanticDecisions: []storage.SemanticDecision{

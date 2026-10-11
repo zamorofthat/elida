@@ -742,8 +742,10 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 		})
 	}
 	for _, d := range record.SemanticDecisions {
-		// Decisions carried from before this session instance started were
-		// exported by the session they belong to (see enrichRecordFromPolicy).
+		// Defense in depth, repeating enrichRecordFromPolicy's filter: a
+		// decision stamped before this session instance started (for example,
+		// on an entry for a reused ID that was not released) belongs to an
+		// earlier session. A retained entry holds none; policy clears them.
 		if !d.Timestamp.IsZero() && d.Timestamp.Before(snap.StartTime) {
 			continue
 		}

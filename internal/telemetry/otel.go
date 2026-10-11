@@ -394,7 +394,6 @@ func (p *Provider) EmitSemanticDecisionLog(ctx context.Context, sessionID string
 		attribute.String("gen_ai.provider.name", providerName),
 		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
 		attribute.String("elida.semantic.rule", rule),
-		attribute.String("elida.semantic.event_id", safeToken(d.EventID)),
 		attribute.String("elida.semantic.event_category", safeToken(d.EventCategory)),
 		attribute.String("elida.semantic.severity", safeToken(d.Severity)),
 		attribute.String("elida.semantic.source_role", safeToken(d.SourceRole)),
@@ -402,6 +401,10 @@ func (p *Provider) EmitSemanticDecisionLog(ctx context.Context, sessionID string
 		attribute.Bool("elida.semantic.evidence_only", d.EvidenceOnly),
 		attribute.Float64("elida.semantic.would_contribute_points", d.WouldContributePoints),
 	)
+	// A blanked event ID is left out, as on the violation exports.
+	if id := safeToken(d.EventID); id != "" {
+		rec.AddAttributes(attribute.String("elida.semantic.event_id", id))
+	}
 	rec.AddAttributes(semanticAttributes("elida.semantic.", d.Metadata)...)
 	setTraceContext(&rec, ctx)
 	p.logger.Emit(ctx, rec)
@@ -662,8 +665,8 @@ const (
 	AttrSDREventCount              = "elida.sdr.event_count"
 
 	// Semantic decision attributes: how many stored semantic decisions the
-	// session exported as logs, and how many the policy engine dropped past
-	// its per-session cap.
+	// session exported as logs (set only when OTEL logs are on), and how many
+	// the policy engine dropped past its per-session cap.
 	AttrSemanticDecisionCount   = "elida.semantic.decisions.count"
 	AttrSemanticDecisionDropped = "elida.semantic.decisions.dropped"
 )
@@ -952,11 +955,13 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 		)
 	}
 	// Counts only: a session without semantic decisions keeps its key set.
+	// The count is of decision logs, so it is left out when OTEL logs are
+	// off (nothing is exported then); the dropped count is kept.
 	if len(record.SemanticDecisions) > 0 || record.SemanticDecisionsDropped > 0 {
-		attrs = append(attrs,
-			attribute.Int(AttrSemanticDecisionCount, len(record.SemanticDecisions)),
-			attribute.Int(AttrSemanticDecisionDropped, record.SemanticDecisionsDropped),
-		)
+		if p.logger != nil {
+			attrs = append(attrs, attribute.Int(AttrSemanticDecisionCount, len(record.SemanticDecisions)))
+		}
+		attrs = append(attrs, attribute.Int(AttrSemanticDecisionDropped, record.SemanticDecisionsDropped))
 	}
 
 	// Add WebSocket attributes if this is a WebSocket session

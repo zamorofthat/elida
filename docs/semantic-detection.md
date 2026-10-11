@@ -33,21 +33,26 @@ the metadata is exported whenever OTEL or OCSF export is on.
   `gen_ai.conversation.id`, `gen_ai.provider.name` and
   `gen_ai.request.model`. An evidence-only decision is logged at Info severity.
   There is no OCSF finding per decision: findings stay one per rule.
-- **On the session span**, `elida.semantic.decisions.count` (decision logs
-  exported) and `elida.semantic.decisions.dropped` (decisions dropped past the
-  per-session cap), set only when the session has semantic decisions.
+- **On the session span**, `elida.semantic.decisions.count` (decisions
+  exported as logs; set only when OTEL logs are on) and
+  `elida.semantic.decisions.dropped` (decisions dropped past the per-session
+  cap), set when the session has stored or dropped semantic decisions.
 
 Decisions never raise `elida.violations.max_severity`; only violations feed
 it, and evidence-only violations are excluded from it. Decisions stamped
-before the ending session instance started (carried by a retained session
-entry that reused the ID) are not exported again, the same rule that applies
-to violations.
+before the ending session instance started (for example, on an entry for a
+reused session ID that was not released) are not exported, the same rule
+that applies to violations. A retained block or terminate entry holds no
+decisions, so this is defense in depth.
 
 **Volume.** The policy engine keeps at most 256 decisions per session, so a
 session end emits at most 256 decision logs in addition to its violation
 logs. Each carries 27 attributes, about 1 KB with typical values and under
-3 KB with every identifier at its 128-byte limit: roughly 0.3 MB, and at most
-about 0.7 MB, of log attributes per session end before exporter encoding.
+3 KB with every identifier field at its 128-byte limit: roughly 0.3 MB, and
+at most about 0.7 MB, of log attributes per session end before exporter
+encoding. The session ID (`gen_ai.conversation.id`) and model name
+(`gen_ai.request.model`) are not length-capped, so the estimate assumes they
+are short.
 Decisions past the cap are counted in `elida.semantic.decisions.dropped`, not
 logged.
 
@@ -56,8 +61,7 @@ logged.
 Request or response content of any kind: no message text, decoded payloads,
 window text or matched text. Every exported string is restricted to
 identifier-shaped values (letters, digits and `._:>+/=-`, at most 128 bytes)
-and exported empty otherwise; a violation's event ID that fails the check is
-left out.
+and exported empty otherwise; an event ID that fails the check is left out.
 
 ## Limitations
 

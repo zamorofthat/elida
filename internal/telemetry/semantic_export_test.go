@@ -1,13 +1,17 @@
 package telemetry
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func semanticMeta() SemanticMetadata {
@@ -255,6 +259,7 @@ func TestSemanticExport_DecisionLogsCarryNoFreeText(t *testing.T) {
 			t.Fatalf("span attribute %s carries planted text", kv.Key)
 		}
 	}
+	var decisionLogs int
 	for _, r := range fl.records {
 		for k := range logKeys(r) {
 			if strings.Contains(attrString(r, k), "sentinel7f3a") {
@@ -264,17 +269,51 @@ func TestSemanticExport_DecisionLogsCarryNoFreeText(t *testing.T) {
 		if strings.Contains(r.Body().AsString(), "sentinel7f3a") {
 			t.Fatalf("log body carries planted text: %q", r.Body().AsString())
 		}
+		if !strings.HasPrefix(r.Body().AsString(), "semantic decision:") {
+			continue
+		}
+		decisionLogs++
+		// The planted decision (message index 2) has a blanked event ID,
+		// which is left out as on the violation exports.
+		planted := false
+		r.WalkAttributes(func(kv attribute.KeyValue) bool {
+			if string(kv.Key) == "elida.semantic.message_index" && kv.Value.AsInt64() == 2 {
+				planted = true
+			}
+			return true
+		})
+		if has := logKeys(r)["elida.semantic.event_id"]; planted && has {
+			t.Fatal("a blanked event ID must be left out of the decision log")
+		} else if !planted && !has {
+			t.Fatal("a valid event ID must be on the decision log")
+		}
+	}
+	if decisionLogs != 2 {
+		t.Fatalf("decision logs = %d, want 2", decisionLogs)
 	}
 }
 
 // Decisions are counted on the span and logged, but only violations feed the
-// exported max severity: a critical evidence-only decision never raises it.
+// exported max severity: neither a critical evidence-only decision nor a
+// contributing critical decision raises it.
 func TestSemanticExport_DecisionsNeverRaiseMaxSeverity(t *testing.T) {
-	spans, _ := exportForTest(t, decisionRecord(semanticMeta()))
+	rec := decisionRecord(semanticMeta())
+	rec.SemanticDecisions = append(rec.SemanticDecisions, SemanticDecision{
+		EventID: "evt_3", RuleName: "injection_elevated", EventCategory: "injection_elevated", Severity: "critical",
+		SourceRole: "user", MessageIndex: 3, WouldContributePoints: 10, Timestamp: time.Now(), Metadata: semanticMeta(),
+	})
+	spans, _ := exportForTest(t, rec)
+	found := false
 	for _, kv := range spans[0].Attributes {
-		if string(kv.Key) == AttrViolationSeverity && kv.Value.AsString() != "warning" {
-			t.Fatalf("max severity = %q, want warning", kv.Value.AsString())
+		if string(kv.Key) == AttrViolationSeverity {
+			found = true
+			if kv.Value.AsString() != "warning" {
+				t.Fatalf("max severity = %q, want warning", kv.Value.AsString())
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("the span must carry %s", AttrViolationSeverity)
 	}
 	var n int
 	for _, ev := range spans[0].Events {
@@ -284,5 +323,39 @@ func TestSemanticExport_DecisionsNeverRaiseMaxSeverity(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("policy.violation events = %d, want 1 (decisions add no span events)", n)
+	}
+}
+
+// With OTEL logs off no decision log is exported, so the span carries no
+// decision count; the dropped count is still set.
+func TestSemanticExport_NoDecisionCountWhenLogsAreOff(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	p := &Provider{
+		config:   Config{Enabled: true, CaptureContent: "none", MaxBodySize: 4096},
+		provider: tp,
+		tracer:   tp.Tracer("test"),
+	}
+	p.ExportSessionRecord(context.Background(), decisionRecord(semanticMeta()))
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("spans = %d, want 1", len(spans))
+	}
+	var hasCount bool
+	var dropped int64 = -1
+	for _, kv := range spans[0].Attributes {
+		switch string(kv.Key) {
+		case AttrSemanticDecisionCount:
+			hasCount = true
+		case AttrSemanticDecisionDropped:
+			dropped = kv.Value.AsInt64()
+		}
+	}
+	if hasCount {
+		t.Fatalf("%s must be left out when OTEL logs are off", AttrSemanticDecisionCount)
+	}
+	if dropped != 3 {
+		t.Fatalf("%s = %d, want 3", AttrSemanticDecisionDropped, dropped)
 	}
 }
