@@ -34,7 +34,12 @@ type RedisStore struct {
 	killTopic string
 }
 
-// sessionData is the JSON-serializable session data for Redis
+// sessionData is the JSON-serializable session data for Redis.
+//
+// It holds live session state only. Session history (policy violations,
+// captured content, semantic shadow decisions) is not stored in Redis, so a
+// reused session ID starts clean here; history across sessions that shared
+// an ID is merged only by storage.SQLiteStore.SaveSession.
 type sessionData struct {
 	ID           string            `json:"id"`
 	State        State             `json:"state"`

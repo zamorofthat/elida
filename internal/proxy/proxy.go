@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -67,6 +68,7 @@ type Proxy struct {
 	instructionRegistry     *instruction.Registry // Instruction file integrity registry
 	trustedTagExtractRegexs []*regexp.Regexp      // Pre-compiled regexes for trusted tag content extraction
 	redactor                redaction.Redactor    // Redaction provider for sensitive data
+	semantic                SemanticAssessor      // Semantic injection assessment (nil when disabled)
 	trustedNets             []*net.IPNet          // proxy.auth.trusted_networks parsed at startup
 }
 
@@ -96,6 +98,28 @@ func WithInstructionRegistry(reg *instruction.Registry) ProxyOption {
 // WithRedactor sets the redaction provider.
 func WithRedactor(r redaction.Redactor) ProxyOption {
 	return func(p *Proxy) { p.redactor = r }
+}
+
+// SemanticAssessor runs semantic injection assessment on the eligible
+// messages of a request.
+//
+// Implementations must not modify the messages, must not block past their
+// own configured inline deadline, and must treat a failure to analyze as a
+// coverage fact rather than a request failure. A nil assessor means the
+// feature is disabled and the request path does nothing.
+//
+// AssessRequest reports protect: true when it recorded a risk-contributing
+// finding for THIS request (an inline result in effective enforce mode). The
+// proxy then re-checks the risk ladder before forwarding, through the same
+// path as the pre-request ladder check. Shadow, audit and async results
+// never report it.
+type SemanticAssessor interface {
+	AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) (protect bool)
+}
+
+// WithSemanticAssessor sets the semantic injection assessor.
+func WithSemanticAssessor(a SemanticAssessor) ProxyOption {
+	return func(p *Proxy) { p.semantic = a }
 }
 
 // New creates a new proxy handler with the given options.
@@ -383,24 +407,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(p.config.Session.Header, sess.ID)
 
 	// Risk ladder enforcement — check cumulative risk score before processing
+	var throttled bool
 	if p.policy != nil {
-		if p.policy.ShouldBlockByRisk(sess.ID) {
-			slog.Warn("request blocked by risk ladder",
-				"session_id", sess.ID,
-			)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			if _, err := w.Write([]byte(`{"error":"risk_threshold_exceeded","message":"Session risk score too high"}`)); err != nil {
-				slog.Warn("write failed", "session_id", sess.ID, "error", err)
-			}
+		var blocked bool
+		if blocked, throttled = p.applyRiskLadder(w, sess, false); blocked {
 			return
-		}
-		if shouldThrottle, delayMs := p.policy.ShouldThrottle(sess.ID); shouldThrottle {
-			slog.Info("request throttled by risk ladder",
-				"session_id", sess.ID,
-				"delay_ms", delayMs,
-			)
-			time.Sleep(time.Duration(delayMs) * time.Millisecond)
 		}
 	}
 
@@ -495,6 +506,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"session_id", sess.ID,
 				"violations", len(result.Violations),
 			)
+		}
+	}
+
+	// Semantic assessment runs after regex policy and before forwarding, so
+	// an inline result can still protect this request, and it runs whether
+	// or not the policy engine is enabled. It has its own view of the
+	// request (extractSemanticMessages: tool_result content included, the
+	// regex allowlist ignored), so the policy engine's input is exactly what
+	// it was before semantic detection existed. It never changes the body
+	// and never fails the request: a panic or a timeout is a coverage gap,
+	// not an error.
+	if p.semantic != nil && len(requestBody) > 0 {
+		if msgs := extractSemanticMessages(requestBody, p.trustedTagRegexs); len(msgs) > 0 {
+			// An inline enforce finding was recorded as an ordinary
+			// violation: re-read the ladder so it protects THIS request,
+			// through the same path as the check above. Shadow, audit and
+			// async results never ask for it.
+			if p.runSemanticAssessment(ctx, sess, msgs) && p.policy != nil {
+				if blocked, _ := p.applyRiskLadder(w, sess, throttled); blocked {
+					return
+				}
+			}
 		}
 	}
 
@@ -1757,6 +1790,8 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 		BytesOut:     snap.BytesOut,
 		Backend:      backendName,
 		ClientAddr:   snap.ClientAddr,
+		// Shadow decisions carry no content, so they need no redaction.
+		SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
 	}
 
 	// Add captured content
@@ -1782,6 +1817,9 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			Timestamp:     v.Timestamp,
 		})
 	}
 
@@ -1804,11 +1842,13 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 	}
 }
 
-// extractScannableContent parses the request body and returns content to scan.
 // extractScannableMessages parses a chat request and returns individual messages to scan
 // with role/index attribution. System prompts are hash-cached — only scanned once per session
 // unless the content changes. Supports both Anthropic (top-level "system") and OpenAI
 // (role: "system" message) formats. Returns nil for non-chat requests (caller should fallback).
+//
+// This is the policy engine's view only. The semantic assessor gets its own
+// view from extractSemanticMessages.
 func extractScannableMessages(body []byte, sess *session.Session, trustedTagRegexs []*regexp.Regexp, allowlistedTools ...[]string) []policy.MessageToScan {
 	var req struct {
 		System   any `json:"system"` // Anthropic top-level system prompt (string or content blocks)
@@ -1876,6 +1916,191 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 	}
 
 	return messages
+}
+
+// extractSemanticMessages parses a chat request into the semantic assessor's
+// view: one entry per non-system message with its text (trusted tags
+// stripped, as in the policy view), followed directly by one role "tool"
+// entry carrying the message's Anthropic tool_result content, in message
+// order. Returns nil for a non-chat request.
+//
+// It differs from the policy view on purpose:
+//   - policy.trust.allowlisted_tools is ignored. The allowlist suppresses
+//     regex false positives on known tool output; semantic detection exists
+//     to score exactly that untrusted output, so an allowlisted Read result
+//     is still assessed.
+//   - System prompts are omitted (they are trusted and never assessed), so
+//     the policy engine's system-prompt hash cache is not touched.
+//   - Trusted tags are not stripped from tool results: tool output is
+//     untrusted, and a trusted tag inside it must not hide content.
+//
+// SkippedBlocks records content blocks that could not be rendered as text
+// (images, documents, nested non-text blocks), so the assessment of that
+// entry is never recorded as complete.
+func extractSemanticMessages(body []byte, trustedTagRegexs []*regexp.Regexp) []policy.MessageToScan {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) == 0 {
+		return nil
+	}
+
+	var out []policy.MessageToScan
+	for i, msg := range req.Messages {
+		if msg.Role == "system" {
+			continue
+		}
+		// A message whose blocks are all images or documents still gets an
+		// entry, with empty content, so its skipped blocks are counted as an
+		// unsupported_block gap rather than silently never analyzed.
+		content := extractMessageContent(msg.Content)
+		if skipped := unsupportedMessageBlocks(msg.Content); content != "" || skipped > 0 {
+			if content != "" && len(trustedTagRegexs) > 0 {
+				content = stripTrustedTags(content, trustedTagRegexs)
+			}
+			out = append(out, policy.MessageToScan{
+				Role:          msg.Role,
+				Index:         i,
+				Content:       content,
+				SkippedBlocks: skipped,
+			})
+		}
+		if tr, skipped := extractToolResultContent(msg.Content); tr != "" || skipped > 0 {
+			out = append(out, policy.MessageToScan{
+				Role:          "tool",
+				Index:         i,
+				Content:       tr,
+				SkippedBlocks: skipped,
+			})
+		}
+	}
+	return out
+}
+
+// unsupportedMessageBlocks counts a message's top-level content blocks that
+// carry neither text nor a tool_result (images, documents, and so on): content
+// the assessor never sees.
+func unsupportedMessageBlocks(content any) int {
+	blocks, ok := content.([]any)
+	if !ok {
+		return 0
+	}
+	n := 0
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok {
+			n++
+			continue
+		}
+		switch m["type"] {
+		case "text", "tool_result", "tool_use":
+			// text is rendered; tool_result is its own entry; tool_use is a
+			// call the model made, not content to analyze.
+		default:
+			n++
+		}
+	}
+	return n
+}
+
+// extractToolResultContent returns the text of every Anthropic tool_result
+// block in a message's content, joined like extractMessageContent joins text
+// blocks, and how many blocks inside those tool_results were not text. A
+// tool_result's content is either a string or an array of blocks, of which
+// only {type: "text"} blocks carry text.
+func extractToolResultContent(content any) (text string, skipped int) {
+	blocks, ok := content.([]any)
+	if !ok {
+		return "", 0
+	}
+	var result strings.Builder
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok || m["type"] != "tool_result" {
+			continue
+		}
+		switch c := m["content"].(type) {
+		case nil:
+		case string:
+			if c != "" {
+				result.WriteString(c)
+				result.WriteString(" ")
+			}
+		case []any:
+			for _, inner := range c {
+				im, ok := inner.(map[string]any)
+				if !ok || im["type"] != "text" {
+					skipped++
+					continue
+				}
+				if t, ok := im["text"].(string); ok && t != "" {
+					result.WriteString(t)
+					result.WriteString(" ")
+				}
+			}
+		default:
+			skipped++
+		}
+	}
+	return result.String(), skipped
+}
+
+// runSemanticAssessment calls the assessor with a recovered panic.
+//
+// The assessor touches a model, a worker pool and a queue. None of that may
+// ever take down a proxied request: a failure to analyze is a coverage gap.
+// The panic value is not logged: it could quote request content.
+func (p *Proxy) runSemanticAssessment(ctx context.Context, sess *session.Session, messages []policy.MessageToScan) (protect bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			protect = false
+			slog.Error("semantic assessment panicked; request continues unanalyzed",
+				"session_id", sess.ID,
+				"panic_type", fmt.Sprintf("%T", r),
+			)
+		}
+	}()
+	// The request ID makes decision IDs stable per request. The proxy has no
+	// request ID of its own, so a fresh one is minted here; unlike the
+	// session's request counter it cannot collide between two concurrent
+	// requests on one session, and it needs no session lock.
+	return p.semantic.AssessRequest(ctx, sess, uuid.New().String(), messages)
+}
+
+// applyRiskLadder applies the session's current risk-ladder action: block
+// (and terminate, which the ladder also treats as block) writes the 403
+// risk_threshold_exceeded response and reports blocked; throttle sleeps for
+// the ladder's delay unless alreadyThrottled (this request already slept
+// once) and reports throttled. It is the one ladder enforcement path, used
+// before the request is processed and again after an inline semantic
+// finding.
+func (p *Proxy) applyRiskLadder(w http.ResponseWriter, sess *session.Session, alreadyThrottled bool) (blocked, throttled bool) {
+	if p.policy.ShouldBlockByRisk(sess.ID) {
+		slog.Warn("request blocked by risk ladder",
+			"session_id", sess.ID,
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		if _, err := w.Write([]byte(`{"error":"risk_threshold_exceeded","message":"Session risk score too high"}`)); err != nil {
+			slog.Warn("write failed", "session_id", sess.ID, "error", err)
+		}
+		return true, alreadyThrottled
+	}
+	if shouldThrottle, delayMs := p.policy.ShouldThrottle(sess.ID); shouldThrottle {
+		if alreadyThrottled {
+			return false, true
+		}
+		slog.Info("request throttled by risk ladder",
+			"session_id", sess.ID,
+			"delay_ms", delayMs,
+		)
+		time.Sleep(time.Duration(delayMs) * time.Millisecond)
+		return false, true
+	}
+	return false, alreadyThrottled
 }
 
 // systemMessageIfChanged returns a MessageToScan for the system prompt only if it's new or changed.

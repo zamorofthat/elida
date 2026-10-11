@@ -41,8 +41,8 @@ func TestDecisionConfig_Defaults(t *testing.T) {
 	if d.InlineTimeout != 50*time.Millisecond {
 		t.Errorf("decision.inline_timeout default = %v, want 50ms", d.InlineTimeout)
 	}
-	if d.MaxConcurrency != 2 {
-		t.Errorf("decision.max_concurrency default = %d, want 2", d.MaxConcurrency)
+	if d.MaxConcurrency != 4 {
+		t.Errorf("decision.max_concurrency default = %d, want 4 (inline 3 / async 1)", d.MaxConcurrency)
 	}
 	if d.InlineQueueWait != 0 {
 		t.Errorf("decision.inline_queue_wait default = %v, want 0 (Phase 1 is zero-queue)", d.InlineQueueWait)

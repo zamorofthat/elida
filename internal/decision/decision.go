@@ -46,11 +46,25 @@ type Input struct {
 // Window locates scored content inside the original message. StartByte and
 // EndByte are always offsets into the ORIGINAL content, even for a derived
 // representation, so evidence always points at real bytes the operator can
-// find. Transform is the transformation chain that produced the scored text
-// ("" for the original) and TransformDepth is how many decodes deep it is.
+// find. A decode cannot be byte-mapped in reverse, so every window of a
+// derived representation reports its ancestor's full original range there.
+//
+// LocalStartByte and LocalEndByte are the window's offsets within the text
+// of the representation it was scored from. They are what tells the windows
+// of one derived representation apart, and an operator can reproduce a
+// derived window by applying Transform to the original and slicing these
+// offsets. For the original representation they equal StartByte and EndByte
+// less the representation's own start (normally 0, so local == absolute).
+//
+// Transform is the transformation chain that produced the scored text ("" for
+// the original) and TransformDepth is how many decodes deep it is. Together
+// with the local offsets, a Window is unique within one message, which is
+// what makes it a correct map key for ByWindow.
 type Window struct {
 	StartByte      int
 	EndByte        int
+	LocalStartByte int
+	LocalEndByte   int
 	Transform      string
 	TransformDepth int
 }
@@ -143,9 +157,12 @@ const (
 	// more windows than the default policy would.
 	AdmitBroadStrictMode AdmissionReason = "broad_strict_mode"
 
-	// DenyNotEligible means the window never qualified for scoring at all
-	// (for example, content outside the signals' scope). It is not queued
-	// async either; it is simply never scored.
+	// DenyNotEligible means the window did not qualify for the inline fast
+	// lane: untrusted content (user, tool) with no admission reason. It is
+	// still scored, on the async lane at the lowest priority (after the
+	// request's capacity-denied windows), within the request's async cap;
+	// what the cap leaves out is a not_assessed coverage gap. Trusted
+	// content (system, assistant) is never queued.
 	DenyNotEligible AdmissionReason = "not_eligible"
 	// DenyNoWorkerAvailable means the window qualified for async scoring
 	// but no worker was free to take it. The window goes unscored and
@@ -163,6 +180,12 @@ const (
 	// accept the window. The window goes unscored and Coverage reports it
 	// as short.
 	DenyQueueFull AdmissionReason = "async_queue_full"
+	// DenyCapabilityAsyncOnly means the provider cannot meet an inline
+	// budget on this build (the embedded provider's async_only capability:
+	// any build other than linux/amd64 with GOEXPERIMENT=simd). The inline
+	// lane is never tried; the window goes straight to the async lane in
+	// suspicion order, bounded by the async cap like any capacity denial.
+	DenyCapabilityAsyncOnly AdmissionReason = "capability_async_only"
 )
 
 // Admission is the admission controller's record for one window.
@@ -203,7 +226,32 @@ type Assessment struct {
 	Scope        ProtectionScope
 	TotalLatency time.Duration
 	Admissions   []Admission
+	// Outcome is how an async job ended. It is set only on assessments a
+	// Scheduler delivers asynchronously, and every queued job is delivered
+	// exactly once with a terminal Outcome, so a sink can always tell a
+	// finished job from one still pending. Inline assessments leave it "".
+	Outcome AsyncOutcome
+	// ErrorClass classifies why an async job produced no answer
+	// ("deadline_exceeded", "canceled", "provider_panic", or an error type
+	// name). It never carries an error message, which could quote content.
+	ErrorClass string
 }
+
+// AsyncOutcome is the terminal state of one async job.
+type AsyncOutcome string
+
+const (
+	// AsyncAnswered: at least one requested signal was answered.
+	AsyncAnswered AsyncOutcome = "answered"
+	// AsyncUnanswered: the provider ran and answered nothing.
+	AsyncUnanswered AsyncOutcome = "unanswered"
+	// AsyncFailed: the provider returned an error or panicked.
+	AsyncFailed AsyncOutcome = "failed"
+	// AsyncCanceled: the job's context ended (its async timeout, or
+	// scheduler shutdown) before it produced an answer. Its decisions are
+	// all unanswered.
+	AsyncCanceled AsyncOutcome = "canceled"
+)
 
 // MaxProbability returns the highest probability among answered decisions
 // for one signal, and whether anything answered at all. Returning answered
@@ -233,7 +281,9 @@ func (a Assessment) MaxProbability(s Signal) (float64, bool) {
 
 // ByWindow returns the answered decisions for one signal, keyed by the Window
 // each one covered. Window is a struct of ints and a string, so it is
-// comparable by value and is used as the map key directly.
+// comparable by value and is used as the map key directly. Its local offsets
+// make it unique per window, including across the windows of one derived
+// representation, which all share the ancestor's absolute range.
 //
 // This is the accessor the human_directed veto must use. The veto applies
 // only to the injection score from the same invocation, window and

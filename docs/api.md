@@ -11,7 +11,10 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 ### Health & Stats
 
 ```bash
-# Health check
+# Health check (unauthenticated). With semantic detection wired it also
+# reports "decision": {"capability", "reason"}: the capability enum
+# (inline, async_only, degraded, disabled) and a fixed reason. Model
+# identity and counters are only on the authenticated /control/decision.
 curl http://localhost:9090/control/health
 
 # Aggregate stats
