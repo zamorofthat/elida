@@ -394,9 +394,9 @@ func (h *Handler) reloadPolicyEngine() {
 	// Convert custom rules from Settings to policy Rules
 	for _, cr := range merged.Policy.CustomRules {
 		if config.ReservedRuleName(cr.Name) {
-			// saveSettings refuses these; a settings.yaml edited by hand can
-			// still carry one. Skipped so a regex rule never records under
-			// the semantic runner's rule name.
+			// saveSettings refuses new ones; one saved earlier (an older
+			// release, or a hand edit) is kept in settings.yaml. Skipped so
+			// a regex rule never records under the semantic runner's name.
 			slog.Warn("custom rule skipped: the name is reserved for semantic detection", "rule", cr.Name)
 			continue
 		}
@@ -1976,8 +1976,9 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // saveSettings validates a settings PUT, saves it and applies it; both PUT
-// routes use it. Custom rules may not take a name reserved for semantic
-// detection. A change to decision.* is checked first against config rules
+// routes use it. A custom rule new in this save may not take a name
+// reserved for semantic detection (one already saved is kept, with a WARN).
+// A change to decision.* is checked first against config rules
 // (restart-only keys, plan D11; enforce under policy.mode audit, D8), then
 // the ?confirm=enforce confirmation (D7), then the configurer's runtime
 // checks. Any problem refuses the whole save with 400 and saves nothing.
@@ -1999,14 +2000,28 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings 
 		// anything else; refuse it here rather than half-apply the save.
 		problems = append(problems, "policy.mode: "+strconv.Quote(nextMode)+" must be enforce or audit")
 	}
+	// A reserved name new in this save is refused. One already saved (by an
+	// earlier release, or by hand) is kept as written, with a WARN: the
+	// reload path skips it, and refusing it would block every unrelated
+	// save, emergency toggles included, until it is renamed.
+	saved := make(map[string]bool, len(prev.Policy.CustomRules))
+	for _, cr := range prev.Policy.CustomRules {
+		saved[cr.Name] = true
+	}
+	var keptReserved []string
 	for _, cr := range next.Policy.CustomRules {
-		if config.ReservedRuleName(cr.Name) {
-			problems = append(problems, "policy.custom_rules: the rule name "+strconv.Quote(cr.Name)+" is reserved for semantic detection; choose another name")
+		if !config.ReservedRuleName(cr.Name) {
+			continue
 		}
+		if saved[cr.Name] {
+			keptReserved = append(keptReserved, cr.Name)
+			continue
+		}
+		problems = append(problems, "policy.custom_rules: the rule name "+strconv.Quote(cr.Name)+" is reserved for semantic detection; choose another name")
 	}
 	changes := config.DecisionSettingsChanges(prev.Decision, next.Decision)
 	if len(changes) > 0 {
-		problems = append(problems, config.ValidateDecisionEdit(prev.Decision, next.Decision, nextMode)...)
+		problems = append(problems, config.ValidateDecisionEdit(prev.Decision, next.Decision, h.settingsStore.GetDefaults().Decision, nextMode)...)
 		for _, c := range changes {
 			if c.Key == "decision.mode" && c.New == config.DecisionModeEnforce && r.URL.Query().Get("confirm") != "enforce" {
 				problems = append(problems, "decision.mode: changing to enforce lets semantic findings drive the risk ladder; resend with ?confirm=enforce to confirm")
@@ -2027,6 +2042,9 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings 
 		slog.Error("failed to save settings", "error", err)
 		http.Error(w, "Failed to save settings", http.StatusInternalServerError)
 		return
+	}
+	for _, name := range keptReserved {
+		slog.Warn("saved custom rule uses a name reserved for semantic detection; it is kept but skipped at runtime, rename it", "rule", name)
 	}
 	h.reloadPolicyEngine()
 	h.logDecisionChanges(r, changes)

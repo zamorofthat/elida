@@ -647,12 +647,15 @@ restart-only values in force under `limits`.
 
 Guardrails:
 
-- **Restart-only changes are refused.** A save that changes a restart-only key
-  returns 400 with `problems` naming the key, and nothing is saved; the same
-  body without that key succeeds. A stale restart-only value already in
-  `settings.yaml` (for example after `elida.yaml` changed) never takes effect,
-  is logged at WARN at startup, and does not block saves that leave it as it
-  is.
+- **Restart-only changes are refused.** A save that sets a restart-only key
+  to anything but its value in force (the `elida.yaml` value, shown under
+  `limits` at `/control/decision`) returns 400 with `problems` naming the
+  key, and nothing is saved; the same body without that key succeeds.
+  Omitting a key is never a change. A stale restart-only value already in
+  `settings.yaml` (for example after `elida.yaml` changed) never takes effect
+  and is logged at WARN at startup. It never blocks a save: a save may keep
+  it (a dashboard round trip), drop it (a partial save that omits it), or
+  set it back to the value in force; only a third value is refused.
 - **`enforce` needs confirmation.** Changing `decision.mode` to `enforce`
   requires `?confirm=enforce` on the request; a UI dialog alone is not enough.
   It is refused while the saved `policy.mode` is `audit`, and when the
@@ -674,16 +677,23 @@ Guardrails:
   `elida.yaml`; any other refused value is logged at WARN and the
   `elida.yaml` value stays in force. (The `policy` section of `settings.yaml`
   is still applied only by a save, so the startup cap uses `elida.yaml`'s
-  `policy.mode`.)
+  `policy.mode`.) An `enforce` saved in `settings.yaml` while that
+  `policy.mode` is `audit` is applied capped to `audit`, not refused; a later
+  `policy.mode: enforce` save (or a reset) lifts the cap without
+  `?confirm=enforce`, since that `enforce` was already confirmed when it was
+  saved. The same holds for any cap: lifting it needs no confirmation.
 - **Every change is logged.** Each changed key writes one INFO line,
   `decision setting changed`, with `key`, `previous` and `new` values,
   `remote_addr`, and `authenticated` (whether control API authentication is
   on, so the request passed it). Values are configuration only, never content
   or credentials.
-- **Reserved rule names.** A custom rule saved through the settings API may not
-  be named `semantic_injection` or `injection_elevated` (the names semantic
-  detection records under); such a save is refused with 400, and a hand-edited
-  `settings.yaml` rule with one of those names is skipped with a WARN.
+- **Reserved rule names.** A custom rule may not be named
+  `semantic_injection` or `injection_elevated` (the names semantic detection
+  records under). A save that introduces such a name (a new rule, or a rename)
+  is refused with 400 naming it. A rule with such a name that is already saved
+  (by an earlier release or a hand edit) does not block saves: it is kept as
+  written, each save logs a WARN naming it, and it is skipped at runtime (also
+  with a WARN) until renamed.
 
 ### Allowlisted tools
 

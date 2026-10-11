@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,12 +95,52 @@ func TestDecisionStartupSettings_AppliesTheSavedMode(t *testing.T) {
 
 // Review Focus 4.
 func TestDecisionStartupSettings_StaleRestartOnlyValuesIgnored(t *testing.T) {
-	a := settingsApp(t, config.DecisionModeAudit, "decision:\n  max_concurrency: 1\n", nil)
+	// A stale restart-only value above its ceiling sits beside a runtime
+	// key. The runtime key must apply; the stale one must be ignored (one
+	// restart-only WARN), never refused, and must not block a later save.
+	a := settingsApp(t, config.DecisionModeAudit, "decision:\n  mode: shadow\n  max_concurrency: 999999\n", nil)
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	if err := a.applyStartupDecisionSettings(); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
+	if got := a.decisionRunner.Live().Mode; got != config.DecisionModeShadow {
+		t.Fatalf("runner mode = %q, want settings.yaml's shadow", got)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "restart-only") || !strings.Contains(out, "key=decision.max_concurrency") {
+		t.Fatalf("want the restart-only WARN for decision.max_concurrency: %s", out)
+	}
+	if strings.Contains(out, "refused") {
+		t.Fatalf("a stale restart-only value must be ignored, not refused: %s", out)
+	}
 	if got := a.DecisionStatus().Limits.MaxConcurrency; got != a.cfg.Decision.MaxConcurrency {
 		t.Fatalf("max_concurrency in force = %d, want elida.yaml's %d", got, a.cfg.Decision.MaxConcurrency)
+	}
+
+	a.initControlAPI()
+	get := httptest.NewRecorder()
+	a.controlHandler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/control/settings", nil))
+	var body map[string]any
+	if err := json.Unmarshal(get.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	dec, ok := body["decision"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET lacks decision: %s", get.Body.String())
+	}
+	dec["mode"] = config.DecisionModeAudit
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := httptest.NewRecorder()
+	a.controlHandler.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/control/settings", strings.NewReader(string(raw))))
+	if put.Code != http.StatusOK {
+		t.Fatalf("GET->PUT changing mode with the stale value present: %d %s", put.Code, put.Body.String())
+	}
+	if got := a.decisionRunner.Live().Mode; got != config.DecisionModeAudit {
+		t.Fatalf("runner mode after save = %q, want audit", got)
 	}
 }
 

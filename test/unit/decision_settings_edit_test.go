@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"elida/internal/config"
+	"elida/internal/control"
 	"elida/internal/policy"
+	"elida/internal/session"
 )
 
 type stubConfigurer struct {
@@ -136,10 +141,140 @@ func TestDecisionSettingsEdit_ChangesAreLogged(t *testing.T) {
 		t.Fatalf("PUT: %d %s", w.Code, w.Body.String())
 	}
 	out := buf.String()
-	for _, want := range []string{"decision setting changed", "key=decision.mode", "previous=shadow", "new=audit", "remote_addr="} {
+	// authenticated reports whether the request passed control API
+	// authentication: with auth off, nothing was authenticated.
+	for _, want := range []string{"decision setting changed", "key=decision.mode", "previous=shadow", "new=audit", "remote_addr=", "authenticated=false"} {
 		if !contains(out, want) {
 			t.Fatalf("log lacks %q: %s", want, out)
 		}
+	}
+
+	// With auth on, a request reaches the handler only after passing it
+	// (here through X-API-Key, not Authorization), so the line says true.
+	buf.Reset()
+	store := session.NewMemoryStore()
+	authed := control.New(store, session.NewManager(store, 5*time.Minute), control.WithAuth("k3y"))
+	ss, err := config.NewSettingsStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authed.SetSettingsStore(ss)
+	authed.SetDecisionConfigurer(&stubConfigurer{})
+	req := httptest.NewRequest(http.MethodPut, "/control/settings", strings.NewReader(`{"decision":{"mode":"audit"}}`))
+	req.Header.Set("X-API-Key", "k3y")
+	w := httptest.NewRecorder()
+	authed.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated PUT: %d %s", w.Code, w.Body.String())
+	}
+	if out := buf.String(); !contains(out, "key=decision.mode") || !contains(out, "authenticated=true") || contains(out, "k3y") {
+		t.Fatalf("authenticated audit line wrong (and must never carry the key): %s", out)
+	}
+}
+
+// builtinDecisionDefaults is the decision section a fresh settings store
+// holds in force (its defaults layer).
+func builtinDecisionDefaults(t *testing.T) config.DecisionSettings {
+	t.Helper()
+	ss, err := config.NewSettingsStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ss.GetDefaults().Decision
+}
+
+// staleSettingsHandler is a settings handler (policy engine, stub
+// configurer) whose settings.yaml holds yamlBody, as left by an earlier save.
+func staleSettingsHandler(t *testing.T, yamlBody string) (*control.Handler, *config.SettingsStore) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(yamlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ss, err := config.NewSettingsStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := settingsHandler(t, policy.NewEngine(policy.Config{Enabled: true, Mode: "enforce"}))
+	h.SetSettingsStore(ss)
+	h.SetDecisionConfigurer(&stubConfigurer{})
+	return h, ss
+}
+
+// Review M-1: a stale restart-only value never blocks a save. Omitting it
+// (a partial PUT) or setting it back to the value in force is accepted;
+// any other value is still refused.
+func TestDecisionSettingsEdit_StaleRestartOnlyValueCanBeOmittedOrReset(t *testing.T) {
+	const stale = "decision:\n  max_concurrency: 2\n"
+	inForce := *builtinDecisionDefaults(t).MaxConcurrency
+
+	for name, body := range map[string]any{
+		"partial decision PUT": decisionPut("audit"),
+		"partial policy PUT":   map[string]any{"policy": map[string]any{"enabled": true, "mode": "audit"}},
+		"reset to in force":    map[string]any{"decision": map[string]any{"max_concurrency": inForce}},
+	} {
+		h, ss := staleSettingsHandler(t, stale)
+		if w := doJSON(t, h, http.MethodPut, "/control/settings", body); w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+		if got := *ss.GetMerged().Decision.MaxConcurrency; got != inForce {
+			t.Fatalf("%s: merged max_concurrency = %d, want the in-force %d", name, got, inForce)
+		}
+	}
+
+	h, ss := staleSettingsHandler(t, stale)
+	w := doJSON(t, h, http.MethodPut, "/control/settings", map[string]any{"decision": map[string]any{"max_concurrency": 7}})
+	if w.Code != http.StatusBadRequest || !contains(w.Body.String(), "decision.max_concurrency") {
+		t.Fatalf("a third value: got %d %s, want 400", w.Code, w.Body.String())
+	}
+	if *ss.GetMerged().Decision.MaxConcurrency != 2 {
+		t.Fatal("a refused edit must not be saved")
+	}
+}
+
+func TestValidateDecisionEdit_AcceptsARestartOnlyKeyBackToItsValueInForce(t *testing.T) {
+	inForce := builtinDecisionDefaults(t)
+	one, four, seven := 1, *inForce.MaxConcurrency, 7
+	prev, back, other := inForce, inForce, inForce
+	prev.MaxConcurrency, back.MaxConcurrency, other.MaxConcurrency = &one, &four, &seven
+	if probs := config.ValidateDecisionEdit(prev, back, inForce, "enforce"); len(probs) != 0 {
+		t.Fatalf("back to the value in force must validate: %v", probs)
+	}
+	if probs := config.ValidateDecisionEdit(prev, other, inForce, "enforce"); len(probs) != 1 || !contains(probs[0], "decision.max_concurrency") {
+		t.Fatalf("any other value must be refused: %v", probs)
+	}
+}
+
+// Review M-2: a reserved custom-rule name already saved does not block
+// unrelated saves (it is skipped at runtime, with a WARN); a reserved name
+// new in this save is still refused.
+func TestDecisionSettingsEdit_PreexistingReservedRuleNameDoesNotBlockSaves(t *testing.T) {
+	var buf bytes.Buffer
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	const yamlBody = "policy:\n  custom_rules:\n    - name: semantic_injection\n      type: content_match\n      patterns: [\"x\"]\n      severity: warning\n"
+	h, ss := staleSettingsHandler(t, yamlBody)
+	got := doJSON(t, h, http.MethodGet, "/control/settings", nil)
+	if w := doJSON(t, h, http.MethodPut, "/control/settings", got.Body.String()); w.Code != http.StatusOK {
+		t.Fatalf("round trip with a pre-existing reserved rule: %d %s", w.Code, w.Body.String())
+	}
+	if out := buf.String(); !contains(out, "level=WARN") || !contains(out, "rule=semantic_injection") {
+		t.Fatalf("a pre-existing reserved rule must WARN: %s", out)
+	}
+	if rules := ss.GetMerged().Policy.CustomRules; len(rules) != 1 || rules[0].Name != "semantic_injection" {
+		t.Fatalf("the saved body must not be rewritten: %+v", rules)
+	}
+
+	w := doJSON(t, h, http.MethodPut, "/control/settings", map[string]any{"policy": map[string]any{
+		"custom_rules": []map[string]any{
+			{"name": "semantic_injection", "type": "content_match", "patterns": []string{"x"}, "severity": "warning"},
+			{"name": "injection_elevated", "type": "content_match", "patterns": []string{"y"}, "severity": "warning"},
+		},
+	}})
+	if w.Code != http.StatusBadRequest || !contains(w.Body.String(), "injection_elevated") || contains(w.Body.String(), `\"semantic_injection\"`) {
+		t.Fatalf("a new reserved name: got %d %s, want 400 naming only the new one", w.Code, w.Body.String())
 	}
 }
 
@@ -155,7 +290,7 @@ func TestDecisionSettingsChanges_ReportsOnlyChangedKeys(t *testing.T) {
 	if len(got) != 2 || got[0].Key != "decision.mode" || got[1].Key != "decision.preprocessing.max_decode_depth" {
 		t.Fatalf("changes = %+v", got)
 	}
-	if probs := config.ValidateDecisionEdit(prev, next, "enforce"); len(probs) != 0 {
+	if probs := config.ValidateDecisionEdit(prev, next, ss.GetDefaults().Decision, "enforce"); len(probs) != 0 {
 		t.Fatalf("runtime keys must validate: %v", probs)
 	}
 	if *ss.GetMerged().Decision.Mode != "shadow" {

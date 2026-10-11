@@ -142,8 +142,10 @@ curl -X PUT http://localhost:9090/control/settings \
 
 # Change semantic detection to enforce: needs explicit confirmation, and is
 # refused with 400 while policy.mode is audit. Only decision.mode and
-# decision.preprocessing.* change at runtime; a restart-only decision key is
-# refused with 400 naming it (see configuration.md, "Changing decision
+# decision.preprocessing.* change at runtime; a restart-only decision key set
+# to anything but its value in force is refused with 400 naming it, and
+# omitting one is never a change, so partial saves like these work even with
+# a stale value in settings.yaml (see configuration.md, "Changing decision
 # settings at runtime").
 curl -X PUT 'http://localhost:9090/control/settings?confirm=enforce' \
   -H "Content-Type: application/json" \

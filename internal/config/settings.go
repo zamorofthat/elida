@@ -215,8 +215,9 @@ func (s DecisionSettings) ApplyTo(d DecisionConfig, policyMode string) (Decision
 }
 
 // DecisionRestartOnlyKeys are the DecisionSettings keys that cannot change at
-// runtime (plan D5, D6). A settings save that changes one is refused; a stale
-// value already in settings.yaml never takes effect. The runtime-editable
+// runtime (plan D5, D6). A settings save that sets one to anything but its
+// value in force is refused; a stale value already in settings.yaml never
+// takes effect, and a save may drop it or set it back. The runtime-editable
 // keys are decision.mode and decision.preprocessing.*.
 var DecisionRestartOnlyKeys = map[string]bool{
 	"decision.threshold_set":      true,
@@ -295,11 +296,19 @@ func DecisionSettingsChanges(prev, next DecisionSettings) []DecisionSettingChang
 // enforce while nextPolicyMode is audit (plan D8). Runtime facts (is
 // semantic detection running, does the threshold set match) are the
 // configurer's to check.
-func ValidateDecisionEdit(prev, next DecisionSettings, nextPolicyMode string) []string {
+//
+// inForce is the decision section actually running (elida.yaml, the
+// settings store's defaults). A restart-only key whose next value equals
+// its value in force is not refused: that is a stale settings.yaml value
+// being dropped (a partial save that omits it) or set back, and it changes
+// nothing that runs. Any other restart-only value is refused, so no value
+// that differs from what runs can be saved.
+func ValidateDecisionEdit(prev, next, inForce DecisionSettings, nextPolicyMode string) []string {
+	running := flatDecision(inForce)
 	var problems []string
 	for _, c := range DecisionSettingsChanges(prev, next) {
-		if DecisionRestartOnlyKeys[c.Key] {
-			problems = append(problems, fmt.Sprintf("%s is restart-only: set it in elida.yaml and restart (it cannot change from %q to %q at runtime)", c.Key, c.Previous, c.New))
+		if DecisionRestartOnlyKeys[c.Key] && c.New != running[c.Key] {
+			problems = append(problems, fmt.Sprintf("%s is restart-only: set it in elida.yaml and restart (it cannot change to %q at runtime; the value in force is %q)", c.Key, c.New, running[c.Key]))
 		}
 		if c.Key == "decision.mode" && c.New == DecisionModeEnforce && nextPolicyMode == "audit" {
 			problems = append(problems, "decision.mode: enforce is refused while policy.mode is audit")
