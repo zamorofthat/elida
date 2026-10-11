@@ -1107,6 +1107,15 @@ func (r *ValidationResult) Error() error {
 	return fmt.Errorf("configuration invalid:\n  - %s", strings.Join(msgs, "\n  - "))
 }
 
+// reservedSemanticRuleNames are the rule names the semantic decision runner
+// records violations under (runner.RuleSemanticInjection and
+// runner.RuleInjectionElevated; config does not import decision, so a test
+// keeps the two lists in step). No policy rule may use them.
+var reservedSemanticRuleNames = map[string]bool{
+	"semantic_injection": true,
+	"injection_elevated": true,
+}
+
 // validate checks that the configuration is valid
 func (c *Config) validate() error {
 	result := c.Validate()
@@ -1248,6 +1257,19 @@ func (c *Config) Validate() *ValidationResult {
 			Message: fmt.Sprintf("%q is invalid", c.Policy.Mode),
 			Hint:    "must be \"enforce\" or \"audit\"",
 		})
+	}
+
+	// Rule names the semantic decision runner records under are reserved: a
+	// config rule sharing one would merge into the same per-rule display
+	// entry as semantic decisions.
+	for i, r := range c.Policy.Rules {
+		if reservedSemanticRuleNames[r.Name] {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("policy.rules[%d].name", i),
+				Message: fmt.Sprintf("%q is reserved for semantic decisions", r.Name),
+				Hint:    "rename the rule",
+			})
+		}
 	}
 
 	// Control API auth

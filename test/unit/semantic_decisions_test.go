@@ -2,9 +2,13 @@ package unit
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"elida/internal/config"
+	"elida/internal/decision/runner"
 	"elida/internal/policy"
 )
 
@@ -224,13 +228,30 @@ func TestSemanticDecisions_EveryDisplayFieldComesFromOneDecision(t *testing.T) {
 	}
 }
 
-func TestSemanticDecisions_GetFlaggedSessionReturnsACopy(t *testing.T) {
-	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
-	e.RecordSemanticViolation("sess-sd-copy", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_a", 1, "a"))
-	fs := e.GetFlaggedSession("sess-sd-copy")
-	fs.SemanticDecisions[0].Evidence.DecisionID = "tampered"
-	if got := e.GetFlaggedSession("sess-sd-copy").SemanticDecisions[0].Evidence.DecisionID; got != "dec_a" {
-		t.Fatalf("the engine's record was changed through a returned copy: %q", got)
+func TestSemanticDecisions_GettersReturnCopies(t *testing.T) {
+	getters := []struct {
+		name string
+		get  func(e *policy.Engine) *policy.FlaggedSession
+	}{
+		{"GetFlaggedSession", func(e *policy.Engine) *policy.FlaggedSession { return e.GetFlaggedSession("sess-sd-copy") }},
+		{"GetFlaggedSessions", func(e *policy.Engine) *policy.FlaggedSession { return e.GetFlaggedSessions()[0] }},
+		{"GetFlaggedSessionsBySeverity", func(e *policy.Engine) *policy.FlaggedSession {
+			return e.GetFlaggedSessionsBySeverity(policy.SeverityInfo)[0]
+		}},
+	}
+	for _, g := range getters {
+		t.Run(g.name, func(t *testing.T) {
+			e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+			e.RecordSemanticViolation("sess-sd-copy", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_a", 1, "a"))
+			fs := g.get(e)
+			fs.SemanticDecisions[0].Evidence.DecisionID = "tampered"
+			fs.SemanticDecisions = append(fs.SemanticDecisions, policy.SemanticDecision{EventID: "extra"})
+			fs.SemanticDecisionsDropped = 99
+			got := e.GetFlaggedSession("sess-sd-copy")
+			if len(got.SemanticDecisions) != 1 || got.SemanticDecisions[0].Evidence.DecisionID != "dec_a" || got.SemanticDecisionsDropped != 0 {
+				t.Fatalf("the engine's records were changed through a copy from %s: %+v", g.name, got.SemanticDecisions)
+			}
+		})
 	}
 }
 
@@ -279,5 +300,157 @@ func TestSemanticDecisions_ConcurrentRecordAndRead(t *testing.T) {
 	fs := e.GetFlaggedSession("sess-sd-race")
 	if len(fs.SemanticDecisions) != policy.MaxSemanticDecisionsPerSession || fs.SemanticDecisionsDropped != 400-policy.MaxSemanticDecisionsPerSession {
 		t.Fatalf("len=%d dropped=%d", len(fs.SemanticDecisions), fs.SemanticDecisionsDropped)
+	}
+}
+
+// Review M1: the representative is ranked on source-weighted severity, so a
+// critical from a trusted role (effective info) never displaces a user
+// warning and MaxSeverity cannot fall.
+func TestSemanticDecisions_RankingUsesEffectiveSeverity(t *testing.T) {
+	systemCritical := func(id string, idx int) policy.Violation {
+		v := decisionViolation("semantic_injection", policy.SeverityCritical, false, 0.95, id, idx, "system critical")
+		v.SourceRole = "system"
+		v.EffectiveSeverity = "" // computed: critical x system = info
+		return v
+	}
+
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	e.RecordSemanticViolation("sess-sd-eff", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_user", 1, "user warning"))
+	e.RecordSemanticViolation("sess-sd-eff", systemCritical("dec_sys", 2))
+	fs := e.GetFlaggedSession("sess-sd-eff")
+	if v := fs.Violations[0]; v.Semantic.DecisionID != "dec_user" || v.SourceRole != "user" {
+		t.Fatalf("a critical/system decision (effective info) must not displace a user warning: %+v / %+v", v, v.Semantic)
+	}
+	if fs.MaxSeverity != policy.SeverityWarning {
+		t.Fatalf("MaxSeverity = %q, want warning (it must not fall)", fs.MaxSeverity)
+	}
+
+	e.RecordSemanticViolation("sess-sd-eff2", systemCritical("dec_sys", 1))
+	e.RecordSemanticViolation("sess-sd-eff2", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_user", 2, "user warning"))
+	fs = e.GetFlaggedSession("sess-sd-eff2")
+	if v := fs.Violations[0]; v.Semantic.DecisionID != "dec_user" {
+		t.Fatalf("a user warning outranks a stored critical/system decision: %+v / %+v", v, v.Semantic)
+	}
+	if fs.MaxSeverity != policy.SeverityWarning {
+		t.Fatalf("MaxSeverity = %q, want warning", fs.MaxSeverity)
+	}
+}
+
+// Review M4: the old mixing path let an evidence-only critical leak into
+// MaxSeverity when a contributing warning followed; the representative is
+// now the contributing warning.
+func TestSemanticDecisions_EvidenceCriticalThenContributingWarning(t *testing.T) {
+	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	e.RecordSemanticViolation("sess-sd-m4", decisionViolation("semantic_injection", policy.SeverityCritical, true, 0.95, "dec_ev", 1, "ev critical"))
+	e.RecordSemanticViolation("sess-sd-m4", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_c", 2, "warning"))
+	fs := e.GetFlaggedSession("sess-sd-m4")
+	v := fs.Violations[0]
+	if v.Severity != policy.SeverityWarning || v.Description != "warning" || v.EvidenceOnly {
+		t.Fatalf("entry must be the contributing warning: %+v", v)
+	}
+	if fs.MaxSeverity != policy.SeverityWarning {
+		t.Fatalf("MaxSeverity = %q, want warning", fs.MaxSeverity)
+	}
+}
+
+// collidingRules gives the engine a regex rule named like a semantic rule.
+// Config validation rejects this name; the engine must still never mix the
+// two kinds in one display entry.
+func collidingRules() []policy.Rule {
+	r := baselineRules()
+	r[0].Name = "semantic_injection"
+	return r
+}
+
+// Review M2, semantic onto regex: the regex entry is kept.
+func TestSemanticDecisions_SemanticNeverReplacesARegexEntry(t *testing.T) {
+	e := newRiskLadderEngine(collidingRules(), baselineThresholds())
+	e.EvaluateMessages("sess-sd-kind", []policy.MessageToScan{{Role: "user", Index: 0, Content: "zzmarkerzz"}})
+	before := e.GetFlaggedSession("sess-sd-kind").Violations[0]
+	if before.Semantic != nil || before.MatchedPattern == "" {
+		t.Fatalf("fixture: want a regex entry: %+v", before)
+	}
+
+	sem := decisionViolation("semantic_injection", policy.SeverityCritical, false, 0.95, "dec_a", 3, "semantic")
+	sem.Timestamp = before.Timestamp.Add(time.Second)
+	e.RecordSemanticViolation("sess-sd-kind", sem)
+
+	fs := e.GetFlaggedSession("sess-sd-kind")
+	if len(fs.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(fs.Violations))
+	}
+	v := fs.Violations[0]
+	if v.Semantic != nil || v.MatchedPattern != before.MatchedPattern || v.Description != before.Description ||
+		v.Severity != before.Severity || v.EventID != before.EventID {
+		t.Fatalf("a semantic decision replaced or mixed into a regex entry: %+v", v)
+	}
+	if !v.Timestamp.Equal(sem.Timestamp) {
+		t.Fatalf("Timestamp = %v, want the last firing %v", v.Timestamp, sem.Timestamp)
+	}
+	// The decision itself is still recorded and scored.
+	if !hasDecision(fs, "dec_a") || len(fs.ViolationEvents) != 2 {
+		t.Fatalf("the decision must still get its record and event: records=%+v events=%d", fs.SemanticDecisions, len(fs.ViolationEvents))
+	}
+}
+
+// Review M2, regex onto semantic: the semantic entry is kept, and an
+// evidence-only critical does not leak into MaxSeverity through a mix.
+func TestSemanticDecisions_RegexNeverReplacesASemanticEntry(t *testing.T) {
+	e := newRiskLadderEngine(collidingRules(), baselineThresholds())
+	sem := decisionViolation("semantic_injection", policy.SeverityCritical, true, 0.95, "dec_ev", 1, "ev critical")
+	sem.Timestamp = time.Now().Add(-time.Minute)
+	e.RecordSemanticViolation("sess-sd-kind2", sem)
+	before := e.GetFlaggedSession("sess-sd-kind2").Violations[0]
+
+	e.EvaluateMessages("sess-sd-kind2", []policy.MessageToScan{{Role: "user", Index: 0, Content: "zzmarkerzz"}})
+
+	fs := e.GetFlaggedSession("sess-sd-kind2")
+	if len(fs.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(fs.Violations))
+	}
+	v := fs.Violations[0]
+	if v.Semantic == nil || v.Semantic.DecisionID != "dec_ev" || !v.EvidenceOnly || v.Severity != policy.SeverityCritical ||
+		v.EventID != before.EventID || v.MatchedPattern != "" {
+		t.Fatalf("a regex firing replaced or mixed into a semantic entry: %+v / %+v", v, v.Semantic)
+	}
+	if !v.Timestamp.After(before.Timestamp) {
+		t.Fatalf("Timestamp must advance to the regex firing: %v <= %v", v.Timestamp, before.Timestamp)
+	}
+	if fs.MaxSeverity == policy.SeverityCritical {
+		t.Fatal("an evidence-only critical leaked into MaxSeverity through a regex firing")
+	}
+	if len(fs.ViolationEvents) != 2 {
+		t.Fatalf("events = %d, want 2 (the regex firing still scores)", len(fs.ViolationEvents))
+	}
+}
+
+// Review M2: config validation reserves the runner's rule names.
+func TestSemanticDecisions_ConfigRejectsReservedRuleNames(t *testing.T) {
+	for _, name := range []string{runner.RuleSemanticInjection, runner.RuleInjectionElevated} {
+		c := config.DefaultConfig()
+		c.Listen = ":8080"
+		c.Backend = "https://api.example.com"
+		c.Policy.Rules = append(c.Policy.Rules, config.PolicyRule{
+			Name: name, Type: "content_match", Patterns: []string{"x"}, Severity: "warning",
+		})
+		res := c.Validate()
+		var found bool
+		for _, e := range res.Errors {
+			if strings.HasPrefix(e.Field, "policy.rules[") && strings.Contains(e.Message, name) {
+				found = true
+			}
+		}
+		if res.Valid || !found {
+			t.Fatalf("a policy rule named %q must be rejected: %+v", name, res.Errors)
+		}
+	}
+
+	c := config.DefaultConfig()
+	c.Listen = ":8080"
+	c.Backend = "https://api.example.com"
+	for _, e := range c.Validate().Errors {
+		if strings.HasPrefix(e.Field, "policy.rules[") {
+			t.Fatalf("the default rules must not use a reserved name: %+v", e)
+		}
 	}
 }
