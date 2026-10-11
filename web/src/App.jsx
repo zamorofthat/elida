@@ -10,6 +10,7 @@ import {
 } from './components/shared/Icons'
 import { TopNav } from './components/TopNav'
 import { SessionsPage } from './components/SessionsPage'
+import { DecisionSettings, settingsSaveUrl, saveErrorText } from './components/DecisionSettings'
 import { DashboardPage } from './components/DashboardPage'
 import { ToolUsePage } from './components/ToolUsePage'
 import { PolicyPage } from './components/PolicyPage'
@@ -704,16 +705,26 @@ function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
+  const [decisionStatus, setDecisionStatus] = useState(null)
+  // savedDecisionMode is the decision.mode the server last returned; a save
+  // that changes it to enforce needs confirmation (?confirm=enforce).
+  const [savedDecisionMode, setSavedDecisionMode] = useState(null)
 
   const fetchSettings = async () => {
     try {
-      const [settingsRes, defaultsRes, diffRes] = await Promise.all([
+      const [settingsRes, defaultsRes, diffRes, decisionRes] = await Promise.all([
         apiFetch(API_BASE + '/control/settings'),
         apiFetch(API_BASE + '/control/settings/defaults'),
         apiFetch(API_BASE + '/control/settings/diff'),
+        apiFetch(API_BASE + '/control/decision'),
       ])
 
-      if (settingsRes.ok) setSettings(await settingsRes.json())
+      if (settingsRes.ok) {
+        const loaded = await settingsRes.json()
+        setSettings(loaded)
+        setSavedDecisionMode(loaded?.decision?.mode ?? null)
+      }
+      if (decisionRes.ok) setDecisionStatus(await decisionRes.json())
       if (defaultsRes.ok) setDefaults(await defaultsRes.json())
       if (diffRes.ok) setDiff(await diffRes.json())
     } catch (err) {
@@ -732,7 +743,12 @@ function SettingsPage() {
     setSaving(true)
     setMessage(null)
     try {
-      const res = await apiFetch(API_BASE + '/control/settings', {
+      const nextMode = settings.decision?.mode
+      if (nextMode === 'enforce' && savedDecisionMode !== 'enforce' &&
+          !confirm('Switch semantic detection to enforce? Semantic findings will add risk and can throttle, block or terminate sessions.')) {
+        return
+      }
+      const res = await apiFetch(settingsSaveUrl(API_BASE, savedDecisionMode, nextMode), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
@@ -741,8 +757,8 @@ function SettingsPage() {
         setMessage({ type: 'success', text: 'Settings applied instantly (no restart required)' })
         fetchSettings() // Refresh diff
       } else {
-        const err = await res.text()
-        setMessage({ type: 'error', text: 'Failed to save: ' + err })
+        // The server's refusal, verbatim; the form keeps its edits.
+        setMessage({ type: 'error', text: 'Failed to save: ' + saveErrorText(await res.text()) })
       }
     } catch (err) {
       setMessage({ type: 'error', text: 'Failed to save settings' })
@@ -934,6 +950,15 @@ function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <DecisionSettings
+        decision={settings.decision}
+        policyMode={settings.policy?.mode || 'enforce'}
+        status={decisionStatus}
+        isModified={isModified}
+        onChange={(key, value) => updateSetting('decision', key, value)}
+        onPreprocessingChange={(key, value) => updateNestedSetting('decision', 'preprocessing', key, value)}
+      />
 
       <div class="panel">
         <div class="panel-header">
