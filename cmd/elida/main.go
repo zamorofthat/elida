@@ -421,13 +421,13 @@ func (a *app) initSessionEndCallback() {
 // their representative semantic metadata) and per-decision semantic records
 // for the ending session to its record.
 //
-// Only this session instance's violations and decision records are added. A violation that last
-// fired before start was carried over by a retained block/terminate entry
-// from an earlier session with the same ID; it is skipped here, at the
-// source, so neither SQLite events nor the OTEL/OCSF export (which are built
-// from this record) report it again for a session whose requests were all
-// refused. SQLite history still holds it: SaveSession carries it from the
-// stored row.
+// Only this session instance's violations and decision records are added.
+// A violation that last fired before start was carried over by a retained
+// block/terminate entry from an earlier session with the same ID; it is
+// skipped here, at the source, so neither SQLite events nor the OTEL/OCSF
+// export (which are built from this record) report it again for a session
+// whose requests were all refused. SQLite history still holds it:
+// SaveSession carries it from the stored row.
 func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string, start time.Time) {
 	if a.policyEngine == nil {
 		return

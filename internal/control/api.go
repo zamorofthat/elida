@@ -1293,8 +1293,9 @@ func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The list stays small: per-decision records are served by
-	// /control/flagged/{id} and the session detail path only. Each entry is
-	// a deep copy, so this changes nothing in the engine.
+	// /control/flagged/{id} and the session detail path only. The dropped
+	// count is kept (it is one small number). Each entry is a deep copy, so
+	// this changes nothing in the engine.
 	for _, fs := range flagged {
 		fs.SemanticDecisions = nil
 	}

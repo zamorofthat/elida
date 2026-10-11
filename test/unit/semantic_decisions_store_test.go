@@ -273,3 +273,53 @@ func TestSemanticDecisionsStore_CarriedDecisionsAreCapped(t *testing.T) {
 		t.Fatalf("dropped = %d, want 2 (the two carried records the cap cut)", got.SemanticDecisionsDropped)
 	}
 }
+
+// The conversion allocates its output once and keeps returning nil for an
+// empty result (no records, or every record from before notBefore).
+func TestSemanticDecisionsStore_ConversionPreallocates(t *testing.T) {
+	start := time.Now()
+	in := make([]policy.SemanticDecision, 64)
+	for i := range in {
+		in[i] = policy.SemanticDecision{EventID: fmt.Sprintf("evt_%d", i), Timestamp: start.Add(time.Second)}
+	}
+	if allocs := testing.AllocsPerRun(20, func() { _ = storage.SemanticDecisionsFromPolicy(in, start) }); allocs != 1 {
+		t.Fatalf("allocations = %v, want 1 (one preallocated slice)", allocs)
+	}
+	if out := storage.SemanticDecisionsFromPolicy(in, start); len(out) != 64 || cap(out) != 64 {
+		t.Fatalf("len/cap = %d/%d, want 64/64", len(out), cap(out))
+	}
+	if out := storage.SemanticDecisionsFromPolicy(nil, time.Time{}); out != nil {
+		t.Fatalf("no records must convert to nil, got %+v", out)
+	}
+	if out := storage.SemanticDecisionsFromPolicy(in, start.Add(time.Minute)); out != nil {
+		t.Fatalf("all records filtered must convert to nil, got %+v", out)
+	}
+}
+
+// GET /control/flagged leaves the per-decision list out but keeps the
+// dropped count, as docs/api.md says.
+func TestSemanticDecisions_FlaggedListKeepsTheDroppedCount(t *testing.T) {
+	store := session.NewMemoryStore()
+	manager := session.NewManager(store, 5*time.Minute)
+	engine := newRiskLadderEngine(baselineRules(), baselineThresholds())
+	n := policy.MaxSemanticDecisionsPerSession + 3
+	for i := 0; i < n; i++ {
+		engine.RecordSemanticViolation("sess-sd-drop", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, fmt.Sprintf("dec_%d", i), i, "drop"))
+	}
+	h := control.New(store, manager, control.WithPolicy(engine))
+
+	w := doJSON(t, h, http.MethodGet, "/control/flagged", nil)
+	var list struct {
+		Flagged []map[string]json.RawMessage `json:"flagged"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list.Flagged) != 1 {
+		t.Fatalf("flagged list: %d %s", w.Code, w.Body.String())
+	}
+	if _, ok := list.Flagged[0]["semantic_decisions"]; ok {
+		t.Fatal("the flagged list must not carry the per-decision list")
+	}
+	var dropped int
+	if err := json.Unmarshal(list.Flagged[0]["semantic_decisions_dropped"], &dropped); err != nil || dropped != 3 {
+		t.Fatalf("semantic_decisions_dropped = %d (%v), want 3", dropped, err)
+	}
+}

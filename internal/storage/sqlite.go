@@ -246,7 +246,10 @@ func SemanticEvidenceFromPolicy(e *policy.SemanticEvidence) *SemanticEvidence {
 // enrichRecordFromPolicy). A zero notBefore keeps every record. It returns
 // nil for an empty result.
 func SemanticDecisionsFromPolicy(in []policy.SemanticDecision, notBefore time.Time) []SemanticDecision {
-	var out []SemanticDecision
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SemanticDecision, 0, len(in))
 	for _, d := range in {
 		if !notBefore.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(notBefore) {
 			continue
@@ -264,6 +267,9 @@ func SemanticDecisionsFromPolicy(in []policy.SemanticDecision, notBefore time.Ti
 			Timestamp:             d.Timestamp,
 			Evidence:              SemanticEvidence(d.Evidence),
 		})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -476,9 +482,9 @@ func (s *SQLiteStore) migrate() error {
 // SaveSession reads the stored row. When its start_time differs from
 // record.StartTime the stored row belongs to an earlier session, and its
 // violations, captured content, semantic shadow decisions and per-decision
-// semantic records become the carried "prior history". A save of the same session (equal start_time,
-// e.g. the proxy's flagged-session save followed by the session-end save)
-// keeps the prior history already carried. The written lists are the
+// semantic records become the carried "prior history". A save of the same
+// session (equal start_time, e.g. the proxy's flagged-session save followed
+// by the session-end save) keeps the prior history already carried. The written lists are the
 // record's own entries merged with the prior history; mergeHistory documents
 // the deduplication and the caps.
 //
