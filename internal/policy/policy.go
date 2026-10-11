@@ -165,6 +165,14 @@ type FlaggedSession struct {
 
 	// Time-series for exponential decay — each occurrence stored with timestamp and source
 	ViolationEvents []ViolationEvent `json:"violation_events,omitempty"`
+
+	// SemanticDecisions is one record per semantic ViolationEvent, oldest
+	// first, bounded by MaxSemanticDecisionsPerSession. It is how a
+	// semantic enforcement action is explained after the fact: the display
+	// entry in Violations shows only the rule's representative decision.
+	SemanticDecisions []SemanticDecision `json:"semantic_decisions,omitempty"`
+	// SemanticDecisionsDropped counts records evicted or dropped by the bound.
+	SemanticDecisionsDropped int `json:"semantic_decisions_dropped,omitempty"`
 }
 
 // ViolationEvent is a lightweight record of a single violation occurrence
@@ -213,6 +221,130 @@ type SemanticEvidence struct {
 	CoverageComplete bool    `json:"coverage_complete"`
 	ExecutionMode    string  `json:"execution_mode"`
 	ProtectionScope  string  `json:"protection_scope"`
+}
+
+// MaxSemanticDecisionsPerSession bounds FlaggedSession.SemanticDecisions.
+// When the list is full, the oldest evidence-only record is evicted first;
+// with none, the oldest record is evicted, except that a new evidence-only
+// record is dropped instead of evicting a contributing one. Contributing
+// decisions are what an enforcement action must be explained by, so they
+// are kept preferentially. Every eviction or drop is counted in
+// SemanticDecisionsDropped.
+const MaxSemanticDecisionsPerSession = 256
+
+// SemanticDecision is the stored explanation of one semantic decision that
+// was recorded as a violation: which rule it fired, whether it contributed
+// risk, and the decision metadata behind it. There is one per semantic
+// ViolationEvent, with the same EventID. It carries no request content.
+type SemanticDecision struct {
+	EventID               string           `json:"event_id"`
+	RuleName              string           `json:"rule_name"`
+	EventCategory         string           `json:"event_category,omitempty"`
+	Severity              Severity         `json:"severity"`
+	EffectiveSeverity     Severity         `json:"effective_severity,omitempty"`
+	SourceRole            string           `json:"source_role"`
+	MessageIndex          int              `json:"message_index"`
+	EvidenceOnly          bool             `json:"evidence_only,omitempty"`
+	WouldContributePoints float64          `json:"would_contribute_points,omitempty"`
+	Timestamp             time.Time        `json:"timestamp"`
+	Evidence              SemanticEvidence `json:"evidence"`
+}
+
+// semanticDecisionOf builds the record for a semantic violation. The caller
+// has checked v.Semantic != nil.
+func semanticDecisionOf(v Violation) SemanticDecision {
+	return SemanticDecision{
+		EventID:               v.EventID,
+		RuleName:              v.RuleName,
+		EventCategory:         v.EventCategory,
+		Severity:              v.Severity,
+		EffectiveSeverity:     v.EffectiveSeverity,
+		SourceRole:            v.SourceRole,
+		MessageIndex:          v.MessageIndex,
+		EvidenceOnly:          v.EvidenceOnly,
+		WouldContributePoints: v.WouldContributePoints,
+		Timestamp:             v.Timestamp,
+		Evidence:              *v.Semantic,
+	}
+}
+
+// appendSemanticDecision appends d to list under MaxSemanticDecisionsPerSession
+// (see there for the eviction order) and returns the list and the updated
+// drop count. It reuses list's backing array; the caller holds the engine
+// lock and owns list.
+func appendSemanticDecision(list []SemanticDecision, dropped int, d SemanticDecision) ([]SemanticDecision, int) {
+	if len(list) < MaxSemanticDecisionsPerSession {
+		return append(list, d), dropped
+	}
+	victim := -1
+	for i := range list {
+		if list[i].EvidenceOnly {
+			victim = i
+			break
+		}
+	}
+	if victim < 0 {
+		if d.EvidenceOnly {
+			return list, dropped + 1
+		}
+		victim = 0
+	}
+	copy(list[victim:], list[victim+1:])
+	list[len(list)-1] = d
+	return list, dropped + 1
+}
+
+// severityRank orders severities for semanticOutranks.
+func severityRank(s Severity) int {
+	switch s {
+	case SeverityCritical:
+		return 2
+	case SeverityWarning:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// semanticOutranks reports whether semantic violation a should replace b as
+// its rule's display entry: a contributing decision outranks an evidence-only
+// one, then the higher severity wins, then the higher probability. An exact
+// tie keeps b, the earlier decision.
+func semanticOutranks(a, b Violation) bool {
+	if a.EvidenceOnly != b.EvidenceOnly {
+		return !a.EvidenceOnly
+	}
+	if ra, rb := severityRank(a.Severity), severityRank(b.Severity); ra != rb {
+		return ra > rb
+	}
+	var pa, pb float64
+	if a.Semantic != nil {
+		pa = a.Semantic.Probability
+	}
+	if b.Semantic != nil {
+		pb = b.Semantic.Probability
+	}
+	return pa > pb
+}
+
+// mergeSemanticViolation folds a later firing of a semantic rule into the
+// rule's display entry. The entry always describes exactly ONE decision:
+// the most consequential so far (semanticOutranks), with every field that
+// describes a decision (severity, effective severity, description, source
+// role, message index, event ID, evidence flag, would-contribute points,
+// Semantic) taken from that decision together. Only Timestamp is not a
+// decision field: it stays "when the rule last fired", which the
+// session-end path relies on (enrichRecordFromPolicy). The full history is
+// FlaggedSession.SemanticDecisions.
+func mergeSemanticViolation(existing *Violation, v Violation) {
+	lastFired := existing.Timestamp
+	if v.Timestamp.After(lastFired) {
+		lastFired = v.Timestamp
+	}
+	if semanticOutranks(v, *existing) {
+		*existing = v
+	}
+	existing.Timestamp = lastFired
 }
 
 // MaxRiskScore is the saturation cap for cumulative risk scores
@@ -1312,6 +1444,10 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 				EvidenceOnly:  v.EvidenceOnly,
 				Timestamp:     v.Timestamp,
 			})
+			if v.Semantic != nil {
+				flagged.SemanticDecisions, flagged.SemanticDecisionsDropped = appendSemanticDecision(
+					flagged.SemanticDecisions, flagged.SemanticDecisionsDropped, semanticDecisionOf(v))
+			}
 			if !v.EvidenceOnly {
 				contributed = true
 			}
@@ -1325,6 +1461,12 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 			for i := range flagged.Violations {
 				if flagged.Violations[i].RuleName == v.RuleName {
 					existing := &flagged.Violations[i]
+					if v.Semantic != nil {
+						// A semantic entry describes one decision, never a
+						// mix of two (see mergeSemanticViolation).
+						mergeSemanticViolation(existing, v)
+						break
+					}
 					existing.ActualValue = v.ActualValue
 					existing.Timestamp = v.Timestamp
 					// Once a rule has contributed, a later evidence-only
@@ -1639,6 +1781,11 @@ func (fs *FlaggedSession) clone() *FlaggedSession {
 			c.ViolationCounts[k] = v
 		}
 	}
+	if fs.SemanticDecisions != nil {
+		// SemanticDecision holds no pointers, so copying the slice is a deep copy.
+		c.SemanticDecisions = make([]SemanticDecision, len(fs.SemanticDecisions))
+		copy(c.SemanticDecisions, fs.SemanticDecisions)
+	}
 	return &c
 }
 
@@ -1765,8 +1912,8 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 // slimRetainedLocked reduces a retained entry to what enforcement on a
 // reused ID needs: action, throttle rate, score, max severity, timestamps,
 // per-rule counts, and the violations with their content fields
-// (MatchedText, SourceContent) cleared. Captured content, the event list and
-// the semantic dedup set are dropped. The session-end save has already
+// (MatchedText, SourceContent) cleared. Captured content, the event list,
+// the semantic decision list and the semantic dedup set are dropped. The session-end save has already
 // persisted the full record, which SQLite keeps across ID reuse.
 //
 // Bound: roughly 1.4 KB per entry (measured) plus a few hundred bytes per distinct rule
@@ -1784,6 +1931,8 @@ func (e *Engine) slimRetainedLocked(sessionID string, flagged *FlaggedSession) {
 	flagged.Violations = slim
 	flagged.CapturedContent = nil
 	flagged.ViolationEvents = nil
+	flagged.SemanticDecisions = nil
+	flagged.SemanticDecisionsDropped = 0
 	delete(e.seenSemanticEvents, sessionID)
 }
 
@@ -1910,8 +2059,11 @@ func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
 // captured and persisted as flagged. Both save paths (the session-end
 // callback in cmd/elida and the proxy's flagged-session save) copy
 // v.EvidenceOnly into storage.Violation.EvidenceOnly, so history marks
-// evidence-only findings as such. WouldContributePoints, EventID and
-// Semantic are not persisted by those paths.
+// evidence-only findings as such.
+// Each recorded decision is also appended to FlaggedSession.SemanticDecisions
+// (bounded; see MaxSemanticDecisionsPerSession), and the rule's display
+// entry in Violations is the rule's most consequential decision so far (see
+// mergeSemanticViolation), never a mix of two.
 //
 // MatchedText and SourceContent are cleared: a semantic violation records
 // scores and identifiers, never request content.

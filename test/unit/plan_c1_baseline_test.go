@@ -103,30 +103,6 @@ func TestBaselineC1_SemanticFiringsScorePerDecision(t *testing.T) {
 	}
 }
 
-// FLIP in Task 1. Today the display entry mixes two decisions: severity,
-// description and location stay from the first firing while Semantic and
-// EventID come from the latest (Plan A final review N2).
-func TestBaselineC1_MergedSemanticViolation_MixesFirstAndLatest(t *testing.T) {
-	e := newRiskLadderEngine(baselineRules(), baselineThresholds())
-	e.RecordSemanticViolation("sess-c1-mix", decisionViolation("semantic_injection", policy.SeverityWarning, false, 0.6, "dec_a", 1, "first"))
-	e.RecordSemanticViolation("sess-c1-mix", decisionViolation("semantic_injection", policy.SeverityCritical, false, 0.9, "dec_b", 2, "second"))
-
-	fs := e.GetFlaggedSession("sess-c1-mix")
-	v := fs.Violations[0]
-	if v.Severity != policy.SeverityWarning || v.Description != "first" || v.MessageIndex != 1 {
-		t.Fatalf("today severity/description/location stay from the first firing: %+v", v)
-	}
-	if v.Semantic == nil || v.Semantic.DecisionID != "dec_b" {
-		t.Fatalf("today Semantic comes from the latest firing: %+v", v.Semantic)
-	}
-	if v.EventID != fs.ViolationEvents[1].EventID {
-		t.Fatalf("today EventID comes from the latest firing: %q vs %q", v.EventID, fs.ViolationEvents[1].EventID)
-	}
-	if fs.MaxSeverity != policy.SeverityWarning {
-		t.Fatalf("today MaxSeverity follows the first firing's severity: %q", fs.MaxSeverity)
-	}
-}
-
 // KEEP. Once a rule has contributed, a later evidence-only firing never
 // relabels its display entry as evidence-only (Task 29).
 func TestBaselineC1_LaterEvidenceDoesNotRelabelAContributingRule(t *testing.T) {
