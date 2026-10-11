@@ -320,6 +320,13 @@ const (
 	// at least one answered window keeps its claim, so its remaining windows
 	// are not revisited and stay counted here.
 	GapNotAssessed = "not_assessed"
+	// GapAsyncDroppedDisabled counts async results delivered while the
+	// effective mode is disabled (a runtime Reconfigure to disabled with
+	// jobs still queued). They are dropped unrecorded and settled as
+	// unanswered, so a message with nothing else answered is re-assessed by
+	// the next request carrying it once the runner is enabled again. See
+	// AsyncDroppedDisabled.
+	GapAsyncDroppedDisabled = "async_dropped_disabled"
 	// ReasonAlreadyAssessed counts messages skipped because this session
 	// already had them scored. It is not a gap; see AlreadyAssessed.
 	ReasonAlreadyAssessed = "already_assessed"
@@ -371,6 +378,10 @@ type Runner struct {
 	droppedSinceLog int64
 	lastRefuseLog   time.Time
 	refusedSinceLog int64
+	// disabledDropLogged is set by the first async result dropped because
+	// the runner is disabled, and cleared by every Reconfigure that changes
+	// the effective mode, so that drop is logged once per mode change.
+	disabledDropLogged atomic.Bool
 }
 
 // boundSession is one registry entry.
@@ -512,6 +523,11 @@ func New(cfg Config) (*Runner, error) {
 			return nil, fmt.Errorf("runner: Policy is a nil %T; pass a nil interface for shadow-only behavior", cfg.Policy)
 		}
 	}
+	// The same value checks Reconfigure applies, so Reconfigure(r.Live())
+	// never fails for a runner New accepted.
+	if err := checkLive(Live{Mode: cfg.Mode, PolicyMode: cfg.PolicyMode, Budget: cfg.Budget}); err != nil {
+		return nil, err
+	}
 	if cfg.InlineTimeout < 0 {
 		return nil, fmt.Errorf("runner: InlineTimeout must not be negative, got %v", cfg.InlineTimeout)
 	}
@@ -606,10 +622,12 @@ func (r *Runner) snapshot() liveState {
 // Live returns the runtime-editable configuration in force.
 func (r *Runner) Live() Live { return r.snapshot().cfg }
 
-// validateLive checks l against the runner's fixed configuration, with the
-// rules New applies to the configured mode plus the bounds config validation
-// applies to the preprocessing budget.
-func (r *Runner) validateLive(l Live) error {
+// checkLive checks the values of l on their own, for New and Reconfigure
+// alike: a known mode, a known policy mode ("" as config validation allows,
+// "enforce" or "audit"; anything else would silently un-cap enforce), and,
+// unless the mode is disabled (which runs no preprocessing), the lower
+// bounds config validation applies to the preprocessing budget.
+func checkLive(l Live) error {
 	switch l.Mode {
 	case config.DecisionModeDisabled, config.DecisionModeShadow, config.DecisionModeAudit, config.DecisionModeEnforce:
 	default:
@@ -619,6 +637,22 @@ func (r *Runner) validateLive(l Live) error {
 	case "", "enforce", "audit":
 	default:
 		return fmt.Errorf("runner: unknown policy mode %q", l.PolicyMode)
+	}
+	if l.Mode == config.DecisionModeDisabled {
+		return nil
+	}
+	b := l.Budget
+	if b.MaxInputBytes < 1 || b.MaxAnalysisBytes < b.MaxInputBytes || b.MaxRepresentations < 1 || b.MaxDecodeDepth < 0 || b.MaxExpansionRatio < 1 {
+		return fmt.Errorf("runner: invalid preprocessing budget %+v", b)
+	}
+	return nil
+}
+
+// validateLive checks l against the runner's fixed configuration, with the
+// rules New applies to the configured mode, plus checkLive.
+func (r *Runner) validateLive(l Live) error {
+	if err := checkLive(l); err != nil {
+		return err
 	}
 	if l.Mode != config.DecisionModeDisabled {
 		// A runner built disabled skipped these checks in New; enabling it
@@ -641,10 +675,6 @@ func (r *Runner) validateLive(l Live) error {
 			return enforceRefused(r.cfg.Model.ThresholdSet)
 		}
 	}
-	b := l.Budget
-	if b.MaxInputBytes < 1 || b.MaxAnalysisBytes < b.MaxInputBytes || b.MaxRepresentations < 1 || b.MaxDecodeDepth < 0 || b.MaxExpansionRatio < 1 {
-		return fmt.Errorf("runner: invalid preprocessing budget %+v", b)
-	}
 	return nil
 }
 
@@ -655,10 +685,24 @@ func (r *Runner) validateLive(l Live) error {
 // policy.mode change made at runtime re-caps (or un-caps) the configured
 // mode, and without a policy engine audit and enforce still cap to shadow.
 //
-// A request already being assessed finishes under the snapshot it took; the
-// next entry point sees the new value. An async result reads the mode in
-// force at its delivery: one queued under enforce and delivered after a
-// downgrade records as evidence-only, which is the safe direction.
+// In-flight work on a change:
+//
+//   - A request already being assessed finishes under the snapshot it took;
+//     the next entry point sees the new value.
+//   - Every async result reads the mode in force at its delivery, not at
+//     enqueue, with the consequences below.
+//   - Downgrade (enforce to audit, or a policy.mode cap): a result queued
+//     under enforce records as evidence-only, which is the safe direction.
+//   - Upgrade (audit to enforce): a result queued under audit contributes,
+//     the same as if it had been assessed after the change.
+//   - To shadow: a delivered result records shadow entries only.
+//   - To disabled: the result is dropped unrecorded, counted in
+//     GapAsyncDroppedDisabled (AsyncDroppedDisabled) and logged once per
+//     mode change at INFO, and settled as unanswered, so a message with
+//     nothing else answered releases its claim and is re-assessed by the
+//     next request carrying it after the runner is enabled again.
+//
+// The preprocessing budget applies to the next message preprocessed.
 func (r *Runner) Reconfigure(l Live) error {
 	if err := r.validateLive(l); err != nil {
 		return err
@@ -668,6 +712,9 @@ func (r *Runner) Reconfigure(l Live) error {
 	old := r.live
 	r.live = st
 	r.liveMu.Unlock()
+	if old.effective != st.effective {
+		r.disabledDropLogged.Store(false)
+	}
 	if old.cfg.Mode != st.cfg.Mode || old.cfg.PolicyMode != st.cfg.PolicyMode || old.effective != st.effective {
 		slog.Info("semantic decision mode changed",
 			"old_mode", old.cfg.Mode,
@@ -915,6 +962,15 @@ func (r *Runner) logRateLimited(last *time.Time, since *int64, msg string, attrs
 // registry was full). Each is semantic analysis that was done and could not
 // be recorded.
 func (r *Runner) AsyncDroppedNoSession() int64 { return r.asyncDroppedNoSession.Load() }
+
+// AsyncDroppedDisabled returns how many async results were delivered while
+// the effective mode was disabled and dropped unrecorded
+// (GapAsyncDroppedDisabled, also in CoverageGaps).
+func (r *Runner) AsyncDroppedDisabled() int64 {
+	r.gapsMu.Lock()
+	defer r.gapsMu.Unlock()
+	return r.gaps[GapAsyncDroppedDisabled]
+}
 
 // BindRefused returns how many sessions were not bound because
 // MaxBoundSessions live bindings already existed.
@@ -1336,12 +1392,21 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 // message is delivered and nothing about that message was answered, the
 // claim is released so the next request carrying it assesses it again.
 func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.Assessment) {
+	k := msgKey{index: in.MessageIndex, sum: sha256.Sum256([]byte(in.Content))}
 	// The mode in force at delivery, not at enqueue (see Reconfigure).
 	st := r.snapshot()
 	if st.effective == config.DecisionModeDisabled {
+		// Queued before a runtime change to disabled. Nothing is recorded,
+		// so the delivery settles as unanswered: the message's claim is
+		// released rather than leaked, and it is re-assessed once enabled.
+		r.countGap(GapAsyncDroppedDisabled, 1)
+		if r.disabledDropLogged.CompareAndSwap(false, true) {
+			slog.Info("async semantic results dropped: the runner is disabled",
+				"consequence", "the dropped results are recorded nowhere; their messages are re-assessed after the runner is enabled again")
+		}
+		r.asyncDelivered(req.SessionID, k, false)
 		return
 	}
-	k := msgKey{index: in.MessageIndex, sum: sha256.Sum256([]byte(in.Content))}
 	defer r.asyncDelivered(req.SessionID, k, answeredAny(a))
 	sess := r.lookupSession(req.SessionID)
 	if sess == nil {
