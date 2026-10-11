@@ -183,6 +183,13 @@ func main() {
 	a.initProxy()
 	a.initWebSocket()
 	a.initSettings()
+	// settings.yaml's decision section, through the same mapping a settings
+	// save uses (plan D9). Only an enforce refused for a threshold-set
+	// mismatch is fatal, as it is in elida.yaml (see initDecision).
+	if err := a.applyStartupDecisionSettings(); err != nil {
+		slog.Error("startup failed", "error", err)
+		os.Exit(1)
+	}
 	a.initControlAPI()
 
 	errChan := a.startServers()
@@ -1093,6 +1100,10 @@ func (a *app) initControlAPI() {
 	// Always wired, so the status reports the configured mode and why the
 	// feature is or is not running (disabled, degraded, mode-disabled).
 	a.controlHandler.SetDecisionProvider(a)
+	// Always wired, so a settings save applies decision.mode and
+	// decision.preprocessing.* and re-caps the runner on a policy.mode
+	// change; with no runner it refuses decision changes as not running.
+	a.controlHandler.SetDecisionConfigurer(a)
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")

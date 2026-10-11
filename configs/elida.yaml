@@ -428,6 +428,10 @@ websocket:
 #
 # Enabling this loads ~90 MiB of model assets. With enabled: false nothing is
 # loaded and the request path is unchanged.
+#
+# Only mode and preprocessing.* change at runtime (dashboard or settings API;
+# enforce needs ?confirm=enforce). Every other key needs this file and a
+# restart. See docs/configuration.md, "Changing decision settings at runtime".
 decision:
   # Load model assets and run assessments. Restart required.
   enabled: false

@@ -400,6 +400,112 @@ func (f semanticAssessorFunc) AssessRequest(ctx context.Context, sess *session.S
 	return f(ctx, sess, requestID, msgs)
 }
 
+// liveFrom maps the runtime-editable decision settings onto the runner's
+// Live. Only decision.mode and decision.preprocessing.* are read:
+// restart-only fields in s are ignored (a stale value in settings.yaml must
+// neither take effect nor block a save, plan D11). ApplyTo supplies the
+// ceilings and the analysis>=input invariant; it is given policy mode
+// "enforce" so it does not cap: the runner applies the policy.mode cap
+// itself and keeps the configured mode (plan D8).
+func (a *app) liveFrom(s config.DecisionSettings, policyMode string) (runner.Live, []string) {
+	runtime := config.DecisionSettings{Mode: s.Mode, Preprocessing: s.Preprocessing}
+	eff, rejected := runtime.ApplyTo(a.cfg.Decision, "enforce")
+	p := eff.Preprocessing
+	return runner.Live{
+		Mode:       eff.Mode,
+		PolicyMode: policyMode,
+		Budget: preprocess.Budget{
+			MaxInputBytes:      p.MaxInputBytes,
+			MaxAnalysisBytes:   p.MaxAnalysisBytes,
+			MaxRepresentations: p.MaxRepresentations,
+			MaxDecodeDepth:     p.MaxDecodeDepth,
+			MaxExpansionRatio:  p.MaxExpansionRatio,
+		},
+	}, rejected
+}
+
+var _ control.DecisionConfigurer = (*app)(nil)
+
+// decisionNotRunning refuses a runtime decision change when no runner was
+// built at startup: there is nothing to apply it to.
+const decisionNotRunning = "semantic detection is not running (decision.enabled, decision.mode or the model load at startup); decision settings take effect only after a restart"
+
+// ValidateDecisionSettings implements control.DecisionConfigurer: the
+// runtime checks a settings save needs before it is written (is the runner
+// running, are the values within their ceilings, does enforce have a
+// matching threshold set). It changes nothing.
+func (a *app) ValidateDecisionSettings(next config.DecisionSettings, policyMode string) []string {
+	if a.decisionRunner == nil {
+		return []string{decisionNotRunning}
+	}
+	l, problems := a.liveFrom(next, policyMode)
+	if err := a.decisionRunner.CheckLive(l); err != nil {
+		problems = append(problems, err.Error())
+	}
+	return problems
+}
+
+// ApplyDecisionSettings implements control.DecisionConfigurer. It runs after
+// every settings save or reset, so the runner's effective mode is re-derived
+// from policyMode each time (plan D8). Without a running runner there is
+// nothing to apply (a change was refused by ValidateDecisionSettings).
+func (a *app) ApplyDecisionSettings(next config.DecisionSettings, policyMode string) error {
+	if a.decisionRunner == nil {
+		return nil
+	}
+	l, _ := a.liveFrom(next, policyMode)
+	return a.decisionRunner.Reconfigure(l)
+}
+
+// applyStartupDecisionSettings applies settings.yaml's decision section once
+// at startup, after initSettings (plan D9), through the same mapping a
+// settings save uses. Restart-only values that differ from elida.yaml are
+// ignored with a WARN. decision.mode enforce refused for a threshold-set
+// mismatch fails startup, exactly as in elida.yaml, whatever
+// decision.required says; any other refusal (an out-of-range value, or
+// semantic detection not running) keeps the elida.yaml value with a WARN.
+func (a *app) applyStartupDecisionSettings() error {
+	if a.settingsStore == nil {
+		return nil
+	}
+	defaults := a.settingsStore.GetDefaults().Decision
+	merged := a.settingsStore.GetMerged().Decision
+	var runtimeChanged bool
+	for _, c := range config.DecisionSettingsChanges(defaults, merged) {
+		if config.DecisionRestartOnlyKeys[c.Key] {
+			slog.Warn("settings.yaml value ignored: the key is restart-only; set it in elida.yaml",
+				"key", c.Key, "settings_value", c.New, "in_force", c.Previous)
+			continue
+		}
+		runtimeChanged = true
+	}
+	if a.decisionRunner == nil {
+		if runtimeChanged {
+			slog.Warn("settings.yaml decision settings not applied: " + decisionNotRunning)
+		}
+		return nil
+	}
+	// The policy engine runs elida.yaml's policy.mode at startup:
+	// settings.yaml's policy section is applied only by a settings save
+	// (pre-existing; plan D9 finding). Cap against what actually runs, as
+	// setupDecision does.
+	policyMode := "enforce"
+	if a.cfg.Policy.Enabled && a.cfg.Policy.Mode != "" {
+		policyMode = a.cfg.Policy.Mode
+	}
+	l, rejected := a.liveFrom(merged, policyMode)
+	for _, r := range rejected {
+		slog.Warn("settings.yaml decision value refused; the elida.yaml value stays in force", "reason", r)
+	}
+	if err := a.decisionRunner.Reconfigure(l); err != nil {
+		if errors.Is(err, runner.ErrEnforceRefused) {
+			return fmt.Errorf("settings.yaml decision.mode enforce refused: %w", err)
+		}
+		slog.Warn("settings.yaml decision settings not applied; elida.yaml values stay in force", "error", err)
+	}
+	return nil
+}
+
 // DecisionStatus implements control.DecisionProvider. Ratios are derived
 // from scheduler counters so an operator sees capacity pressure, not a fixed
 // throughput claim.
@@ -417,6 +523,18 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		// Always present: empty when nothing runs, and carrying
 		// messages_not_assessed as soon as a runner exists.
 		CoverageGaps: map[string]int64{},
+		// Restart-only values: always elida.yaml's, whatever settings.yaml
+		// holds (plan D11).
+		Limits: control.DecisionLimits{
+			ThresholdSet:      d.ThresholdSet,
+			ElevatedThreshold: d.ElevatedThreshold,
+			InlineTimeoutMs:   int(d.InlineTimeout / time.Millisecond),
+			MaxConcurrency:    d.MaxConcurrency,
+			MaxInlineTokens:   d.MaxInlineTokens,
+			MaxInlineWindows:  d.MaxInlineWindows,
+			MaxAsyncWindows:   d.MaxAsyncWindows,
+			AsyncQueueSize:    d.AsyncQueueSize,
+		},
 	}
 	if a.decisionProvider == nil {
 		return st
@@ -438,6 +556,9 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 	}
 
 	if a.decisionRunner != nil {
+		// The configured mode in force, which a settings save may have
+		// changed since startup.
+		st.Mode = a.decisionRunner.Live().Mode
 		st.EffectiveMode = a.decisionRunner.EffectiveMode()
 		if a.policyEngine == nil && st.EffectiveMode != st.Mode {
 			// Nothing can be recorded, so the runner is shadow-only whatever
@@ -456,6 +577,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		}
 		st.AlreadyAssessed = a.decisionRunner.AlreadyAssessed()
 		st.AsyncDroppedNoSession = a.decisionRunner.AsyncDroppedNoSession()
+		st.AsyncDroppedDisabled = a.decisionRunner.AsyncDroppedDisabled()
 	}
 	if a.decisionScheduler != nil {
 		m := a.decisionScheduler.Metrics()

@@ -140,6 +140,15 @@ curl -X PUT http://localhost:9090/control/settings \
   -H "Content-Type: application/json" \
   -d '{"policy":{"mode":"audit"}}'
 
+# Change semantic detection to enforce: needs explicit confirmation, and is
+# refused with 400 while policy.mode is audit. Only decision.mode and
+# decision.preprocessing.* change at runtime; a restart-only decision key is
+# refused with 400 naming it (see configuration.md, "Changing decision
+# settings at runtime").
+curl -X PUT 'http://localhost:9090/control/settings?confirm=enforce' \
+  -H "Content-Type: application/json" \
+  -d '{"decision":{"mode":"enforce"}}'
+
 # Reset to defaults (removes UI overrides)
 curl -X DELETE http://localhost:9090/control/settings
 ```
