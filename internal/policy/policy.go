@@ -2099,9 +2099,11 @@ func (e *Engine) GetSessionRiskScore(sessionID string) (float64, string, int) {
 // captured and persisted as flagged. Both save paths (the session-end
 // callback in cmd/elida and the proxy's flagged-session save) copy
 // v.EvidenceOnly into storage.Violation.EvidenceOnly, so history marks
-// evidence-only findings as such. Until Task 2 of Plan C-1 lands,
-// WouldContributePoints, EventID, Semantic and SemanticDecisions are not
-// persisted by those paths.
+// evidence-only findings as such. They also persist the violation's EventID
+// and Semantic metadata (storage.Violation.Semantic) and the session's
+// SemanticDecisions and SemanticDecisionsDropped (the semantic_decisions
+// column); WouldContributePoints is persisted on each decision record, not
+// on the violation.
 //
 // Each recorded decision is also appended to FlaggedSession.SemanticDecisions
 // (bounded; see MaxSemanticDecisionsPerSession), and the rule's display

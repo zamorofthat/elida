@@ -410,10 +410,11 @@ func (a *app) initSessionEndCallback() {
 	})
 }
 
-// enrichRecordFromPolicy adds the policy engine's captures and violations
+// enrichRecordFromPolicy adds the policy engine's captures, violations (with
+// their representative semantic metadata) and per-decision semantic records
 // for the ending session to its record.
 //
-// Only this session instance's violations are added. A violation that last
+// Only this session instance's violations and decision records are added. A violation that last
 // fired before start was carried over by a retained block/terminate entry
 // from an earlier session with the same ID; it is skipped here, at the
 // source, so neither SQLite events nor the OTEL/OCSF export (which are built
@@ -455,8 +456,14 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			EvidenceOnly:  v.EvidenceOnly,
 			EventID:       v.EventID,
 			Timestamp:     v.Timestamp,
+			// Decision metadata carries no content, so it needs no redaction.
+			Semantic: storage.SemanticEvidenceFromPolicy(v.Semantic),
 		})
 	}
+	// Same ending-instance rule as the violations above. The records carry
+	// no content, so they need no redaction.
+	record.SemanticDecisions = storage.SemanticDecisionsFromPolicy(flagged.SemanticDecisions, start)
+	record.SemanticDecisionsDropped = flagged.SemanticDecisionsDropped
 }
 
 func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessionID string) {

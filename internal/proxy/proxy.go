@@ -1820,8 +1820,15 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 			EvidenceOnly:  v.EvidenceOnly,
 			EventID:       v.EventID,
 			Timestamp:     v.Timestamp,
+			// Decision metadata carries no content, so it needs no redaction.
+			Semantic: storage.SemanticEvidenceFromPolicy(v.Semantic),
 		})
 	}
+	// Per-decision records carry no content, so they need no redaction.
+	// Records from before this session instance started (a retained entry's
+	// carry-over) are skipped; SaveSession carries them from the stored row.
+	record.SemanticDecisions = storage.SemanticDecisionsFromPolicy(flaggedData.SemanticDecisions, snap.StartTime)
+	record.SemanticDecisionsDropped = flaggedData.SemanticDecisionsDropped
 
 	// Redact sensitive data before persistence
 	if p.redactor != nil {

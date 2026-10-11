@@ -593,6 +593,12 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// Detail path only: the snapshot already holds a deep copy taken under
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
+	// GetFlaggedSession returns a deep copy, so the list is the caller's.
+	if h.policyEngine != nil {
+		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
+			info.SemanticDecisions = fs.SemanticDecisions
+		}
+	}
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -692,6 +698,11 @@ type SessionInfo struct {
 	// Fifty entries per session would bloat every list response, and
 	// calibration review happens one session at a time.
 	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
+
+	// SemanticDecisions is the policy engine's per-decision record list
+	// (detail path only, like SemanticShadow): what explains each semantic
+	// violation and enforcement action on this session.
+	SemanticDecisions []policy.SemanticDecision `json:"semantic_decisions,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
@@ -1205,6 +1216,13 @@ func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 		flagged = h.policyEngine.GetFlaggedSessionsBySeverity(policy.Severity(minSeverity))
 	} else {
 		flagged = h.policyEngine.GetFlaggedSessions()
+	}
+
+	// The list stays small: per-decision records are served by
+	// /control/flagged/{id} and the session detail path only. Each entry is
+	// a deep copy, so this changes nothing in the engine.
+	for _, fs := range flagged {
+		fs.SemanticDecisions = nil
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
