@@ -211,16 +211,18 @@ type Message struct {
 // Config configures the runner.
 type Config struct {
 	// Mode is the configured decision mode: disabled, shadow, audit or
-	// enforce.
+	// enforce. It is the initial value; see Reconfigure.
 	Mode string
-	// PolicyMode is policy.mode ("enforce" or "audit"); it caps Mode.
+	// PolicyMode is policy.mode ("enforce" or "audit"); it caps Mode. It is
+	// the initial value; see Reconfigure.
 	PolicyMode string
 	// Scheduler assesses content. If it also implements AssessCandidates
 	// (as *scheduler.Inline does), every preprocessed representation is
 	// assessed; otherwise only the original content is, and the result is
 	// recorded as incomplete coverage.
 	Scheduler decision.Scheduler
-	// Budget bounds analysis-only preprocessing.
+	// Budget bounds analysis-only preprocessing. It is the initial value;
+	// see Reconfigure.
 	Budget preprocess.Budget
 	// Signals are the signals asked of the scheduler.
 	Signals []decision.Signal
@@ -325,8 +327,14 @@ const (
 
 // Runner is the orchestrator. It is safe for concurrent use.
 type Runner struct {
-	cfg  Config
-	mode string
+	// cfg is fixed at New. Its Mode, PolicyMode and Budget are only the
+	// initial values: the ones in force are in live.
+	cfg Config
+	// liveMu guards live, the runtime-editable configuration. It is a leaf
+	// lock: nothing is called while it is held. Readers copy live once per
+	// entry point (snapshot) and use only the copy.
+	liveMu sync.RWMutex
+	live   liveState
 	// assessor is cfg.Scheduler's candidate-aware form, when it has one.
 	assessor candidateAssessor
 	// timeout is the request-scoped inline deadline; 0 means none known.
@@ -494,7 +502,7 @@ func New(cfg Config) (*Runner, error) {
 		// enforce must surface as the configuration error it is, never as a
 		// quiet downgrade the operator cannot see.
 		if cfg.Mode == config.DecisionModeEnforce && !cfg.ThresholdSetMatches {
-			return nil, fmt.Errorf("runner: enforce mode refused: the configured threshold set %q does not match the loaded model; strict enforcement requires calibration evidence for the exact model and threshold-set versions in use", cfg.Model.ThresholdSet)
+			return nil, enforceRefused(cfg.Model.ThresholdSet)
 		}
 	}
 	if cfg.Policy != nil {
@@ -516,8 +524,11 @@ func New(cfg Config) (*Runner, error) {
 	cfg.Signals = append([]decision.Signal(nil), cfg.Signals...)
 
 	r := &Runner{
-		cfg:          cfg,
-		mode:         capMode(cfg.Mode, cfg.PolicyMode, cfg.Policy != nil),
+		cfg: cfg,
+		live: liveState{
+			cfg:       Live{Mode: cfg.Mode, PolicyMode: cfg.PolicyMode, Budget: cfg.Budget},
+			effective: capMode(cfg.Mode, cfg.PolicyMode, cfg.Policy != nil),
+		},
 		timeout:      cfg.InlineTimeout,
 		bound:        make(map[string]*boundSession),
 		recorded:     make(map[string]int, maxRecordedDecisions),
@@ -557,7 +568,118 @@ func capMode(mode, policyMode string, hasPolicy bool) string {
 }
 
 // EffectiveMode returns the mode actually in force after the policy cap.
-func (r *Runner) EffectiveMode() string { return r.mode }
+func (r *Runner) EffectiveMode() string { return r.snapshot().effective }
+
+// ErrEnforceRefused is returned (wrapped) by New and Reconfigure when enforce
+// is configured but the configured threshold set does not match the loaded
+// model's own.
+var ErrEnforceRefused = errors.New("runner: enforce refused: the configured threshold set does not match the loaded model")
+
+func enforceRefused(thresholdSet string) error {
+	return fmt.Errorf("%w (threshold set %q); strict enforcement requires calibration evidence for the exact model and threshold-set versions in use", ErrEnforceRefused, thresholdSet)
+}
+
+// Live is the runner's runtime-editable configuration (see Reconfigure).
+// It is comparable: Budget holds only ints.
+type Live struct {
+	Mode       string            // configured decision.mode: disabled, shadow, audit, enforce
+	PolicyMode string            // policy.mode: "enforce" or "audit"
+	Budget     preprocess.Budget // analysis-only preprocessing bounds
+}
+
+// liveState is the runtime-editable configuration with its derived
+// effective mode. It is replaced whole under liveMu and read by copy.
+type liveState struct {
+	cfg       Live
+	effective string
+}
+
+// snapshot copies the live state under the read lock. Each entry point takes
+// one snapshot and uses only that copy for the whole call.
+func (r *Runner) snapshot() liveState {
+	r.liveMu.RLock()
+	st := r.live
+	r.liveMu.RUnlock()
+	return st
+}
+
+// Live returns the runtime-editable configuration in force.
+func (r *Runner) Live() Live { return r.snapshot().cfg }
+
+// validateLive checks l against the runner's fixed configuration, with the
+// rules New applies to the configured mode plus the bounds config validation
+// applies to the preprocessing budget.
+func (r *Runner) validateLive(l Live) error {
+	switch l.Mode {
+	case config.DecisionModeDisabled, config.DecisionModeShadow, config.DecisionModeAudit, config.DecisionModeEnforce:
+	default:
+		return fmt.Errorf("runner: unknown mode %q", l.Mode)
+	}
+	switch l.PolicyMode {
+	case "", "enforce", "audit":
+	default:
+		return fmt.Errorf("runner: unknown policy mode %q", l.PolicyMode)
+	}
+	if l.Mode != config.DecisionModeDisabled {
+		// A runner built disabled skipped these checks in New; enabling it
+		// at runtime must not bypass them.
+		if r.cfg.Scheduler == nil {
+			return errors.New("runner: built in disabled mode without a scheduler; a restart is required to enable it")
+		}
+		if len(r.cfg.Signals) == 0 {
+			return errors.New("runner: built without Signals; a restart is required to enable it")
+		}
+		th := r.cfg.Thresholds
+		if th.Main <= 0 || th.Main >= 1 || th.Aux <= 0 || th.Aux >= 1 {
+			return errors.New("runner: built without valid Thresholds; a restart is required to enable it")
+		}
+		if r.cfg.Model.ThresholdSet == "" {
+			return errors.New("runner: built without Model.ThresholdSet; a restart is required to enable it")
+		}
+		// Checked on the configured mode, before the policy cap, as in New.
+		if l.Mode == config.DecisionModeEnforce && !r.cfg.ThresholdSetMatches {
+			return enforceRefused(r.cfg.Model.ThresholdSet)
+		}
+	}
+	b := l.Budget
+	if b.MaxInputBytes < 1 || b.MaxAnalysisBytes < b.MaxInputBytes || b.MaxRepresentations < 1 || b.MaxDecodeDepth < 0 || b.MaxExpansionRatio < 1 {
+		return fmt.Errorf("runner: invalid preprocessing budget %+v", b)
+	}
+	return nil
+}
+
+// Reconfigure replaces the runtime-editable configuration. Thresholds, the
+// model identity, the scheduler and the policy recorder are fixed at New.
+// It is all-or-nothing: an invalid l is refused and the configuration in
+// force is kept. The effective mode is re-derived with capMode, so a
+// policy.mode change made at runtime re-caps (or un-caps) the configured
+// mode, and without a policy engine audit and enforce still cap to shadow.
+//
+// A request already being assessed finishes under the snapshot it took; the
+// next entry point sees the new value. An async result reads the mode in
+// force at its delivery: one queued under enforce and delivered after a
+// downgrade records as evidence-only, which is the safe direction.
+func (r *Runner) Reconfigure(l Live) error {
+	if err := r.validateLive(l); err != nil {
+		return err
+	}
+	st := liveState{cfg: l, effective: capMode(l.Mode, l.PolicyMode, r.cfg.Policy != nil)}
+	r.liveMu.Lock()
+	old := r.live
+	r.live = st
+	r.liveMu.Unlock()
+	if old.cfg.Mode != st.cfg.Mode || old.cfg.PolicyMode != st.cfg.PolicyMode || old.effective != st.effective {
+		slog.Info("semantic decision mode changed",
+			"old_mode", old.cfg.Mode,
+			"new_mode", st.cfg.Mode,
+			"old_policy_mode", old.cfg.PolicyMode,
+			"new_policy_mode", st.cfg.PolicyMode,
+			"old_effective_mode", old.effective,
+			"effective_mode", st.effective,
+		)
+	}
+	return nil
+}
 
 // eligibleRole reports whether content from this role is analyzed.
 //
@@ -959,7 +1081,10 @@ func (r *Runner) claimDecision(id string) bool {
 // evidence-only events and async results never set it: an async result
 // arrives with ScopeFutureActivity and affects later requests only.
 func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, requestID string, msgs []Message) (protect bool) {
-	if r.mode == config.DecisionModeDisabled || sess == nil || len(msgs) == 0 {
+	// One snapshot for the whole request: a concurrent Reconfigure applies
+	// to the next request, never halfway through this one.
+	st := r.snapshot()
+	if st.effective == config.DecisionModeDisabled || sess == nil || len(msgs) == 0 {
 		return false
 	}
 	if r.timeout > 0 {
@@ -1026,7 +1151,7 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 		}
 		assessed++
 		tracked := r.openPending(sess.ID, k)
-		answered, queued, contributed := r.assessMessage(ctx, sess, requestID, msg, elevated, spent)
+		answered, queued, contributed := r.assessMessage(ctx, sess, requestID, msg, elevated, spent, st)
 		protect = protect || contributed
 		done = append(done, settled{k: k, tracked: tracked, answered: answered, queued: queued})
 	}
@@ -1079,7 +1204,9 @@ func (r *Runner) AssessRequest(ctx context.Context, sess *session.Session, reque
 // This is the only place runner depends on the policy package, and it is a
 // one-way value conversion.
 func (r *Runner) AssessPolicyMessages(ctx context.Context, sess *session.Session, requestID string, msgs []policy.MessageToScan) (protect bool) {
-	if r.mode == config.DecisionModeDisabled || len(msgs) == 0 {
+	// AssessRequest takes its own snapshot; a change between the two only
+	// means this request runs under the newer value.
+	if r.snapshot().effective == config.DecisionModeDisabled || len(msgs) == 0 {
 		return false
 	}
 	converted := make([]Message, 0, len(msgs))
@@ -1112,11 +1239,11 @@ func (r *Runner) alreadyClaimed(sessionID string, k msgKey) bool {
 // whether any window was answered inline, how many async jobs were queued
 // whose deliveries will reach OnAsync for this session, and whether an
 // ordinary (risk-contributing) violation was recorded from the inline result.
-func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.Spend) (answered bool, queued int, contributed bool) {
+func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, requestID string, msg Message, elevated bool, spent *scheduler.Spend, st liveState) (answered bool, queued int, contributed bool) {
 	// Analysis-only preprocessing, inside the request deadline: the loop
 	// in AssessRequest checks the deadline before each message. Nothing
 	// here is forwarded.
-	pre := preprocess.Run(msg.Content, r.cfg.Budget)
+	pre := preprocess.Run(msg.Content, st.cfg.Budget)
 
 	in := decision.Input{
 		Content:      msg.Content,
@@ -1193,7 +1320,7 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 		}
 	}
 
-	contributed = r.handle(sess, requestID, in, a)
+	contributed = r.handle(sess, requestID, in, a, st)
 	return answeredAny(a), a.Coverage.QueuedAsync, contributed
 }
 
@@ -1209,7 +1336,9 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 // message is delivered and nothing about that message was answered, the
 // claim is released so the next request carrying it assesses it again.
 func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.Assessment) {
-	if r.mode == config.DecisionModeDisabled {
+	// The mode in force at delivery, not at enqueue (see Reconfigure).
+	st := r.snapshot()
+	if st.effective == config.DecisionModeDisabled {
 		return
 	}
 	k := msgKey{index: in.MessageIndex, sum: sha256.Sum256([]byte(in.Content))}
@@ -1226,7 +1355,7 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 		return
 	}
 	a.Scope = decision.ScopeFutureActivity
-	_ = r.handle(sess, req.RequestID, in, a)
+	_ = r.handle(sess, req.RequestID, in, a, st)
 }
 
 // handle records verdicts according to the effective mode.
@@ -1260,7 +1389,7 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 // recorded for a verdict whose scope is current_request (an inline result in
 // effective enforce mode): the request being assessed can still be stopped
 // by the ladder.
-func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment) (contributed bool) {
+func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment, st liveState) (contributed bool) {
 	for _, v := range r.Verdicts(sess.ID, requestID, in, a) {
 		if !r.claimDecision(v.DecisionID) {
 			continue
@@ -1270,7 +1399,7 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 		// distribution, including the vetoes and the quiet scores.
 		r.recordShadow(sess, in, v)
 
-		if r.mode == config.DecisionModeShadow || r.cfg.Policy == nil {
+		if st.effective == config.DecisionModeShadow || r.cfg.Policy == nil {
 			continue
 		}
 		// A vetoed decision is not a finding in any mode. The aux head
@@ -1285,8 +1414,8 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 			// Over the violation threshold. Evidence-only in audit mode; an
 			// ordinary violation in effective enforce mode, so the existing
 			// risk ladder does the rest.
-			evidenceOnly := r.mode != config.DecisionModeEnforce
-			r.recordViolation(sess.ID, in, v, RuleSemanticInjection, CategorySemanticInjection, evidenceOnly)
+			evidenceOnly := st.effective != config.DecisionModeEnforce
+			r.recordViolation(sess.ID, in, v, RuleSemanticInjection, CategorySemanticInjection, evidenceOnly, st.effective)
 			if !evidenceOnly && v.Scope == decision.ScopeCurrentRequest {
 				contributed = true
 			}
@@ -1294,7 +1423,7 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 			// Sub-threshold but notable. Always evidence-only: on its own
 			// this contributes nothing, and a repeated-category correlation
 			// rule is what gives it meaning.
-			r.recordViolation(sess.ID, in, v, RuleInjectionElevated, CategoryInjectionElevated, true)
+			r.recordViolation(sess.ID, in, v, RuleInjectionElevated, CategoryInjectionElevated, true, st.effective)
 		}
 	}
 	return contributed
@@ -1302,7 +1431,7 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 
 // recordViolation builds the policy violation for one verdict and records it
 // through the ordinary violation path. The caller holds the verdict's claim.
-func (r *Runner) recordViolation(sessionID string, in decision.Input, v Verdict, ruleName, category string, evidenceOnly bool) {
+func (r *Runner) recordViolation(sessionID string, in decision.Input, v Verdict, ruleName, category string, evidenceOnly bool, mode string) {
 	severity := policy.Severity(v.Severity)
 	if severity == "" {
 		severity = policy.SeverityInfo
@@ -1370,7 +1499,7 @@ func (r *Runner) recordViolation(sessionID string, in decision.Input, v Verdict,
 		"coverage_complete", v.Coverage.Complete,
 		"decision_id", v.DecisionID,
 		"threshold_set", r.cfg.Model.ThresholdSet,
-		"mode", r.mode,
+		"mode", mode,
 	)
 }
 
