@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/preact'
-import { DecisionSettings, enforceBlockedReason, settingsSaveUrl, saveErrorText } from './DecisionSettings'
+import { DecisionSettings, enforceBlockedReason, settingsSaveUrl, saveErrorText, isValidBudget, invalidBudgetKeys } from './DecisionSettings'
 
 const status = {
   enabled: true, mode: 'audit', effective_mode: 'audit', capability: 'inline',
@@ -83,15 +83,56 @@ describe('DecisionSettings', () => {
   it('explains when semantic detection is not running', () => {
     const { container } = renderIt({ status: { ...status, enabled: false, capability: 'disabled' } })
     expect(container.textContent).toContain('not running')
+    expect(container.textContent).toContain('decision changes are refused until it is enabled')
   })
 
   it('renders without a status (status fetch failed)', () => {
     const { container } = renderIt({ status: null })
     expect(container.querySelector('select[name="decision_mode"]')).toBeTruthy()
+    expect(container.textContent).toContain('status unavailable')
+    expect(container.textContent).not.toContain('not running')
+  })
+
+  it('shows the breaker state', () => {
+    const closed = renderIt()
+    expect(closed.container.querySelector('.decision-status').textContent).toContain('Breakerclosed')
+    cleanup()
+    const open = renderIt({ status: { ...status, breaker_open: true } })
+    expect(open.container.querySelector('.decision-status').textContent).toContain('Breakeropen')
+  })
+
+  it('shows a modified badge for a modified key', () => {
+    const { container } = renderIt({ isModified: (p) => p === 'decision.preprocessing.max_decode_depth' })
+    const item = container.querySelector('#decision-max_decode_depth').closest('.settings-item')
+    expect(item.querySelector('.modified-badge')).toBeTruthy()
+    expect(container.querySelectorAll('.modified-badge')).toHaveLength(1)
+  })
+
+  it('keeps an emptied or non-integer budget as text and flags it', () => {
+    const { container, props } = renderIt()
+    fireEvent.input(container.querySelector('[name="max_decode_depth"]'), { target: { value: '' } })
+    expect(props.onPreprocessingChange).toHaveBeenLastCalledWith('max_decode_depth', '')
+    cleanup()
+    const flagged = renderIt({ decision: { ...decision, preprocessing: { ...decision.preprocessing, max_decode_depth: '' } } })
+    const input = flagged.container.querySelector('[name="max_decode_depth"]')
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect(flagged.container.querySelector('#decision-max_decode_depth-error').textContent)
+      .toBe('Enter a whole number of 0 or more.')
+    expect(flagged.container.querySelector('[name="max_input_bytes"]').getAttribute('aria-invalid')).toBeNull()
   })
 })
 
 describe('guardrail helpers', () => {
+  it('invalidBudgetKeys flags empty, fractional and negative budgets only', () => {
+    expect(isValidBudget(0)).toBe(true)
+    expect(isValidBudget(3)).toBe(true)
+    for (const v of ['', '1.5', 1.5, -1, NaN, null]) expect(isValidBudget(v)).toBe(false)
+    const pre = { ...decision.preprocessing, max_decode_depth: '', max_expansion_ratio: 1.5 }
+    expect(invalidBudgetKeys({ preprocessing: pre })).toEqual(['max_decode_depth', 'max_expansion_ratio'])
+    expect(invalidBudgetKeys(decision)).toEqual([])
+    expect(invalidBudgetKeys(undefined)).toEqual([])
+  })
+
   it('enforceBlockedReason', () => {
     expect(enforceBlockedReason('enforce', status)).toBeNull()
     expect(enforceBlockedReason('audit', status)).toContain('policy.mode is audit')

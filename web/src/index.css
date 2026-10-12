@@ -1144,6 +1144,14 @@ body {
   margin: 0.5rem 0;
 }
 
+.settings-note.settings-error {
+  color: var(--color-error);
+}
+
+.settings-item.invalid .settings-input {
+  border-color: var(--color-error);
+}
+
 .decision-status,
 .decision-limits {
   display: grid;

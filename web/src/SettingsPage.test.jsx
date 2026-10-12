@@ -26,6 +26,8 @@ function json(body, status = 200) {
 describe('SettingsPage decision section', () => {
   let mockFetch
   let putResponse
+  let currentStatus
+  let diffBody
 
   beforeEach(() => {
     const storage = { [AUTH_KEY]: 'k' }
@@ -35,10 +37,13 @@ describe('SettingsPage decision section', () => {
       removeItem: vi.fn((k) => { delete storage[k] }),
     })
     putResponse = json({ status: 'saved' })
+    currentStatus = decisionStatus
+    diffBody = { modified_count: 0, modifications: {} }
     mockFetch = vi.fn((url, opts = {}) => {
       if (opts.method === 'PUT') return Promise.resolve(putResponse)
       if (url === '/control/settings') return Promise.resolve(json(settings))
-      if (url === '/control/decision') return Promise.resolve(json(decisionStatus))
+      if (url === '/control/settings/diff') return Promise.resolve(json(diffBody))
+      if (url === '/control/decision') return Promise.resolve(json(currentStatus))
       return Promise.resolve(json({}))
     })
     vi.stubGlobal('fetch', mockFetch)
@@ -55,7 +60,8 @@ describe('SettingsPage decision section', () => {
     const nav = [...r.container.querySelectorAll('.topnav-item')].find((b) => b.textContent.includes('Settings'))
     fireEvent.click(nav)
     await waitFor(() => expect(r.container.querySelector('select[name="decision_mode"]')).toBeTruthy())
-    await waitFor(() => expect(r.container.textContent).toContain('restart'))
+    // A status-only value: the fetched status reached the component.
+    await waitFor(() => expect(r.container.querySelector('.decision-status')?.textContent).toContain('audit (effective: audit)'))
     return r
   }
 
@@ -75,12 +81,17 @@ describe('SettingsPage decision section', () => {
     vi.stubGlobal('confirm', vi.fn(() => true))
     const { container } = await openSettings()
     const before = mockFetch.mock.calls.filter(([u]) => u === '/control/decision').length
+    currentStatus = { ...decisionStatus, mode: 'enforce', effective_mode: 'audit',
+      reason: 'enforce capped to audit because policy.mode is audit' }
     fireEvent.change(container.querySelector('select[name="decision_mode"]'), { target: { value: 'enforce' } })
     fireEvent.click(saveButton(container))
     await waitFor(() => expect(puts()).toHaveLength(1))
     expect(puts()[0][0]).toBe('/control/settings?confirm=enforce')
     expect(JSON.parse(puts()[0][1].body).decision.mode).toBe('enforce')
     await waitFor(() => expect(mockFetch.mock.calls.filter(([u]) => u === '/control/decision').length).toBe(before + 1))
+    // The refreshed status is what renders.
+    await waitFor(() => expect(container.querySelector('.decision-status').textContent).toContain('enforce (effective: audit)'))
+    expect(container.querySelector('.decision-status').textContent).toContain('enforce capped to audit because policy.mode is audit')
   })
 
   it('a non-enforce edit saves without confirmation', async () => {
@@ -106,5 +117,27 @@ describe('SettingsPage decision section', () => {
       .toBe('Failed to save: decision.max_decode_depth: 99 exceeds the ceiling of 8')
     expect(container.querySelector('select[name="decision_mode"]').value).toBe('shadow')
     expect(settingsGets()).toBe(getsBefore)
+  })
+
+  it('a modified decision key lights its badge and the header counts the modifications', async () => {
+    diffBody = { modified_count: 1, modifications: {
+      'decision.mode': { path: 'decision.mode', default_value: 'shadow', local_value: 'audit' } } }
+    const { container } = await openSettings()
+    await waitFor(() => expect(container.querySelector('.settings-diff-count')?.textContent).toBe('1 setting modified'))
+    const item = container.querySelector('#decision-mode').closest('.settings-item')
+    expect(item.classList.contains('modified')).toBe(true)
+    expect(item.querySelector('.modified-badge')).toBeTruthy()
+    expect(container.querySelectorAll('.modified-badge')).toHaveLength(1)
+  })
+
+  it('an emptied budget is flagged and blocks the save with a client message', async () => {
+    const { container } = await openSettings()
+    fireEvent.input(container.querySelector('[name="max_decode_depth"]'), { target: { value: '' } })
+    await waitFor(() => expect(container.querySelector('#decision-max_decode_depth-error')).toBeTruthy())
+    fireEvent.click(saveButton(container))
+    await waitFor(() => expect(container.querySelector('.settings-message.error')).toBeTruthy())
+    expect(container.querySelector('.settings-message.error').textContent)
+      .toBe('Not saved: enter a whole number of 0 or more for decision.preprocessing.max_decode_depth')
+    expect(puts()).toHaveLength(0)
   })
 })

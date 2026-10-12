@@ -10,7 +10,7 @@ import {
 } from './components/shared/Icons'
 import { TopNav } from './components/TopNav'
 import { SessionsPage } from './components/SessionsPage'
-import { DecisionSettings, settingsSaveUrl, saveErrorText } from './components/DecisionSettings'
+import { DecisionSettings, settingsSaveUrl, saveErrorText, invalidBudgetKeys } from './components/DecisionSettings'
 import { DashboardPage } from './components/DashboardPage'
 import { ToolUsePage } from './components/ToolUsePage'
 import { PolicyPage } from './components/PolicyPage'
@@ -726,7 +726,8 @@ function SettingsPage() {
       }
       if (decisionRes.ok) setDecisionStatus(await decisionRes.json())
       if (defaultsRes.ok) setDefaults(await defaultsRes.json())
-      if (diffRes.ok) setDiff(await diffRes.json())
+      // The diff endpoint wraps the paths: {modified_count, modifications}.
+      if (diffRes.ok) setDiff((await diffRes.json()).modifications || {})
     } catch (err) {
       console.error('Failed to fetch settings:', err)
       setMessage({ type: 'error', text: 'Failed to load settings' })
@@ -743,6 +744,12 @@ function SettingsPage() {
     setSaving(true)
     setMessage(null)
     try {
+      const invalid = invalidBudgetKeys(settings.decision)
+      if (invalid.length > 0) {
+        setMessage({ type: 'error', text: 'Not saved: enter a whole number of 0 or more for ' +
+          invalid.map((k) => 'decision.preprocessing.' + k).join(', ') })
+        return
+      }
       const nextMode = settings.decision?.mode
       if (nextMode === 'enforce' && savedDecisionMode !== 'enforce' &&
           !confirm('Switch semantic detection to enforce? Semantic findings will add risk and can throttle, block or terminate sessions.')) {

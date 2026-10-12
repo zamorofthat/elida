@@ -38,6 +38,25 @@ export function saveErrorText(text) {
   return String(text || '').trim()
 }
 
+// A budget is a whole number of 0 or more. An emptied or non-numeric input
+// is kept as its raw text so the field can be flagged and the save blocked:
+// sent as null it would silently revert that budget to the elida.yaml value.
+export function isValidBudget(v) {
+  return Number.isInteger(v) && v >= 0
+}
+
+// invalidBudgetKeys lists the runtime preprocessing keys whose value is set
+// but not a valid budget.
+export function invalidBudgetKeys(decision) {
+  const pre = (decision && decision.preprocessing) || {}
+  return RUNTIME_PREPROCESSING_KEYS.filter((k) => pre[k] !== undefined && !isValidBudget(pre[k]))
+}
+
+function parseBudget(raw) {
+  const n = Number(raw)
+  return String(raw).trim() !== '' && isValidBudget(n) ? n : raw
+}
+
 function label(key) {
   return key.replaceAll('_', ' ')
 }
@@ -54,9 +73,10 @@ export function DecisionSettings({ decision, policyMode, status, isModified, onC
         <h2 class="panel-title">Semantic Detection</h2>
       </div>
       <div class="panel-body">
-        {!running && (
+        {!status && <p class="settings-note">Semantic detection status unavailable.</p>}
+        {status && !running && (
           <p class="settings-note">
-            Semantic detection is not running. Changes here take effect only after it is enabled in elida.yaml and ELIDA restarts.
+            Semantic detection is not running; decision changes are refused until it is enabled in elida.yaml and ELIDA restarts.
           </p>
         )}
         {status && (
@@ -84,6 +104,8 @@ export function DecisionSettings({ decision, policyMode, status, isModified, onC
             <dd>{status.async_queue_depth || 0} queued, {status.async_dropped || 0} dropped</dd>
             <dt>Coverage gaps</dt>
             <dd>{gaps}</dd>
+            <dt>Breaker</dt>
+            <dd>{status.breaker_open ? 'open' : 'closed'}</dd>
           </dl>
         )}
         <div class="settings-grid">
@@ -107,8 +129,9 @@ export function DecisionSettings({ decision, policyMode, status, isModified, onC
           </div>
           {RUNTIME_PREPROCESSING_KEYS.map((k) => {
             const modified = isModified('decision.preprocessing.' + k)
+            const invalid = pre[k] !== undefined && !isValidBudget(pre[k])
             return (
-              <div key={k} class={'settings-item' + (modified ? ' modified' : '')}>
+              <div key={k} class={'settings-item' + (modified ? ' modified' : '') + (invalid ? ' invalid' : '')}>
                 <label class="settings-label" for={'decision-' + k}>
                   <span>{label(k)}</span>
                   {modified && <span class="modified-badge">modified</span>}
@@ -120,8 +143,13 @@ export function DecisionSettings({ decision, policyMode, status, isModified, onC
                   min="0"
                   name={k}
                   value={pre[k] ?? ''}
-                  onInput={(e) => onPreprocessingChange(k, parseInt(e.target.value, 10))}
+                  aria-invalid={invalid ? 'true' : undefined}
+                  aria-describedby={invalid ? 'decision-' + k + '-error' : undefined}
+                  onInput={(e) => onPreprocessingChange(k, parseBudget(e.target.value))}
                 />
+                {invalid && (
+                  <p id={'decision-' + k + '-error'} class="settings-note settings-error">Enter a whole number of 0 or more.</p>
+                )}
               </div>
             )
           })}
