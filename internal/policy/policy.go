@@ -1715,12 +1715,12 @@ func (e *Engine) calculateMaxSeverity(violations []Violation) Severity {
 
 // CaptureRequest captures request/response content for a flagged session
 func (e *Engine) CaptureRequest(sessionID string, req CapturedRequest) {
+	// captureContent is read under the lock: ReloadConfig writes it.
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.captureContent {
 		return
 	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	flagged, exists := e.flaggedSessions[sessionID]
 	if !exists {
@@ -1745,12 +1745,12 @@ func (e *Engine) UpdateLastCaptureWithResponse(sessionID, responseBody string) {
 
 // UpdateLastCaptureWithResponseAndStatus updates the most recent captured request with response body and status code
 func (e *Engine) UpdateLastCaptureWithResponseAndStatus(sessionID, responseBody string, statusCode int) {
+	// captureContent is read under the lock: ReloadConfig writes it.
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if !e.captureContent {
 		return
 	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	flagged, exists := e.flaggedSessions[sessionID]
 	if !exists || len(flagged.CapturedContent) == 0 {
