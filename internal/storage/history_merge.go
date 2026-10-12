@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"elida/internal/policy"
 	"elida/internal/session"
 )
 
@@ -21,6 +22,10 @@ const (
 	// MaxCarriedShadow is session.MaxSemanticShadow, the per-session cap on
 	// shadow decisions.
 	MaxCarriedShadow = session.MaxSemanticShadow
+	// MaxCarriedSemanticDecisions matches the policy engine's per-session
+	// bound on semantic decision records (policy.MaxSemanticDecisionsPerSession,
+	// 256).
+	MaxCarriedSemanticDecisions = policy.MaxSemanticDecisionsPerSession
 )
 
 // priorHistory is what a session row carries from earlier sessions with the
@@ -31,6 +36,12 @@ type priorHistory struct {
 	Violations      []Violation       `json:"violations,omitempty"`
 	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
 	SemanticShadow  []SemanticShadow  `json:"semantic_shadow,omitempty"`
+	// SemanticDecisions are the carried per-decision records (oldest first);
+	// SemanticDecisionsDropped counts the records the earlier sessions lost
+	// to their bounds, including carried records cut by
+	// MaxCarriedSemanticDecisions.
+	SemanticDecisions        []SemanticDecision `json:"semantic_decisions,omitempty"`
+	SemanticDecisionsDropped int                `json:"semantic_decisions_dropped,omitempty"`
 }
 
 // loadPriorHistory returns the history the session being saved must carry.
@@ -41,9 +52,9 @@ type priorHistory struct {
 //     which already includes its own prior history.
 func loadPriorHistory(tx *sql.Tx, id string, start time.Time) (priorHistory, error) {
 	var storedStart time.Time
-	var captured, violations, shadow, prior sql.NullString
-	err := tx.QueryRow(`SELECT start_time, captured_content, violations, semantic_shadow, prior_history FROM sessions WHERE id = ?`, id).
-		Scan(&storedStart, &captured, &violations, &shadow, &prior)
+	var captured, violations, shadow, decisions, prior sql.NullString
+	err := tx.QueryRow(`SELECT start_time, captured_content, violations, semantic_shadow, semantic_decisions, prior_history FROM sessions WHERE id = ?`, id).
+		Scan(&storedStart, &captured, &violations, &shadow, &decisions, &prior)
 	if err == sql.ErrNoRows {
 		return priorHistory{}, nil
 	}
@@ -58,6 +69,10 @@ func loadPriorHistory(tx *sql.Tx, id string, start time.Time) (priorHistory, err
 	unmarshalJSON(violations, &p.Violations, "violations", id)
 	unmarshalJSON(captured, &p.CapturedContent, "captured_content", id)
 	unmarshalJSON(shadow, &p.SemanticShadow, "semantic_shadow", id)
+	var sd semanticDecisionsColumn
+	unmarshalJSON(decisions, &sd, "semantic_decisions", id)
+	p.SemanticDecisions = sd.Decisions
+	p.SemanticDecisionsDropped = sd.Dropped
 	return p, nil
 }
 
@@ -89,6 +104,13 @@ func captureKey(c CapturedRequest) string {
 //   - Semantic shadow (newest first): the record's own, then prior;
 //     deduplicated by DecisionID; capped by MaxCarriedShadow likewise, the
 //     newest prior entries kept.
+//   - Semantic decisions (oldest first): prior first, then the record's
+//     own; a prior record is dropped when the record holds the same EventID
+//     (records without one are always carried); capped by
+//     MaxCarriedSemanticDecisions likewise, the newest prior records kept.
+//     SemanticDecisionsDropped becomes the record's own count plus the
+//     carried count plus the carried records the cap cut, so the stored
+//     total still says how many decisions history cannot explain.
 func mergeHistory(record SessionRecord, prior priorHistory) (SessionRecord, priorHistory) {
 	var kept priorHistory
 
@@ -125,6 +147,19 @@ func mergeHistory(record SessionRecord, prior priorHistory) (SessionRecord, prio
 	}
 	kept.SemanticShadow = keepHead(kept.SemanticShadow, MaxCarriedShadow-len(record.SemanticShadow))
 
+	ownD := make(map[string]bool, len(record.SemanticDecisions))
+	for _, d := range record.SemanticDecisions {
+		ownD[d.EventID] = true
+	}
+	for _, d := range prior.SemanticDecisions {
+		if d.EventID == "" || !ownD[d.EventID] {
+			kept.SemanticDecisions = append(kept.SemanticDecisions, d)
+		}
+	}
+	before := len(kept.SemanticDecisions)
+	kept.SemanticDecisions = keepTail(kept.SemanticDecisions, MaxCarriedSemanticDecisions-len(record.SemanticDecisions))
+	kept.SemanticDecisionsDropped = prior.SemanticDecisionsDropped + before - len(kept.SemanticDecisions)
+
 	if len(kept.Violations) > 0 {
 		record.Violations = append(append([]Violation(nil), kept.Violations...), record.Violations...)
 	}
@@ -134,6 +169,10 @@ func mergeHistory(record SessionRecord, prior priorHistory) (SessionRecord, prio
 	if len(kept.SemanticShadow) > 0 {
 		record.SemanticShadow = append(append([]SemanticShadow(nil), record.SemanticShadow...), kept.SemanticShadow...)
 	}
+	if len(kept.SemanticDecisions) > 0 {
+		record.SemanticDecisions = append(append([]SemanticDecision(nil), kept.SemanticDecisions...), record.SemanticDecisions...)
+	}
+	record.SemanticDecisionsDropped += kept.SemanticDecisionsDropped
 	return record, kept
 }
 

@@ -1138,6 +1138,42 @@ body {
   text-decoration: underline;
 }
 
+.settings-note {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: 0.5rem 0;
+}
+
+.settings-note.settings-error {
+  color: var(--color-error);
+}
+
+.settings-item.invalid .settings-input {
+  border-color: var(--color-error);
+}
+
+.decision-status,
+.decision-limits {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+}
+
+.decision-status dt,
+.decision-limits dt {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.decision-status dd,
+.decision-limits dd {
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
 /* Responsive adjustments */
 @media (max-width: 1024px) {
   .metrics-row {

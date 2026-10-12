@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"elida/internal/config"
@@ -114,6 +115,41 @@ type DecisionStatus struct {
 	// the runner no longer (or never) had bound: ended sessions, and
 	// sessions refused because the live-binding safety limit was reached.
 	AsyncDroppedNoSession int64 `json:"async_dropped_no_session"`
+	// AsyncDroppedDisabled counts async results delivered while decision.mode
+	// was disabled at runtime: dropped unrecorded and settled as unanswered
+	// (also in coverage_gaps as async_dropped_disabled).
+	AsyncDroppedDisabled int64 `json:"async_dropped_disabled"`
+
+	// Limits are the restart-only values in force; the Settings page shows
+	// them read-only. Changing one needs elida.yaml and a restart.
+	Limits DecisionLimits `json:"limits"`
+}
+
+// DecisionLimits are the restart-only decision settings in force (plan D5,
+// D6, D11).
+type DecisionLimits struct {
+	ThresholdSet      string  `json:"threshold_set"`
+	ElevatedThreshold float64 `json:"elevated_threshold"`
+	InlineTimeoutMs   int     `json:"inline_timeout_ms"`
+	MaxConcurrency    int     `json:"max_concurrency"`
+	MaxInlineTokens   int     `json:"max_inline_tokens"`
+	MaxInlineWindows  int     `json:"max_inline_windows"`
+	MaxAsyncWindows   int     `json:"max_async_windows"`
+	AsyncQueueSize    int     `json:"async_queue_size"`
+}
+
+// DecisionConfigurer applies runtime decision settings (decision.mode and
+// decision.preprocessing.*) to the running semantic detection.
+//
+// ValidateDecisionSettings returns why next cannot be applied (empty when
+// it can) without changing anything: runtime facts such as whether
+// semantic detection is running and whether enforce has a matching
+// threshold set. ApplyDecisionSettings applies next and re-derives the
+// effective mode from policyMode; it is called after every settings save or
+// reset, so a policy.mode change re-caps the runner (plan D8).
+type DecisionConfigurer interface {
+	ValidateDecisionSettings(next config.DecisionSettings, policyMode string) []string
+	ApplyDecisionSettings(next config.DecisionSettings, policyMode string) error
 }
 
 // Handler handles control API requests
@@ -130,7 +166,16 @@ type Handler struct {
 	// decisionProvider reports semantic detection status; nil means the
 	// feature is off.
 	decisionProvider DecisionProvider
-	mux              *http.ServeMux
+	// decisionConfigurer applies runtime decision settings; nil means
+	// decision changes are validated only by config rules and never applied.
+	decisionConfigurer DecisionConfigurer
+	// settingsMu serializes settings writes (validate, save, apply) so two
+	// concurrent PUTs cannot each validate against the same previous state,
+	// and so applies reach the policy engine and the runner in save order.
+	// No SettingsStore lock is held while it is, and the configurer never
+	// calls back into the handler.
+	settingsMu sync.Mutex
+	mux        *http.ServeMux
 
 	// Authentication
 	authEnabled bool
@@ -272,9 +317,16 @@ func (h *Handler) SetDecisionProvider(p DecisionProvider) {
 	h.decisionProvider = p
 }
 
-// reloadPolicyEngine applies current settings to the policy engine without restart
+// SetDecisionConfigurer sets the configurer that applies runtime decision
+// settings on every settings save. Call it before serving starts.
+func (h *Handler) SetDecisionConfigurer(c DecisionConfigurer) {
+	h.decisionConfigurer = c
+}
+
+// reloadPolicyEngine applies current settings to the policy engine and the
+// decision configurer without restart.
 func (h *Handler) reloadPolicyEngine() {
-	if h.policyEngine == nil || h.settingsStore == nil {
+	if h.settingsStore == nil {
 		return
 	}
 
@@ -284,6 +336,18 @@ func (h *Handler) reloadPolicyEngine() {
 	mode := "enforce"
 	if merged.Policy.Mode != nil {
 		mode = *merged.Policy.Mode
+	}
+
+	if h.decisionConfigurer != nil {
+		// The runner re-derives its effective mode from policy.mode here
+		// (plan D8), so there is no stale cap to warn about. Applied even
+		// without a policy engine: the runner then caps to shadow itself.
+		if err := h.decisionConfigurer.ApplyDecisionSettings(merged.Decision, mode); err != nil {
+			slog.Error("decision settings not applied", "error", err)
+		}
+	}
+	if h.policyEngine == nil {
+		return
 	}
 
 	cfg := policy.Config{
@@ -329,6 +393,13 @@ func (h *Handler) reloadPolicyEngine() {
 
 	// Convert custom rules from Settings to policy Rules
 	for _, cr := range merged.Policy.CustomRules {
+		if config.ReservedRuleName(cr.Name) {
+			// saveSettings refuses new ones; one saved earlier (an older
+			// release, or a hand edit) is kept in settings.yaml. Skipped so
+			// a regex rule never records under the semantic runner's name.
+			slog.Warn("custom rule skipped: the name is reserved for semantic detection", "rule", cr.Name)
+			continue
+		}
 		rule := policy.Rule{
 			Name:           cr.Name,
 			Type:           policy.RuleType(cr.Type),
@@ -345,13 +416,16 @@ func (h *Handler) reloadPolicyEngine() {
 	}
 
 	h.policyEngine.ReloadConfig(cfg)
-	h.warnStaleDecisionCap(mode)
+	if h.decisionConfigurer == nil {
+		h.warnStaleDecisionCap(mode)
+	}
 }
 
 // warnStaleDecisionCap logs a WARN when a runtime policy.mode change no
-// longer matches semantic detection's effective mode. The policy.mode cap on
-// decision.mode is computed once at startup (decision.* keys are
-// restart-only), so after such a change the effective mode reported at
+// longer matches semantic detection's effective mode. It runs only when no
+// DecisionConfigurer is wired (tests and embedders): main wires one, which
+// re-caps the runner on every save instead. Without a configurer the cap
+// computed at startup stays in force, so the effective mode reported at
 // /control/decision is stale until restart. The policy engine's own mode
 // still governs whether its ladder acts.
 func (h *Handler) warnStaleDecisionCap(policyMode string) {
@@ -593,6 +667,12 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// Detail path only: the snapshot already holds a deep copy taken under
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
+	// GetFlaggedSession returns a deep copy, so the list is the caller's.
+	if h.policyEngine != nil {
+		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
+			info.SemanticDecisions = fs.SemanticDecisions
+		}
+	}
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -692,6 +772,11 @@ type SessionInfo struct {
 	// Fifty entries per session would bloat every list response, and
 	// calibration review happens one session at a time.
 	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
+
+	// SemanticDecisions is the policy engine's per-decision record list
+	// (detail path only, like SemanticShadow): what explains each semantic
+	// violation and enforcement action on this session.
+	SemanticDecisions []policy.SemanticDecision `json:"semantic_decisions,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
@@ -1205,6 +1290,14 @@ func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 		flagged = h.policyEngine.GetFlaggedSessionsBySeverity(policy.Severity(minSeverity))
 	} else {
 		flagged = h.policyEngine.GetFlaggedSessions()
+	}
+
+	// The list stays small: per-decision records are served by
+	// /control/flagged/{id} and the session detail path only. The dropped
+	// count is kept (it is one small number). Each entry is a deep copy, so
+	// this changes nothing in the engine.
+	for _, fs := range flagged {
+		fs.SemanticDecisions = nil
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -1858,20 +1951,12 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.settingsStore.SaveLocal(settings); err != nil {
-			slog.Error("failed to save settings", "error", err)
-			http.Error(w, "Failed to save settings", http.StatusInternalServerError)
-			return
-		}
-
-		h.reloadPolicyEngine()
-		slog.Info("settings saved and applied")
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":  "saved",
-			"message": "Settings applied instantly (no restart required)",
-		})
+		h.saveSettings(w, r, settings, "settings saved and applied", "Settings applied instantly (no restart required)")
 
 	case http.MethodDelete:
+		h.settingsMu.Lock()
+		defer h.settingsMu.Unlock()
+		prevDecision := h.settingsStore.GetMerged().Decision
 		if err := h.settingsStore.ResetToDefault(); err != nil {
 			slog.Error("failed to reset settings", "error", err)
 			http.Error(w, "Failed to reset settings", http.StatusInternalServerError)
@@ -1879,6 +1964,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.reloadPolicyEngine()
+		h.logDecisionChanges(r, config.DecisionSettingsChanges(prevDecision, h.settingsStore.GetMerged().Decision))
 		slog.Info("settings reset to defaults")
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status":  "reset",
@@ -1887,6 +1973,106 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// saveSettings validates a settings PUT, saves it and applies it; both PUT
+// routes use it. A custom rule new in this save may not take a name
+// reserved for semantic detection (one already saved is kept, with a WARN).
+// A change to decision.* is checked first against config rules
+// (restart-only keys, plan D11; enforce under policy.mode audit, D8), then
+// the ?confirm=enforce confirmation (D7), then the configurer's runtime
+// checks. Any problem refuses the whole save with 400 and saves nothing.
+// On success every changed decision key is logged once (D10). Decision keys
+// equal to their elida.yaml value are not stored (DecisionOverridesOnly).
+func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings config.Settings, logMessage, okMessage string) {
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+
+	prev := h.settingsStore.GetMerged()
+	next := h.settingsStore.PreviewMerged(settings)
+	nextMode := "enforce"
+	if next.Policy.Mode != nil {
+		nextMode = *next.Policy.Mode
+	}
+
+	var problems []string
+	if nextMode != "enforce" && nextMode != "audit" && (prev.Policy.Mode == nil || *prev.Policy.Mode != nextMode) {
+		// The policy mode also caps the semantic runner, which refuses
+		// anything else; refuse it here rather than half-apply the save.
+		problems = append(problems, "policy.mode: "+strconv.Quote(nextMode)+" must be enforce or audit")
+	}
+	// A reserved name new in this save is refused. One already saved (by an
+	// earlier release, or by hand) is kept as written, with a WARN: the
+	// reload path skips it, and refusing it would block every unrelated
+	// save, emergency toggles included, until it is renamed.
+	saved := make(map[string]bool, len(prev.Policy.CustomRules))
+	for _, cr := range prev.Policy.CustomRules {
+		saved[cr.Name] = true
+	}
+	var keptReserved []string
+	for _, cr := range next.Policy.CustomRules {
+		if !config.ReservedRuleName(cr.Name) {
+			continue
+		}
+		if saved[cr.Name] {
+			keptReserved = append(keptReserved, cr.Name)
+			continue
+		}
+		problems = append(problems, "policy.custom_rules: the rule name "+strconv.Quote(cr.Name)+" is reserved for semantic detection; choose another name")
+	}
+	changes := config.DecisionSettingsChanges(prev.Decision, next.Decision)
+	if len(changes) > 0 {
+		problems = append(problems, config.ValidateDecisionEdit(prev.Decision, next.Decision, h.settingsStore.GetDefaults().Decision, nextMode)...)
+		for _, c := range changes {
+			if c.Key == "decision.mode" && c.New == config.DecisionModeEnforce && r.URL.Query().Get("confirm") != "enforce" {
+				problems = append(problems, "decision.mode: changing to enforce lets semantic findings drive the risk ladder; resend with ?confirm=enforce to confirm")
+			}
+		}
+		// Runtime checks only for an edit that passed the config rules:
+		// their messages would otherwise repeat or contradict them.
+		if len(problems) == 0 && h.decisionConfigurer != nil {
+			problems = h.decisionConfigurer.ValidateDecisionSettings(next.Decision, nextMode)
+		}
+	}
+	if len(problems) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "settings refused", "problems": problems})
+		return
+	}
+
+	// settings.yaml keeps only real decision overrides: a key equal to its
+	// elida.yaml value is dropped (the merged value is the same), so a
+	// dashboard round trip cannot pin elida.yaml's values and override a
+	// later elida.yaml edit at startup.
+	settings.Decision = config.DecisionOverridesOnly(settings.Decision, h.settingsStore.GetDefaults().Decision)
+	if err := h.settingsStore.SaveLocal(settings); err != nil {
+		slog.Error("failed to save settings", "error", err)
+		http.Error(w, "Failed to save settings", http.StatusInternalServerError)
+		return
+	}
+	for _, name := range keptReserved {
+		slog.Warn("saved custom rule uses a name reserved for semantic detection; it is kept but skipped at runtime, rename it", "rule", name)
+	}
+	h.reloadPolicyEngine()
+	h.logDecisionChanges(r, changes)
+	slog.Info(logMessage)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "saved", "message": okMessage})
+}
+
+// logDecisionChanges writes one audit line per changed decision key (plan
+// D10): key, previous and new values (configuration only, never content),
+// the caller's address, and whether the request passed API-key
+// authentication (with auth enabled, a request reaches a handler only after
+// passing it). No credential is ever logged.
+func (h *Handler) logDecisionChanges(r *http.Request, changes []config.DecisionSettingChange) {
+	for _, c := range changes {
+		slog.Info("decision setting changed",
+			"key", c.Key,
+			"previous", c.Previous,
+			"new", c.New,
+			"remote_addr", r.RemoteAddr,
+			"authenticated", h.authEnabled,
+		)
 	}
 }
 
@@ -1934,23 +2120,13 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.settingsStore.SaveLocal(settings); err != nil {
-			slog.Error("failed to save settings", "error", err)
-			http.Error(w, "Failed to save settings", http.StatusInternalServerError)
-			return
-		}
-
-		// Dynamically reload policy engine with new settings
-		h.reloadPolicyEngine()
-
-		slog.Info("local settings saved and applied")
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":  "saved",
-			"message": "Settings saved and applied (no restart required)",
-		})
+		h.saveSettings(w, r, settings, "local settings saved and applied", "Settings saved and applied (no restart required)")
 
 	case http.MethodDelete:
 		// Reset to defaults (remove local customizations)
+		h.settingsMu.Lock()
+		defer h.settingsMu.Unlock()
+		prevDecision := h.settingsStore.GetMerged().Decision
 		if err := h.settingsStore.ResetToDefault(); err != nil {
 			slog.Error("failed to reset settings", "error", err)
 			http.Error(w, "Failed to reset settings", http.StatusInternalServerError)
@@ -1959,6 +2135,7 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 
 		// Dynamically reload policy engine with default settings
 		h.reloadPolicyEngine()
+		h.logDecisionChanges(r, config.DecisionSettingsChanges(prevDecision, h.settingsStore.GetMerged().Decision))
 
 		slog.Info("settings reset to defaults and applied")
 		writeJSON(w, http.StatusOK, map[string]interface{}{

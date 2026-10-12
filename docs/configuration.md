@@ -599,12 +599,15 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   request). An async finding affects later requests only.
   `decision.inline_admission.broad_strict_mode` only widens which messages may
   try the inline lane; it does not change what a finding does.
-- **`policy.mode: audit` caps `enforce` to `audit`.** Validation warns. The cap
-  is computed once, at startup, like every `decision.*` key: changing
-  `policy.mode` at runtime (dashboard or settings API) does not change the
-  semantic effective mode until restart, and ELIDA logs a WARN when the two
-  disagree. The policy engine's own mode still decides whether the ladder
-  acts.
+- **`policy.mode: audit` caps `enforce` to `audit`.** Validation warns. The
+  runner re-derives its effective mode whenever settings are applied, so a
+  later `policy.mode: audit` saved through the dashboard or settings API caps
+  `enforce` immediately, and switching back to `enforce` lifts the cap. (The
+  WARN about a stale cap remains only where no decision configurer is wired,
+  i.e. in tests.) While capped, `GET /control/decision` reports
+  `mode: enforce`, `effective_mode: audit` and a `reason` that includes
+  `capped by policy.mode=audit`. The policy engine's own mode still decides
+  whether the ladder acts.
 - **No policy engine caps `audit` and `enforce` to `shadow`.** With
   `policy.enabled: false` nothing can be recorded. Validation warns, the
   startup log gives the reason, and `/control/decision` reports
@@ -620,6 +623,89 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   `evidence_only`, OCSF findings carry `elida.evidence_only` with `severity_id`
   1 (Informational), and SQLite `violation_detected` rows carry
   `evidence_only`. The exported `elida.violations.max_severity` ignores it.
+  Semantic violations also carry their decision metadata (never content) in
+  every export; see [Telemetry](semantic-detection.md#telemetry).
+
+### Changing decision settings at runtime
+
+Only two groups of `decision` keys change at runtime, through the dashboard or
+`PUT /control/settings` (and `/control/settings/local`); everything else needs
+`elida.yaml` and a restart:
+
+| Runtime (applied on save) | Restart-only (read-only at runtime) |
+|---|---|
+| `decision.mode` | `decision.threshold_set` |
+| `decision.preprocessing.max_input_bytes` | `decision.elevated_threshold` |
+| `decision.preprocessing.max_analysis_bytes` | `decision.inline_timeout_ms` |
+| `decision.preprocessing.max_representations` | `decision.max_concurrency` |
+| `decision.preprocessing.max_decode_depth` | `decision.max_inline_tokens` |
+| `decision.preprocessing.max_expansion_ratio` | `decision.max_inline_windows` |
+| | `decision.max_async_windows` |
+| | `decision.async_queue_size` |
+
+`decision.enabled`, `required`, `require_inline`, `provider`, `model_path` and
+`endpoint` are not settings keys at all. `/control/decision` reports the
+restart-only values in force under `limits`.
+
+Guardrails:
+
+- **Restart-only changes are refused.** A save that sets a restart-only key
+  to anything but its value in force (the `elida.yaml` value, shown under
+  `limits` at `/control/decision`) returns 400 with `problems` naming the
+  key, and nothing is saved; the same body without that key succeeds.
+  Omitting a key is never a change. A stale restart-only value already in
+  `settings.yaml` (for example after `elida.yaml` changed) never takes effect
+  and is logged at WARN at startup. It never blocks a save: a save may keep
+  it (a dashboard round trip), drop it (a partial save that omits it), or
+  set it back to the value in force; only a third value is refused.
+- **`enforce` needs confirmation.** Changing `decision.mode` to `enforce`
+  requires `?confirm=enforce` on the request; a UI dialog alone is not enough.
+  It is refused while the saved `policy.mode` is `audit`, and when the
+  configured threshold set does not match the loaded model.
+- **Values are checked before saving.** Preprocessing values outside their
+  ceilings, and any decision change while semantic detection is not running
+  (`decision.enabled: false`, `decision.mode: disabled` at startup, or a
+  model that did not load), are refused with 400.
+- **The runner re-caps on every save.** Each save (and each reset) applies the
+  merged `decision` section with the saved `policy.mode`, so the effective
+  mode always follows the rules in
+  [Modes and when enforcement is refused](#modes-and-when-enforcement-is-refused).
+  An async result uses the mode in force when it is delivered, not when it
+  was queued; a result delivered while the mode is `disabled` is dropped and
+  counted in `async_dropped_disabled`.
+- **`settings.yaml` is applied at startup.** Its `decision` section is applied
+  once after the settings store loads, through the same checks. `enforce`
+  with a mismatched threshold set there fails startup, as it does in
+  `elida.yaml`; any other refused value is logged at WARN and the
+  `elida.yaml` value stays in force. (The `policy` section of `settings.yaml`
+  is still applied only by a save, so the startup cap uses `elida.yaml`'s
+  `policy.mode`.) An `enforce` saved in `settings.yaml` while that
+  `policy.mode` is `audit` is applied capped to `audit`, not refused; a later
+  `policy.mode: enforce` save (or a reset) lifts the cap without
+  `?confirm=enforce`. That `enforce` was confirmed when it was saved; a later
+  `elida.yaml` change does not re-confirm it. The same holds for any cap:
+  lifting it needs no confirmation.
+- **`settings.yaml` holds only overrides.** A save stores a `decision` key
+  only when its value differs from `elida.yaml`'s; a key equal to the
+  `elida.yaml` value is dropped (the merged value is the same). A dashboard
+  save, which sends every value, therefore never pins `elida.yaml`'s values.
+  At startup every runtime `decision` key that `settings.yaml` overrides is
+  logged at WARN (`settings.yaml overrides elida.yaml for a decision key`)
+  with both values, so an `elida.yaml` edit that a stored override shadows
+  is visible. Save the key from the dashboard, or reset settings, to change
+  it.
+- **Every change is logged.** Each changed key writes one INFO line,
+  `decision setting changed`, with `key`, `previous` and `new` values,
+  `remote_addr`, and `authenticated` (whether control API authentication is
+  on, so the request passed it). Values are configuration only, never content
+  or credentials.
+- **Reserved rule names.** A custom rule may not be named
+  `semantic_injection` or `injection_elevated` (the names semantic detection
+  records under). A save that introduces such a name (a new rule, or a rename)
+  is refused with 400 naming it. A rule with such a name that is already saved
+  (by an earlier release or a hand edit) does not block saves: it is kept as
+  written, each save logs a WARN naming it, and it is skipped at runtime (also
+  with a WARN) until renamed.
 
 ### Allowlisted tools
 

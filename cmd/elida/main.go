@@ -183,6 +183,13 @@ func main() {
 	a.initProxy()
 	a.initWebSocket()
 	a.initSettings()
+	// settings.yaml's decision section, through the same mapping a settings
+	// save uses (plan D9). Only an enforce refused for a threshold-set
+	// mismatch is fatal, as it is in elida.yaml (see initDecision).
+	if err := a.applyStartupDecisionSettings(); err != nil {
+		slog.Error("startup failed", "error", err)
+		os.Exit(1)
+	}
 	a.initControlAPI()
 
 	errChan := a.startServers()
@@ -410,16 +417,17 @@ func (a *app) initSessionEndCallback() {
 	})
 }
 
-// enrichRecordFromPolicy adds the policy engine's captures and violations
+// enrichRecordFromPolicy adds the policy engine's captures, violations (with
+// their representative semantic metadata) and per-decision semantic records
 // for the ending session to its record.
 //
-// Only this session instance's violations are added. A violation that last
-// fired before start was carried over by a retained block/terminate entry
-// from an earlier session with the same ID; it is skipped here, at the
-// source, so neither SQLite events nor the OTEL/OCSF export (which are built
-// from this record) report it again for a session whose requests were all
-// refused. SQLite history still holds it: SaveSession carries it from the
-// stored row.
+// Only this session instance's violations and decision records are added.
+// A violation that last fired before start was carried over by a retained
+// block/terminate entry from an earlier session with the same ID; it is
+// skipped here, at the source, so neither SQLite events nor the OTEL/OCSF
+// export (which are built from this record) report it again for a session
+// whose requests were all refused. SQLite history still holds it:
+// SaveSession carries it from the stored row.
 func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string, start time.Time) {
 	if a.policyEngine == nil {
 		return
@@ -455,8 +463,14 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			EvidenceOnly:  v.EvidenceOnly,
 			EventID:       v.EventID,
 			Timestamp:     v.Timestamp,
+			// Decision metadata carries no content, so it needs no redaction.
+			Semantic: storage.SemanticEvidenceFromPolicy(v.Semantic),
 		})
 	}
+	// Same ending-instance rule as the violations above. The records carry
+	// no content, so they need no redaction.
+	record.SemanticDecisions = storage.SemanticDecisionsFromPolicy(flagged.SemanticDecisions, start)
+	record.SemanticDecisionsDropped = flagged.SemanticDecisionsDropped
 }
 
 func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessionID string) {
@@ -668,7 +682,31 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	if !a.tp.Enabled() && a.ocsfEmitter == nil {
 		return
 	}
+	a.tp.ExportSessionRecord(context.Background(), telemetryRecordFrom(record, snap, endTime, integrity))
+}
 
+// telemetrySemantic converts stored semantic metadata for export. The fields
+// are listed explicitly rather than converted, so storage and telemetry can
+// evolve their mirror types independently.
+func telemetrySemantic(s *storage.SemanticEvidence) *telemetry.SemanticMetadata {
+	if s == nil {
+		return nil
+	}
+	m := telemetry.SemanticMetadata{
+		Signal: s.Signal, Probability: s.Probability, AuxProbability: s.AuxProbability, Vetoed: s.Vetoed,
+		Model: s.Model, ModelVersion: s.ModelVersion, ModelChecksum: s.ModelChecksum, ThresholdSet: s.ThresholdSet,
+		DecisionID: s.DecisionID, Transform: s.Transform, TransformDepth: s.TransformDepth,
+		WindowStartByte: s.WindowStartByte, WindowEndByte: s.WindowEndByte, CoverageComplete: s.CoverageComplete,
+		ExecutionMode: s.ExecutionMode, ProtectionScope: s.ProtectionScope,
+	}
+	return &m
+}
+
+// telemetryRecordFrom builds the telemetry export record from the stored
+// record. It is pure, so the content-free guarantee is testable without an
+// exporter. The record's violations are already limited to the ending
+// session instance (enrichRecordFromPolicy).
+func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, endTime time.Time, integrity *storage.SDRIntegrity) telemetry.SessionRecord {
 	telemRecord := telemetry.SessionRecord{
 		SessionID:    snap.ID,
 		State:        snap.State.String(),
@@ -699,8 +737,29 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
 			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			Semantic:      telemetrySemantic(v.Semantic),
 		})
 	}
+	for _, d := range record.SemanticDecisions {
+		// Defense in depth, repeating enrichRecordFromPolicy's filter: a
+		// decision stamped before this session instance started (for example,
+		// on an entry for a reused ID that was not released) belongs to an
+		// earlier session. A retained entry holds none; policy clears them.
+		if !d.Timestamp.IsZero() && d.Timestamp.Before(snap.StartTime) {
+			continue
+		}
+		var m telemetry.SemanticMetadata
+		if p := telemetrySemantic(&d.Evidence); p != nil {
+			m = *p
+		}
+		telemRecord.SemanticDecisions = append(telemRecord.SemanticDecisions, telemetry.SemanticDecision{
+			EventID: d.EventID, RuleName: d.RuleName, EventCategory: d.EventCategory, Severity: d.Severity,
+			SourceRole: d.SourceRole, MessageIndex: d.MessageIndex, EvidenceOnly: d.EvidenceOnly,
+			WouldContributePoints: d.WouldContributePoints, Timestamp: d.Timestamp, Metadata: m,
+		})
+	}
+	telemRecord.SemanticDecisionsDropped = record.SemanticDecisionsDropped
 	for _, c := range record.CapturedContent {
 		telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
 			Timestamp:    c.Timestamp.Format(time.RFC3339),
@@ -711,7 +770,7 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			StatusCode:   c.StatusCode,
 		})
 	}
-	a.tp.ExportSessionRecord(context.Background(), telemRecord)
+	return telemRecord
 }
 
 func (a *app) initOCSF() {
@@ -1043,6 +1102,10 @@ func (a *app) initControlAPI() {
 	// Always wired, so the status reports the configured mode and why the
 	// feature is or is not running (disabled, degraded, mode-disabled).
 	a.controlHandler.SetDecisionProvider(a)
+	// Always wired, so a settings save applies decision.mode and
+	// decision.preprocessing.* and re-caps the runner on a policy.mode
+	// change; with no runner it refuses decision changes as not running.
+	a.controlHandler.SetDecisionConfigurer(a)
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")

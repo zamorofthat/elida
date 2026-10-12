@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"elida/internal/instruction"
+	"elida/internal/policy"
 	"elida/internal/session"
 
 	_ "modernc.org/sqlite"
@@ -60,6 +61,10 @@ type Violation struct {
 	// entry carried over from an earlier session with the same ID. Absent
 	// on older rows.
 	Timestamp time.Time `json:"timestamp,omitempty"`
+	// Semantic is the representative decision's metadata for a semantic
+	// rule (see policy.mergeSemanticViolation). Absent on older rows and on
+	// non-semantic violations. It carries no request content.
+	Semantic *SemanticEvidence `json:"semantic,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
@@ -131,6 +136,12 @@ type SessionRecord struct {
 	// Loaded by GetSession only; ListSessions leaves it empty to keep list
 	// payloads small.
 	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+
+	// SemanticDecisions holds one record per semantic decision recorded as a
+	// violation, oldest first: what explains an enforcement action after the
+	// session ended. Loaded by GetSession only, like SemanticShadow.
+	SemanticDecisions        []SemanticDecision `json:"semantic_decisions,omitempty"`
+	SemanticDecisionsDropped int                `json:"semantic_decisions_dropped,omitempty"`
 }
 
 // SemanticShadow mirrors session.SemanticShadow for persistence. The storage
@@ -176,6 +187,97 @@ func SemanticShadowFromSession(in []session.SemanticShadow) []SemanticShadow {
 		out[i] = SemanticShadow(s)
 	}
 	return out
+}
+
+// SemanticEvidence mirrors policy.SemanticEvidence for persistence: the
+// decision metadata behind a semantic violation. Same fields, types and JSON
+// tags. It carries no request content: only scores, identifiers and byte
+// offsets.
+type SemanticEvidence struct {
+	Signal           string  `json:"signal"`
+	Probability      float64 `json:"probability"`
+	AuxProbability   float64 `json:"aux_probability,omitempty"`
+	Vetoed           bool    `json:"vetoed,omitempty"`
+	Model            string  `json:"model"`
+	ModelVersion     string  `json:"model_version"`
+	ModelChecksum    string  `json:"model_checksum,omitempty"`
+	ThresholdSet     string  `json:"threshold_set"`
+	DecisionID       string  `json:"decision_id"`
+	Transform        string  `json:"transform,omitempty"`
+	TransformDepth   int     `json:"transform_depth,omitempty"`
+	WindowStartByte  int     `json:"window_start_byte"`
+	WindowEndByte    int     `json:"window_end_byte"`
+	CoverageComplete bool    `json:"coverage_complete"`
+	ExecutionMode    string  `json:"execution_mode"`
+	ProtectionScope  string  `json:"protection_scope"`
+}
+
+// SemanticDecision mirrors policy.SemanticDecision for persistence: one
+// semantic decision recorded as a violation. Severities are stored as plain
+// strings, as in Violation. It carries no request content.
+type SemanticDecision struct {
+	EventID               string           `json:"event_id"`
+	RuleName              string           `json:"rule_name"`
+	EventCategory         string           `json:"event_category,omitempty"`
+	Severity              string           `json:"severity"`
+	EffectiveSeverity     string           `json:"effective_severity,omitempty"`
+	SourceRole            string           `json:"source_role"`
+	MessageIndex          int              `json:"message_index"`
+	EvidenceOnly          bool             `json:"evidence_only,omitempty"`
+	WouldContributePoints float64          `json:"would_contribute_points,omitempty"`
+	Timestamp             time.Time        `json:"timestamp"`
+	Evidence              SemanticEvidence `json:"evidence"`
+}
+
+// SemanticEvidenceFromPolicy copies a violation's semantic metadata into its
+// persisted form. The conversion is a struct conversion, so it compiles only
+// while the two types have identical fields.
+func SemanticEvidenceFromPolicy(e *policy.SemanticEvidence) *SemanticEvidence {
+	if e == nil {
+		return nil
+	}
+	s := SemanticEvidence(*e)
+	return &s
+}
+
+// SemanticDecisionsFromPolicy copies the policy engine's per-decision records
+// into their persisted form, skipping records stamped before notBefore (a
+// retained entry's carry-over from an earlier session with the same ID; see
+// enrichRecordFromPolicy). A zero notBefore keeps every record. It returns
+// nil for an empty result.
+func SemanticDecisionsFromPolicy(in []policy.SemanticDecision, notBefore time.Time) []SemanticDecision {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SemanticDecision, 0, len(in))
+	for _, d := range in {
+		if !notBefore.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(notBefore) {
+			continue
+		}
+		out = append(out, SemanticDecision{
+			EventID:               d.EventID,
+			RuleName:              d.RuleName,
+			EventCategory:         d.EventCategory,
+			Severity:              string(d.Severity),
+			EffectiveSeverity:     string(d.EffectiveSeverity),
+			SourceRole:            d.SourceRole,
+			MessageIndex:          d.MessageIndex,
+			EvidenceOnly:          d.EvidenceOnly,
+			WouldContributePoints: d.WouldContributePoints,
+			Timestamp:             d.Timestamp,
+			Evidence:              SemanticEvidence(d.Evidence),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// semanticDecisionsColumn is the JSON stored in the semantic_decisions column.
+type semanticDecisionsColumn struct {
+	Decisions []SemanticDecision `json:"decisions,omitempty"`
+	Dropped   int                `json:"dropped,omitempty"`
 }
 
 // SQLiteStore provides persistent storage for session history
@@ -234,6 +336,7 @@ func (s *SQLiteStore) migrate() error {
 		fingerprint_bucket TEXT DEFAULT '',
 		fingerprint_class TEXT DEFAULT '',
 		semantic_shadow TEXT DEFAULT '',
+		semantic_decisions TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -361,6 +464,9 @@ func (s *SQLiteStore) migrate() error {
 	// Add the semantic shadow column (idempotent — ignore "duplicate column" errors)
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN semantic_shadow TEXT DEFAULT ''")
 
+	// Per-decision semantic records (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN semantic_decisions TEXT DEFAULT ''")
+
 	// History carried from earlier sessions with the same ID (see
 	// SaveSession). Idempotent — ignore "duplicate column" errors.
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN prior_history TEXT DEFAULT ''")
@@ -375,16 +481,16 @@ func (s *SQLiteStore) migrate() error {
 // erase the earlier session's history. So, inside one transaction,
 // SaveSession reads the stored row. When its start_time differs from
 // record.StartTime the stored row belongs to an earlier session, and its
-// violations, captured content and semantic shadow decisions become the
-// carried "prior history". A save of the same session (equal start_time,
-// e.g. the proxy's flagged-session save followed by the session-end save)
-// keeps the prior history already carried. The written lists are the
+// violations, captured content, semantic shadow decisions and per-decision
+// semantic records become the carried "prior history". A save of the same
+// session (equal start_time, e.g. the proxy's flagged-session save followed
+// by the session-end save) keeps the prior history already carried. The written lists are the
 // record's own entries merged with the prior history; mergeHistory documents
 // the deduplication and the caps.
 //
 // The Redis session store (session.RedisStore) holds live session state
-// only, never this history (no violations, captures or shadow decisions),
-// so there is nothing to merge there.
+// only, never this history (no violations, captures, shadow decisions or
+// semantic decision records), so there is nothing to merge there.
 func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -422,10 +528,15 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		semanticShadow = []byte("[]")
 	}
 
+	semanticDecisions, err := json.Marshal(semanticDecisionsColumn{Decisions: record.SemanticDecisions, Dropped: record.SemanticDecisionsDropped})
+	if err != nil {
+		semanticDecisions = []byte("{}")
+	}
+
 	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, prior_history)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, prior_history)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -443,6 +554,7 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		record.FingerprintBucket,
 		record.FingerprintClass,
 		string(semanticShadow),
+		string(semanticDecisions),
 		string(priorJSON),
 	)
 	if err != nil {
@@ -469,14 +581,14 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 // GetSessionCtx retrieves a session by ID using the provided context.
 func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
 	var metadataStr, capturedStr, violationsStr sql.NullString
 	var fingerprintDistance sql.NullFloat64
 	var fingerprintBucket, fingerprintClass sql.NullString
-	var semanticShadowStr sql.NullString
+	var semanticShadowStr, semanticDecisionsStr sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -495,6 +607,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 		&fingerprintBucket,
 		&fingerprintClass,
 		&semanticShadowStr,
+		&semanticDecisionsStr,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -516,6 +629,12 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 	unmarshalJSON(capturedStr, &record.CapturedContent, "captured_content", record.ID)
 	unmarshalJSON(violationsStr, &record.Violations, "violations", record.ID)
 	unmarshalJSON(semanticShadowStr, &record.SemanticShadow, "semantic_shadow", record.ID)
+	// NULL or '' (rows written before the column existed) loads as no
+	// decisions; see unmarshalJSON.
+	var sd semanticDecisionsColumn
+	unmarshalJSON(semanticDecisionsStr, &sd, "semantic_decisions", record.ID)
+	record.SemanticDecisions = sd.Decisions
+	record.SemanticDecisionsDropped = sd.Dropped
 
 	integrity, integrityErr := s.GetSDRIntegrity(ctx, record.ID)
 	if integrityErr != nil {

@@ -104,6 +104,45 @@ type OCSFUnmapped struct {
 	// that contributed no risk. Such a finding is exported at severity_id
 	// Informational whatever its rule severity.
 	EvidenceOnly bool `json:"elida.evidence_only,omitempty"`
+	// EventID and Semantic are set for semantic findings only: the
+	// representative decision's event ID and metadata.
+	EventID  string        `json:"elida.event_id,omitempty"`
+	Semantic *OCSFSemantic `json:"elida.semantic,omitempty"`
+}
+
+// OCSFSemantic is semantic decision metadata in a Detection Finding's
+// unmapped block: scores, identifiers and offsets, never content.
+type OCSFSemantic struct {
+	Signal           string  `json:"signal"`
+	Probability      float64 `json:"probability"`
+	AuxProbability   float64 `json:"aux_probability"`
+	Vetoed           bool    `json:"vetoed"`
+	Model            string  `json:"model"`
+	ModelVersion     string  `json:"model_version"`
+	ModelChecksum    string  `json:"model_checksum"`
+	ThresholdSet     string  `json:"threshold_set"`
+	DecisionID       string  `json:"decision_id"`
+	Transform        string  `json:"transform"`
+	TransformDepth   int     `json:"transform_depth"`
+	WindowStartByte  int     `json:"window_start_byte"`
+	WindowEndByte    int     `json:"window_end_byte"`
+	CoverageComplete bool    `json:"coverage_complete"`
+	ExecutionMode    string  `json:"execution_mode"`
+	ProtectionScope  string  `json:"protection_scope"`
+}
+
+// ocsfSemantic converts m for the unmapped block, passing every string
+// through the safeToken redaction guard.
+func ocsfSemantic(m SemanticMetadata) *OCSFSemantic {
+	return &OCSFSemantic{
+		Signal: safeToken(m.Signal), Probability: m.Probability, AuxProbability: m.AuxProbability,
+		Vetoed: m.Vetoed, Model: safeToken(m.Model), ModelVersion: safeToken(m.ModelVersion),
+		ModelChecksum: safeToken(m.ModelChecksum), ThresholdSet: safeToken(m.ThresholdSet),
+		DecisionID: safeToken(m.DecisionID), Transform: safeToken(m.Transform),
+		TransformDepth: m.TransformDepth, WindowStartByte: m.WindowStartByte, WindowEndByte: m.WindowEndByte,
+		CoverageComplete: m.CoverageComplete, ExecutionMode: safeToken(m.ExecutionMode),
+		ProtectionScope: safeToken(m.ProtectionScope),
+	}
 }
 
 // OCSFDetectionFinding represents OCSF class 2004 — Detection Finding
@@ -203,6 +242,10 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 			SDRRootHash:  record.SDRRootHash,
 			EvidenceOnly: v.EvidenceOnly,
 		},
+	}
+	if v.Semantic != nil {
+		finding.Unmapped.EventID = safeToken(v.EventID)
+		finding.Unmapped.Semantic = ocsfSemantic(*v.Semantic)
 	}
 
 	// Populate ai_model from record
