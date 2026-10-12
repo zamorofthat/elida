@@ -165,7 +165,7 @@ func (e *Engine) Observe(sessionID string, events []Event) []Match {
 	if st == nil || len(fresh) == 0 {
 		return nil
 	}
-	e.stats.HistoryEvicted += uint64(st.prune(e.maxWindow, e.limits.MaxHistoryEvents))
+	e.stats.HistoryEvicted += st.prune(e.maxWindow, e.limits.MaxHistoryEvents)
 
 	var matches []Match
 	for _, seq := range fresh {
@@ -323,20 +323,23 @@ func (s *sessionState) insert(ev Event) uint64 {
 
 // prune drops entries older than newest-maxWindow, then the oldest entries
 // past maxEvents. It returns how many were dropped.
-func (s *sessionState) prune(maxWindow time.Duration, maxEvents int) int {
+func (s *sessionState) prune(maxWindow time.Duration, maxEvents int) uint64 {
 	floor := s.newest.Add(-maxWindow)
 	cut := 0
+	var dropped uint64
 	for cut < len(s.history) && s.history[cut].ev.Timestamp.Before(floor) {
 		cut++
+		dropped++
 	}
-	if over := len(s.history) - cut - maxEvents; over > 0 {
-		cut += over
+	for len(s.history)-cut > maxEvents {
+		cut++
+		dropped++
 	}
 	if cut == 0 {
 		return 0
 	}
 	s.history = append(s.history[:0], s.history[cut:]...)
-	return cut
+	return dropped
 }
 
 func (s *sessionState) indexOf(seq uint64) int {

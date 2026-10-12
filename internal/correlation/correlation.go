@@ -81,22 +81,22 @@ const (
 // zero values (CountBy event, Cooldown = Window, Severity warning, Mode
 // audit).
 type Rule struct {
-	Name  string
-	Shape Shape
+	Name  string `yaml:"name" json:"name"`
+	Shape Shape  `yaml:"shape" json:"shape"`
 	// Category, Count and CountBy apply to repeated rules only.
-	Category string
-	Count    int
-	CountBy  CountBy
+	Category string  `yaml:"category,omitempty" json:"category,omitempty"`
+	Count    int     `yaml:"count,omitempty" json:"count,omitempty"`
+	CountBy  CountBy `yaml:"count_by,omitempty" json:"count_by,omitempty"`
 	// Sequence applies to sequence rules only: categories in order.
-	Sequence []string
+	Sequence []string `yaml:"sequence,omitempty" json:"sequence,omitempty"`
 	// Window bounds the time from the first to the last contributing event.
-	Window time.Duration
+	Window time.Duration `yaml:"window" json:"window"`
 	// Cooldown suppresses a further match of this rule in a session until
 	// this long after the previous match's last event. Zero means Window.
-	Cooldown time.Duration
+	Cooldown time.Duration `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 	// Severity is "info", "warning" or "critical"; empty means warning.
-	Severity string
-	Mode     Mode
+	Severity string `yaml:"severity,omitempty" json:"severity,omitempty"`
+	Mode     Mode   `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
 // Limits bounds the engine's memory.
