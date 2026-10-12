@@ -252,6 +252,10 @@ func (a *app) teardownDecision(ctx context.Context) {
 // capped at shadow.
 const decisionPolicyDisabledReason = "policy engine disabled"
 
+// decisionPolicyAuditCapReason is the /control/decision reason when
+// policy.mode audit caps a configured enforce to audit (plan D8).
+const decisionPolicyAuditCapReason = "capped by policy.mode=audit"
+
 // decisionSchedulerConfig is the production scheduler configuration.
 //
 // InlineCapable is the provider's capability: an async_only provider gets no
@@ -459,7 +463,9 @@ func (a *app) ApplyDecisionSettings(next config.DecisionSettings, policyMode str
 
 // applyStartupDecisionSettings applies settings.yaml's decision section once
 // at startup, after initSettings (plan D9), through the same mapping a
-// settings save uses. Restart-only values that differ from elida.yaml are
+// settings save uses. Every runtime key settings.yaml overrides is logged at
+// WARN with both values, so an elida.yaml edit that a stored override
+// shadows is visible. Restart-only values that differ from elida.yaml are
 // ignored with a WARN. decision.mode enforce refused for a threshold-set
 // mismatch fails startup, exactly as in elida.yaml, whatever
 // decision.required says; any other refusal (an out-of-range value, or
@@ -477,6 +483,8 @@ func (a *app) applyStartupDecisionSettings() error {
 				"key", c.Key, "settings_value", c.New, "in_force", c.Previous)
 			continue
 		}
+		slog.Warn("settings.yaml overrides elida.yaml for a decision key; save it from the dashboard or reset settings to change it",
+			"key", c.Key, "settings_value", c.New, "elida_yaml_value", c.Previous)
 		runtimeChanged = true
 	}
 	if a.decisionRunner == nil {
@@ -568,6 +576,15 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 				st.Reason = decisionPolicyDisabledReason
 			} else {
 				st.Reason += "; " + decisionPolicyDisabledReason
+			}
+		}
+		if a.policyEngine != nil && st.Mode == config.DecisionModeEnforce && st.EffectiveMode == config.DecisionModeAudit {
+			// The only cap from enforce to audit is policy.mode audit
+			// (runner.capMode).
+			if st.Reason == "" {
+				st.Reason = decisionPolicyAuditCapReason
+			} else {
+				st.Reason += "; " + decisionPolicyAuditCapReason
 			}
 		}
 		st.CoverageGaps[runner.GapMessagesNotAssessed] = 0

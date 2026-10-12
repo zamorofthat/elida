@@ -370,3 +370,36 @@ func TestSettingsPreviewMerged_DoesNotMutateDefaults(t *testing.T) {
 		t.Fatalf("a preview changed the defaults' shape threshold to %v", got)
 	}
 }
+
+// DecisionOverridesOnly drops every decision key equal to its value in
+// force and keeps the rest, preprocessing keys one by one.
+func TestDecisionOverridesOnly_KeepsOnlyKeysThatDiffer(t *testing.T) {
+	str := func(s string) *string { return &s }
+	num := func(n int) *int { return &n }
+	flt := func(f float64) *float64 { return &f }
+	inForce := config.DecisionSettings{
+		Mode: str("enforce"), ThresholdSet: str("v1"), ElevatedThreshold: flt(0.3), MaxConcurrency: num(4),
+		Preprocessing: &config.DecisionPreprocessingSettings{MaxDecodeDepth: num(2), MaxInputBytes: num(262144)},
+	}
+	local := config.DecisionSettings{
+		Mode: str("enforce"), ThresholdSet: str("v1"), ElevatedThreshold: flt(0.3), MaxConcurrency: num(1),
+		Preprocessing: &config.DecisionPreprocessingSettings{MaxDecodeDepth: num(1), MaxInputBytes: num(262144)},
+	}
+	got := config.DecisionOverridesOnly(local, inForce)
+	if got.Mode != nil || got.ThresholdSet != nil || got.ElevatedThreshold != nil {
+		t.Fatalf("keys equal to the value in force must be dropped: %+v", got)
+	}
+	if got.MaxConcurrency == nil || *got.MaxConcurrency != 1 {
+		t.Fatalf("a differing (stale) value is kept: %+v", got.MaxConcurrency)
+	}
+	if got.Preprocessing == nil || got.Preprocessing.MaxDecodeDepth == nil || *got.Preprocessing.MaxDecodeDepth != 1 || got.Preprocessing.MaxInputBytes != nil {
+		t.Fatalf("preprocessing = %+v, want only max_decode_depth=1", got.Preprocessing)
+	}
+	if *local.Mode != "enforce" || local.Preprocessing.MaxInputBytes == nil {
+		t.Fatal("the input must not be modified")
+	}
+	all := config.DecisionOverridesOnly(inForce, inForce)
+	if all.Mode != nil || all.Preprocessing != nil || all.MaxConcurrency != nil {
+		t.Fatalf("an all-equal section stores nothing: %+v", all)
+	}
+}

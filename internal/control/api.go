@@ -1983,7 +1983,8 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 // (restart-only keys, plan D11; enforce under policy.mode audit, D8), then
 // the ?confirm=enforce confirmation (D7), then the configurer's runtime
 // checks. Any problem refuses the whole save with 400 and saves nothing.
-// On success every changed decision key is logged once (D10).
+// On success every changed decision key is logged once (D10). Decision keys
+// equal to their elida.yaml value are not stored (DecisionOverridesOnly).
 func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings config.Settings, logMessage, okMessage string) {
 	h.settingsMu.Lock()
 	defer h.settingsMu.Unlock()
@@ -2039,6 +2040,11 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings 
 		return
 	}
 
+	// settings.yaml keeps only real decision overrides: a key equal to its
+	// elida.yaml value is dropped (the merged value is the same), so a
+	// dashboard round trip cannot pin elida.yaml's values and override a
+	// later elida.yaml edit at startup.
+	settings.Decision = config.DecisionOverridesOnly(settings.Decision, h.settingsStore.GetDefaults().Decision)
 	if err := h.settingsStore.SaveLocal(settings); err != nil {
 		slog.Error("failed to save settings", "error", err)
 		http.Error(w, "Failed to save settings", http.StatusInternalServerError)

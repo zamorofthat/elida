@@ -317,6 +317,61 @@ func ValidateDecisionEdit(prev, next, inForce DecisionSettings, nextPolicyMode s
 	return problems
 }
 
+// DecisionOverridesOnly returns local with every decision key whose value
+// equals its value in force (elida.yaml, the settings store's defaults)
+// removed, so settings.yaml stores only explicit operator overrides. The
+// merged result is unchanged: a removed key falls back to that same value.
+// Without this, a dashboard save (which echoes the whole merged object)
+// would pin elida.yaml's decision values into settings.yaml, and a later
+// elida.yaml edit would be overridden at startup.
+func DecisionOverridesOnly(local, inForce DecisionSettings) DecisionSettings {
+	out := local
+	if eqStr(local.Mode, inForce.Mode) {
+		out.Mode = nil
+	}
+	if eqStr(local.ThresholdSet, inForce.ThresholdSet) {
+		out.ThresholdSet = nil
+	}
+	if local.ElevatedThreshold != nil && inForce.ElevatedThreshold != nil && *local.ElevatedThreshold == *inForce.ElevatedThreshold {
+		out.ElevatedThreshold = nil
+	}
+	out.InlineTimeoutMs = dropEqInt(local.InlineTimeoutMs, inForce.InlineTimeoutMs)
+	out.MaxConcurrency = dropEqInt(local.MaxConcurrency, inForce.MaxConcurrency)
+	out.MaxInlineTokens = dropEqInt(local.MaxInlineTokens, inForce.MaxInlineTokens)
+	out.MaxInlineWindows = dropEqInt(local.MaxInlineWindows, inForce.MaxInlineWindows)
+	out.MaxAsyncWindows = dropEqInt(local.MaxAsyncWindows, inForce.MaxAsyncWindows)
+	out.AsyncQueueSize = dropEqInt(local.AsyncQueueSize, inForce.AsyncQueueSize)
+	if local.Preprocessing != nil {
+		in := inForce.Preprocessing
+		if in == nil {
+			in = &DecisionPreprocessingSettings{}
+		}
+		p := DecisionPreprocessingSettings{
+			MaxInputBytes:      dropEqInt(local.Preprocessing.MaxInputBytes, in.MaxInputBytes),
+			MaxAnalysisBytes:   dropEqInt(local.Preprocessing.MaxAnalysisBytes, in.MaxAnalysisBytes),
+			MaxRepresentations: dropEqInt(local.Preprocessing.MaxRepresentations, in.MaxRepresentations),
+			MaxDecodeDepth:     dropEqInt(local.Preprocessing.MaxDecodeDepth, in.MaxDecodeDepth),
+			MaxExpansionRatio:  dropEqInt(local.Preprocessing.MaxExpansionRatio, in.MaxExpansionRatio),
+		}
+		if p == (DecisionPreprocessingSettings{}) {
+			out.Preprocessing = nil
+		} else {
+			out.Preprocessing = &p
+		}
+	}
+	return out
+}
+
+func eqStr(a, b *string) bool { return a != nil && b != nil && *a == *b }
+
+// dropEqInt returns nil when a equals b, else a.
+func dropEqInt(a, b *int) *int {
+	if a != nil && b != nil && *a == *b {
+		return nil
+	}
+	return a
+}
+
 // ReservedRuleName reports whether name is a rule name the semantic decision
 // runner records violations under. No policy rule, from elida.yaml or from a
 // settings save, may use one.

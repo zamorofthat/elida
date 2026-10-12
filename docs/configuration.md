@@ -604,8 +604,10 @@ about 4.7 CPUs of work per wall-clock second on an 8-core machine.
   later `policy.mode: audit` saved through the dashboard or settings API caps
   `enforce` immediately, and switching back to `enforce` lifts the cap. (The
   WARN about a stale cap remains only where no decision configurer is wired,
-  i.e. in tests.) The policy engine's own mode still decides whether the
-  ladder acts.
+  i.e. in tests.) While capped, `GET /control/decision` reports
+  `mode: enforce`, `effective_mode: audit` and a `reason` that includes
+  `capped by policy.mode=audit`. The policy engine's own mode still decides
+  whether the ladder acts.
 - **No policy engine caps `audit` and `enforce` to `shadow`.** With
   `policy.enabled: false` nothing can be recorded. Validation warns, the
   startup log gives the reason, and `/control/decision` reports
@@ -680,8 +682,18 @@ Guardrails:
   `policy.mode`.) An `enforce` saved in `settings.yaml` while that
   `policy.mode` is `audit` is applied capped to `audit`, not refused; a later
   `policy.mode: enforce` save (or a reset) lifts the cap without
-  `?confirm=enforce`, since that `enforce` was already confirmed when it was
-  saved. The same holds for any cap: lifting it needs no confirmation.
+  `?confirm=enforce`. That `enforce` was confirmed when it was saved; a later
+  `elida.yaml` change does not re-confirm it. The same holds for any cap:
+  lifting it needs no confirmation.
+- **`settings.yaml` holds only overrides.** A save stores a `decision` key
+  only when its value differs from `elida.yaml`'s; a key equal to the
+  `elida.yaml` value is dropped (the merged value is the same). A dashboard
+  save, which sends every value, therefore never pins `elida.yaml`'s values.
+  At startup every runtime `decision` key that `settings.yaml` overrides is
+  logged at WARN (`settings.yaml overrides elida.yaml for a decision key`)
+  with both values, so an `elida.yaml` edit that a stored override shadows
+  is visible. Save the key from the dashboard, or reset settings, to change
+  it.
 - **Every change is logged.** Each changed key writes one INFO line,
   `decision setting changed`, with `key`, `previous` and `new` values,
   `remote_addr`, and `authenticated` (whether control API authentication is
