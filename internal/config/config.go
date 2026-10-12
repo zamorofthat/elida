@@ -195,6 +195,11 @@ type TrustConfig struct {
 
 	// AllowlistedTools - tool names that bypass content scanning on request side
 	// Example: ["Bash", "Read", "Glob"] — requests invoking these tools skip request-side rules
+	//
+	// This is a control for the regex policy engine only. Semantic injection
+	// detection (decision.*) ignores it: tool output is the untrusted content
+	// that detection exists to score, so an allowlisted Read result is still
+	// assessed.
 	AllowlistedTools []string `yaml:"allowlisted_tools"`
 }
 
@@ -457,27 +462,56 @@ const (
 
 // DecisionConfig holds semantic injection-detection configuration.
 //
-// Restart-required keys (enabled, required, provider, model_path, endpoint)
-// load model assets or move the network boundary and live only here and in
-// ELIDA_DECISION_* env vars. Every other key is runtime-editable through
+// Restart-required keys (enabled, required, require_inline, provider,
+// model_path, endpoint) load model assets, gate startup or move the network
+// boundary, and live only here and in ELIDA_DECISION_* env vars. Every other key is runtime-editable through
 // Settings (see settings.go: DecisionSettings).
 type DecisionConfig struct {
-	Enabled   bool   `yaml:"enabled"`    // Load model assets (default: false)
-	Required  bool   `yaml:"required"`   // true: bad assets fail startup; false: degraded mode
-	Mode      string `yaml:"mode"`       // disabled, shadow, audit, enforce (default: shadow)
-	Provider  string `yaml:"provider"`   // embedded or systemone (default: embedded)
-	ModelPath string `yaml:"model_path"` // Model directory (default: /etc/elida/models/injection)
-	Endpoint  string `yaml:"endpoint"`   // systemone only; content leaves the deployment
+	Enabled  bool `yaml:"enabled"`  // Load model assets (default: false)
+	Required bool `yaml:"required"` // true: bad assets fail startup; false: degraded mode (availability only, never a calibration mismatch)
+	// RequireInline fails startup unless the computed capability is
+	// "inline": the model loaded and verified, and this build has GoMLX's
+	// accelerated kernels (amd64 with GOEXPERIMENT=simd). Set it when a
+	// deployment needs inline protection and must not silently fall back to
+	// async-only on an architecture that cannot meet an inline budget.
+	//
+	// Stronger than Required: an unmet require_inline fails startup
+	// whatever Required says, including when the model fails to load,
+	// because the operator explicitly demanded inline protection. Inert
+	// when Enabled is false or Mode is disabled (nothing is loaded).
+	//
+	// Restart-required: the capability is computed once, at load.
+	RequireInline bool   `yaml:"require_inline"` // default: false
+	Mode          string `yaml:"mode"`           // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
+	Provider      string `yaml:"provider"`       // embedded or systemone (default: embedded)
+	ModelPath     string `yaml:"model_path"`     // Model directory (default: /etc/elida/models/injection)
+	Endpoint      string `yaml:"endpoint"`       // systemone only; content leaves the deployment
 
-	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1)
+	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
 	InlineTimeout     time.Duration `yaml:"inline_timeout"`     // Global inline deadline: admission, preprocessing, tokenization and inference (default: 50ms)
-	MaxConcurrency    int           `yaml:"max_concurrency"`    // Physical worker pool size (default: 2)
-	InlineQueueWait   time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
-	MaxInlineTokens   int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
-	MaxInlineWindows  int           `yaml:"max_inline_windows"` // Windows scored inline per request (default: 1)
-	MaxAsyncWindows   int           `yaml:"max_async_windows"`  // Windows queued per request (default: 8)
-	AsyncQueueSize    int           `yaml:"async_queue_size"`   // Bounded queue; overflow is a metric (default: 100)
+	// MaxConcurrency is the physical inference worker pool size (default: 4).
+	// It is split into an inline lane and an async lane that never share
+	// slots (async = 0 at 1, else max(1, n/4); inline = the rest):
+	//
+	//	max_concurrency | inline | async
+	//	1               | 1      | 0 (async continuation disabled)
+	//	2               | 1      | 1
+	//	4               | 3      | 1
+	//	8               | 6      | 2
+	//	16              | 12     | 4
+	//
+	// A worker slot is not one CPU: the embedded pure-Go backend runs each
+	// inference over an intra-op worker pool, measured at about 4.7 CPUs of
+	// work per wall-clock second on an 8-core M1 Pro, so even two busy slots
+	// can occupy most of such a machine. Capping intra-op parallelism is a
+	// follow-up pending Hugot support.
+	MaxConcurrency   int           `yaml:"max_concurrency"`
+	InlineQueueWait  time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
+	MaxInlineTokens  int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
+	MaxInlineWindows int           `yaml:"max_inline_windows"` // Windows scored inline per request (default: 1)
+	MaxAsyncWindows  int           `yaml:"max_async_windows"`  // Windows queued per request (default: 8)
+	AsyncQueueSize   int           `yaml:"async_queue_size"`   // Bounded queue; overflow is a metric (default: 100)
 
 	InlineAdmission DecisionAdmissionConfig     `yaml:"inline_admission"`
 	Preprocessing   DecisionPreprocessingConfig `yaml:"preprocessing"`
@@ -674,13 +708,14 @@ func defaults() *Config {
 		Decision: DecisionConfig{
 			Enabled:           false, // loads ~90 MiB of model assets; opt-in only
 			Required:          false, // degraded mode rather than fail-startup
+			RequireInline:     false, // async_only is permitted unless an operator says otherwise
 			Mode:              DecisionModeShadow,
 			Provider:          "embedded",
 			ModelPath:         "/etc/elida/models/injection",
 			ThresholdSet:      "v1",
 			ElevatedThreshold: 0.3,
 			InlineTimeout:     50 * time.Millisecond,
-			MaxConcurrency:    2,
+			MaxConcurrency:    4,
 			InlineQueueWait:   0, // Phase 1: inline never waits for a worker
 			MaxInlineTokens:   128,
 			MaxInlineWindows:  1,
@@ -921,6 +956,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if os.Getenv("ELIDA_DECISION_REQUIRED") == "true" {
 		c.Decision.Required = true
+	}
+	if os.Getenv("ELIDA_DECISION_REQUIRE_INLINE") == "true" {
+		c.Decision.RequireInline = true
 	}
 	if v := os.Getenv("ELIDA_DECISION_PROVIDER"); v != "" {
 		c.Decision.Provider = v
@@ -1324,9 +1362,21 @@ func (c *Config) Validate() *ValidationResult {
 // errors and warnings to append to the ValidationResult. A disabled feature
 // is not validated: nothing is loaded and nothing runs, so its settings are
 // inert and must not be able to fail startup.
+// requireInlineInertWarning is the decision.require_inline advisory when
+// semantic detection is off: no model is loaded, so the startup gate never
+// runs and startup succeeds.
+var requireInlineInertWarning = ValidationError{
+	Field:   "decision.require_inline",
+	Message: "require_inline has no effect while decision is disabled (decision.enabled false or decision.mode disabled): no model is loaded and startup does not check the capability",
+	Hint:    "enable decision with mode shadow, audit or enforce for the gate to apply, or set require_inline: false",
+}
+
 func validateDecision(c *Config) (errs, warns []ValidationError) {
 	d := c.Decision
 	if !d.Enabled {
+		if d.RequireInline {
+			return nil, []ValidationError{requireInlineInertWarning}
+		}
 		return nil, nil
 	}
 
@@ -1368,6 +1418,21 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 			Field:   "decision.provider",
 			Message: fmt.Sprintf("unknown provider %q", d.Provider),
 			Hint:    "one of: embedded, systemone",
+		})
+	}
+
+	if d.RequireInline && d.Mode == DecisionModeDisabled {
+		warns = append(warns, requireInlineInertWarning)
+	} else if d.RequireInline {
+		// Not an error: the same elida.yaml is deployed to every
+		// architecture, and whether a build has accelerated kernels is not
+		// knowable from the config (config deliberately does not import the
+		// embedded provider and its inference backend). The hard failure
+		// happens at startup, in embedded.New, where it is known.
+		warns = append(warns, ValidationError{
+			Field:   "decision.require_inline",
+			Message: "startup will fail unless the computed capability is inline (a verified model plus GoMLX accelerated kernels, which are gated to amd64 with GOEXPERIMENT=simd), whatever decision.required says",
+			Hint:    "set false to permit async-only operation on architectures without accelerated kernels",
 		})
 	}
 
@@ -1440,6 +1505,16 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 		errs = append(errs, ValidationError{
 			Field:   "decision.preprocessing.max_analysis_bytes",
 			Message: fmt.Sprintf("%d is below max_input_bytes (%d): the original representation alone would exceed the aggregate budget", d.Preprocessing.MaxAnalysisBytes, d.Preprocessing.MaxInputBytes),
+		})
+	}
+
+	// Without a policy engine nothing can be recorded, so audit and
+	// enforce run as shadow.
+	if (d.Mode == DecisionModeAudit || d.Mode == DecisionModeEnforce) && !c.Policy.Enabled {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: fmt.Sprintf("%s is capped to shadow because the policy engine is disabled (policy.enabled: false): semantic violations have nowhere to be recorded", d.Mode),
+			Hint:    "set policy.enabled: true, or set decision.mode: shadow",
 		})
 	}
 

@@ -104,3 +104,16 @@ CLAUDE.md.backup
 Makefile
 *.md
 !configs/*.yaml
+
+# Generated model artifact and model build scratch (~90 MiB float32 graph,
+# upstream downloads, the conversion virtualenv). The image builds its own
+# copy in the model-builder stage from the pinned upstream commit; a local
+# build must never leak into the context.
+models/
+build/
+
+# The model-builder stage needs the model build scripts and the model card
+# (shipped as MODEL_CARD.md). These re-includes come last so they override
+# the scripts/, docs/ and *.md exclusions above.
+!scripts/models/
+!docs/model-card-injection.md

@@ -333,8 +333,12 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 
 	var rec otellog.Record
 	rec.SetTimestamp(time.Now())
-	rec.SetSeverity(otelSeverity(v.Severity))
-	rec.SetBody(attribute.StringValue("policy violation: " + v.RuleName))
+	rec.SetSeverity(otelSeverity(v.exportedSeverity()))
+	body := "policy violation: " + v.RuleName
+	if v.EvidenceOnly {
+		body = "policy evidence (no risk contributed): " + v.RuleName
+	}
+	rec.SetBody(attribute.StringValue(body))
 	rec.AddAttributes(
 		// GenAI semconv
 		attribute.String("gen_ai.conversation.id", sessionID),
@@ -347,6 +351,7 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		attribute.String("elida.violation.matched_text", truncateBody(p.redact(v.MatchedText), 200)),
 		attribute.String("elida.violation.action", v.Action),
 		attribute.String("elida.violation.description", v.Description),
+		attribute.Bool("elida.violation.evidence_only", v.EvidenceOnly),
 	)
 
 	// Trace correlation
@@ -619,6 +624,21 @@ type Violation struct {
 	EventCategory string
 	FrameworkRef  string
 	SourceRole    string
+	// EvidenceOnly marks a violation recorded as evidence for correlation
+	// that contributed no risk (semantic detection in audit mode, and every
+	// injection_elevated event). Exports carry the flag, report it at
+	// informational severity, and leave it out of the session's max
+	// severity, so a SIEM never reads audit evidence as a finding.
+	EvidenceOnly bool
+}
+
+// exportedSeverity is the severity a violation is exported at: its own,
+// except that evidence-only violations are informational.
+func (v Violation) exportedSeverity() string {
+	if v.EvidenceOnly {
+		return "info"
+	}
+	return v.Severity
 }
 
 // CapturedRequest represents a captured request/response for telemetry export
@@ -744,8 +764,11 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	for _, v := range record.Violations {
 		ruleNames = append(ruleNames, v.RuleName)
 		actions = append(actions, v.Action)
-		if severityOrder[v.Severity] > severityOrder[maxSeverity] {
-			maxSeverity = v.Severity
+		// Evidence-only violations contributed no risk, so they never raise
+		// the exported max severity (the policy engine's own MaxSeverity
+		// excludes them the same way).
+		if sev := v.exportedSeverity(); severityOrder[sev] > severityOrder[maxSeverity] {
+			maxSeverity = sev
 		}
 	}
 
@@ -799,6 +822,7 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 				attribute.String("severity", v.Severity),
 				attribute.String("matched_text", p.redact(v.MatchedText)),
 				attribute.String("action", v.Action),
+				attribute.Bool("evidence_only", v.EvidenceOnly),
 			),
 		)
 	}

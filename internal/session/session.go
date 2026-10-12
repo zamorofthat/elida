@@ -79,6 +79,10 @@ type Session struct {
 	// Tool call history (who called what)
 	ToolCallHistory []ToolCallRecord `json:"tool_call_history,omitempty"`
 
+	// Shadow-mode semantic decisions, newest first, capped at
+	// MaxSemanticShadow. Never contributes to risk.
+	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+
 	// Conversation history for failover/replay
 	Messages     []Message `json:"messages,omitempty"`
 	SystemPrompt string    `json:"system_prompt,omitempty"`
@@ -95,6 +99,42 @@ type ToolCallRecord struct {
 	RequestID string         `json:"request_id,omitempty"`
 	Arguments map[string]any `json:"arguments,omitempty"`
 	Result    string         `json:"result,omitempty"`
+}
+
+// MaxSemanticShadow caps the per-session shadow-decision list.
+//
+// Shadow mode exists to gather calibration data, not to keep a complete
+// history: fifty newest entries is enough to see how a session scored
+// without letting a long-running session grow without bound.
+const MaxSemanticShadow = 50
+
+// SemanticShadow is one shadow-mode semantic decision, retained for
+// calibration review.
+//
+// It carries probabilities, locations and model identity, never the window
+// text. Raw content is persisted only under the existing capture and
+// redaction policy, and threshold selection does not need it.
+type SemanticShadow struct {
+	Timestamp        time.Time `json:"timestamp"`
+	DecisionID       string    `json:"decision_id"`
+	Signal           string    `json:"signal"`
+	Probability      float64   `json:"probability"`
+	AuxProbability   float64   `json:"aux_probability,omitempty"`
+	Vetoed           bool      `json:"vetoed,omitempty"`
+	SourceRole       string    `json:"source_role"`
+	MessageIndex     int       `json:"message_index"`
+	Transform        string    `json:"transform,omitempty"`
+	TransformDepth   int       `json:"transform_depth,omitempty"`
+	WindowStartByte  int       `json:"window_start_byte"`
+	WindowEndByte    int       `json:"window_end_byte"`
+	Model            string    `json:"model"`
+	ModelVersion     string    `json:"model_version"`
+	ModelChecksum    string    `json:"model_checksum,omitempty"`
+	ThresholdSet     string    `json:"threshold_set"`
+	ExecutionMode    string    `json:"execution_mode"`   // "inline" or "async"
+	ProtectionScope  string    `json:"protection_scope"` // see decision.ProtectionScope
+	CoverageComplete bool      `json:"coverage_complete"`
+	LatencyMs        int64     `json:"latency_ms"`
 }
 
 // Message represents a single message in the conversation history
@@ -275,6 +315,34 @@ func (s *Session) GetToolCallHistory() []ToolCallRecord {
 	result := make([]ToolCallRecord, len(s.ToolCallHistory))
 	copy(result, s.ToolCallHistory)
 	return result
+}
+
+// RecordSemanticShadow prepends a shadow decision, newest first, and drops
+// the oldest beyond MaxSemanticShadow.
+func (s *Session) RecordSemanticShadow(sh SemanticShadow) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := len(s.SemanticShadow) + 1
+	if n > MaxSemanticShadow {
+		n = MaxSemanticShadow
+	}
+	out := make([]SemanticShadow, n)
+	out[0] = sh
+	copy(out[1:], s.SemanticShadow)
+	s.SemanticShadow = out
+}
+
+// GetSemanticShadow returns a copy of the shadow list, newest first.
+func (s *Session) GetSemanticShadow() []SemanticShadow {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.SemanticShadow == nil {
+		return nil
+	}
+	out := make([]SemanticShadow, len(s.SemanticShadow))
+	copy(out, s.SemanticShadow)
+	return out
 }
 
 // GetSystemPromptHash returns the cached system prompt hash
@@ -613,6 +681,10 @@ func (s *Session) Snapshot() Session {
 	if s.ToolCallHistory != nil {
 		snap.ToolCallHistory = make([]ToolCallRecord, len(s.ToolCallHistory))
 		copy(snap.ToolCallHistory, s.ToolCallHistory)
+	}
+	if s.SemanticShadow != nil {
+		snap.SemanticShadow = make([]SemanticShadow, len(s.SemanticShadow))
+		copy(snap.SemanticShadow, s.SemanticShadow)
 	}
 	if s.Messages != nil {
 		snap.Messages = make([]Message, len(s.Messages))

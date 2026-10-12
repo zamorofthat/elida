@@ -14,6 +14,11 @@ permissions:
 
 env:
   GO_VERSION: "1.27.0"
+  # The injection model pins (upstream commit, model.onnx and manifest.json
+  # sha256) live only in scripts/models/pins.env; jobs that need them load
+  # that file into $GITHUB_ENV. Bumping a pin is a model change and
+  # requires security review (model provenance is a reserved decision),
+  # not just a green build.
 
 jobs:
   lint:
@@ -164,12 +169,213 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  model:
+    name: Model Artifact
+    runs-on: ubuntu-latest
+    # A cold run fetches ~23 MiB from upstream, converts it and runs the
+    # model-backed tests in a few minutes; this is headroom, not a target.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Load the model pins
+        # The three named pin keys only, as KEY=hex: no other key (PATH,
+        # BASH_ENV, ...) can reach $GITHUB_ENV through pins.env.
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+
+      - name: Restore the model artifact
+        id: model-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            models/injection
+            build/model-int8
+          # The artifact is a deterministic function of scripts/models/
+          # (pins.env with the upstream commit, the upstream checksums, the
+          # pinned Python versions) and the model card it ships. No
+          # restore-keys: a near match is a different artifact. The cache is
+          # saved only when the job succeeds, so a build that fails the
+          # parity gate is never cached.
+          key: model-injection-v5-fp32-${{ hashFiles('scripts/models/**', 'docs/model-card-injection.md') }}
+
+      - name: Set up Python
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Build the model artifact
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        # make model installs exactly onnx 1.23.1 and numpy 2.5.3 (build.sh
+        # refuses anything else) and runs scripts/models/build.sh, whose
+        # fetch verifies every upstream file against its pinned sha256 and
+        # fails if upstream's classifier_config.json has drifted from the
+        # pinned fixture. build.sh also refuses an output that does not
+        # match pins.env.
+        run: make model
+
+      - name: Verify the artifact against the pins
+        # Runs on a cache hit as well as a fresh build. manifest.json must
+        # match MANIFEST_SHA256, model.onnx must match MODEL_ONNX_SHA256, and
+        # every file the manifest lists must match its recorded sha256.
+        run: |
+          echo "${MANIFEST_SHA256}  models/injection/manifest.json" | sha256sum -c -
+          scripts/models/verify.sh models/injection
+
+      - name: Run the model-backed Go tests and the conversion parity gate
+        # GOEXPERIMENT=simd is what the released linux/amd64 binary uses, so
+        # the model is exercised through the same kernels it will run on.
+        # The parity gate compares the float32 graph against the int8 source
+        # in build/model-int8 at a 1e-4 tolerance. Every load verifies the
+        # manifest's sha256 for each file.
+        #
+        # Not under -race: GoMLX aborts under checkptr, so plain -race skips
+        # every real-model test, and -race with checkptr disabled makes the
+        # Hugot test binaries take ~12 minutes to link. The Unit Tests job
+        # runs this code under -race with the model absent.
+        run: |
+          go test -count=1 ./internal/decision/...
+          go test -count=1 -v ./test/unit/ -run 'TestRealModel|TestEmbedded|TestModelParity'
+        env:
+          GOEXPERIMENT: simd
+          ELIDA_TEST_MODEL_PATH: ${{ github.workspace }}/models/injection
+          ELIDA_TEST_INT8_MODEL_PATH: ${{ github.workspace }}/build/model-int8
+
+      - name: Benchmark the sequence length
+        # Records whether a 128-token window actually costs less than a
+        # 256-token one. Informational: it does not gate the build, but these
+        # numbers are what justify the window size, so they belong in the log.
+        run: go test -run '^$' -bench BenchmarkSequenceLength -benchtime 20x ./internal/decision/embedded/
+        env:
+          GOEXPERIMENT: simd
+          ELIDA_TEST_MODEL_PATH: ${{ github.workspace }}/models/injection
+
+      - name: Package the artifact
+        # Deterministic tarball: fixed order, mtime and owner, and no gzip
+        # timestamp, so the same artifact always has the same digest.
+        run: |
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -cf - -C models injection | gzip -n -9 > models-injection-v5-fp32.tar.gz
+          sha256sum models-injection-v5-fp32.tar.gz > models-injection-v5-fp32.tar.gz.sha256
+          cat models-injection-v5-fp32.tar.gz.sha256
+
+      - name: Upload the artifact
+        # The release workflow calls this workflow and ships these exact
+        # bytes, so the released model is the one that passed parity above.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: models-injection-v5-fp32
+          path: |
+            models-injection-v5-fp32.tar.gz
+            models-injection-v5-fp32.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  container-smoke:
+    name: Container Smoke (amd64 semantic detection)
+    runs-on: ubuntu-latest
+    # Builds the linux/amd64 image (never pushed) and checks that the
+    # released configuration starts semantic detection with the inline
+    # capability, which only amd64 + GOEXPERIMENT=simd can claim and no
+    # developer machine on arm64 can verify. Runs on every PR. Sends no
+    # request content: it reads only the startup log and /control/decision.
+    needs: [model]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # Secrets cannot appear in `if:`; this env copy can. Empty on forks,
+      # where the login step is skipped and pulls stay anonymous.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Load the model pins
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
+
+      # Authenticated pulls of the base images (golang, python, alpine,
+      # oven/bun) avoid Docker Hub's anonymous rate limit.
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the linux/amd64 image (not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: elida:ci-smoke
+          platforms: linux/amd64
+          build-args: |
+            VERSION=ci-smoke
+            DEFENDER_COMMIT=${{ env.PINNED_DEFENDER_COMMIT }}
+          # Read the release/docker cache and this job's own scope; write
+          # only its own scope, so PR builds stay warm without overwriting
+          # the multi-arch cache.
+          cache-from: |
+            type=gha
+            type=gha,scope=smoke
+          cache-to: type=gha,mode=max,scope=smoke
+
+      - name: Semantic detection starts inline and reports its model
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          key="ci-smoke-$(openssl rand -hex 16)"
+          echo "::add-mask::$key"
+          docker run -d --name elida-smoke -p 127.0.0.1:19090:9090 \
+            -e ELIDA_DECISION_ENABLED=true -e ELIDA_DECISION_REQUIRED=true \
+            -e ELIDA_DECISION_REQUIRE_INLINE=true \
+            -e ELIDA_CONTROL_API_KEY="$key" -e ELIDA_BACKEND=http://127.0.0.1:1 \
+            elida:ci-smoke
+          ready=""
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:19090/control/health >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          test -n "$ready" || { docker logs elida-smoke; exit 1; }
+
+          enabled=$(docker logs elida-smoke 2>&1 | grep '"msg":"semantic detection enabled"' || true)
+          echo "$enabled"
+          echo "$enabled" | grep -q '"capability":"inline"'
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19090/control/decision)
+          test "$code" = "401"
+
+          status=$(curl -fsS -H "Authorization: Bearer $key" http://127.0.0.1:19090/control/decision)
+          echo "$status" | jq '{capability, require_inline, arch, simd, effective_mode, model, model_version, model_checksum, threshold_set_matches}'
+          echo "$status" | jq -e '.capability == "inline" and .require_inline == true and .arch == "amd64" and .simd == true and .effective_mode == "shadow" and .threshold_set_matches == true'
+          echo "$status" | jq -e --arg sum "$MANIFEST_SHA256" '.model_checksum == $sum'
+
+      - name: Remove the smoke container
+        if: always()
+        run: docker rm -f elida-smoke >/dev/null 2>&1 || true
+
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
     services:
       redis:
         image: redis:7-alpine
+        # Authenticated pull to avoid Docker Hub's anonymous rate limit.
+        # On forks the secrets are empty and the credentials are ignored.
+        credentials:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
         ports:
           - 6379:6379
         options: >-
@@ -300,7 +506,10 @@ jobs:
   docker:
     name: Docker Build & Push
     runs-on: ubuntu-latest
-    needs: [lint, security, test, sbom]
+    # model: never push an image while the model artifact fails its pins or
+    # the parity gate. The image builds its own copy, which the Dockerfile
+    # checks against the same pins.
+    needs: [lint, security, test, sbom, model]
     # Only run on main branch or tags (release Docker builds are in release.yml)
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -310,6 +519,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Load the model pins
+        run: grep -E '^(PINNED_DEFENDER_COMMIT|MODEL_ONNX_SHA256|MANIFEST_SHA256)=[0-9a-f]+$' scripts/models/pins.env | tee -a "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -339,7 +551,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            DEFENDER_COMMIT=${{ env.PINNED_DEFENDER_COMMIT }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64

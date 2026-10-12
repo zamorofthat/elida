@@ -1,0 +1,9 @@
+{
+  "optimal_threshold": 0.4,
+  "calibration": {
+    "temperatureT": 2.41,
+    "highRiskThreshold": 0.64,
+    "ece": 0.09,
+    "fitted_on": "labeled plugin events 2026-05-13"
+  }
+}
