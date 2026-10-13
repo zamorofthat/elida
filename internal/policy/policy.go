@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"elida/internal/correlation"
@@ -498,6 +499,20 @@ type Engine struct {
 	// content and is independently bounded by its configured limits.
 	correlation       *correlation.Engine
 	correlationConfig CorrelationConfig
+
+	// seenMatchEvents deduplicates correlation match IDs per session, with
+	// the same bound and lifetime as seenSemanticEvents. Guarded by mu.
+	seenMatchEvents map[string]*seenDecisionIDs
+
+	// Policy-side correlation counters (Stats()["correlation"]).
+	correlationQueued     atomic.Uint64 // events handed to Observe
+	correlationRecorded   atomic.Uint64 // matches recorded as violations
+	correlationDuplicates atomic.Uint64 // matches refused by match-ID dedup
+	correlationDiscarded  atomic.Uint64 // matches for a session that ended during Observe
+
+	// beforeObserve is a test seam: when set, recordViolations calls it
+	// with e.mu released, just before Observe.
+	beforeObserve func()
 }
 
 // Config for the policy engine
@@ -672,6 +687,7 @@ func NewEngine(cfg Config) *Engine {
 		observeRules:      observeRulesFrom(cfg.Rules),
 
 		seenSemanticEvents: make(map[string]*seenDecisionIDs),
+		seenMatchEvents:    make(map[string]*seenDecisionIDs),
 		retained:           make(map[string]uint64),
 		correlation:        newCorrelationEngine(cfg.Correlation, auditMode),
 		correlationConfig:  cloneCorrelationConfig(cfg.Correlation),
@@ -1510,10 +1526,79 @@ func eventWeight(severity Severity, sourceRole string) float64 {
 	return severityWeight * sourceWeight
 }
 
-// recordViolations records violations for a session
+// recordViolations records violations for a session, then feeds the
+// accepted events to the correlator and records its matches.
+//
+// Observe runs with e.mu released: the correlator has its own sharded locks,
+// and holding the policy write lock across it would stall every policy
+// check on the request path for the length of the evaluation (wiring
+// review I-3). The lock order stays policy -> correlation (Forget runs under
+// e.mu); correlation never calls back. Matches are then recorded through the
+// same per-violation path under the lock again, deduplicated by match ID.
 func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	e.mu.Lock()
+	corr := e.correlation
+	inputs := e.recordViolationsLocked(sessionID, violations, corr)
+	e.mu.Unlock()
+
+	if len(inputs) == 0 {
+		return
+	}
+	e.correlationQueued.Add(uint64(len(inputs)))
+	if e.beforeObserve != nil {
+		e.beforeObserve()
+	}
+	matches := corr.Observe(sessionID, inputs)
+	if len(matches) == 0 {
+		return
+	}
+
+	e.mu.Lock()
 	defer e.mu.Unlock()
+	if _, live := e.flaggedSessions[sessionID]; !live || e.retained[sessionID] != 0 {
+		// The session ended (released, removed or retained) while Observe
+		// ran. Its correlation state may have been re-created by this
+		// Observe after the session-end Forget, so forget it again.
+		e.correlationDiscarded.Add(uint64(len(matches)))
+		corr.Forget(sessionID)
+		return
+	}
+	matchViolations := make([]Violation, len(matches))
+	for i, m := range matches {
+		matchViolations[i] = e.matchViolationLocked(m)
+	}
+	e.recordViolationsLocked(sessionID, matchViolations, nil)
+}
+
+// matchViolationLocked turns a correlation match into a violation. The
+// caller holds e.mu (it reads auditMode).
+func (e *Engine) matchViolationLocked(m correlation.Match) Violation {
+	// D5: an enforce rule is capped to evidence-only under policy.mode
+	// audit. Evaluated at record time because policy.mode is
+	// runtime-editable.
+	evidenceOnly := m.Mode != correlation.ModeEnforce || e.auditMode
+	severity := Severity(m.Severity)
+	var wouldContribute float64
+	if evidenceOnly {
+		wouldContribute = eventWeight(severity, "correlation")
+	}
+	return Violation{
+		RuleName:    CorrelationRulePrefix + m.Rule,
+		Description: "Temporal correlation matched events " + strings.Join(m.EventIDs, ", "),
+		Severity:    severity, EffectiveSeverity: severity,
+		Action: "flag", Timestamp: m.LastEvent,
+		EventCategory: CategoryCorrelationMatch,
+		FrameworkRef:  m.ID, EventID: m.ID,
+		SourceRole: "correlation", EvidenceOnly: evidenceOnly,
+		WouldContributePoints: wouldContribute,
+	}
+}
+
+// recordViolationsLocked records violations for a session and returns the
+// correlation inputs for the accepted events that corr wants (nil when corr
+// is nil). The caller holds e.mu.
+func (e *Engine) recordViolationsLocked(sessionID string, violations []Violation, corr *correlation.Engine) []correlation.Event {
+	var inputs []correlation.Event
 
 	flagged, exists := e.flaggedSessions[sessionID]
 	if !exists {
@@ -1542,12 +1627,7 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	recorded := 0
 	contributed := false
 
-	// Use an index loop because accepted source events may append synthetic
-	// correlation violations to this same batch. Correlation outputs carry
-	// CategoryMatch, which the correlation engine never consumes, so this
-	// cannot recurse.
-	for vi := 0; vi < len(violations); vi++ {
-		v := violations[vi]
+	for _, v := range violations {
 		if v.EventID == "" {
 			v.EventID = eventIDFor(sessionID, flagged.ViolationCounts[v.RuleName], v)
 		}
@@ -1573,6 +1653,25 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 			}
 			seen.add(v.EventID)
 		}
+		// A correlation match is one event however often it arrives (a
+		// re-observed event after a history eviction or a Forget can
+		// re-complete it): refuse a match ID this session already
+		// recorded (wiring review M-7).
+		if v.EventCategory == CategoryCorrelationMatch {
+			seen := e.seenMatchEvents[sessionID]
+			if seen == nil {
+				seen = newSeenDecisionIDs()
+				e.seenMatchEvents[sessionID] = seen
+			}
+			if seen.contains(v.EventID) {
+				e.correlationDuplicates.Add(1)
+				slog.Debug("duplicate correlation match refused",
+					"session_id", sessionID, "rule", v.RuleName, "event_id", v.EventID)
+				continue
+			}
+			seen.add(v.EventID)
+			e.correlationRecorded.Add(1)
+		}
 		recorded++
 
 		// Always increment count (don't deduplicate)
@@ -1592,36 +1691,17 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 				Timestamp:     v.Timestamp,
 			}
 			flagged.ViolationEvents = append(flagged.ViolationEvents, event)
-			if e.correlation != nil && e.correlation.Wants(event.EventCategory) {
+			// A match (CategoryCorrelationMatch) is never wanted, so the
+			// match-recording pass collects nothing and cannot recurse.
+			if corr != nil && corr.Wants(event.EventCategory) {
 				group := event.SourceRole
 				if v.MessageIndex >= 0 {
 					group += ":" + strconv.Itoa(v.MessageIndex)
 				}
-				matches := e.correlation.Observe(sessionID, []correlation.Event{{
+				inputs = append(inputs, correlation.Event{
 					ID: event.EventID, Category: event.EventCategory,
 					Group: group, Timestamp: event.Timestamp,
-				}})
-				for _, match := range matches {
-					// D5: an enforce rule is capped to evidence-only under
-					// policy.mode audit. Evaluated at record time because
-					// policy.mode is runtime-editable.
-					evidenceOnly := match.Mode != correlation.ModeEnforce || e.auditMode
-					severity := Severity(match.Severity)
-					var wouldContribute float64
-					if evidenceOnly {
-						wouldContribute = eventWeight(severity, "correlation")
-					}
-					violations = append(violations, Violation{
-						RuleName:    CorrelationRulePrefix + match.Rule,
-						Description: "Temporal correlation matched events " + strings.Join(match.EventIDs, ", "),
-						Severity:    severity, EffectiveSeverity: severity,
-						Action: "flag", Timestamp: match.LastEvent,
-						EventCategory: CategoryCorrelationMatch,
-						FrameworkRef:  match.ID, EventID: match.ID,
-						SourceRole: "correlation", EvidenceOnly: evidenceOnly,
-						WouldContributePoints: wouldContribute,
-					})
-				}
+				})
 			}
 			if v.Semantic != nil {
 				flagged.SemanticDecisions, flagged.SemanticDecisionsDropped = appendSemanticDecision(
@@ -1678,7 +1758,7 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	// Every violation was a refused duplicate: nothing happened, so touch
 	// nothing (not LastFlagged, MaxSeverity, the score or the action).
 	if exists && len(violations) > 0 && recorded == 0 {
-		return
+		return inputs
 	}
 
 	flagged.LastFlagged = time.Now()
@@ -1701,6 +1781,7 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 			"throttle_rate", flagged.ThrottleRate,
 		)
 	}
+	return inputs
 }
 
 // calculateRiskScore computes risk score using exponential decay and source-role weighting.
@@ -2035,6 +2116,7 @@ func (e *Engine) RemoveFlaggedSession(sessionID string) {
 func (e *Engine) removeFlaggedLocked(sessionID string) {
 	delete(e.flaggedSessions, sessionID)
 	delete(e.seenSemanticEvents, sessionID)
+	delete(e.seenMatchEvents, sessionID)
 	delete(e.retained, sessionID)
 }
 
@@ -2072,6 +2154,7 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 	flagged, ok := e.flaggedSessions[sessionID]
 	if !ok {
 		delete(e.seenSemanticEvents, sessionID)
+		delete(e.seenMatchEvents, sessionID)
 		delete(e.retained, sessionID)
 		return false
 	}
@@ -2133,6 +2216,7 @@ func (e *Engine) slimRetainedLocked(sessionID string, flagged *FlaggedSession) {
 	flagged.SemanticDecisions = nil
 	flagged.SemanticDecisionsDropped = 0
 	delete(e.seenSemanticEvents, sessionID)
+	delete(e.seenMatchEvents, sessionID)
 }
 
 // retainedRef is one entry of the retention FIFO. seq tells a current entry
