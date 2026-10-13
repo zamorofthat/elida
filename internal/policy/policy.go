@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -531,6 +532,44 @@ func newCorrelationEngine(cfg CorrelationConfig) *correlation.Engine {
 	return engine
 }
 
+// correlationConfigEqual reports whether two correlation blocks build the
+// same engine. A nil and an empty rule list are equal.
+func correlationConfigEqual(a, b CorrelationConfig) bool {
+	if a.Enabled != b.Enabled || a.Limits != b.Limits || len(a.Rules) != len(b.Rules) {
+		return false
+	}
+	for i := range a.Rules {
+		ra, rb := a.Rules[i], b.Rules[i]
+		if len(ra.Sequence) != len(rb.Sequence) {
+			return false
+		}
+		for j := range ra.Sequence {
+			if ra.Sequence[j] != rb.Sequence[j] {
+				return false
+			}
+		}
+		ra.Sequence, rb.Sequence = nil, nil
+		if !reflect.DeepEqual(ra, rb) {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneCorrelationConfig deep-copies a correlation block, so neither the
+// caller's slices nor GetConfig's result alias the engine's copy.
+func cloneCorrelationConfig(c CorrelationConfig) CorrelationConfig {
+	if c.Rules != nil {
+		rules := make([]correlation.Rule, len(c.Rules))
+		for i, r := range c.Rules {
+			r.Sequence = append([]string(nil), r.Sequence...)
+			rules[i] = r
+		}
+		c.Rules = rules
+	}
+	return c
+}
+
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
 type RiskLadderConfig struct {
 	Enabled    bool            `yaml:"enabled" json:"enabled"`
@@ -610,7 +649,7 @@ func NewEngine(cfg Config) *Engine {
 		seenSemanticEvents: make(map[string]*seenDecisionIDs),
 		retained:           make(map[string]uint64),
 		correlation:        newCorrelationEngine(cfg.Correlation),
-		correlationConfig:  cfg.Correlation,
+		correlationConfig:  cloneCorrelationConfig(cfg.Correlation),
 	}
 
 	// Compile regex patterns for content rules
@@ -683,11 +722,27 @@ func (e *Engine) ReloadConfig(cfg Config) {
 
 	// Compile tool call rules outside the lock
 	newToolRules := compileToolRules(cfg.Rules)
-	newCorrelation := newCorrelationEngine(cfg.Correlation)
 
 	// Swap all state under the write lock
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// Correlation is restart-only (Plan B D4): the control API's settings
+	// reload carries the startup block unchanged, and an unchanged block
+	// keeps the same engine and its per-session state. Only a caller that
+	// passes a different block (an embedder) replaces the engine, which
+	// resets every session's correlation history, so that is logged.
+	if !correlationConfigEqual(e.correlationConfig, cfg.Correlation) {
+		previous := e.correlation
+		e.correlation = newCorrelationEngine(cfg.Correlation)
+		e.correlationConfig = cloneCorrelationConfig(cfg.Correlation)
+		if previous != nil || e.correlation != nil {
+			slog.Info("correlation engine replaced; per-session correlation state reset",
+				"enabled", e.correlation != nil,
+				"correlation_rules", len(cfg.Correlation.Rules),
+			)
+		}
+	}
 
 	e.auditMode = cfg.Mode == "audit"
 	e.observeRules = observeRulesFrom(cfg.Rules)
@@ -705,8 +760,6 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	e.rules = cfg.Rules
 	e.compiledRules = newCompiledRules
 	e.compiledToolRules = newToolRules
-	e.correlation = newCorrelation
-	e.correlationConfig = cfg.Correlation
 
 	mode := "enforce"
 	if e.auditMode {
@@ -743,7 +796,7 @@ func (e *Engine) GetConfig() Config {
 			Enabled:    e.riskLadderEnabled,
 			Thresholds: e.riskThresholds,
 		},
-		Correlation: e.correlationConfig,
+		Correlation: cloneCorrelationConfig(e.correlationConfig),
 	}
 }
 

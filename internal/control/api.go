@@ -354,6 +354,11 @@ func (h *Handler) reloadPolicyEngine() {
 		Enabled:        merged.Policy.Enabled != nil && *merged.Policy.Enabled,
 		Mode:           mode,
 		CaptureContent: true,
+		// Temporal correlation is restart-only and not a Settings field
+		// (Plan B D4): carry the block in force, which is elida.yaml's,
+		// unchanged. The engine then keeps its correlator and every
+		// session's correlation state across the reload.
+		Correlation: h.policyEngine.GetConfig().Correlation,
 	}
 
 	if merged.Capture.MaxCaptureSize != nil {
