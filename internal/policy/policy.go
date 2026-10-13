@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"elida/internal/correlation"
 )
 
 // Severity levels for policy violations
@@ -490,6 +492,11 @@ type Engine struct {
 	// Anomaly callback — invoked when compound/rate anomaly violations fire.
 	// Allows real-time OCSF emission without coupling policy to telemetry.
 	anomalyCallback func(sessionID string, violation Violation, detector *SessionDetector)
+
+	// correlation evaluates accepted violation events. It contains no
+	// content and is independently bounded by its configured limits.
+	correlation       *correlation.Engine
+	correlationConfig CorrelationConfig
 }
 
 // Config for the policy engine
@@ -501,7 +508,27 @@ type Config struct {
 	Rules          []Rule `yaml:"rules" json:"rules"`
 
 	// Risk ladder configuration
-	RiskLadder RiskLadderConfig `yaml:"risk_ladder" json:"risk_ladder"`
+	RiskLadder  RiskLadderConfig  `yaml:"risk_ladder" json:"risk_ladder"`
+	Correlation CorrelationConfig `yaml:"correlation" json:"correlation"`
+}
+
+// CorrelationConfig is the policy engine's temporal-correlation input.
+type CorrelationConfig struct {
+	Enabled bool
+	Rules   []correlation.Rule
+	Limits  correlation.Limits
+}
+
+func newCorrelationEngine(cfg CorrelationConfig) *correlation.Engine {
+	if !cfg.Enabled {
+		return nil
+	}
+	engine, err := correlation.New(cfg.Rules, cfg.Limits)
+	if err != nil {
+		slog.Error("correlation engine disabled by invalid configuration", "error", err)
+		return nil
+	}
+	return engine
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
@@ -582,6 +609,8 @@ func NewEngine(cfg Config) *Engine {
 
 		seenSemanticEvents: make(map[string]*seenDecisionIDs),
 		retained:           make(map[string]uint64),
+		correlation:        newCorrelationEngine(cfg.Correlation),
+		correlationConfig:  cfg.Correlation,
 	}
 
 	// Compile regex patterns for content rules
@@ -617,6 +646,7 @@ func NewEngine(cfg Config) *Engine {
 		"tool_rules", len(e.compiledToolRules),
 		"capture_content", cfg.CaptureContent,
 		"mode", mode,
+		"correlation_rules", len(cfg.Correlation.Rules),
 	)
 
 	return e
@@ -653,6 +683,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 
 	// Compile tool call rules outside the lock
 	newToolRules := compileToolRules(cfg.Rules)
+	newCorrelation := newCorrelationEngine(cfg.Correlation)
 
 	// Swap all state under the write lock
 	e.mu.Lock()
@@ -674,6 +705,8 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	e.rules = cfg.Rules
 	e.compiledRules = newCompiledRules
 	e.compiledToolRules = newToolRules
+	e.correlation = newCorrelation
+	e.correlationConfig = cfg.Correlation
 
 	mode := "enforce"
 	if e.auditMode {
@@ -686,6 +719,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 		"capture_content", e.captureContent,
 		"mode", mode,
 		"risk_ladder_enabled", e.riskLadderEnabled,
+		"correlation_rules", len(cfg.Correlation.Rules),
 	)
 }
 
@@ -709,6 +743,7 @@ func (e *Engine) GetConfig() Config {
 			Enabled:    e.riskLadderEnabled,
 			Thresholds: e.riskThresholds,
 		},
+		Correlation: e.correlationConfig,
 	}
 }
 
@@ -1429,7 +1464,12 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	recorded := 0
 	contributed := false
 
-	for _, v := range violations {
+	// Use an index loop because accepted source events may append synthetic
+	// correlation violations to this same batch. Correlation outputs carry
+	// CategoryMatch, which the correlation engine never consumes, so this
+	// cannot recurse.
+	for vi := 0; vi < len(violations); vi++ {
+		v := violations[vi]
 		if v.EventID == "" {
 			v.EventID = eventIDFor(sessionID, flagged.ViolationCounts[v.RuleName], v)
 		}
@@ -1464,7 +1504,7 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 		// nothing at all; evidence-only violations record an event that
 		// correlation can see but that contributes no risk.
 		if !e.observeRules[v.RuleName] {
-			flagged.ViolationEvents = append(flagged.ViolationEvents, ViolationEvent{
+			event := ViolationEvent{
 				EventID:       v.EventID,
 				RuleName:      v.RuleName,
 				Severity:      v.Severity,
@@ -1472,7 +1512,32 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 				EventCategory: v.EventCategory,
 				EvidenceOnly:  v.EvidenceOnly,
 				Timestamp:     v.Timestamp,
-			})
+			}
+			flagged.ViolationEvents = append(flagged.ViolationEvents, event)
+			if e.correlation != nil && e.correlation.Wants(event.EventCategory) {
+				group := event.SourceRole
+				if v.MessageIndex >= 0 {
+					group += ":" + strconv.Itoa(v.MessageIndex)
+				}
+				matches := e.correlation.Observe(sessionID, []correlation.Event{{
+					ID: event.EventID, Category: event.EventCategory,
+					Group: group, Timestamp: event.Timestamp,
+				}})
+				for _, match := range matches {
+					evidenceOnly := match.Mode != correlation.ModeEnforce
+					severity := Severity(match.Severity)
+					violations = append(violations, Violation{
+						RuleName:    correlation.RuleNamePrefix + match.Rule,
+						Description: "Temporal correlation matched events " + strings.Join(match.EventIDs, ", "),
+						Severity:    severity, EffectiveSeverity: severity,
+						Action: "flag", Timestamp: match.LastEvent,
+						EventCategory: correlation.CategoryMatch,
+						FrameworkRef:  match.ID, EventID: match.ID,
+						SourceRole: "correlation", EvidenceOnly: evidenceOnly,
+						WouldContributePoints: eventWeight(severity, "correlation"),
+					})
+				}
+			}
 			if v.Semantic != nil {
 				flagged.SemanticDecisions, flagged.SemanticDecisionsDropped = appendSemanticDecision(
 					flagged.SemanticDecisions, flagged.SemanticDecisionsDropped, semanticDecisionOf(v))
@@ -1872,6 +1937,9 @@ func (e *Engine) severityMeetsMinimum(actual, minimum Severity) bool {
 func (e *Engine) RemoveFlaggedSession(sessionID string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.correlation != nil {
+		e.correlation.Forget(sessionID)
+	}
 	e.removeFlaggedLocked(sessionID)
 }
 
@@ -1909,6 +1977,9 @@ const MaxRetainedFlaggedSessions = 4096
 func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.correlation != nil {
+		e.correlation.Forget(sessionID)
+	}
 
 	flagged, ok := e.flaggedSessions[sessionID]
 	if !ok {

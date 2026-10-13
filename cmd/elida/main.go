@@ -24,6 +24,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/correlation"
 	"elida/internal/decision/embedded"
 	"elida/internal/decision/runner"
 	"elida/internal/decision/scheduler"
@@ -874,6 +875,14 @@ func (a *app) initPolicyEngine() {
 		RiskLadder: policy.RiskLadderConfig{
 			Enabled:    a.cfg.Policy.RiskLadder.Enabled,
 			Thresholds: riskThresholds,
+		},
+		Correlation: policy.CorrelationConfig{
+			Enabled: a.cfg.Correlation.Enabled,
+			Rules:   a.cfg.Correlation.Rules,
+			Limits: correlation.Limits{
+				MaxHistoryEvents: a.cfg.Correlation.MaxHistoryEvents,
+				MaxSessions:      a.cfg.Correlation.MaxSessions,
+			},
 		},
 	})
 

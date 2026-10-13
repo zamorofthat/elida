@@ -684,7 +684,7 @@ Guardrails:
   `policy.mode: enforce` save (or a reset) lifts the cap without
   `?confirm=enforce`. That `enforce` was confirmed when it was saved; a later
   `elida.yaml` change does not re-confirm it. The same holds for any cap:
-  lifting it needs no confirmation.
+lifting it needs no confirmation.
 - **`settings.yaml` holds only overrides.** A save stores a `decision` key
   only when its value differs from `elida.yaml`'s; a key equal to the
   `elida.yaml` value is dropped (the merged value is the same). A dashboard
@@ -844,3 +844,34 @@ policy:
       action: block
       description: "Block SSN patterns"
 ```
+
+## Temporal correlation
+
+`correlation` evaluates content-free policy event metadata within each
+session. Its history and session count are bounded, and the engine forgets a
+session when that session ends. Configuration changes require a restart.
+
+```yaml
+correlation:
+  enabled: true
+  max_history_events: 64
+  max_sessions: 4096
+  rules:
+    - name: repeated_injection
+      shape: repeated
+      category: semantic_injection
+      count: 3
+      count_by: message
+      window: 10m
+      cooldown: 1h
+      severity: critical
+      mode: audit
+```
+
+Rule names, categories, counts, windows, and memory limits are validated at
+startup. `shape` is `repeated` or `sequence`; sequence rules use a `sequence`
+list instead of `category`, `count`, and `count_by`. The default `mode` is
+`audit`, so matches are evidence-only and exported as informational OCSF 2004
+Detection Findings. `mode: enforce` makes a match contribute to the existing
+risk ladder. Correlation findings use the reserved rule prefix `correlation.`
+and event category `correlation_match`.

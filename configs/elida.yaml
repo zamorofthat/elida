@@ -555,3 +555,23 @@ decision:
     max_representations: 8
     max_decode_depth: 2
     max_expansion_ratio: 4
+
+# Bounded temporal correlation over content-free policy event metadata.
+# Audit is the safe rule default; set mode: enforce explicitly for matches
+# that should contribute to the existing risk ladder.
+correlation:
+  enabled: false
+  max_history_events: 64
+  max_sessions: 4096
+  rules: []
+  # Example:
+  # rules:
+  #   - name: multi_event_injection
+  #     shape: repeated
+  #     category: semantic_injection
+  #     count: 3
+  #     count_by: message
+  #     window: 10m
+  #     cooldown: 1h
+  #     severity: critical
+  #     mode: audit

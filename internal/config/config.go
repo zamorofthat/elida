@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"elida/internal/correlation"
 )
 
 // envRefPattern matches ${IDENTIFIER} references in config values.
@@ -72,7 +74,30 @@ type Config struct {
 	Panel           PanelConfig              `yaml:"panel"`            // Behavioral panel configuration
 	Failover        FailoverConfig           `yaml:"failover"`         // Failover configuration
 	Decision        DecisionConfig           `yaml:"decision"`         // Semantic decision (injection detection) configuration
+	Correlation     CorrelationConfig        `yaml:"correlation"`      // Bounded temporal correlation configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
+}
+
+// CorrelationConfig configures bounded, per-session temporal correlation.
+// Rules default to audit mode in the correlation package; an operator must
+// explicitly select enforce before a match can contribute to the risk ladder.
+type CorrelationConfig struct {
+	Enabled          bool               `yaml:"enabled"`
+	MaxHistoryEvents int                `yaml:"max_history_events"`
+	MaxSessions      int                `yaml:"max_sessions"`
+	Rules            []correlation.Rule `yaml:"rules"`
+}
+
+func (c CorrelationConfig) limits() correlation.Limits {
+	history := c.MaxHistoryEvents
+	if history == 0 {
+		history = correlation.DefaultMaxHistoryEvents
+	}
+	sessions := c.MaxSessions
+	if sessions == 0 {
+		sessions = correlation.DefaultMaxSessions
+	}
+	return correlation.Limits{MaxHistoryEvents: history, MaxSessions: sessions}
 }
 
 // ProxyConfig holds proxy-level configuration
@@ -736,6 +761,11 @@ func defaults() *Config {
 				MaxExpansionRatio:  4,
 			},
 		},
+		Correlation: CorrelationConfig{
+			Enabled:          false,
+			MaxHistoryEvents: correlation.DefaultMaxHistoryEvents,
+			MaxSessions:      correlation.DefaultMaxSessions,
+		},
 		TLS: TLSConfig{
 			Enabled:  false,
 			CertFile: "",
@@ -1268,6 +1298,22 @@ func (c *Config) Validate() *ValidationResult {
 				Field:   fmt.Sprintf("policy.rules[%d].name", i),
 				Message: fmt.Sprintf("%q is reserved for semantic decisions", r.Name),
 				Hint:    "rename the rule",
+			})
+		}
+		if strings.HasPrefix(r.Name, correlation.RuleNamePrefix) {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("policy.rules[%d].name", i),
+				Message: fmt.Sprintf("%q uses the reserved correlation rule prefix", r.Name),
+				Hint:    "rename the rule",
+			})
+		}
+	}
+
+	if c.Correlation.Enabled || len(c.Correlation.Rules) > 0 {
+		for _, err := range correlation.Validate(c.Correlation.Rules, c.Correlation.limits()) {
+			errors = append(errors, ValidationError{
+				Field:   "correlation." + err.Field,
+				Message: err.Message,
 			})
 		}
 	}
