@@ -88,7 +88,9 @@ type CorrelationConfig struct {
 	Rules            []correlation.Rule `yaml:"rules"`
 }
 
-func (c CorrelationConfig) limits() correlation.Limits {
+// Limits returns the engine limits exactly as configured. Validation checks
+// these same values, so what validates is what is built.
+func (c CorrelationConfig) Limits() correlation.Limits {
 	history := c.MaxHistoryEvents
 	if history == 0 {
 		history = correlation.DefaultMaxHistoryEvents
@@ -98,6 +100,46 @@ func (c CorrelationConfig) limits() correlation.Limits {
 		sessions = correlation.DefaultMaxSessions
 	}
 	return correlation.Limits{MaxHistoryEvents: history, MaxSessions: sessions}
+}
+
+// validationErrors checks the block against correlation.Validate and the
+// shapes this release implements.
+func (c CorrelationConfig) validationErrors() []ValidationError {
+	var errs []ValidationError
+	for _, err := range correlation.Validate(c.Rules, c.Limits()) {
+		errs = append(errs, ValidationError{
+			Field:   "correlation." + err.Field,
+			Message: err.Message,
+		})
+	}
+	for i, r := range c.Rules {
+		if r.Shape == correlation.ShapeSequence {
+			errs = append(errs, ValidationError{
+				Field:   fmt.Sprintf("correlation.rules[%d].shape", i),
+				Message: "shape: sequence is not supported yet: ordered sequences land in Plan B Task 3",
+				Hint:    "use shape: repeated",
+			})
+		}
+	}
+	return errs
+}
+
+// Validate reports whether the block can be built as configured. It is
+// what startup checks (an invalid enabled block refuses to start); a
+// disabled block is not checked.
+func (c CorrelationConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	errs := c.validationErrors()
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(errs))
+	for i, e := range errs {
+		msgs[i] = e.Field + ": " + e.Message
+	}
+	return fmt.Errorf("invalid correlation configuration: %s", strings.Join(msgs, "; "))
 }
 
 // ProxyConfig holds proxy-level configuration
@@ -1310,12 +1352,7 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	if c.Correlation.Enabled || len(c.Correlation.Rules) > 0 {
-		for _, err := range correlation.Validate(c.Correlation.Rules, c.Correlation.limits()) {
-			errors = append(errors, ValidationError{
-				Field:   "correlation." + err.Field,
-				Message: err.Message,
-			})
-		}
+		errors = append(errors, c.Correlation.validationErrors()...)
 	}
 
 	// Control API auth

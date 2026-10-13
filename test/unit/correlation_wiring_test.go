@@ -290,3 +290,24 @@ func TestCorrelationWiring_EnforceRuleWarnsAtStartup(t *testing.T) {
 		}
 	}
 }
+
+// Wiring review I-4: the sequence engine is a stub, so configuration
+// rejects shape: sequence instead of accepting a rule that never matches.
+func TestCorrelationWiring_ConfigRejectsSequenceRules(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Correlation.Enabled = true
+	cfg.Correlation.Rules = []correlation.Rule{sequenceRule("ordered", time.Minute, "a_b", "c_d")}
+	res := cfg.Validate()
+	found := false
+	for _, e := range res.Errors {
+		if e.Field == "correlation.rules[0].shape" && contains(e.Message, "Plan B Task 3") {
+			found = true
+		}
+	}
+	if res.Valid || !found {
+		t.Fatalf("shape: sequence must be rejected naming Plan B Task 3: %+v", res.Errors)
+	}
+	if err := cfg.Correlation.Validate(); err == nil || !contains(err.Error(), "ordered sequences land in Plan B Task 3") {
+		t.Fatalf("CorrelationConfig.Validate: %v", err)
+	}
+}

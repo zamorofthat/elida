@@ -869,8 +869,9 @@ correlation:
 ```
 
 Rule names, categories, counts, windows, and memory limits are validated at
-startup. `shape` is `repeated` or `sequence`; sequence rules use a `sequence`
-list instead of `category`, `count`, and `count_by`. The default `mode` is
+startup. `shape` must be `repeated`. Ordered sequences (`shape: sequence`)
+are not available yet: configuration validation rejects them until they land
+(Plan B Task 3). The default `mode` is
 `audit`, so matches are evidence-only and exported as informational OCSF 2004
 Detection Findings. `mode: enforce` makes a match contribute to the existing
 risk ladder. Correlation findings use the reserved rule prefix `correlation.`
