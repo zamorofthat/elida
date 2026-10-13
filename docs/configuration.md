@@ -684,7 +684,7 @@ Guardrails:
   `policy.mode: enforce` save (or a reset) lifts the cap without
   `?confirm=enforce`. That `enforce` was confirmed when it was saved; a later
   `elida.yaml` change does not re-confirm it. The same holds for any cap:
-lifting it needs no confirmation.
+  lifting it needs no confirmation.
 - **`settings.yaml` holds only overrides.** A save stores a `decision` key
   only when its value differs from `elida.yaml`'s; a key equal to the
   `elida.yaml` value is dropped (the merged value is the same). A dashboard
