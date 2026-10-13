@@ -848,6 +848,11 @@ func (a *app) initPolicyEngine() {
 // while the operator believes it is running.
 func (a *app) setupPolicyEngine() error {
 	if !a.cfg.Policy.Enabled {
+		if a.cfg.Correlation.Enabled {
+			// Correlation reads the policy engine's violation events, so
+			// without one it is inert (wiring review M-8).
+			slog.Warn("correlation is enabled but policy.enabled is false: correlation is inactive until the policy engine is enabled")
+		}
 		return nil
 	}
 	if err := a.cfg.Correlation.Validate(); err != nil {

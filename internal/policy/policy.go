@@ -134,6 +134,9 @@ type Violation struct {
 	// Semantic carries the decision metadata when this violation came from
 	// a semantic signal.
 	Semantic *SemanticEvidence `json:"semantic,omitempty"`
+	// Correlation carries the match evidence when this violation is a
+	// temporal-correlation match. Nil for every other violation.
+	Correlation *CorrelationEvidence `json:"correlation,omitempty"`
 }
 
 // SessionMetrics contains the metrics needed for policy evaluation
@@ -204,6 +207,22 @@ type ViolationEvent struct {
 	// authoritative score.
 	EvidenceOnly bool      `json:"evidence_only,omitempty"`
 	Timestamp    time.Time `json:"timestamp"`
+}
+
+// CorrelationEvidence explains a correlation match: which rule, which
+// events, over what window, in which mode. Identifiers, categories and
+// timestamps only, never content. Mode is the rule's configured mode; the
+// violation's EvidenceOnly says whether it contributed (policy.mode audit
+// caps an enforce rule).
+type CorrelationEvidence struct {
+	MatchID    string    `json:"match_id"`
+	Rule       string    `json:"rule"`
+	Shape      string    `json:"shape"`
+	Mode       string    `json:"mode"`
+	EventIDs   []string  `json:"event_ids"`
+	Categories []string  `json:"categories"`
+	FirstEvent time.Time `json:"first_event"`
+	LastEvent  time.Time `json:"last_event"`
 }
 
 // SemanticEvidence is the semantic decision metadata behind a violation.
@@ -403,6 +422,10 @@ var SourceRoleWeights = map[string]float64{
 	"assistant": 0.2, // Model output — likely benign echo of patterns
 	"system":    0.1, // Provider-controlled system prompt — almost always false positive
 	"":          1.0, // Unknown source (legacy/fallback) — full weight
+	// A temporal-correlation match is derived from several events, not
+	// found in one message, so it carries the rule's severity at full
+	// weight (Plan B wiring ruling M-2).
+	"correlation": 1.0,
 }
 
 // RiskLadderAction defines actions that can be taken based on risk score
@@ -1570,6 +1593,30 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	e.recordViolationsLocked(sessionID, matchViolations, nil)
 }
 
+// correlationGroup is an event's count_by: message key: its source role and
+// message index. MessageIndex 0 is treated as unknown, because metric,
+// anomaly and tool violations leave it 0 rather than -1: such an event (and,
+// as a documented limitation, a finding in the first message) is its own
+// group, so count_by: message falls back to counting events for it.
+func correlationGroup(v Violation) string {
+	if v.MessageIndex <= 0 {
+		return ""
+	}
+	return v.SourceRole + ":" + strconv.Itoa(v.MessageIndex)
+}
+
+// CorrelationStats are the correlator's counters plus the policy engine's
+// own: events queued to Observe, matches recorded, matches refused as
+// duplicates, and matches discarded because their session ended while
+// Observe ran. Served at GET /control/flagged/stats under "correlation".
+type CorrelationStats struct {
+	correlation.Stats
+	EventsQueued     uint64 `json:"events_queued"`
+	MatchesRecorded  uint64 `json:"matches_recorded"`
+	MatchesDuplicate uint64 `json:"matches_duplicate"`
+	MatchesDiscarded uint64 `json:"matches_discarded"`
+}
+
 // matchViolationLocked turns a correlation match into a violation. The
 // caller holds e.mu (it reads auditMode).
 func (e *Engine) matchViolationLocked(m correlation.Match) Violation {
@@ -1584,13 +1631,23 @@ func (e *Engine) matchViolationLocked(m correlation.Match) Violation {
 	}
 	return Violation{
 		RuleName:    CorrelationRulePrefix + m.Rule,
-		Description: "Temporal correlation matched events " + strings.Join(m.EventIDs, ", "),
+		Description: "Temporal correlation rule " + m.Rule + " matched " + strconv.Itoa(len(m.EventIDs)) + " events",
 		Severity:    severity, EffectiveSeverity: severity,
 		Action: "flag", Timestamp: m.LastEvent,
 		EventCategory: CategoryCorrelationMatch,
-		FrameworkRef:  m.ID, EventID: m.ID,
-		SourceRole: "correlation", EvidenceOnly: evidenceOnly,
+		EventID:       m.ID,
+		SourceRole:    "correlation", EvidenceOnly: evidenceOnly,
 		WouldContributePoints: wouldContribute,
+		Correlation: &CorrelationEvidence{
+			MatchID:    m.ID,
+			Rule:       m.Rule,
+			Shape:      string(m.Shape),
+			Mode:       string(m.Mode),
+			EventIDs:   append([]string(nil), m.EventIDs...),
+			Categories: append([]string(nil), m.Categories...),
+			FirstEvent: m.FirstEvent,
+			LastEvent:  m.LastEvent,
+		},
 	}
 }
 
@@ -1694,13 +1751,9 @@ func (e *Engine) recordViolationsLocked(sessionID string, violations []Violation
 			// A match (CategoryCorrelationMatch) is never wanted, so the
 			// match-recording pass collects nothing and cannot recurse.
 			if corr != nil && corr.Wants(event.EventCategory) {
-				group := event.SourceRole
-				if v.MessageIndex >= 0 {
-					group += ":" + strconv.Itoa(v.MessageIndex)
-				}
 				inputs = append(inputs, correlation.Event{
 					ID: event.EventID, Category: event.EventCategory,
-					Group: group, Timestamp: event.Timestamp,
+					Group: correlationGroup(v), Timestamp: event.Timestamp,
 				})
 			}
 			if v.Semantic != nil {
@@ -1748,6 +1801,12 @@ func (e *Engine) recordViolationsLocked(sessionID string, violations []Violation
 						existing.EvidenceOnly = v.EvidenceOnly
 						existing.WouldContributePoints = v.WouldContributePoints
 						existing.Semantic = v.Semantic
+						if v.Correlation != nil {
+							// A correlation entry describes one match,
+							// never a mix of two.
+							existing.Correlation = v.Correlation
+							existing.Description = v.Description
+						}
 					}
 					break
 				}
@@ -2038,6 +2097,12 @@ func (fs *FlaggedSession) clone() *FlaggedSession {
 				semCopy := *sem
 				c.Violations[i].Semantic = &semCopy
 			}
+			if ce := c.Violations[i].Correlation; ce != nil {
+				ceCopy := *ce
+				ceCopy.EventIDs = append([]string(nil), ce.EventIDs...)
+				ceCopy.Categories = append([]string(nil), ce.Categories...)
+				c.Violations[i].Correlation = &ceCopy
+			}
 		}
 	}
 	if fs.CapturedContent != nil {
@@ -2271,7 +2336,7 @@ func (e *Engine) Stats() map[string]interface{} {
 		avgRiskScore = totalRiskScore / float64(len(e.flaggedSessions))
 	}
 
-	return map[string]interface{}{
+	stats := map[string]interface{}{
 		"total_flagged":  len(e.flaggedSessions),
 		"critical":       critical,
 		"warning":        warning,
@@ -2283,6 +2348,17 @@ func (e *Engine) Stats() map[string]interface{} {
 		"blocked":        blocked,
 		"avg_risk_score": avgRiskScore,
 	}
+	// D13: correlation counters, only when a correlator is installed.
+	if e.correlation != nil {
+		stats["correlation"] = CorrelationStats{
+			Stats:            e.correlation.Stats(),
+			EventsQueued:     e.correlationQueued.Load(),
+			MatchesRecorded:  e.correlationRecorded.Load(),
+			MatchesDuplicate: e.correlationDuplicates.Load(),
+			MatchesDiscarded: e.correlationDiscarded.Load(),
+		}
+	}
+	return stats
 }
 
 // GetSessionRiskScore returns the risk score for a session

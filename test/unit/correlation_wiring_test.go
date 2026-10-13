@@ -2,6 +2,7 @@ package unit
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -309,5 +310,116 @@ func TestCorrelationWiring_ConfigRejectsSequenceRules(t *testing.T) {
 	}
 	if err := cfg.Correlation.Validate(); err == nil || !contains(err.Error(), "ordered sequences land in Plan B Task 3") {
 		t.Fatalf("CorrelationConfig.Validate: %v", err)
+	}
+}
+
+// Wiring review M-3/M-2: a match carries structured evidence in
+// Violation.Correlation, FrameworkRef stays empty, the description holds
+// no event IDs, and the "correlation" source role has an explicit 1.0
+// weight.
+func TestCorrelationWiring_MatchViolationShape(t *testing.T) {
+	if w, ok := policy.SourceRoleWeights["correlation"]; !ok || w != 1.0 {
+		t.Fatalf("SourceRoleWeights[correlation] = %v, %v; want an explicit 1.0", w, ok)
+	}
+	e := wiringEngine(t, "enforce", correlation.ModeAudit)
+	now := time.Now()
+	recordCorrelationInput(e, "sess-shape", "ev_a", now)
+	recordCorrelationInput(e, "sess-shape", "ev_b", now.Add(time.Second))
+	m := correlationMatch(e.GetFlaggedSession("sess-shape"))
+	if m == nil || m.Correlation == nil {
+		t.Fatalf("want a match with correlation evidence: %+v", m)
+	}
+	ev := m.Correlation
+	if ev.MatchID != m.EventID || ev.Rule != "repeated_injection" || ev.Shape != "repeated" || ev.Mode != "audit" {
+		t.Fatalf("evidence metadata: %+v", ev)
+	}
+	if len(ev.EventIDs) != 2 || len(ev.Categories) != 2 || ev.Categories[0] != "semantic_injection" {
+		t.Fatalf("contributing events: %+v", ev)
+	}
+	if !ev.FirstEvent.Equal(now) || !ev.LastEvent.Equal(now.Add(time.Second)) {
+		t.Fatalf("window: %v..%v", ev.FirstEvent, ev.LastEvent)
+	}
+	if m.FrameworkRef != "" || contains(m.Description, "ev_") || m.SourceRole != "correlation" {
+		t.Fatalf("FrameworkRef must stay empty and the description ID-free: %+v", m)
+	}
+	if m.WouldContributePoints != 10 {
+		t.Fatalf("would-contribute = critical x 1.0 = 10, got %v", m.WouldContributePoints)
+	}
+
+	// GetFlaggedSession deep-copies the evidence.
+	m.Correlation.EventIDs[0] = "tampered"
+	if again := correlationMatch(e.GetFlaggedSession("sess-shape")); again.Correlation.EventIDs[0] == "tampered" {
+		t.Fatal("GetFlaggedSession must deep-copy correlation evidence")
+	}
+}
+
+// Wiring review M-6: count_by: message groups by source role and message
+// index, and treats MessageIndex 0 (what metric, anomaly and tool
+// violations carry) as unknown: such events count individually.
+func TestCorrelationWiring_CountByMessageGroups(t *testing.T) {
+	newEngine := func() *policy.Engine {
+		return policy.NewEngine(policy.Config{
+			Enabled: true, Mode: "enforce",
+			Correlation: policy.CorrelationConfig{
+				Enabled: true, Limits: okLimits(),
+				Rules: []correlation.Rule{{
+					Name: "repeated_injection", Shape: correlation.ShapeRepeated,
+					Category: "semantic_injection", Count: 2, CountBy: correlation.CountByMessage,
+					Window: time.Minute, Severity: "warning",
+				}},
+			},
+		})
+	}
+	record := func(e *policy.Engine, sess, id string, idx int, at time.Time) {
+		e.RecordSemanticViolation(sess, policy.Violation{
+			RuleName: "semantic_injection", EventID: id, EventCategory: "semantic_injection",
+			Severity: policy.SeverityWarning, SourceRole: "tool", MessageIndex: idx,
+			Timestamp: at, EvidenceOnly: true,
+		})
+	}
+	now := time.Now()
+
+	e := newEngine()
+	record(e, "sess-zero", "ev_1", 0, now)
+	record(e, "sess-zero", "ev_2", 0, now.Add(time.Second))
+	if correlationMatch(e.GetFlaggedSession("sess-zero")) == nil {
+		t.Fatal("MessageIndex 0 is unknown: two events must count as two")
+	}
+
+	e = newEngine()
+	record(e, "sess-msg", "ev_1", 3, now)
+	record(e, "sess-msg", "ev_2", 3, now.Add(time.Second))
+	if correlationMatch(e.GetFlaggedSession("sess-msg")) != nil {
+		t.Fatal("two events of one message count once")
+	}
+	record(e, "sess-msg", "ev_3", 4, now.Add(2*time.Second))
+	if correlationMatch(e.GetFlaggedSession("sess-msg")) == nil {
+		t.Fatal("a second message completes the match")
+	}
+}
+
+// Wiring review M-5 (D13): /control/flagged/stats carries correlation
+// counters when a correlator is installed.
+func TestCorrelationWiring_StatsKey(t *testing.T) {
+	e := wiringEngine(t, "enforce", correlation.ModeAudit)
+	now := time.Now()
+	recordCorrelationInput(e, "sess-st", "ev_a", now)
+	recordCorrelationInput(e, "sess-st", "ev_b", now.Add(time.Second))
+	st, ok := e.Stats()["correlation"].(policy.CorrelationStats)
+	if !ok {
+		t.Fatalf("Stats must include correlation when a correlator is set: %+v", e.Stats())
+	}
+	if st.EventsQueued != 2 || st.EventsObserved != 2 || st.Matches != 1 || st.MatchesRecorded != 1 ||
+		st.Shards == 0 || st.Rules != 1 || st.EventsDropped != 0 {
+		t.Fatalf("correlation stats: %+v", st)
+	}
+	out, err := json.Marshal(e.Stats())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"events_queued"`, `"events_observed"`, `"matches"`, `"events_dropped"`, `"shards"`} {
+		if !contains(string(out), key) {
+			t.Errorf("stats JSON lacks %s: %s", key, out)
+		}
 	}
 }

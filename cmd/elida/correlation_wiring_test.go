@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,5 +72,31 @@ func TestCorrelationWiring_ValidConfigStarts(t *testing.T) {
 	}
 	if !a.policyEngine.GetConfig().Correlation.Enabled {
 		t.Fatal("correlation must be enabled")
+	}
+}
+
+// Wiring review M-8: correlation enabled with the policy engine disabled is
+// inert; startup says so once, at WARN.
+func TestCorrelationWiring_WarnsWhenPolicyDisabled(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		var buf strings.Builder
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		cfg := correlationTestConfig(t)
+		cfg.Policy.Enabled = false
+		cfg.Correlation.Enabled = enabled
+		a := &app{cfg: cfg}
+		err := a.setupPolicyEngine()
+		slog.SetDefault(prev)
+		if err != nil {
+			t.Fatalf("setupPolicyEngine: %v", err)
+		}
+		want := 0
+		if enabled {
+			want = 1
+		}
+		if got := strings.Count(buf.String(), "policy.enabled is false"); got != want {
+			t.Errorf("correlation enabled=%v: %d warnings, want %d\n%s", enabled, got, want, buf.String())
+		}
 	}
 }
