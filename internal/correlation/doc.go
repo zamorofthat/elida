@@ -9,11 +9,15 @@
 // grouping key and a timestamp, and a Match is a rule name, IDs, categories
 // and timestamps.
 //
-// Bounds. Per session: at most Limits.MaxHistoryEvents events, pruned by
-// age at the largest rule window, and at most MaxMatchIDsPerSession
-// remembered match IDs. Across sessions: at most Limits.MaxSessions, least
-// recently observed evicted first. Eviction loses history (a match may be
-// missed); it never produces a match.
+// Bounds. Per session: at most Limits.MaxHistoryEvents events (shared by
+// every wanted category), pruned by age at the largest rule window, at most
+// MaxMatchIDsPerSession remembered match digests, and for each count_by
+// message rule at most Limits.MaxHistoryEvents consumed message groups.
+// Per Observe call: at most MaxEventsPerObserve events. Across sessions: at
+// most Limits.MaxSessions, split across up to MaxShards independently
+// locked shards, each evicting its least recently observed session first.
+// Eviction loses history (a match may be missed); it never produces a
+// match. DefaultMaxHistoryEvents documents the measured memory.
 //
 // Lock order. The policy engine calls Observe while holding its own lock, so
 // this package must never call back into the policy engine.
