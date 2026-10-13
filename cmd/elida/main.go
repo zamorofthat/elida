@@ -24,7 +24,6 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
-	"elida/internal/correlation"
 	"elida/internal/decision/embedded"
 	"elida/internal/decision/runner"
 	"elida/internal/decision/scheduler"
@@ -837,8 +836,22 @@ func (a *app) initTelemetry() {
 }
 
 func (a *app) initPolicyEngine() {
+	if err := a.setupPolicyEngine(); err != nil {
+		slog.Error("policy engine failed to start", "error", err)
+		os.Exit(1)
+	}
+}
+
+// setupPolicyEngine builds the policy engine. An enabled correlation block
+// that cannot be built as configured is a startup error, like any other
+// invalid security configuration: correlation must never be silently off
+// while the operator believes it is running.
+func (a *app) setupPolicyEngine() error {
 	if !a.cfg.Policy.Enabled {
-		return
+		return nil
+	}
+	if err := a.cfg.Correlation.Validate(); err != nil {
+		return err
 	}
 	policyRules := make([]policy.Rule, len(a.cfg.Policy.Rules))
 	for i, r := range a.cfg.Policy.Rules {
@@ -879,10 +892,7 @@ func (a *app) initPolicyEngine() {
 		Correlation: policy.CorrelationConfig{
 			Enabled: a.cfg.Correlation.Enabled,
 			Rules:   a.cfg.Correlation.Rules,
-			Limits: correlation.Limits{
-				MaxHistoryEvents: a.cfg.Correlation.MaxHistoryEvents,
-				MaxSessions:      a.cfg.Correlation.MaxSessions,
-			},
+			Limits:  a.cfg.Correlation.Limits(),
 		},
 	})
 
@@ -902,6 +912,7 @@ func (a *app) initPolicyEngine() {
 	})
 
 	slog.Info("policy engine enabled", "rules", len(policyRules))
+	return nil
 }
 
 func (a *app) initInstructionIntegrity() {

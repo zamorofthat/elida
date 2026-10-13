@@ -90,16 +90,10 @@ type CorrelationConfig struct {
 
 // Limits returns the engine limits exactly as configured. Validation checks
 // these same values, so what validates is what is built.
+// An omitted key keeps its default (DefaultConfig); an explicit 0 is
+// invalid, not "use the default".
 func (c CorrelationConfig) Limits() correlation.Limits {
-	history := c.MaxHistoryEvents
-	if history == 0 {
-		history = correlation.DefaultMaxHistoryEvents
-	}
-	sessions := c.MaxSessions
-	if sessions == 0 {
-		sessions = correlation.DefaultMaxSessions
-	}
-	return correlation.Limits{MaxHistoryEvents: history, MaxSessions: sessions}
+	return correlation.Limits{MaxHistoryEvents: c.MaxHistoryEvents, MaxSessions: c.MaxSessions}
 }
 
 // validationErrors checks the block against correlation.Validate and the
