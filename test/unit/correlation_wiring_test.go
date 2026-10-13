@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -421,5 +422,56 @@ func TestCorrelationWiring_StatsKey(t *testing.T) {
 		if !contains(string(out), key) {
 			t.Errorf("stats JSON lacks %s: %s", key, out)
 		}
+	}
+}
+
+// D8: the shipped default rule set is one audit-only slow_burn_injection
+// rule, and correlation stays disabled by default.
+func TestCorrelationWiring_DefaultRuleSet(t *testing.T) {
+	c := config.DefaultConfig().Correlation
+	if c.Enabled {
+		t.Fatal("correlation must stay disabled by default")
+	}
+	want := correlation.Rule{
+		Name: "slow_burn_injection", Shape: correlation.ShapeRepeated,
+		Category: "injection_elevated", Count: 3, CountBy: correlation.CountByMessage,
+		Window: 15 * time.Minute, Cooldown: 15 * time.Minute,
+		Severity: "warning", Mode: correlation.ModeAudit,
+	}
+	if len(c.Rules) != 1 || !reflect.DeepEqual(c.Rules[0], want) {
+		t.Fatalf("default rules = %+v, want [%+v]", c.Rules, want)
+	}
+	c.Enabled = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("the default block must validate when enabled: %v", err)
+	}
+}
+
+// configs/elida.yaml documents the correlation block and is what the
+// Docker image runs: it must equal DefaultConfig.
+func TestSampleConfig_CorrelationMatchesDefaults(t *testing.T) {
+	cfg, err := config.Load("../../configs/elida.yaml")
+	if err != nil {
+		t.Fatalf("load configs/elida.yaml: %v", err)
+	}
+	if want := config.DefaultConfig().Correlation; !reflect.DeepEqual(cfg.Correlation, want) {
+		t.Fatalf("configs/elida.yaml correlation block drifted from DefaultConfig:\n got %+v\nwant %+v", cfg.Correlation, want)
+	}
+}
+
+func TestCorrelationWiring_EnvOverride(t *testing.T) {
+	t.Setenv("ELIDA_CORRELATION_ENABLED", "true")
+	path := writeTempConfig(t, "correlation:\n  enabled: false\n")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Correlation.Enabled {
+		t.Fatal("ELIDA_CORRELATION_ENABLED=true must enable correlation")
+	}
+	t.Setenv("ELIDA_CORRELATION_ENABLED", "false")
+	path = writeTempConfig(t, "correlation:\n  enabled: true\n")
+	if cfg, err = config.Load(path); err != nil || cfg.Correlation.Enabled {
+		t.Fatalf("ELIDA_CORRELATION_ENABLED=false must disable correlation (err %v)", err)
 	}
 }
