@@ -513,6 +513,15 @@ type Config struct {
 	Correlation CorrelationConfig `yaml:"correlation" json:"correlation"`
 }
 
+// CorrelationRulePrefix prefixes the RuleName of a correlation match.
+// Config reserves it (config.ReservedRuleName), so a correlation match never
+// shares a name, a count or a display entry with a config rule.
+const CorrelationRulePrefix = correlation.RuleNamePrefix
+
+// CategoryCorrelationMatch is the EventCategory of a correlation match. It
+// is never a correlation input.
+const CategoryCorrelationMatch = correlation.CategoryMatch
+
 // CorrelationConfig is the policy engine's temporal-correlation input.
 type CorrelationConfig struct {
 	Enabled bool
@@ -1580,11 +1589,11 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 					evidenceOnly := match.Mode != correlation.ModeEnforce
 					severity := Severity(match.Severity)
 					violations = append(violations, Violation{
-						RuleName:    correlation.RuleNamePrefix + match.Rule,
+						RuleName:    CorrelationRulePrefix + match.Rule,
 						Description: "Temporal correlation matched events " + strings.Join(match.EventIDs, ", "),
 						Severity:    severity, EffectiveSeverity: severity,
 						Action: "flag", Timestamp: match.LastEvent,
-						EventCategory: correlation.CategoryMatch,
+						EventCategory: CategoryCorrelationMatch,
 						FrameworkRef:  match.ID, EventID: match.ID,
 						SourceRole: "correlation", EvidenceOnly: evidenceOnly,
 						WouldContributePoints: eventWeight(severity, "correlation"),
@@ -1608,11 +1617,14 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 			for i := range flagged.Violations {
 				if flagged.Violations[i].RuleName == v.RuleName {
 					existing := &flagged.Violations[i]
-					if (v.Semantic != nil) != (existing.Semantic != nil) {
-						// Different kinds (a semantic decision and a config
-						// rule sharing a name): never mix them or replace
-						// one with the other; only "last fired" advances.
-						// Config validation reserves the semantic names.
+					if (v.Semantic != nil) != (existing.Semantic != nil) ||
+						(v.EventCategory == CategoryCorrelationMatch) != (existing.EventCategory == CategoryCorrelationMatch) {
+						// Different kinds (a semantic decision or a
+						// correlation match, and a config rule sharing a
+						// name): never mix them or replace one with the
+						// other; only "last fired" advances. Config
+						// validation and the control API reserve the
+						// semantic names and the "correlation." prefix.
 						if v.Timestamp.After(existing.Timestamp) {
 							existing.Timestamp = v.Timestamp
 						}

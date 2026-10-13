@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"elida/internal/config"
 	"elida/internal/correlation"
 	"elida/internal/policy"
 )
@@ -119,4 +120,113 @@ func TestCorrelationWiring_GetConfigCopiesRules(t *testing.T) {
 	if e.GetConfig().Correlation.Rules[0].Name != "repeated_injection" {
 		t.Fatal("GetConfig must deep-copy the correlation rules")
 	}
+}
+
+// Wiring review I-2: the "correlation." prefix is reserved on the control
+// API path too, not only in elida.yaml validation.
+func TestCorrelationWiring_ReservedPrefix(t *testing.T) {
+	for _, name := range []string{"correlation.repeated_injection", "correlation.x"} {
+		if !config.ReservedRuleName(name) {
+			t.Errorf("%q must be reserved", name)
+		}
+	}
+	for _, name := range []string{"correlation_rule", "my_correlation.rule", "correlation"} {
+		if config.ReservedRuleName(name) {
+			t.Errorf("%q must not be reserved", name)
+		}
+	}
+}
+
+func TestCorrelationWiring_ControlAPIRefusesNewCorrelationRule(t *testing.T) {
+	e := wiringEngine(t, "enforce", correlation.ModeAudit)
+	h, ss := settingsHandler(t, e)
+	w := doJSON(t, h, http.MethodPut, "/control/settings", map[string]any{"policy": map[string]any{
+		"custom_rules": []map[string]any{
+			{"name": "correlation.repeated_injection", "type": "content_match", "patterns": []string{"x"}, "severity": "warning"},
+		},
+	}})
+	if w.Code != http.StatusBadRequest || !contains(w.Body.String(), "correlation.repeated_injection") {
+		t.Fatalf("a new correlation.* custom rule: got %d %s, want 400 naming it", w.Code, w.Body.String())
+	}
+	if len(ss.GetMerged().Policy.CustomRules) != 0 {
+		t.Fatal("a refused save must not be stored")
+	}
+	for _, r := range e.GetConfig().Rules {
+		if r.Name == "correlation.repeated_injection" {
+			t.Fatal("a refused rule must not reach the engine")
+		}
+	}
+}
+
+func TestCorrelationWiring_SavedCorrelationRuleWarnsAndIsSkipped(t *testing.T) {
+	buf := captureLogs(t, slog.LevelInfo)
+	const yamlBody = "policy:\n  custom_rules:\n    - name: correlation.saved\n      type: content_match\n      patterns: [\"x\"]\n      severity: warning\n"
+	h, ss := staleSettingsHandler(t, yamlBody)
+	got := doJSON(t, h, http.MethodGet, "/control/settings", nil)
+	if w := doJSON(t, h, http.MethodPut, "/control/settings", got.Body.String()); w.Code != http.StatusOK {
+		t.Fatalf("round trip with a saved correlation.* rule: %d %s", w.Code, w.Body.String())
+	}
+	if out := buf.String(); !contains(out, "level=WARN") || !contains(out, "rule=correlation.saved") {
+		t.Fatalf("a saved correlation.* rule must WARN: %s", out)
+	}
+	if rules := ss.GetMerged().Policy.CustomRules; len(rules) != 1 || rules[0].Name != "correlation.saved" {
+		t.Fatalf("the saved body must not be rewritten: %+v", rules)
+	}
+}
+
+// kindGateEngine has a config rule sharing the correlation match's name:
+// the state a reserved-name bypass would produce (an embedder constructing
+// rules directly).
+func kindGateEngine(t *testing.T, mode correlation.Mode) *policy.Engine {
+	t.Helper()
+	return policy.NewEngine(policy.Config{
+		Enabled: true, Mode: "enforce",
+		Rules: []policy.Rule{{
+			Name: "correlation.repeated_injection", Type: policy.RuleTypeContentMatch,
+			Target: policy.RuleTargetRequest, Patterns: []string{"zzmarkerzz"},
+			Severity: policy.SeverityWarning, Action: "flag",
+		}},
+		RiskLadder: policy.RiskLadderConfig{Enabled: true, Thresholds: baselineThresholds()},
+		Correlation: policy.CorrelationConfig{
+			Enabled: true, Limits: okLimits(),
+			Rules: []correlation.Rule{{
+				Name: "repeated_injection", Shape: correlation.ShapeRepeated,
+				Category: "semantic_injection", Count: 2, Window: time.Minute,
+				Severity: "critical", Mode: mode,
+			}},
+		},
+	})
+}
+
+// A correlation match never merges into a regex display entry, and a regex
+// firing never merges into a correlation display entry.
+func TestCorrelationWiring_KindGate(t *testing.T) {
+	t.Run("regex first", func(t *testing.T) {
+		// An enforce match: the plain merge would relabel the regex entry.
+		e := kindGateEngine(t, correlation.ModeEnforce)
+		e.EvaluateMessages("sess-kg1", []policy.MessageToScan{{Role: "user", Index: 0, Content: "zzmarkerzz"}})
+		before := *correlationMatch(e.GetFlaggedSession("sess-kg1"))
+		now := time.Now()
+		recordCorrelationInput(e, "sess-kg1", "ev_a", now)
+		recordCorrelationInput(e, "sess-kg1", "ev_b", now.Add(time.Second))
+		got := correlationMatch(e.GetFlaggedSession("sess-kg1"))
+		if got.EventCategory == correlation.CategoryMatch || got.EvidenceOnly || got.EventID != before.EventID {
+			t.Fatalf("the regex entry absorbed the correlation match: %+v", got)
+		}
+	})
+	t.Run("correlation first", func(t *testing.T) {
+		e := kindGateEngine(t, correlation.ModeAudit)
+		now := time.Now()
+		recordCorrelationInput(e, "sess-kg2", "ev_a", now)
+		recordCorrelationInput(e, "sess-kg2", "ev_b", now.Add(time.Second))
+		before := *correlationMatch(e.GetFlaggedSession("sess-kg2"))
+		if before.EventCategory != correlation.CategoryMatch {
+			t.Fatalf("precondition: a correlation entry, got %+v", before)
+		}
+		e.EvaluateMessages("sess-kg2", []policy.MessageToScan{{Role: "user", Index: 0, Content: "zzmarkerzz"}})
+		got := correlationMatch(e.GetFlaggedSession("sess-kg2"))
+		if got.EventCategory != correlation.CategoryMatch || !got.EvidenceOnly || got.EventID != before.EventID {
+			t.Fatalf("the correlation entry absorbed the regex firing: %+v", got)
+		}
+	})
 }

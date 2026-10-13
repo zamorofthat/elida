@@ -401,8 +401,9 @@ func (h *Handler) reloadPolicyEngine() {
 		if config.ReservedRuleName(cr.Name) {
 			// saveSettings refuses new ones; one saved earlier (an older
 			// release, or a hand edit) is kept in settings.yaml. Skipped so
-			// a regex rule never records under the semantic runner's name.
-			slog.Warn("custom rule skipped: the name is reserved for semantic detection", "rule", cr.Name)
+			// a regex rule never records under the semantic runner's name
+			// or a correlation match's "correlation." name.
+			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
 			continue
 		}
 		rule := policy.Rule{
@@ -1983,7 +1984,8 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 // saveSettings validates a settings PUT, saves it and applies it; both PUT
 // routes use it. A custom rule new in this save may not take a name
-// reserved for semantic detection (one already saved is kept, with a WARN).
+// reserved for semantic detection or temporal correlation (one already
+// saved is kept, with a WARN).
 // A change to decision.* is checked first against config rules
 // (restart-only keys, plan D11; enforce under policy.mode audit, D8), then
 // the ?confirm=enforce confirmation (D7), then the configurer's runtime
@@ -2024,7 +2026,7 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings 
 			keptReserved = append(keptReserved, cr.Name)
 			continue
 		}
-		problems = append(problems, "policy.custom_rules: the rule name "+strconv.Quote(cr.Name)+" is reserved for semantic detection; choose another name")
+		problems = append(problems, "policy.custom_rules: the rule name "+strconv.Quote(cr.Name)+" is reserved for semantic detection or temporal correlation; choose another name")
 	}
 	changes := config.DecisionSettingsChanges(prev.Decision, next.Decision)
 	if len(changes) > 0 {
@@ -2056,7 +2058,7 @@ func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings 
 		return
 	}
 	for _, name := range keptReserved {
-		slog.Warn("saved custom rule uses a name reserved for semantic detection; it is kept but skipped at runtime, rename it", "rule", name)
+		slog.Warn("saved custom rule uses a name reserved for semantic detection or temporal correlation; it is kept but skipped at runtime, rename it", "rule", name)
 	}
 	h.reloadPolicyEngine()
 	h.logDecisionChanges(r, changes)
