@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,4 +230,63 @@ func TestCorrelationWiring_KindGate(t *testing.T) {
 			t.Fatalf("the correlation entry absorbed the regex firing: %+v", got)
 		}
 	})
+}
+
+// Wiring review I-5 (D5): under policy.mode audit an enforce rule's match is
+// evidence-only, with the would-contribute diagnostic, exactly like the
+// semantic cap. The cap is read at record time: switching policy.mode to
+// enforce lifts it for later matches.
+func TestCorrelationWiring_PolicyAuditCapsEnforceRule(t *testing.T) {
+	e := wiringEngine(t, "audit", correlation.ModeEnforce)
+	now := time.Now()
+	recordCorrelationInput(e, "sess-cap", "ev_a", now)
+	recordCorrelationInput(e, "sess-cap", "ev_b", now.Add(time.Second))
+	fs := e.GetFlaggedSession("sess-cap")
+	m := correlationMatch(fs)
+	if m == nil || !m.EvidenceOnly {
+		t.Fatalf("policy.mode audit must cap an enforce rule to evidence-only: %+v", m)
+	}
+	if m.WouldContributePoints != 10 {
+		t.Fatalf("would-contribute = critical x 1.0 = 10, got %v", m.WouldContributePoints)
+	}
+	if fs.RiskScore != 0 || fs.MaxSeverity == policy.SeverityCritical {
+		t.Fatalf("a capped match must not score or raise severity: score=%v max=%s", fs.RiskScore, fs.MaxSeverity)
+	}
+
+	cfg := e.GetConfig()
+	cfg.Mode = "enforce"
+	e.ReloadConfig(cfg)
+	recordCorrelationInput(e, "sess-cap2", "ev_c", now)
+	recordCorrelationInput(e, "sess-cap2", "ev_d", now.Add(time.Second))
+	fs = e.GetFlaggedSession("sess-cap2")
+	if m := correlationMatch(fs); m == nil || m.EvidenceOnly || m.WouldContributePoints != 0 || fs.RiskScore < 9 {
+		t.Fatalf("under policy.mode enforce the rule contributes: %+v score=%v", m, fs.RiskScore)
+	}
+}
+
+// D5: one startup WARN per enforce-mode rule, naming it; none for audit.
+func TestCorrelationWiring_EnforceRuleWarnsAtStartup(t *testing.T) {
+	for _, tc := range []struct {
+		policyMode string
+		ruleMode   correlation.Mode
+		want       string
+	}{
+		{"enforce", correlation.ModeEnforce, "contribute risk"},
+		{"audit", correlation.ModeEnforce, "capped to evidence-only"},
+		{"enforce", correlation.ModeAudit, ""},
+	} {
+		buf := captureLogs(t, slog.LevelWarn)
+		wiringEngine(t, tc.policyMode, tc.ruleMode)
+		out := buf.String()
+		got := strings.Count(out, "rule=repeated_injection")
+		if tc.want == "" {
+			if got != 0 {
+				t.Errorf("audit rule must not WARN:\n%s", out)
+			}
+			continue
+		}
+		if got != 1 || !contains(out, "level=WARN") || !contains(out, tc.want) {
+			t.Errorf("policy %s, rule %s: want one WARN naming the rule (%q):\n%s", tc.policyMode, tc.ruleMode, tc.want, out)
+		}
+	}
 }

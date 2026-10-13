@@ -529,7 +529,11 @@ type CorrelationConfig struct {
 	Limits  correlation.Limits
 }
 
-func newCorrelationEngine(cfg CorrelationConfig) *correlation.Engine {
+// newCorrelationEngine builds the correlator for cfg, or nil when it is
+// disabled. It logs one WARN per enforce-mode rule (Plan B D5): promoting a
+// rule to enforce is a reserved decision, and under policy.mode audit the
+// rule is capped to audit at record time, which the WARN says.
+func newCorrelationEngine(cfg CorrelationConfig, auditMode bool) *correlation.Engine {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -537,6 +541,18 @@ func newCorrelationEngine(cfg CorrelationConfig) *correlation.Engine {
 	if err != nil {
 		slog.Error("correlation engine disabled by invalid configuration", "error", err)
 		return nil
+	}
+	for _, r := range engine.Rules() {
+		if r.Mode != correlation.ModeEnforce {
+			continue
+		}
+		if auditMode {
+			slog.Warn("correlation rule is in enforce mode but policy.mode is audit: its matches are capped to evidence-only",
+				"rule", r.Name)
+			continue
+		}
+		slog.Warn("correlation rule is in enforce mode: its matches contribute risk to the ladder",
+			"rule", r.Name)
 	}
 	return engine
 }
@@ -657,7 +673,7 @@ func NewEngine(cfg Config) *Engine {
 
 		seenSemanticEvents: make(map[string]*seenDecisionIDs),
 		retained:           make(map[string]uint64),
-		correlation:        newCorrelationEngine(cfg.Correlation),
+		correlation:        newCorrelationEngine(cfg.Correlation, auditMode),
 		correlationConfig:  cloneCorrelationConfig(cfg.Correlation),
 	}
 
@@ -743,7 +759,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	// resets every session's correlation history, so that is logged.
 	if !correlationConfigEqual(e.correlationConfig, cfg.Correlation) {
 		previous := e.correlation
-		e.correlation = newCorrelationEngine(cfg.Correlation)
+		e.correlation = newCorrelationEngine(cfg.Correlation, cfg.Mode == "audit")
 		e.correlationConfig = cloneCorrelationConfig(cfg.Correlation)
 		if previous != nil || e.correlation != nil {
 			slog.Info("correlation engine replaced; per-session correlation state reset",
@@ -1586,8 +1602,15 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 					Group: group, Timestamp: event.Timestamp,
 				}})
 				for _, match := range matches {
-					evidenceOnly := match.Mode != correlation.ModeEnforce
+					// D5: an enforce rule is capped to evidence-only under
+					// policy.mode audit. Evaluated at record time because
+					// policy.mode is runtime-editable.
+					evidenceOnly := match.Mode != correlation.ModeEnforce || e.auditMode
 					severity := Severity(match.Severity)
+					var wouldContribute float64
+					if evidenceOnly {
+						wouldContribute = eventWeight(severity, "correlation")
+					}
 					violations = append(violations, Violation{
 						RuleName:    CorrelationRulePrefix + match.Rule,
 						Description: "Temporal correlation matched events " + strings.Join(match.EventIDs, ", "),
@@ -1596,7 +1619,7 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 						EventCategory: CategoryCorrelationMatch,
 						FrameworkRef:  match.ID, EventID: match.ID,
 						SourceRole: "correlation", EvidenceOnly: evidenceOnly,
-						WouldContributePoints: eventWeight(severity, "correlation"),
+						WouldContributePoints: wouldContribute,
 					})
 				}
 			}
