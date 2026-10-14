@@ -551,8 +551,13 @@ type Engine struct {
 	// toollane.go), in an LRU (toolLRU, front = most recently used).
 	// Guarded by mu.
 	toolSessions map[string]*toolSession
-	toolLRU      list.List
-	toolEpoch    uint64
+	// toolEvicted holds, per session ID, states evicted from toolSessions
+	// while a batch of theirs was queued or running, so a session end can
+	// still mark them ended (see evictToolSessionLocked). Drained states
+	// are pruned lazily. Guarded by mu.
+	toolEvicted map[string][]*toolSession
+	toolLRU     list.List
+	toolEpoch   uint64
 	// tools is the off-request-path lane that categorizes tool calls.
 	tools toolLane
 }
@@ -766,6 +771,7 @@ func NewEngine(cfg Config) *Engine {
 		retained:           make(map[string]uint64),
 		correlationConfig:  cloneCorrelationConfig(cfg.Correlation),
 		toolSessions:       make(map[string]*toolSession),
+		toolEvicted:        make(map[string][]*toolSession),
 	}
 	e.tools.init()
 	e.correlation, e.taxonomy = newCorrelationEngine(cfg.Correlation, auditMode)

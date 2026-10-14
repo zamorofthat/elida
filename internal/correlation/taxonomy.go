@@ -505,7 +505,9 @@ const toolEventVersion = "v1"
 // and the caller chooses an ordinal that never repeats within the session
 // (the policy tool lane numbers every call of the session).
 //
-// The policy tool lane passes a call ID only the first time the session
+// The policy tool lane qualifies the call ID with a per-process state
+// epoch ("<id>#<epoch>"), so its event IDs are stable within a process but
+// not across restarts. It passes a call ID only the first time the session
 // sees it; a repeated or absent ID, and every ID once the session's ID
 // memory is full, takes the anonymous form. Every tool call therefore
 // counts, a call ID reused by a provider for a distinct call included.

@@ -312,17 +312,60 @@ func (e *Engine) toolSessionLocked(sessionID string) *toolSession {
 // The session is not ended: batches already queued with this state still
 // run and record (an eviction never forgets correlation history), and the
 // session's next batch starts a fresh state with an empty call-ID memory
-// (its later calls may be anonymous, never suppressed). The caller holds
-// e.mu.
+// (its later calls may be anonymous, never suppressed). A state with a
+// batch queued or running is kept in toolEvicted, so a session end that
+// comes before that batch runs still marks it ended and the batch is
+// discarded. The caller holds e.mu.
 func (e *Engine) evictToolSessionLocked(st *toolSession) {
 	e.toolLRU.Remove(st.lru)
 	delete(e.toolSessions, st.id)
 	e.tools.sessionsEvicted.Add(1)
+	if st.inflight.Load() > 0 {
+		e.keepEvictedToolStateLocked(st)
+	}
 }
 
-// endToolSessionLocked ends the session instance's tool state: its queued
+// keepEvictedToolStateLocked records an evicted state with batches in
+// flight. inflight only grows under e.mu, and an evicted state gets no new
+// batches, so a state seen drained stays drained and is pruned. The side
+// list is bounded by the batches in flight: whenever it reaches the
+// session cap, every drained state is pruned. The caller holds e.mu.
+func (e *Engine) keepEvictedToolStateLocked(st *toolSession) {
+	limit := e.correlationConfig.Limits.MaxSessions
+	if limit <= 0 {
+		limit = correlation.DefaultMaxSessions
+	}
+	if len(e.toolEvicted) >= limit {
+		for id, states := range e.toolEvicted {
+			if kept := liveToolStates(states); len(kept) > 0 {
+				e.toolEvicted[id] = kept
+			} else {
+				delete(e.toolEvicted, id)
+			}
+		}
+	}
+	e.toolEvicted[st.id] = append(liveToolStates(e.toolEvicted[st.id]), st)
+}
+
+// liveToolStates keeps the states that still have a batch in flight.
+func liveToolStates(states []*toolSession) []*toolSession {
+	kept := states[:0]
+	for _, st := range states {
+		if st.inflight.Load() > 0 {
+			kept = append(kept, st)
+		}
+	}
+	return kept
+}
+
+// endToolSessionLocked ends the session instance's tool state, and any
+// evicted state of it whose batches are still in flight: their queued
 // batches are discarded. The caller holds e.mu.
 func (e *Engine) endToolSessionLocked(sessionID string) {
+	for _, st := range e.toolEvicted[sessionID] {
+		st.ended = true
+	}
+	delete(e.toolEvicted, sessionID)
 	st := e.toolSessions[sessionID]
 	if st == nil {
 		return
@@ -489,7 +532,10 @@ func (e *Engine) processToolJob(job *toolJob) {
 // repeat is a distinct call from a provider that reuses IDs (the proxy
 // evaluates each response once), so it falls back to the anonymous form,
 // as does every call once the ID set is full. h is the keyed hash of id.
-// The caller holds e.mu.
+// The epoch is a per-process counter, so these event IDs (and the match IDs
+// built from them) are not stable across restarts or re-created states;
+// nothing consumes cross-restart stability today, since correlator state
+// and match dedup are in memory. The caller holds e.mu.
 func (s *toolSession) identify(id string, h uint64) (string, int) {
 	s.ordinal++
 	if id == "" {
