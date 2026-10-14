@@ -115,8 +115,8 @@ func (c CorrelationConfig) Limits() correlation.Limits {
 	return correlation.Limits{MaxHistoryEvents: c.MaxHistoryEvents, MaxSessions: c.MaxSessions}
 }
 
-// validationErrors checks the block against correlation.Validate and the
-// shapes this release implements.
+// validationErrors checks the block against correlation.Validate, exactly
+// as correlation.New will check it.
 func (c CorrelationConfig) validationErrors() []ValidationError {
 	var errs []ValidationError
 	for _, err := range correlation.Validate(c.Rules, c.Limits()) {
@@ -124,15 +124,6 @@ func (c CorrelationConfig) validationErrors() []ValidationError {
 			Field:   "correlation." + err.Field,
 			Message: err.Message,
 		})
-	}
-	for i, r := range c.Rules {
-		if r.Shape == correlation.ShapeSequence {
-			errs = append(errs, ValidationError{
-				Field:   fmt.Sprintf("correlation.rules[%d].shape", i),
-				Message: "shape: sequence is not supported yet: ordered sequences land in Plan B Task 3",
-				Hint:    "use shape: repeated",
-			})
-		}
 	}
 	return errs
 }

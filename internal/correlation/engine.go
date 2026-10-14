@@ -114,9 +114,11 @@ type shard struct {
 
 	// Scratch reused across evaluations under mu, so evaluation does not
 	// allocate. Sized by the largest history seen.
-	fresh []uint64
-	elig  []int
-	seen  map[uint64]struct{}
+	fresh   []uint64
+	elig    []int
+	seen    map[uint64]struct{}
+	seqCur  [MaxSequenceSteps]int // sequence: the chain being built
+	seqBest [MaxSequenceSteps]int // sequence: the best chain so far
 }
 
 type consumedKey struct {
@@ -405,10 +407,7 @@ func (e *Engine) evaluateLocked(sh *shard, st *sessionState, ri, at int) (Match,
 			picked, suppressed = sh.repeated(st, ri, r, bit, at)
 		}
 	case ShapeSequence:
-		picked = st.sequence(r, bit, at)
-		if len(picked) > 0 && st.inCooldown(ri, r, st.history[picked[len(picked)-1]].ev.Timestamp) {
-			picked, suppressed = nil, true
-		}
+		picked, suppressed = sh.sequence(st, ri, r, bit, at)
 	}
 	if len(picked) == 0 {
 		if suppressed {
@@ -666,7 +665,3 @@ func (s *sessionState) rememberMatch(d [16]byte) {
 	}
 	s.matchIDs[d] = struct{}{}
 }
-
-// sequence is implemented in sequence.go (Task 3). Until then a sequence
-// rule never matches.
-func (s *sessionState) sequence(r Rule, bit uint64, at int) []int { return nil }

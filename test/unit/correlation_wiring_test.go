@@ -294,24 +294,70 @@ func TestCorrelationWiring_EnforceRuleWarnsAtStartup(t *testing.T) {
 	}
 }
 
-// Wiring review I-4: the sequence engine is a stub, so configuration
-// rejects shape: sequence instead of accepting a rule that never matches.
-func TestCorrelationWiring_ConfigRejectsSequenceRules(t *testing.T) {
+// Wiring review I-4 refused shape: sequence while the engine was a stub.
+// Plan B Task 3 implements sequences, so a valid sequence rule validates
+// and an invalid one is still refused with the engine's own field error.
+func TestCorrelationWiring_ConfigAcceptsSequenceRules(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Correlation.Enabled = true
 	cfg.Correlation.Rules = []correlation.Rule{sequenceRule("ordered", time.Minute, "a_b", "c_d")}
+	if res := cfg.Validate(); !res.Valid {
+		t.Fatalf("a valid sequence rule must validate: %+v", res.Errors)
+	}
+	if err := cfg.Correlation.Validate(); err != nil {
+		t.Fatalf("CorrelationConfig.Validate: %v", err)
+	}
+
+	cfg.Correlation.Rules = []correlation.Rule{sequenceRule("ordered", time.Minute, "a_b")}
 	res := cfg.Validate()
 	found := false
 	for _, e := range res.Errors {
-		if e.Field == "correlation.rules[0].shape" && contains(e.Message, "Plan B Task 3") {
+		if e.Field == "correlation.rules[0].sequence" {
 			found = true
 		}
 	}
 	if res.Valid || !found {
-		t.Fatalf("shape: sequence must be rejected naming Plan B Task 3: %+v", res.Errors)
+		t.Fatalf("a one-step sequence must be refused on rules[0].sequence: %+v", res.Errors)
 	}
-	if err := cfg.Correlation.Validate(); err == nil || !contains(err.Error(), "ordered sequences land in Plan B Task 3") {
-		t.Fatalf("CorrelationConfig.Validate: %v", err)
+}
+
+// A sequence match reaches the policy engine as a correlation violation
+// whose evidence reports shape sequence and the steps in time order, even
+// when the later step was recorded first.
+func TestCorrelationWiring_SequenceMatchViolation(t *testing.T) {
+	e := policy.NewEngine(policy.Config{
+		Enabled: true, Mode: "enforce",
+		RiskLadder: policy.RiskLadderConfig{Enabled: true, Thresholds: baselineThresholds()},
+		Correlation: policy.CorrelationConfig{
+			Enabled: true,
+			Limits:  okLimits(),
+			Rules:   []correlation.Rule{sequenceRule("ordered_injection", time.Minute, "semantic_injection", "semantic_injection")},
+		},
+	})
+	now := time.Now()
+	recordCorrelationInput(e, "sess-seq", "ev_late", now.Add(time.Second))
+	recordCorrelationInput(e, "sess-seq", "ev_early", now)
+	fs := e.GetFlaggedSession("sess-seq")
+	var m *policy.Violation
+	if fs != nil {
+		for i := range fs.Violations {
+			if fs.Violations[i].RuleName == "correlation.ordered_injection" {
+				m = &fs.Violations[i]
+			}
+		}
+	}
+	if m == nil || m.Correlation == nil {
+		t.Fatalf("want a sequence match with evidence: %+v", fs)
+	}
+	ev := m.Correlation
+	if ev.Shape != "sequence" || ev.Rule != "ordered_injection" || ev.MatchID != m.EventID {
+		t.Fatalf("evidence metadata: %+v", ev)
+	}
+	if len(ev.EventIDs) != 2 || ev.EventIDs[0] != "ev_early" || ev.EventIDs[1] != "ev_late" {
+		t.Fatalf("steps must be in time order: %+v", ev.EventIDs)
+	}
+	if !m.EvidenceOnly {
+		t.Fatal("an audit rule's match is evidence-only")
 	}
 }
 

@@ -32,10 +32,10 @@ func TestCorrelationWiring_InvalidConfigFailsStartup(t *testing.T) {
 	for name, mutate := range map[string]func(*config.Config){
 		"zero history":  func(c *config.Config) { c.Correlation.MaxHistoryEvents = 0 },
 		"zero sessions": func(c *config.Config) { c.Correlation.MaxSessions = 0 },
-		"sequence rule": func(c *config.Config) {
+		"one-step sequence rule": func(c *config.Config) {
 			c.Correlation.Rules = []correlation.Rule{{
 				Name: "ordered", Shape: correlation.ShapeSequence,
-				Sequence: []string{"a_b", "c_d"}, Window: time.Minute,
+				Sequence: []string{"a_b"}, Window: time.Minute,
 			}}
 		},
 	} {
@@ -48,6 +48,25 @@ func TestCorrelationWiring_InvalidConfigFailsStartup(t *testing.T) {
 		if a.policyEngine != nil {
 			t.Errorf("%s: a failed startup must not leave a policy engine", name)
 		}
+	}
+}
+
+// Plan B Task 3: the engine implements ordered sequences, so a valid
+// sequence rule starts (configuration used to refuse shape: sequence while
+// the engine was a stub).
+func TestCorrelationWiring_SequenceRuleStarts(t *testing.T) {
+	quietLogs(t)
+	cfg := correlationTestConfig(t)
+	cfg.Correlation.Rules = []correlation.Rule{{
+		Name: "ordered", Shape: correlation.ShapeSequence,
+		Sequence: []string{"a_b", "c_d"}, Window: time.Minute,
+	}}
+	a := &app{cfg: cfg}
+	if err := a.setupPolicyEngine(); err != nil {
+		t.Fatalf("a valid sequence rule must start: %v", err)
+	}
+	if a.policyEngine == nil {
+		t.Fatal("want a policy engine")
 	}
 }
 

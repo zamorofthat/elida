@@ -84,8 +84,10 @@ pattern completes. The shipped rule, `slow_burn_injection`, matches
 - **Needs evidence to correlate.** `injection_elevated` events exist only
   when semantic detection runs in `audit` or `enforce`; in `shadow` the
   shipped rule sees nothing.
-- **Sequences are not available yet.** Only `shape: repeated` rules exist;
-  `shape: sequence` is rejected at load until ordered sequences land.
+- **Sequences need their events in the history.** `shape: sequence` rules
+  order steps by event timestamp, so a late asynchronous result still fills
+  its step, but only while the earlier steps are still in the bounded
+  history (see the budget below). No sequence rule ships by default.
 - **One history budget per session.** `max_history_events` is shared by every
   category any rule wants. A flood of one wanted category can evict another
   category's evidence before its rule window has elapsed, so with several

@@ -887,9 +887,28 @@ in `audit` or `enforce`; in `shadow` the rule sees nothing.
 **Validation.** Rule names, categories, counts, windows and memory limits are
 validated when the file is loaded, exactly as the engine will be built (an
 explicit `max_history_events: 0` is an error, not "use the default"). An
-enabled block that cannot be built refuses startup. `shape` must be
-`repeated`: ordered sequences (`shape: sequence`) are not available yet, and
-validation rejects them until they land (Plan B Task 3).
+enabled block that cannot be built refuses startup.
+
+**Shapes.** `shape: repeated` matches `count` events of one `category`
+within `window`. `shape: sequence` matches 2 to 8 categories listed under
+`sequence:`, in that order by event time, with the first and last no more
+than `window` apart (inclusive); it takes no `category`, `count` or
+`count_by`:
+
+```yaml
+    - name: probe_then_exfil
+      shape: sequence
+      sequence: [injection_elevated, policy_violation]
+      window: 10m
+```
+
+Order is decided by event timestamps, not by arrival, so an asynchronous
+semantic result that lands after later events still fills its step. Events
+with equal timestamps follow arrival order. A step may repeat a category
+(`[a, a, b]` needs two `a` events before the `b`). For both shapes, each
+event contributes to at most one match of a rule (it may also contribute to
+other rules), and `cooldown` (default: `window`) suppresses a further match
+of the rule until that long after the previous match's last event.
 
 **Modes.** The default `mode` is `audit`: a match is evidence-only, adds no
 risk, and is exported as an informational OCSF 2004 Detection Finding with
