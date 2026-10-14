@@ -2701,6 +2701,21 @@ func compileToolRules(rules []Rule) []CompiledToolRule {
 // rules. When a tool taxonomy is configured it also queues the calls for
 // temporal correlation; that never affects the result.
 func (e *Engine) EvaluateToolCalls(sessionID string, toolCalls []ToolCall) *ContentCheckResult {
+	return e.evaluateToolCalls(sessionID, toolCalls, true)
+}
+
+// EvaluateToolCallsUncorrelated is EvaluateToolCalls without the temporal
+// correlation step: tool rules are evaluated and their violations recorded
+// exactly as EvaluateToolCalls does, but the calls are not queued on the
+// tool lane. The detached async response scan uses it for a session that
+// is no longer active, so a late batch keeps its tool-rule evidence (the
+// caller persists a flagged session as before) without re-creating tool
+// correlation state for an ended session.
+func (e *Engine) EvaluateToolCallsUncorrelated(sessionID string, toolCalls []ToolCall) *ContentCheckResult {
+	return e.evaluateToolCalls(sessionID, toolCalls, false)
+}
+
+func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, correlate bool) *ContentCheckResult {
 	if len(toolCalls) == 0 {
 		return nil
 	}
@@ -2718,7 +2733,7 @@ func (e *Engine) EvaluateToolCalls(sessionID string, toolCalls []ToolCall) *Cont
 	// lock (see toollane.go). On its own a categorized call records
 	// nothing; only a completed correlation match is recorded, and never
 	// as part of this result.
-	if taxonomy != nil {
+	if taxonomy != nil && correlate {
 		e.enqueueToolCalls(sessionID, taxonomy, toolCalls)
 	}
 

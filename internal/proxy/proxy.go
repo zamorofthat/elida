@@ -1336,13 +1336,19 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 			)
 		}
 	}
-	// Evaluate tool calls in async-scanned response. A session that ended
-	// (killed, terminated or timed out) while this scan ran is skipped: its
-	// record may already be persisted and released, and a late batch must
-	// not re-create its policy or correlation state.
-	if toolCalls := p.liveToolCalls(sessionID, content); len(toolCalls) > 0 {
+	// Evaluate tool calls in async-scanned response. For a session that
+	// ended (killed, terminated or timed out) while this scan ran, tool
+	// rules are still evaluated and a flagged session still persisted
+	// below, like EvaluateResponseContent above, but the calls skip
+	// temporal correlation: a late batch must not re-create the ended
+	// session's tool correlation state.
+	if toolCalls := ExtractToolCallsFromResponse([]byte(content)); len(toolCalls) > 0 {
 		policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
-		if result := p.policy.EvaluateToolCalls(sessionID, policyToolCalls); result != nil {
+		evaluate := p.policy.EvaluateToolCalls
+		if !p.sessionActive(sessionID) {
+			evaluate = p.policy.EvaluateToolCallsUncorrelated
+		}
+		if result := evaluate(sessionID, policyToolCalls); result != nil {
 			for _, v := range result.Violations {
 				slog.Info("async tool call scan: violation detected",
 					"session_id", sessionID,
@@ -1361,15 +1367,14 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 	}
 }
 
-// liveToolCalls extracts the tool calls of an async-scanned response, or
-// none when the session is no longer active in the manager.
-func (p *Proxy) liveToolCalls(sessionID, content string) []ToolCallInfo {
-	if p.manager != nil {
-		if sess, ok := p.manager.Get(sessionID); !ok || !sess.IsActive() {
-			return nil
-		}
+// sessionActive reports whether the session is still active in the
+// manager (true when the proxy has no manager).
+func (p *Proxy) sessionActive(sessionID string) bool {
+	if p.manager == nil {
+		return true
 	}
-	return ExtractToolCallsFromResponse([]byte(content))
+	sess, ok := p.manager.Get(sessionID)
+	return ok && sess.IsActive()
 }
 
 // logResponse logs a standard response
