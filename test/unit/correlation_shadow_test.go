@@ -312,18 +312,27 @@ func TestShadowCorrelation_RuntimeSwitchSplitsEvidenceNeverDoubleCounts(t *testi
 }
 
 // Race detector target: AssessRequest, Reconfigure, Bind/Unbind (Forget)
-// and the session readers all run concurrently.
+// and the session readers all run concurrently. A start barrier releases
+// every goroutine together, the mode keeps switching until the workers are
+// done (so both modes are exercised: some decisions reach the shadow
+// correlator and some do not), and a second group races an AssessRequest
+// against its own session's end and Unbind (Task 8 review M3). Whatever the
+// interleaving, no shadow correlation state may survive the sessions.
 func TestShadowCorrelation_ConcurrentAssessReconfigureUnbind(t *testing.T) {
 	r, _, sc := shadowCorrRunner(t, "shadow", elevatedScores())
-	var wg sync.WaitGroup
-	for w := 0; w < 4; w++ {
+	const workers, iterations, messages = 4, 20, 3
+	const racers = 16
+	start := make(chan struct{})
+	var wg, reconf sync.WaitGroup
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			for i := 0; i < 20; i++ {
+			<-start
+			for i := 0; i < iterations; i++ {
 				sess := session.NewSession(fmt.Sprintf("sess-conc-%d-%d", w, i%3), "https://backend", "127.0.0.1:1")
 				r.Bind(sess)
-				for m := 0; m < 3; m++ {
+				for m := 0; m < messages; m++ {
 					assessTool(r, sess, m, fmt.Sprintf("Note %d %d.", i, m))
 				}
 				_ = sess.GetCorrelationShadow()
@@ -332,10 +341,39 @@ func TestShadowCorrelation_ConcurrentAssessReconfigureUnbind(t *testing.T) {
 			}
 		}(w)
 	}
-	wg.Add(1)
+	// Assess versus Unbind: each racer session is bound up front, then its
+	// messages race the session's end and Unbind.
+	raced := make([]*session.Session, racers)
+	for i := range raced {
+		sess := session.NewSession(fmt.Sprintf("sess-race-%d", i), "https://backend", "127.0.0.1:1")
+		r.Bind(sess)
+		raced[i] = sess
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			for m := 0; m < messages; m++ {
+				assessTool(r, sess, 100+m, fmt.Sprintf("Racing note %d.", m))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			sess.SetState(session.Completed)
+			r.Unbind(sess)
+		}()
+	}
+	workersDone := make(chan struct{})
+	reconf.Add(1)
 	go func() {
-		defer wg.Done()
-		for i := 0; i < 20; i++ {
+		defer reconf.Done()
+		<-start
+		for i := 0; ; i++ {
+			select {
+			case <-workersDone:
+				return
+			default:
+			}
 			l := r.Live()
 			if i%2 == 0 {
 				l.Mode = "audit"
@@ -345,8 +383,22 @@ func TestShadowCorrelation_ConcurrentAssessReconfigureUnbind(t *testing.T) {
 			_ = r.Reconfigure(l)
 		}
 	}()
+	close(start)
 	wg.Wait()
-	if st := sc.Stats(); st.Sessions != 0 {
+	close(workersDone)
+	reconf.Wait()
+
+	st := sc.Stats()
+	if st.Sessions != 0 {
 		t.Fatalf("every session was unbound, so no shadow state may remain: %+v", st)
+	}
+	for _, sess := range raced {
+		if r.Bound(sess.ID) {
+			t.Fatalf("an AssessRequest racing Unbind re-bound the ended session %s", sess.ID)
+		}
+	}
+	total := uint64(workers*iterations*messages + racers*messages)
+	if st.EventsObserved == 0 || st.EventsObserved >= total {
+		t.Fatalf("both modes must be exercised: %d of %d decisions observed by the shadow correlator", st.EventsObserved, total)
 	}
 }

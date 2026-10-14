@@ -978,10 +978,19 @@ func sameInstance(a, b *session.Session) bool {
 // instance starts under a key of its own, so it never completes a match with
 // an earlier instance's evidence.
 func (r *Runner) Bind(sess *session.Session) {
-	if sess == nil || !sess.IsActive() {
+	if sess == nil {
 		return
 	}
 	r.boundMu.Lock()
+	// IsActive is checked under boundMu: every session-end path moves the
+	// session off Active before Unbind takes this lock, so a Bind that
+	// checked before the state change and locked after Unbind would
+	// otherwise re-bind the ended session permanently (no further Unbind
+	// comes) with its shadow correlation state.
+	if !sess.IsActive() {
+		r.boundMu.Unlock()
+		return
+	}
 	if b, ok := r.bound[sess.ID]; ok {
 		if !sameInstance(b.sess, sess) {
 			r.forgetShadow(shadowKey(b.sess))
