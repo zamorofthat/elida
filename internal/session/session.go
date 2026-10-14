@@ -150,8 +150,10 @@ const MaxCorrelationShadow = 50
 // semantic decisions. It is calibration data: it records what a correlation
 // rule would have matched had the decisions been recorded as violations,
 // and it is never a violation. EventIDs are the contributing DecisionIDs
-// (see SemanticShadow). It carries identifiers, categories and times, never
-// content.
+// (see SemanticShadow) recorded under this session ID while this session
+// instance was bound to the semantic runner: a session that reuses an
+// ended session's ID starts with empty shadow correlation state. It carries
+// identifiers, categories and times, never content.
 type CorrelationShadow struct {
 	Timestamp time.Time `json:"timestamp"`
 	MatchID   string    `json:"match_id"`

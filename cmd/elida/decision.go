@@ -164,6 +164,13 @@ func (a *app) setupDecision(ctx context.Context) error {
 		return fmt.Errorf("decision.mode enforce refused: the configured threshold set %q does not match the loaded model's threshold set %q (model %s %s); enforcement requires calibration evidence for the exact model and threshold-set versions in use. Select the matching decision.threshold_set, or set decision.mode: audit",
 			d.ThresholdSet, m.Calibration.ThresholdSet, m.Name, m.Version)
 	}
+	// The shadow correlator (D14) is built for every startup mode, so a
+	// runtime switch to shadow finds it; only effective shadow feeds it.
+	shadowCorr, err := a.shadowCorrelator()
+	if err != nil {
+		a.teardownDecision(ctx)
+		return err
+	}
 	rcfg := runner.Config{
 		Mode:       d.Mode,
 		PolicyMode: policyMode,
@@ -188,12 +195,18 @@ func (a *app) setupDecision(ctx context.Context) error {
 		Policy:              recorder,
 		ThresholdSetMatches: h.ThresholdSetMatches,
 	}
+	if shadowCorr != nil {
+		// Assigned only when built: a nil *correlation.Engine must not
+		// reach the interface as a typed nil.
+		rcfg.ShadowCorrelator = shadowCorr
+	}
 	r, err := runner.New(rcfg)
 	if err != nil {
 		return a.abandonDecision(ctx, fmt.Errorf("semantic runner configuration is invalid: %w", err))
 	}
 	pending.Store(r)
 	a.decisionRunner = r
+	a.shadowCorr = shadowCorr
 	warnEmptyElevatedBand(d.ElevatedThreshold, m.Calibration.MainThreshold)
 
 	// Without an engine, policyMode is only a fill-in: log "none" rather
@@ -244,7 +257,7 @@ func (a *app) teardownDecision(ctx context.Context) {
 	if a.decisionProvider != nil {
 		_ = a.decisionProvider.Close()
 	}
-	a.decisionScheduler, a.decisionProvider, a.decisionRunner = nil, nil, nil
+	a.decisionScheduler, a.decisionProvider, a.decisionRunner, a.shadowCorr = nil, nil, nil, nil
 }
 
 // decisionPolicyDisabledReason is the /control/decision reason when the

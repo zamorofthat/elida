@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -83,6 +84,14 @@ type app struct {
 	// decisionSchedulerCfg is the configuration decisionScheduler was built
 	// with, kept for inspection.
 	decisionSchedulerCfg scheduler.Config
+	// shadowCorr is the semantic runner's shadow correlator (Plan B D14),
+	// nil unless correlation is enabled and the runner was built. It needs
+	// no shutdown drain: Observe runs synchronously inside the runner (on
+	// the request or the async-delivery goroutine), it owns no goroutines
+	// or queues, and its in-memory state is meant to end with the process.
+	// The decision drain, which delivers the last async results, runs
+	// before the process exits, so nothing is left half-observed.
+	shadowCorr *correlation.Engine
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -170,6 +179,7 @@ func main() {
 	a.initPolicyEngine()
 	a.initInstructionIntegrity()
 	a.initDecision()
+	a.logCorrelationSummary()
 
 	// Start session manager (handles timeouts, cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -964,6 +974,86 @@ func logTaxonomyWarnings(cfg correlation.TaxonomyConfig) {
 			"message", w.Message,
 		)
 	}
+}
+
+// shadowCorrelator builds the semantic runner's shadow correlator (Plan B
+// D14): a correlation engine of its own, from the same correlation rules
+// and limits as the policy engine's correlator but never shared with it, so
+// shadow evidence can never complete a policy match or become a violation.
+// It returns nil when correlation is disabled or the policy engine is not
+// running (correlation is inactive without it, and setupPolicyEngine warns).
+// setupPolicyEngine has already validated the block, so an error here is a
+// programming error and fails startup like any invalid correlation block.
+func (a *app) shadowCorrelator() (*correlation.Engine, error) {
+	cc := a.cfg.Correlation
+	if !cc.Enabled || a.policyEngine == nil {
+		return nil, nil
+	}
+	eng, err := correlation.New(cc.Rules, cc.Limits())
+	if err != nil {
+		return nil, fmt.Errorf("invalid correlation configuration for the shadow correlator: %w", err)
+	}
+	return eng, nil
+}
+
+// logCorrelationSummary logs one content-free line describing temporal
+// correlation as started: the rules (count, shapes, mode per rule), the
+// limits, whether the semantic runner has a shadow correlator, the tool
+// taxonomy and the tool-lane bounds. Rule names are operator configuration;
+// no tool glob, argument pattern or traffic content is logged. Per-rule
+// enforce WARNs and taxonomy cost WARNs are logged separately.
+func (a *app) logCorrelationSummary() {
+	cc := a.cfg.Correlation
+	if !cc.Enabled {
+		slog.Info("temporal correlation disabled")
+		return
+	}
+	if a.policyEngine == nil {
+		return // setupPolicyEngine already warned that correlation is inactive
+	}
+	eng, err := correlation.New(cc.Rules, cc.Limits())
+	if err != nil {
+		return // unreachable: setupPolicyEngine refused an invalid block
+	}
+	tx, err := correlation.NewTaxonomy(cc.TaxonomyConfig)
+	if err != nil {
+		return // unreachable, as above
+	}
+	var repeated, sequence int
+	modes := make([]string, 0, len(cc.Rules))
+	for _, r := range eng.Rules() {
+		switch r.Shape {
+		case correlation.ShapeRepeated:
+			repeated++
+		case correlation.ShapeSequence:
+			sequence++
+		}
+		modes = append(modes, r.Name+":"+string(r.Mode))
+	}
+	instructions, maxArgs, warnings := 0, correlation.DefaultMaxArgumentBytes, 0
+	if tx != nil {
+		instructions, maxArgs, warnings = tx.Instructions(), tx.MaxArgumentBytes(), len(tx.Warnings())
+	}
+	slog.Info("temporal correlation enabled",
+		"rules", len(modes),
+		"repeated_rules", repeated,
+		"sequence_rules", sequence,
+		"rule_modes", strings.Join(modes, ","),
+		"policy_mode", a.cfg.Policy.Mode,
+		"max_history_events", cc.MaxHistoryEvents,
+		"max_sessions", cc.MaxSessions,
+		"shadow_correlator", a.shadowCorr != nil,
+		"tool_categories", len(cc.ToolCategories),
+		"taxonomy_instructions", instructions,
+		"max_argument_bytes", maxArgs,
+		"taxonomy_warnings", warnings,
+		"tool_lane_workers", policy.ToolLaneWorkers,
+		"tool_queue_per_worker", policy.ToolQueuePerWorker,
+		"tool_batches_per_session", policy.MaxToolBatchesPerSession,
+		"tool_queue_bytes", policy.MaxToolQueueBytes,
+		"tool_calls_per_batch", policy.MaxToolCallsPerBatch,
+		"tool_call_ids_per_session", policy.MaxToolCallIDsPerSession,
+	)
 }
 
 func (a *app) initInstructionIntegrity() {

@@ -26,7 +26,13 @@ import (
 // from the SHIPPED default correlation config.
 func shadowCorrRunner(t *testing.T, mode string, scores map[decision.Signal]float64) (*runner.Runner, *policy.Engine, *correlation.Engine) {
 	t.Helper()
-	f := decisiontest.NewFake(scores)
+	return shadowCorrRunnerWith(t, mode, decisiontest.NewFake(scores))
+}
+
+// shadowCorrRunnerWith is shadowCorrRunner over a caller-built fake (for
+// a ScoreFunc gate).
+func shadowCorrRunnerWith(t *testing.T, mode string, f *decisiontest.FakeProvider) (*runner.Runner, *policy.Engine, *correlation.Engine) {
+	t.Helper()
 	sch, err := scheduler.New(scheduler.Config{
 		Provider:         f,
 		TokenCounter:     decisiontest.ByteTokenCounter{BytesPerToken: 4},
