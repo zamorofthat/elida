@@ -49,7 +49,10 @@ func TestTaxonomy_Categorize(t *testing.T) {
 		{"unmapped tool", "list_dir", `{"path":"/"}`, "[]"},
 		{"empty name", "", `anything`, "[]"},
 		{"glob is anchored", "xread_file", `{}`, "[]"},
-		{"name longer than the bound", strings.Repeat("h", correlation.MaxToolNameBytes-4) + "http_", `{}`, "[]"},
+		// Task 4 review N1: names the glob http_* would match, one byte
+		// over the bound (not categorized) and exactly at it (categorized).
+		{"name longer than the bound", "http_" + strings.Repeat("h", correlation.MaxToolNameBytes-4), `{}`, "[]"},
+		{"name at the bound", "http_" + strings.Repeat("h", correlation.MaxToolNameBytes-5), `{}`, "[external_transmission]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -468,5 +471,38 @@ func TestTaxonomy_EstimatedWorstCaseCost(t *testing.T) {
 		if got := correlation.EstimatedWorstCaseCost(tc.insts, tc.bytes); got != tc.want {
 			t.Errorf("EstimatedWorstCaseCost(%d, %d) = %v, want %v", tc.insts, tc.bytes, got, tc.want)
 		}
+	}
+}
+
+// Task 4 review N2: the soft limit is inclusive. A taxonomy of exactly
+// WarnTaxonomyInstructions instructions does not warn; one more does.
+func TestTaxonomy_SoftInstructionWarningBoundary(t *testing.T) {
+	build := func(v int) *correlation.Taxonomy {
+		r := correlation.ToolCategoryRule{Category: "edge", Tools: []string{"*"}}
+		for j := 0; j < 4; j++ {
+			r.ArgumentPatterns = append(r.ArgumentPatterns, strings.Repeat(string(rune('a'+j)), 200))
+		}
+		r.ArgumentPatterns = append(r.ArgumentPatterns, strings.Repeat("z", v))
+		return newTaxonomy(t, 0, r)
+	}
+	var atLimit, overLimit bool
+	for v := 1; v <= 250 && !(atLimit && overLimit); v++ {
+		tx := build(v)
+		switch n := tx.Instructions(); n {
+		case correlation.WarnTaxonomyInstructions:
+			atLimit = true
+			if w := tx.Warnings(); w != nil {
+				t.Fatalf("exactly %d instructions must not warn: %v", n, w)
+			}
+		case correlation.WarnTaxonomyInstructions + 1:
+			overLimit = true
+			if w := tx.Warnings(); len(w) != 1 {
+				t.Fatalf("%d instructions must warn once, got %v", n, w)
+			}
+		}
+	}
+	if !atLimit || !overLimit {
+		t.Fatalf("fixture: no pattern length hit %d and %d instructions exactly (at=%v over=%v)",
+			correlation.WarnTaxonomyInstructions, correlation.WarnTaxonomyInstructions+1, atLimit, overLimit)
 	}
 }
