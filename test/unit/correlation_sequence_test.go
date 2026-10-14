@@ -279,3 +279,45 @@ func TestCorrelationSequence_EvaluationDoesNotAllocate(t *testing.T) {
 		t.Fatalf("sequence evaluation allocates %v per event, want 0", allocs)
 	}
 }
+
+// Task 3 review M2: the cooldown-suppressed path, through repickLast,
+// allocates nothing per event either. After one match the rule is in
+// cooldown; the history is full of later b events, and each measured event
+// is an a arriving late (async) with an earlier timestamp. It fills step 0,
+// the forward walk picks the earliest b, which is inside the cooldown, so
+// evaluation re-picks the last step (repickLast), finds no b that clears
+// the cooldown, and suppresses.
+func TestCorrelationSequence_SuppressedAndRepickPathsDoNotAllocate(t *testing.T) {
+	r := sequenceRule("chain", time.Hour, "a", "b")
+	r.Cooldown = time.Hour
+	e := newCorr(t, correlation.Limits{MaxHistoryEvents: 1024, MaxSessions: 16}, r)
+	if m := e.Observe("s", []correlation.Event{cev("a0", "a", "", 0), cev("b0", "b", "", time.Millisecond)}); len(m) != 1 {
+		t.Fatalf("fixture: the first chain must match, got %+v", m)
+	}
+	for i := 0; i < 64; i++ { // fill the history with later b events
+		if m := e.Observe("s", []correlation.Event{cev(fmt.Sprintf("b%04d", i), "b", "", 10*time.Second+time.Duration(i)*time.Millisecond)}); len(m) != 0 {
+			t.Fatalf("fixture: a b alone must not match, got %+v", m)
+		}
+	}
+	evs := make([][]correlation.Event, 512)
+	for i := range evs {
+		evs[i] = []correlation.Event{cev(fmt.Sprintf("a%04d", i), "a", "", 5*time.Second+time.Duration(i)*time.Microsecond)}
+	}
+	i := 0
+	for ; i < 16; i++ { // warm up the late-a path
+		e.Observe("s", evs[i])
+	}
+	before := e.Stats().CooldownSuppressed
+	allocs := testing.AllocsPerRun(256, func() {
+		if m := e.Observe("s", evs[i]); len(m) != 0 {
+			t.Fatalf("unexpected match inside the cooldown %+v", m)
+		}
+		i++
+	})
+	if got := e.Stats().CooldownSuppressed; got <= before {
+		t.Fatalf("fixture: the measured events must take the suppressed path (CooldownSuppressed %d -> %d)", before, got)
+	}
+	if allocs != 0 {
+		t.Fatalf("suppressed sequence evaluation allocates %v per event, want 0", allocs)
+	}
+}

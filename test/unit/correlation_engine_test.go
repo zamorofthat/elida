@@ -444,6 +444,13 @@ func TestCorrelationEngine_ShardsSplitTheSessionCap(t *testing.T) {
 	if st.Sessions > correlation.DefaultMaxSessions || st.Sessions+int(st.SessionsEvicted) != n || st.HistoryEvents != st.Sessions {
 		t.Fatalf("sessions must stay within the cap and every eviction be counted: %+v", st)
 	}
+	// Task 2 review N-2: the sessions are spread across the shards, so the
+	// engine keeps most of the cap (the per-shard LRU keeps about 85-95%
+	// at full occupancy); a hash that sent every session to one shard
+	// would keep only 1/MaxShards of it.
+	if st.Sessions < correlation.DefaultMaxSessions*3/4 {
+		t.Fatalf("after %d sessions the shards keep only %d of the %d cap: they are not spread", n, st.Sessions, correlation.DefaultMaxSessions)
+	}
 	for i := 0; i < n; i++ {
 		e.Forget(fmt.Sprintf("s%d", i))
 	}
