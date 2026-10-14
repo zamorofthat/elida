@@ -857,8 +857,12 @@ when that session ends.
 `/control/settings`. A settings save or reset reloads the policy engine but
 keeps the correlation engine and every session's correlation state; changing
 the block needs a restart. `ELIDA_CORRELATION_ENABLED=true|false` overrides
-`enabled`. Correlation reads the policy engine's violation events, so it
-needs `policy.enabled: true`; startup logs a WARN otherwise.
+`enabled`. Policy correlation (violation events and tool activity) reads the
+policy engine's events, so it needs `policy.enabled: true`; shadow
+correlation of semantic decisions does not (see
+[semantic detection](semantic-detection.md#temporal-correlation)). With the
+policy engine disabled, startup logs a WARN that policy correlation is
+inactive while shadow correlation is active.
 
 **Defaults.** Correlation is disabled by default. The shipped rule set is one
 audit-only rule:
@@ -893,7 +897,7 @@ violations.
 
 | Key | Default | Notes |
 |---|---|---|
-| `correlation.enabled` | `false` | Env `ELIDA_CORRELATION_ENABLED=true\|false`. Needs `policy.enabled: true`. |
+| `correlation.enabled` | `false` | Env `ELIDA_CORRELATION_ENABLED=true\|false`. Policy correlation (violation events and tool activity) needs `policy.enabled: true`; shadow correlation of semantic decisions does not. |
 | `correlation.max_history_events` | `64` | Events kept per session, shared by every category any rule wants; 1 to 1024, and at least the largest rule's `count` or sequence length. |
 | `correlation.max_sessions` | `4096` | Sessions tracked, least recently active evicted first (per shard); 1 to 100000. |
 | `correlation.rules` | `slow_burn_injection` | Replaces the default list. At most 64 rules. |
