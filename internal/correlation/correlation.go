@@ -30,7 +30,11 @@ const (
 	CountByEvent CountBy = "event"
 	// CountByMessage counts distinct Event.Group values, so several events
 	// produced by one message (its windows, its decoded representations)
-	// count once.
+	// count once. A message that contributed to a match of the rule is
+	// consumed for that rule: none of its events count toward another match
+	// of the rule unless the event is more than Window after that match's
+	// last event (exactly Window later is still consumed). This holds after
+	// the message's earlier events have left the history.
 	CountByMessage CountBy = "message"
 )
 
@@ -68,11 +72,29 @@ const (
 	MaxHistoryEventsCeiling = 1024
 	MaxSessionsCeiling      = 100000
 	// MaxMatchIDsPerSession caps the per-session set of emitted match IDs
-	// kept for deduplication. Oldest evicted first.
+	// kept for deduplication (as 16-byte digests). Oldest evicted first.
 	MaxMatchIDsPerSession = 256
 	// DefaultMaxHistoryEvents and DefaultMaxSessions are the configuration
-	// defaults: about 64 x 160 B = 10 KB per session, about 40 MB at the
-	// session cap in the worst case.
+	// defaults.
+	//
+	// Worst-case memory, measured as live heap per session after a GC:
+	// every rule matching repeatedly (count 2, 1 ns cooldown), a full
+	// history of 38-byte event IDs, a full dedup set and, under count_by
+	// message, a full consumed-group set:
+	//
+	//	history  rules  count_by  per session  x 4096 (default)  x 100000 (ceiling)
+	//	64       64     event     ~29 KB       ~117 MB           ~2.9 GB
+	//	64       64     message   ~39 KB       ~159 MB           ~3.9 GB
+	//	64       1      message   ~37 KB       ~153 MB           ~3.7 GB
+	//	1024     64     event     ~196 KB      ~803 MB           ~19.6 GB
+	//	1024     64     message   ~295 KB      ~1.2 GB           ~29.5 GB
+	//
+	// The history costs about 180 B per event (the entry plus its ID,
+	// category and group strings; longer IDs cost more), the dedup set about
+	// 12 KB when full, the consumed-group set about 80 B per group, and the
+	// last-match times 24 B per rule. A session that has never matched
+	// carries only its history. Operators raising max_history_events or
+	// max_sessions should budget from this table.
 	DefaultMaxHistoryEvents = 64
 	DefaultMaxSessions      = 4096
 )
@@ -90,9 +112,16 @@ type Rule struct {
 	// Sequence applies to sequence rules only: categories in order.
 	Sequence []string `yaml:"sequence,omitempty" json:"sequence,omitempty"`
 	// Window bounds the time from the first to the last contributing event.
+	// It is inclusive: events exactly Window apart may match. Under
+	// count_by message it is also how long a consumed message stays
+	// consumed (see CountByMessage).
 	Window time.Duration `yaml:"window" json:"window"`
 	// Cooldown suppresses a further match of this rule in a session until
-	// this long after the previous match's last event. Zero means Window.
+	// this long after the previous match's last event. It is inclusive on
+	// the allowed side: a candidate whose last event is exactly Cooldown
+	// after the previous match's last event may match. Zero means Window.
+	// Each candidate window is checked separately, so a late event can
+	// still complete a window that ends after the cooldown.
 	Cooldown time.Duration `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
 	// Severity is "info", "warning" or "critical"; empty means warning.
 	Severity string `yaml:"severity,omitempty" json:"severity,omitempty"`
@@ -101,8 +130,18 @@ type Rule struct {
 
 // Limits bounds the engine's memory.
 type Limits struct {
+	// MaxHistoryEvents caps each session's history. The budget is shared
+	// by every category any rule wants: a high-volume category can evict a
+	// low-volume category's evidence before that evidence's rule window
+	// has elapsed, so a flood of one wanted category is an evasion lever
+	// against rules on another. With the default rule set (one category)
+	// this does not arise. Follow-up, before tool-call categories ship
+	// (Plan B Task 7): reserve a share of the budget for
+	// injection_elevated, or give each rule its own budget.
 	MaxHistoryEvents int
-	MaxSessions      int
+	// MaxSessions caps the sessions tracked across all shards (see
+	// MaxShards).
+	MaxSessions int
 }
 
 // Event is one correlation input. It carries no content.
@@ -278,6 +317,18 @@ func canonicalMatch(rule string, eventIDs []string) string {
 // repeated here. The same rule over the same events always yields the same
 // ID, which is what deduplicates repeated evaluation.
 func MatchID(rule string, eventIDs []string) string {
+	return matchIDFromDigest(matchDigest(rule, eventIDs))
+}
+
+// matchDigest is the 16-byte digest a MatchID encodes. The engine keeps
+// digests, not ID strings, in its per-session dedup set.
+func matchDigest(rule string, eventIDs []string) [16]byte {
 	sum := sha256.Sum256([]byte("elida.correlation." + matchIDVersion + "\x00" + canonicalMatch(rule, eventIDs)))
-	return "cm_" + hex.EncodeToString(sum[:16])
+	var d [16]byte
+	copy(d[:], sum[:16])
+	return d
+}
+
+func matchIDFromDigest(d [16]byte) string {
+	return "cm_" + hex.EncodeToString(d[:])
 }

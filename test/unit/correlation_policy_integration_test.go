@@ -1,8 +1,10 @@
 package unit
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,12 +59,40 @@ func TestCorrelationPolicy_AuditMatchIsEvidenceOnlyAndExportsOCSF(t *testing.T) 
 	if !got.EvidenceOnly || fs.RiskScore != 0 || fs.CurrentAction != string(policy.ActionObserve) {
 		t.Fatalf("audit match contributed risk: evidence=%v score=%v action=%q", got.EvidenceOnly, fs.RiskScore, fs.CurrentAction)
 	}
+	// The match ID is the violation's event ID and its evidence's match ID.
+	if !strings.HasPrefix(got.EventID, "cm_") || got.Correlation == nil || got.Correlation.MatchID != got.EventID {
+		t.Fatalf("match ID: event_id=%q evidence=%+v", got.EventID, got.Correlation)
+	}
+	// Every field the session-end export copies (cmd/elida enrichRecordFromPolicy).
 	finding := telemetry.BuildPolicyDetection("sess-audit", telemetry.Violation{
 		RuleName: got.RuleName, Description: got.Description, Severity: string(got.Severity),
-		Action: got.Action, EventCategory: got.EventCategory, EvidenceOnly: got.EvidenceOnly,
+		MatchedText: got.MatchedText, Action: got.Action, EventCategory: got.EventCategory,
+		FrameworkRef: got.FrameworkRef, SourceRole: got.SourceRole,
+		EvidenceOnly: got.EvidenceOnly, EventID: got.EventID,
 	}, telemetry.SessionRecord{})
 	if finding.ClassUID != 2004 || len(finding.FindingInfo.Types) != 1 || finding.FindingInfo.Types[0] != correlation.CategoryMatch {
 		t.Fatalf("OCSF correlation finding = %#v", finding)
+	}
+	if !strings.HasPrefix(finding.FindingInfo.Title, correlation.RuleNamePrefix) || finding.Analytic.Name != "correlation.repeated_injection" {
+		t.Fatalf("the finding must carry the correlation.-prefixed rule name: %+v %+v", finding.FindingInfo, finding.Analytic)
+	}
+	if !finding.Unmapped.EvidenceOnly || finding.SeverityID != telemetry.OCSFSeverityInfo ||
+		!strings.HasPrefix(finding.Message, "Policy evidence (no risk contributed)") {
+		t.Fatalf("an audit match exports as informational evidence: sev=%d evidence=%v msg=%q",
+			finding.SeverityID, finding.Unmapped.EvidenceOnly, finding.Message)
+	}
+	// No new export (C-1 allowlist): the match ID is not exported (it is on
+	// /control/flagged/{id}), analytic.uid is not misused for it, and no
+	// event ID or semantic metadata is attached to a non-semantic finding.
+	if finding.Analytic.UID != "" || finding.Unmapped.EventID != "" || finding.Unmapped.Semantic != nil {
+		t.Fatalf("correlation finding exports more than the allowlist: %+v %+v", finding.Analytic, finding.Unmapped)
+	}
+	raw, err := json.Marshal(finding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), got.EventID) || strings.Contains(string(raw), "ev_a") {
+		t.Fatalf("the finding must not carry match or contributing event IDs: %s", raw)
 	}
 }
 

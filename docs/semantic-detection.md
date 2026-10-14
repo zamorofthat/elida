@@ -63,6 +63,37 @@ window text or matched text. Every exported string is restricted to
 identifier-shaped values (letters, digits and `._:>+/=-`, at most 128 bytes)
 and exported empty otherwise; an event ID that fails the check is left out.
 
+## Temporal correlation
+
+A single elevated window is weak evidence; a slow burn spreads an injection
+across several messages so that no one message crosses the main threshold.
+Temporal correlation (`correlation:` in `elida.yaml`, see
+[configuration](configuration.md#temporal-correlation)) watches each
+session's content-free violation events and records a match when a rule's
+pattern completes. The shipped rule, `slow_burn_injection`, matches
+`injection_elevated` evidence from three distinct messages within 15 minutes.
+
+- **Audit-only by default.** Correlation is disabled by default, and the
+  shipped rule is `mode: audit`: a match is recorded as an evidence-only
+  `correlation.slow_burn_injection` violation and adds no risk. A rule set to
+  `mode: enforce` contributes its severity to the risk ladder, except under
+  `policy.mode: audit`, which caps it. Promoting a rule is a reserved
+  decision.
+- **Restart-only.** The block is not a settings key; a settings save keeps
+  the engine and its state, and a change needs a restart.
+- **Needs evidence to correlate.** `injection_elevated` events exist only
+  when semantic detection runs in `audit` or `enforce`; in `shadow` the
+  shipped rule sees nothing.
+- **Sequences are not available yet.** Only `shape: repeated` rules exist;
+  `shape: sequence` is rejected at load until ordered sequences land.
+- **One history budget per session.** `max_history_events` is shared by every
+  category any rule wants. A flood of one wanted category can evict another
+  category's evidence before its rule window has elapsed, so with several
+  categories configured, a high-volume category is an evasion lever against a
+  rule on a low-volume one. The shipped rule set has one category.
+- **State is in memory.** History is lost on restart and when a session ends
+  or is evicted by `max_sessions`.
+
 ## Limitations
 
 Each entry says what is not caught or not guaranteed, and how it fails.

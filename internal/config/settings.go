@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"elida/internal/correlation"
 )
 
 // SettingsLayer identifies the source of settings
@@ -373,9 +375,12 @@ func dropEqInt(a, b *int) *int {
 }
 
 // ReservedRuleName reports whether name is a rule name the semantic decision
-// runner records violations under. No policy rule, from elida.yaml or from a
-// settings save, may use one.
-func ReservedRuleName(name string) bool { return reservedSemanticRuleNames[name] }
+// runner records violations under, or starts with the temporal-correlation
+// prefix ("correlation.") that correlation matches are recorded under. No
+// policy rule, from elida.yaml or from a settings save, may use one.
+func ReservedRuleName(name string) bool {
+	return reservedSemanticRuleNames[name] || strings.HasPrefix(name, correlation.RuleNamePrefix)
+}
 
 // SettingsStore manages settings with layered configuration
 type SettingsStore struct {

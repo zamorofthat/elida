@@ -684,7 +684,7 @@ Guardrails:
   `policy.mode: enforce` save (or a reset) lifts the cap without
   `?confirm=enforce`. That `enforce` was confirmed when it was saved; a later
   `elida.yaml` change does not re-confirm it. The same holds for any cap:
-lifting it needs no confirmation.
+  lifting it needs no confirmation.
 - **`settings.yaml` holds only overrides.** A save stores a `decision` key
   only when its value differs from `elida.yaml`'s; a key equal to the
   `elida.yaml` value is dropped (the merged value is the same). A dashboard
@@ -847,31 +847,67 @@ policy:
 
 ## Temporal correlation
 
-`correlation` evaluates content-free policy event metadata within each
-session. Its history and session count are bounded, and the engine forgets a
-session when that session ends. Configuration changes require a restart.
+`correlation` evaluates content-free policy event metadata (event IDs,
+categories, source role and message index, timestamps) within each session.
+Its history and session count are bounded, and the engine forgets a session
+when that session ends.
+
+**Restart-only, outside settings.** The block is top-level `correlation:` in
+`elida.yaml` (not under `policy:`), and it is not part of `settings.yaml` or
+`/control/settings`. A settings save or reset reloads the policy engine but
+keeps the correlation engine and every session's correlation state; changing
+the block needs a restart. `ELIDA_CORRELATION_ENABLED=true|false` overrides
+`enabled`. Correlation reads the policy engine's violation events, so it
+needs `policy.enabled: true`; startup logs a WARN otherwise.
+
+**Defaults.** Correlation is disabled by default. The shipped rule set is one
+audit-only rule:
 
 ```yaml
 correlation:
-  enabled: true
+  enabled: false
   max_history_events: 64
   max_sessions: 4096
   rules:
-    - name: repeated_injection
+    - name: slow_burn_injection
       shape: repeated
-      category: semantic_injection
+      category: injection_elevated
       count: 3
       count_by: message
-      window: 10m
-      cooldown: 1h
-      severity: critical
+      window: 15m
+      cooldown: 15m
+      severity: warning
       mode: audit
 ```
 
-Rule names, categories, counts, windows, and memory limits are validated at
-startup. `shape` is `repeated` or `sequence`; sequence rules use a `sequence`
-list instead of `category`, `count`, and `count_by`. The default `mode` is
-`audit`, so matches are evidence-only and exported as informational OCSF 2004
-Detection Findings. `mode: enforce` makes a match contribute to the existing
-risk ladder. Correlation findings use the reserved rule prefix `correlation.`
-and event category `correlation_match`.
+A `rules:` list in `elida.yaml` replaces the default list; it is not merged.
+`injection_elevated` evidence is recorded only when semantic detection runs
+in `audit` or `enforce`; in `shadow` the rule sees nothing.
+
+**Validation.** Rule names, categories, counts, windows and memory limits are
+validated when the file is loaded, exactly as the engine will be built (an
+explicit `max_history_events: 0` is an error, not "use the default"). An
+enabled block that cannot be built refuses startup. `shape` must be
+`repeated`: ordered sequences (`shape: sequence`) are not available yet, and
+validation rejects them until they land (Plan B Task 3).
+
+**Modes.** The default `mode` is `audit`: a match is evidence-only, adds no
+risk, and is exported as an informational OCSF 2004 Detection Finding with
+`evidence_only`. `mode: enforce` makes a match contribute the rule's severity
+at full weight to the existing risk ladder. Promoting a rule to enforce is a
+reserved decision; startup logs a WARN for each enforce rule, and
+`policy.mode: audit` caps enforce rules to evidence-only.
+
+**Records.** A match is recorded as a violation named `correlation.<rule>`
+with event category `correlation_match`, its match ID as the event ID, and a
+`correlation` object (match ID, rule, shape, mode, contributing event IDs and
+categories, first and last event time) on `GET /control/flagged/{id}`. The
+`correlation.` prefix is reserved: neither `elida.yaml` nor a settings save
+may name a rule with it. `GET /control/flagged/stats` reports a
+`correlation` object (events queued and observed, matches, drops, shard
+count) while correlation is enabled.
+
+`count_by: message` counts distinct messages (source role and message
+index; index 0 is a real message, so several windows of one long first
+message count once). Events with no message at all (metric and anomaly
+violations, which carry no source role) count individually.

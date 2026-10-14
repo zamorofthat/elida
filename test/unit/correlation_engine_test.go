@@ -303,3 +303,182 @@ func TestCorrelationEngine_MatchDedupSetIsBounded(t *testing.T) {
 		t.Fatalf("the dedup set is bounded at %d: the oldest ID was evicted, got %+v", correlation.MaxMatchIDsPerSession, m)
 	}
 }
+
+// The tests below come from the Task 2 review fix round.
+
+// D10: consumption is per rule, so one event counts toward each rule once.
+func TestCorrelationRepeated_OneEventCountsTowardDifferentRules(t *testing.T) {
+	e := newCorr(t, okLimits(),
+		repeatedRule("pair", "a", 2, 10*time.Minute),
+		repeatedRule("triple", "a", 3, 10*time.Minute))
+	var all []correlation.Match
+	for i := 0; i < 3; i++ {
+		all = append(all, e.Observe("s", []correlation.Event{cev(fmt.Sprintf("e%d", i), "a", "", time.Duration(i)*time.Second)})...)
+	}
+	got := map[string]string{}
+	for _, m := range all {
+		got[m.Rule] = fmt.Sprint(m.EventIDs)
+	}
+	if len(all) != 2 || got["pair"] != "[e0 e1]" || got["triple"] != "[e0 e1 e2]" {
+		t.Fatalf("want pair [e0 e1] and triple [e0 e1 e2] sharing e0 and e1, got %+v", all)
+	}
+}
+
+// A late event can complete a window that ends after the cooldown even when
+// the earliest-ending window containing it is inside the cooldown.
+func TestCorrelationRepeated_LateEventCompletesWindowPastCooldown(t *testing.T) {
+	burst := repeatedRule("burst", "a", 2, 10*time.Minute)
+	burst.Cooldown = 5 * time.Minute
+	long := repeatedRule("long", "z", 2, time.Hour) // raises the history horizon only
+	e := newCorr(t, okLimits(), burst, long)
+	obs := func(id string, at time.Duration) []correlation.Match {
+		return e.Observe("s", []correlation.Event{cev(id, "a", "", at)})
+	}
+	obs("e1", 0)
+	if m := obs("e2", time.Minute); len(m) != 1 { // cooldown runs to 6m
+		t.Fatalf("e1 e2 must match, got %+v", m)
+	}
+	obs("x", 2*time.Minute)
+	if m := obs("z", 13*time.Minute); len(m) != 0 { // [x z] spans 11m
+		t.Fatalf("[x z] is wider than the window, got %+v", m)
+	}
+	// w arrives late: [x w] ends inside the cooldown, [w z] spans exactly
+	// the window and ends after it.
+	m := obs("w", 3*time.Minute)
+	if len(m) != 1 || fmt.Sprint(m[0].EventIDs) != "[w z]" {
+		t.Fatalf("want [w z], got %+v", m)
+	}
+	if s := e.Stats().CooldownSuppressed; s != 0 {
+		t.Fatalf("a window cleared the cooldown, so nothing is counted as suppressed, got %d", s)
+	}
+}
+
+// Window and cooldown boundaries are inclusive.
+func TestCorrelationRepeated_BoundariesAreInclusive(t *testing.T) {
+	e := newCorr(t, okLimits(), repeatedRule("pair", "a", 2, 10*time.Minute))
+	e.Observe("at", []correlation.Event{cev("a1", "a", "", 0)})
+	if m := e.Observe("at", []correlation.Event{cev("a2", "a", "", 10*time.Minute)}); len(m) != 1 {
+		t.Fatalf("a span of exactly the window matches, got %+v", m)
+	}
+	e.Observe("past", []correlation.Event{cev("p1", "a", "", 0)})
+	if m := e.Observe("past", []correlation.Event{cev("p2", "a", "", 10*time.Minute+time.Nanosecond)}); len(m) != 0 {
+		t.Fatalf("a span one nanosecond over the window does not match, got %+v", m)
+	}
+
+	r := repeatedRule("cd", "a", 2, 10*time.Minute)
+	r.Cooldown = 5 * time.Minute
+	for _, c := range []struct {
+		name  string
+		last  time.Duration
+		match bool
+	}{{"edge", 6 * time.Minute, true}, {"inside", 6*time.Minute - time.Nanosecond, false}} {
+		e := newCorr(t, okLimits(), r)
+		e.Observe("s", []correlation.Event{cev("c1", "a", "", 0), cev("c2", "a", "", time.Minute)}) // cooldown to 6m
+		e.Observe("s", []correlation.Event{cev("c3", "a", "", 5*time.Minute)})
+		m := e.Observe("s", []correlation.Event{cev("c4", "a", "", c.last)})
+		if (len(m) == 1) != c.match {
+			t.Fatalf("%s: a candidate ending at %v, cooldown until 6m: match=%v, got %+v", c.name, c.last, c.match, m)
+		}
+	}
+}
+
+// count_by message: a consumed message cannot count again for the rule
+// until the rule's window has elapsed since the match, even after its
+// events leave the history.
+func TestCorrelationRepeated_CountByMessageConsumedGroupWaitsForWindow(t *testing.T) {
+	r := repeatedRule("slow_burn", "injection_elevated", 3, 15*time.Minute)
+	r.CountBy = correlation.CountByMessage
+	r.Cooldown = time.Nanosecond // isolate consumption from the cooldown
+	e := newCorr(t, okLimits(), r)
+	obs := func(id, group string, at time.Duration) []correlation.Match {
+		return e.Observe("s", []correlation.Event{cev(id, "injection_elevated", group, at)})
+	}
+	obs("A1", "tool#1", 0)
+	obs("B1", "tool#2", 30*time.Second)
+	if m := obs("C1", "tool#3", time.Minute); len(m) != 1 { // tool#1..3 consumed until 1m + 15m
+		t.Fatalf("[A1 B1 C1] must match, got %+v", m)
+	}
+	obs("D1", "tool#4", 10*time.Minute)
+	obs("E1", "tool#5", 12*time.Minute)
+	// A1 (at 0) is pruned from the history at 15m30s, but tool#1 is still
+	// consumed: [D1 E1 A2] must not match.
+	if m := obs("A2", "tool#1", 15*time.Minute+30*time.Second); len(m) != 0 {
+		t.Fatalf("tool#1 already counted for slow_burn at 1m; it cannot count again before 16m, got %+v", m)
+	}
+	if m := obs("A3", "tool#1", 16*time.Minute); len(m) != 0 {
+		t.Fatalf("the consumption boundary is inclusive (16m is still blocked), got %+v", m)
+	}
+	m := obs("A4", "tool#1", 16*time.Minute+time.Second)
+	if len(m) != 1 || fmt.Sprint(m[0].EventIDs) != "[D1 E1 A4]" {
+		t.Fatalf("after the window has elapsed tool#1 counts again: want [D1 E1 A4], got %+v", m)
+	}
+}
+
+func TestCorrelationEngine_ObserveCapsEventsPerCall(t *testing.T) {
+	e := newCorr(t, correlation.Limits{MaxHistoryEvents: correlation.MaxHistoryEventsCeiling, MaxSessions: 8},
+		repeatedRule("burst", "a", 32, time.Hour))
+	batch := make([]correlation.Event, correlation.MaxEventsPerObserve+44)
+	for i := range batch {
+		batch[i] = cev(fmt.Sprintf("e%d", i), "a", "", time.Duration(i)*time.Millisecond)
+	}
+	e.Observe("s", batch)
+	st := e.Stats()
+	if st.EventsObserved != correlation.MaxEventsPerObserve || st.EventsDropped != 44 || st.HistoryEvents != correlation.MaxEventsPerObserve {
+		t.Fatalf("want %d observed and 44 dropped, got %+v", correlation.MaxEventsPerObserve, st)
+	}
+}
+
+func TestCorrelationEngine_ShardsSplitTheSessionCap(t *testing.T) {
+	if s := newCorr(t, okLimits(), repeatedRule("b", "a", 2, time.Hour)).Stats().Shards; s != correlation.MaxShards {
+		t.Fatalf("the default session cap uses %d shards, got %d", correlation.MaxShards, s)
+	}
+	if s := newCorr(t, correlation.Limits{MaxHistoryEvents: 8, MaxSessions: 8}, repeatedRule("b", "a", 2, time.Hour)).Stats().Shards; s != 1 {
+		t.Fatalf("a small session cap keeps one exact LRU, got %d shards", s)
+	}
+	e := newCorr(t, okLimits(), repeatedRule("b", "a", 2, time.Hour))
+	const n = 5000
+	for i := 0; i < n; i++ {
+		e.Observe(fmt.Sprintf("s%d", i), []correlation.Event{cev(fmt.Sprintf("e%d", i), "a", "", 0)})
+	}
+	st := e.Stats()
+	if st.Sessions > correlation.DefaultMaxSessions || st.Sessions+int(st.SessionsEvicted) != n || st.HistoryEvents != st.Sessions {
+		t.Fatalf("sessions must stay within the cap and every eviction be counted: %+v", st)
+	}
+	for i := 0; i < n; i++ {
+		e.Forget(fmt.Sprintf("s%d", i))
+	}
+	if st := e.Stats(); st.Sessions != 0 || st.HistoryEvents != 0 {
+		t.Fatalf("Forget must empty every shard: %+v", st)
+	}
+}
+
+func TestCorrelationEngine_ConcurrentAcrossShards(t *testing.T) {
+	e := newCorr(t, okLimits(), repeatedRule("burst", "a", 3, time.Hour))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	total := 0
+	for g := 0; g < 64; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			sid := fmt.Sprintf("s%d", g)
+			for i := 0; i < 20; i++ {
+				m := e.Observe(sid, []correlation.Event{cev(fmt.Sprintf("g%d-%d", g, i), "a", "", time.Duration(i)*time.Second)})
+				mu.Lock()
+				total += len(m)
+				mu.Unlock()
+				if i%7 == 0 {
+					_ = e.Stats()
+				}
+			}
+			e.Forget(sid)
+		}(g)
+	}
+	wg.Wait()
+	if total != 64 {
+		t.Fatalf("want one match per session, got %d", total)
+	}
+	if st := e.Stats(); st.Sessions != 0 || st.HistoryEvents != 0 {
+		t.Fatalf("every session was forgotten: %+v", st)
+	}
+}

@@ -557,21 +557,25 @@ decision:
     max_expansion_ratio: 4
 
 # Bounded temporal correlation over content-free policy event metadata.
-# Audit is the safe rule default; set mode: enforce explicitly for matches
-# that should contribute to the existing risk ladder.
+# Restart-only: it is not a settings.yaml key, and a settings save keeps the
+# engine and its state. Requires policy.enabled. Audit is the safe rule
+# default; set mode: enforce explicitly for matches that should contribute
+# to the existing risk ladder (policy.mode audit still caps them). A rules
+# list here replaces the default list. Only shape: repeated is available.
+# Env override: ELIDA_CORRELATION_ENABLED.
 correlation:
   enabled: false
   max_history_events: 64
   max_sessions: 4096
-  rules: []
-  # Example:
-  # rules:
-  #   - name: multi_event_injection
-  #     shape: repeated
-  #     category: semantic_injection
-  #     count: 3
-  #     count_by: message
-  #     window: 10m
-  #     cooldown: 1h
-  #     severity: critical
-  #     mode: audit
+  rules:
+    # Three distinct messages with injection_elevated evidence within 15
+    # minutes. Audit-only: recorded as evidence, never adds risk.
+    - name: slow_burn_injection
+      shape: repeated
+      category: injection_elevated
+      count: 3
+      count_by: message
+      window: 15m
+      cooldown: 15m
+      severity: warning
+      mode: audit
