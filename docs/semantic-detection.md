@@ -174,7 +174,9 @@ For example, `sequence: [credential_discovery, external_transmission]`.
   workers, 256 batches queued per worker, 64 batches per session, 32 MiB
   of queued arguments, 128 calls per batch, and 256 remembered provider
   call IDs per session (later calls use the anonymous event form and still
-  count). What overflows is dropped and counted.
+  count). What overflows is dropped and counted. A batch's events (calls x
+  matching categories) are observed in chunks of 256, so a batch that falls
+  into several categories loses nothing.
 - Arguments are scanned and then dropped. They are never stored or
   logged.
 - A categorized call that completes no match records nothing.

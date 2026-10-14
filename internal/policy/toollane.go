@@ -493,7 +493,16 @@ func (e *Engine) processToolJob(job *toolJob) {
 		}
 	}
 	e.correlationQueued.Add(uint64(len(events)))
-	matches := job.corr.Observe(job.sessionID, events)
+	// One batch carries up to MaxToolCallsPerBatch x (categories per call)
+	// events, more than one Observe accepts, so it is observed in chunks of
+	// at most MaxEventsPerObserve. Each chunk is evaluated against the
+	// session's full history, so a match spanning two chunks is still
+	// found, and no event of the batch is dropped unevaluated.
+	var matches []correlation.Match
+	for start := 0; start < len(events); start += correlation.MaxEventsPerObserve {
+		end := min(start+correlation.MaxEventsPerObserve, len(events))
+		matches = append(matches, job.corr.Observe(job.sessionID, events[start:end])...)
+	}
 	if e.tools.afterObserve != nil {
 		e.tools.afterObserve(job)
 	}
