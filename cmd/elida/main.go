@@ -860,9 +860,12 @@ func (a *app) initPolicyEngine() {
 func (a *app) setupPolicyEngine() error {
 	if !a.cfg.Policy.Enabled {
 		if a.cfg.Correlation.Enabled {
-			// Correlation reads the policy engine's violation events, so
-			// without one it is inert (wiring review M-8).
-			slog.Warn("correlation is enabled but policy.enabled is false: correlation is inactive until the policy engine is enabled")
+			// Policy correlation reads the policy engine's violation and
+			// tool events, so without one it is inert (wiring review M-8).
+			// The semantic runner's shadow correlator does not depend on it
+			// (Task 9 review M-1): decision is capped to shadow exactly
+			// when policy is off.
+			slog.Warn("correlation is enabled but policy.enabled is false: policy correlation (violations and tool activity) is inactive; shadow correlation of semantic decisions is active when decision is enabled")
 		}
 		return nil
 	}
@@ -980,14 +983,20 @@ func logTaxonomyWarnings(cfg correlation.TaxonomyConfig) {
 // D14): a correlation engine of its own, from the same correlation rules
 // and limits as the policy engine's correlator but never shared with it, so
 // shadow evidence can never complete a policy match or become a violation.
-// It returns nil when correlation is disabled or the policy engine is not
-// running (correlation is inactive without it, and setupPolicyEngine warns).
-// setupPolicyEngine has already validated the block, so an error here is a
-// programming error and fails startup like any invalid correlation block.
+// It returns nil only when correlation is disabled. It does not need the
+// policy engine: with policy.enabled false, decision is capped to shadow,
+// exactly the mode this correlator serves. An invalid correlation block
+// fails startup like any invalid security configuration (setupPolicyEngine
+// validates it when the policy engine runs; it is validated here when not).
 func (a *app) shadowCorrelator() (*correlation.Engine, error) {
 	cc := a.cfg.Correlation
-	if !cc.Enabled || a.policyEngine == nil {
+	if !cc.Enabled {
 		return nil, nil
+	}
+	if a.policyEngine == nil {
+		if err := cc.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	eng, err := correlation.New(cc.Rules, cc.Limits())
 	if err != nil {
@@ -998,30 +1007,31 @@ func (a *app) shadowCorrelator() (*correlation.Engine, error) {
 
 // logCorrelationSummary logs one content-free line describing temporal
 // correlation as started: the rules (count, shapes, mode per rule), the
-// limits, whether the semantic runner has a shadow correlator, the tool
-// taxonomy and the tool-lane bounds. Rule names are operator configuration;
-// no tool glob, argument pattern or traffic content is logged. Per-rule
-// enforce WARNs and taxonomy cost WARNs are logged separately.
+// limits, whether policy correlation runs, whether the semantic runner has
+// a shadow correlator, the tool taxonomy and the tool-lane bounds. It
+// describes the engines already built (the policy engine's correlator and
+// taxonomy, else the shadow correlator) and builds nothing itself. Rule
+// names are operator configuration; no tool glob, argument pattern or
+// traffic content is logged. Per-rule enforce WARNs and taxonomy cost WARNs
+// are logged separately.
 func (a *app) logCorrelationSummary() {
 	cc := a.cfg.Correlation
 	if !cc.Enabled {
 		slog.Info("temporal correlation disabled")
 		return
 	}
-	if a.policyEngine == nil {
-		return // setupPolicyEngine already warned that correlation is inactive
-	}
-	eng, err := correlation.New(cc.Rules, cc.Limits())
-	if err != nil {
-		return // unreachable: setupPolicyEngine refused an invalid block
-	}
-	tx, err := correlation.NewTaxonomy(cc.TaxonomyConfig)
-	if err != nil {
-		return // unreachable, as above
+	var rules []correlation.Rule
+	var tx *correlation.Taxonomy
+	if a.policyEngine != nil {
+		rules, tx = a.policyEngine.CorrelationSetup()
+	} else if a.shadowCorr != nil {
+		rules = a.shadowCorr.Rules()
+	} else {
+		return // neither correlator runs; setupPolicyEngine already warned
 	}
 	var repeated, sequence int
-	modes := make([]string, 0, len(cc.Rules))
-	for _, r := range eng.Rules() {
+	modes := make([]string, 0, len(rules))
+	for _, r := range rules {
 		switch r.Shape {
 		case correlation.ShapeRepeated:
 			repeated++
@@ -1039,6 +1049,7 @@ func (a *app) logCorrelationSummary() {
 		"repeated_rules", repeated,
 		"sequence_rules", sequence,
 		"rule_modes", strings.Join(modes, ","),
+		"policy_correlation", a.policyEngine != nil,
 		"policy_mode", a.cfg.Policy.Mode,
 		"max_history_events", cc.MaxHistoryEvents,
 		"max_sessions", cc.MaxSessions,

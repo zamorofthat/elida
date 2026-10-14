@@ -1699,6 +1699,16 @@ type CorrelationStats struct {
 	ToolBatchesAbandoned uint64 `json:"tool_batches_abandoned"`
 }
 
+// CorrelationSetup returns the installed correlator's normalized rules and
+// the tool taxonomy, for a startup summary that describes what was built
+// rather than rebuilding it. Both are nil when correlation is off; the
+// taxonomy is nil when no tool_categories are configured.
+func (e *Engine) CorrelationSetup() ([]correlation.Rule, *correlation.Taxonomy) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.correlation.Rules(), e.taxonomy
+}
+
 // matchViolationLocked turns a correlation match into a violation. The
 // caller holds e.mu (it reads auditMode).
 func (e *Engine) matchViolationLocked(m correlation.Match) Violation {

@@ -12,8 +12,8 @@ import (
 
 // Plan B Task 9 (D14): the runner's shadow correlator is built from the
 // same correlation block as the policy engine's correlator, but it is a
-// separate engine, and it exists only when correlation is enabled and the
-// policy engine runs.
+// separate engine, and it exists whenever correlation is enabled, with or
+// without the policy engine (Task 9 review M-1).
 func TestShadowCorrelator_FollowsCorrelationConfig(t *testing.T) {
 	quietLogs(t)
 
@@ -52,16 +52,103 @@ func TestShadowCorrelator_FollowsCorrelationConfig(t *testing.T) {
 		t.Fatalf("correlation disabled: want no correlator, got (%v, %v)", c, err)
 	}
 
-	// Correlation needs the policy engine (setupPolicyEngine warns that it
-	// is inactive), and the shadow correlator follows that.
+	// Task 9 review M-1: with policy.enabled false, decision is capped to
+	// shadow, exactly the mode the shadow correlator serves, so it is built
+	// without the policy engine (policy correlation stays inactive).
 	noPolicyCfg := correlationTestConfig(t)
 	noPolicyCfg.Policy.Enabled = false
 	noPolicy := &app{cfg: noPolicyCfg}
 	if err := noPolicy.setupPolicyEngine(); err != nil {
 		t.Fatalf("setupPolicyEngine: %v", err)
 	}
-	if c, err := noPolicy.shadowCorrelator(); c != nil || err != nil {
-		t.Fatalf("policy disabled: want no correlator, got (%v, %v)", c, err)
+	c, err := noPolicy.shadowCorrelator()
+	if err != nil || c == nil {
+		t.Fatalf("policy disabled: want a shadow correlator, got (%v, %v)", c, err)
+	}
+	if got, want := len(c.Rules()), len(noPolicyCfg.Correlation.Rules); got != want {
+		t.Fatalf("the shadow correlator has %d rules, the correlation block %d", got, want)
+	}
+
+	// Without the policy engine nothing else validated the block: an
+	// invalid one still fails startup.
+	badCfg := correlationTestConfig(t)
+	badCfg.Policy.Enabled = false
+	badCfg.Correlation.MaxHistoryEvents = -1
+	bad := &app{cfg: badCfg}
+	if c, err := bad.shadowCorrelator(); c != nil || err == nil {
+		t.Fatalf("policy disabled, invalid correlation block: want an error, got (%v, %v)", c, err)
+	}
+}
+
+// Task 9 review M-1: with policy disabled, setupDecision still builds the
+// shadow correlator, the WARN says policy correlation is inactive and
+// shadow correlation is active, and the summary line is logged.
+func TestShadowCorrelator_WithoutPolicyEngine(t *testing.T) {
+	logs := captureLogs(t)
+	cfg := decisionTestConfig(t)
+	cfg.Policy.Enabled = false
+	cfg.Correlation.Enabled = true
+	a := newDecisionApp(t, cfg, &gate{})
+	a.initSessionStore()
+	if err := a.setupPolicyEngine(); err != nil {
+		t.Fatalf("setupPolicyEngine: %v", err)
+	}
+	if err := a.setupDecision(context.Background()); err != nil {
+		t.Fatalf("setupDecision: %v", err)
+	}
+	t.Cleanup(func() { a.shutdownDecision(context.Background()) })
+	if a.shadowCorr == nil {
+		t.Fatal("policy disabled: setupDecision must still build the shadow correlator")
+	}
+	a.logCorrelationSummary()
+	out := logs.String()
+	if !strings.Contains(out, "policy correlation (violations and tool activity) is inactive; shadow correlation of semantic decisions is active") {
+		t.Errorf("want the reworded WARN:\n%s", out)
+	}
+	if strings.Contains(out, "correlation is inactive until the policy engine is enabled") {
+		t.Errorf("the old WARN claimed all correlation is inactive:\n%s", out)
+	}
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, `msg="temporal correlation enabled"`) {
+			line = l
+		}
+	}
+	for _, want := range []string{"rules=1", "repeated_rules=1", "policy_correlation=false", "shadow_correlator=true"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("summary lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// Task 9 review N-1: the summary describes the engines already built; it
+// does not rebuild an engine or taxonomy from the config. A config edited
+// after startup (never applied: the block is restart-only) does not change
+// what it reports.
+func TestCorrelationWiring_StartupSummaryDescribesBuiltEngines(t *testing.T) {
+	logs := captureLogs(t)
+	cfg := decisionTestConfig(t)
+	cfg.Policy.Enabled = true
+	cfg.Correlation.Enabled = true
+	a := newDecisionApp(t, cfg, &gate{})
+	a.initSessionStore()
+	if err := a.setupPolicyEngine(); err != nil {
+		t.Fatalf("setupPolicyEngine: %v", err)
+	}
+	a.cfg.Correlation.Rules = append(a.cfg.Correlation.Rules, correlation.Rule{
+		Name: "never_built", Shape: correlation.ShapeSequence,
+		Sequence: []string{"a", "b"}, Window: config.DefaultCorrelationRules()[0].Window,
+	})
+	a.cfg.Correlation.ToolCategories = []correlation.ToolCategoryRule{{Category: "a", Tools: []string{"x"}}}
+	a.logCorrelationSummary()
+	out := logs.String()
+	for _, want := range []string{"rules=1 ", "sequence_rules=0", "policy_correlation=true", "taxonomy_instructions=0"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary lacks %q (it must describe the built engine):\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "never_built") {
+		t.Errorf("summary reported a rule that was never built:\n%s", out)
 	}
 }
 
