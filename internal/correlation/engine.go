@@ -99,7 +99,8 @@ type Engine struct {
 	groupSeed maphash.Seed // Event.Group digests
 	idSeed    maphash.Seed // Event.ID digests (an event with no Group)
 
-	shards []*shard
+	shards    []*shard
+	shardMask uint64 // len(shards)-1; the shard count is a power of two
 }
 
 // shard is one independently locked slice of the sessions.
@@ -192,6 +193,9 @@ func New(rules []Rule, limits Limits) (*Engine, error) {
 	}
 	n := shardCount(limits.MaxSessions)
 	e.shards = make([]*shard, n)
+	if n > 1 {
+		e.shardMask = uint64(n - 1)
+	}
 	for i := range e.shards {
 		share := limits.MaxSessions / n
 		if i < limits.MaxSessions%n {
@@ -233,8 +237,7 @@ func (e *Engine) shardFor(sessionID string) *shard {
 	if len(e.shards) == 1 {
 		return e.shards[0]
 	}
-	// The shard count is a power of two.
-	return e.shards[maphash.String(e.seed, sessionID)&uint64(len(e.shards)-1)]
+	return e.shards[maphash.String(e.seed, sessionID)&e.shardMask]
 }
 
 // groupOf is the digest of an event's CountByMessage key: its Group, or its
@@ -260,8 +263,8 @@ func (e *Engine) Observe(sessionID string, events []Event) []Match {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	if len(events) > MaxEventsPerObserve {
-		sh.stats.EventsDropped += uint64(len(events) - MaxEventsPerObserve)
+	if dropped := len(events) - MaxEventsPerObserve; dropped > 0 {
+		sh.stats.EventsDropped += uint64(dropped)
 		events = events[:MaxEventsPerObserve]
 	}
 
