@@ -208,8 +208,14 @@ func extractToolsRecursive(data interface{}, result *[]ToolCallInfo) {
 				})
 			}
 		}
+		// consumed is set when this map's "function" child has been
+		// extracted here; the recursion below must not extract it a second
+		// time (a name with "_" would otherwise match the branch above when
+		// the child itself is visited, turning one call into two).
+		consumed := false
 		if funcDef, ok := v["function"].(map[string]interface{}); ok {
 			if name, ok := funcDef["name"].(string); ok {
+				consumed = true
 				args := ""
 				if a, ok := funcDef["arguments"].(string); ok {
 					args = a
@@ -224,7 +230,10 @@ func extractToolsRecursive(data interface{}, result *[]ToolCallInfo) {
 			}
 		}
 		// Recurse into children
-		for _, child := range v {
+		for k, child := range v {
+			if consumed && k == "function" {
+				continue
+			}
 			extractToolsRecursive(child, result)
 		}
 	case []interface{}:
