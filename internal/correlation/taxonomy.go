@@ -499,20 +499,24 @@ const toolEventVersion = "v1"
 // hex-encoded.
 //
 // With a provider call ID the identity is (session, call ID, tool name,
-// category), so the same call reported twice, at any time or batch
-// position, is one event, while a call ID reused for a different tool is
-// not. Without one it is (session, tool name, category, time in UTC with
-// nanoseconds, ordinal within the batch), so one anonymous call reported by
-// two paths counts twice. The first canonical field ("call" or "anon")
-// keeps the two forms apart. Every field is length-prefixed
-// ("|<len>:<value>") after the version, the convention of MatchID and
-// internal/decision identity v3. The material is identifiers only, never
-// arguments.
+// category): it is stable whenever the call is seen, so the correlator's
+// event-ID dedup treats two events built from it as one. Without one it is
+// (session, tool name, category, time in UTC with nanoseconds, ordinal),
+// and the caller chooses an ordinal that never repeats within the session
+// (the policy tool lane numbers every call of the session).
 //
-// Callers must pass a callID only when the provider guarantees it unique
-// within the session (OpenAI call_*, Anthropic toolu_*); otherwise they
-// must pass "", because two distinct calls sharing a call ID, tool and
+// The policy tool lane passes a call ID only the first time the session
+// sees it; a repeated or absent ID, and every ID once the session's ID
+// memory is full, takes the anonymous form. Every tool call therefore
+// counts, a call ID reused by a provider for a distinct call included.
+// Callers must likewise pass a callID only when it is unique within the
+// session, and "" otherwise: two distinct calls sharing a call ID, tool and
 // category in one session are one event.
+//
+// The first canonical field ("call" or "anon") keeps the two forms apart.
+// Every field is length-prefixed ("|<len>:<value>") after the version, the
+// convention of MatchID and internal/decision identity v3. The material is
+// identifiers only, never arguments.
 func ToolEventID(sessionID, callID, toolName, category string, at time.Time, ordinal int) string {
 	var fields []string
 	if callID != "" {

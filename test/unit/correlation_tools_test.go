@@ -2,6 +2,7 @@ package unit
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -28,10 +29,10 @@ func toolCorrelatedEngine(t *testing.T, rules []policy.Rule, corr ...correlation
 		Rules:      rules,
 		RiskLadder: policy.RiskLadderConfig{Enabled: true, Thresholds: baselineThresholds()},
 		Correlation: policy.CorrelationConfig{
-			Enabled:  true,
-			Rules:    corr,
-			Limits:   correlation.Limits{MaxHistoryEvents: 64, MaxSessions: 64},
-			Taxonomy: toolTaxonomyConfig(),
+			Enabled:        true,
+			Rules:          corr,
+			Limits:         correlation.Limits{MaxHistoryEvents: 64, MaxSessions: 64},
+			TaxonomyConfig: toolTaxonomyConfig(),
 		},
 	})
 }
@@ -80,15 +81,6 @@ func elevatedAt(offset time.Duration) policy.Violation {
 
 func credThenSend() correlation.Rule {
 	return sequenceRule("cred_then_send", 10*time.Minute, "credential_discovery", "external_transmission")
-}
-
-func containsID(ids []string, id string) bool {
-	for _, x := range ids {
-		if x == id {
-			return true
-		}
-	}
-	return false
 }
 
 func TestCorrelationTools_CategorizedCallsAloneDoNotFlag(t *testing.T) {
@@ -158,9 +150,11 @@ func TestCorrelationTools_RepeatedCallIDFallsBackToAnonymous(t *testing.T) {
 	if m == nil {
 		t.Fatal("a repeated call ID is a distinct call and must count")
 	}
-	first := correlation.ToolEventID("sess-t3", "call_dup", "bash", "credential_discovery", time.Time{}, 0)
-	if len(m.Correlation.EventIDs) != 2 || !containsID(m.Correlation.EventIDs, first) {
-		t.Fatalf("want the first call under its provider ID and the repeat anonymous, got %v (first %s)", m.Correlation.EventIDs, first)
+	// Which form each event took is pinned white-box
+	// (TestToolLane_CallIDResolution); here: two distinct events.
+	ids := m.Correlation.EventIDs
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("want two distinct tool events, got %v", ids)
 	}
 }
 
@@ -252,7 +246,7 @@ func TestCorrelationTools_EnforceRuleCappedUnderPolicyAudit(t *testing.T) {
 		RiskLadder: policy.RiskLadderConfig{Enabled: true, Thresholds: baselineThresholds()},
 		Correlation: policy.CorrelationConfig{
 			Enabled: true, Limits: okLimits(), Rules: []correlation.Rule{rule},
-			Taxonomy: toolTaxonomyConfig(),
+			TaxonomyConfig: toolTaxonomyConfig(),
 		},
 	})
 	e.EvaluateToolCalls("sess-t9", []policy.ToolCall{{ID: "a", Name: "read_file", Arguments: "~/.aws/credentials"}})
@@ -306,13 +300,76 @@ func TestCorrelationTools_TaxonomyIsPartOfTheCorrelationBlock(t *testing.T) {
 	e.EvaluateToolCalls("sess-t10", []policy.ToolCall{{ID: "a", Name: "bash", Arguments: "id_rsa"}})
 	flushTools(t, e)
 	cfg := e.GetConfig()
-	if len(cfg.Correlation.Taxonomy.ToolCategories) != 2 {
-		t.Fatalf("GetConfig lost the taxonomy: %+v", cfg.Correlation.Taxonomy)
+	if len(cfg.Correlation.ToolCategories) != 2 {
+		t.Fatalf("GetConfig lost the taxonomy: %+v", cfg.Correlation.TaxonomyConfig)
 	}
 	e.ReloadConfig(cfg)
 	e.EvaluateToolCalls("sess-t10", []policy.ToolCall{{ID: "b", Name: "bash", Arguments: "id_rsa"}})
 	flushTools(t, e)
 	if findViolation(e.GetFlaggedSession("sess-t10"), "correlation.cred_twice") == nil {
 		t.Fatal("a no-op reload must keep correlation state across tool calls")
+	}
+}
+
+// Only categories some rule wants reach the correlator (the Wants filter):
+// a call categorized into an unwanted category is neither observed nor
+// ignored-and-counted.
+func TestCorrelationTools_UnwantedCategoryIsFilteredBeforeObserve(t *testing.T) {
+	e := toolCorrelatedEngine(t, baselineRules(),
+		repeatedRule("send_twice", "external_transmission", 2, 10*time.Minute))
+	e.EvaluateToolCalls("sess-t11", []policy.ToolCall{{ID: "a", Name: "bash", Arguments: "id_rsa"}})
+	flushTools(t, e)
+	st := toolCorrelationStats(t, e)
+	if st.EventsObserved != 0 || st.EventsIgnored != 0 || st.EventsQueued != 0 {
+		t.Fatalf("an unwanted category must not reach Observe: %+v", st)
+	}
+	e.EvaluateToolCalls("sess-t11", []policy.ToolCall{{ID: "b", Name: "http_get"}})
+	flushTools(t, e)
+	if st := toolCorrelationStats(t, e); st.EventsObserved != 1 {
+		t.Fatalf("a wanted category is observed: %+v", st)
+	}
+}
+
+// A reload that changes only the taxonomy is a changed correlation block:
+// the engine is replaced and per-session correlation state resets.
+func TestCorrelationTools_TaxonomyOnlyReloadReplacesTheEngine(t *testing.T) {
+	e := toolCorrelatedEngine(t, baselineRules(),
+		repeatedRule("cred_twice", "credential_discovery", 2, 10*time.Minute))
+	e.EvaluateToolCalls("sess-t12", []policy.ToolCall{{ID: "a", Name: "bash", Arguments: "id_rsa"}})
+	flushTools(t, e)
+	cfg := e.GetConfig()
+	cfg.Correlation.ToolCategories = append(cfg.Correlation.ToolCategories,
+		correlation.ToolCategoryRule{Category: "shell", Tools: []string{"sh"}})
+	e.ReloadConfig(cfg)
+	if got := len(e.GetConfig().Correlation.ToolCategories); got != 3 {
+		t.Fatalf("taxonomy not reloaded: %d entries", got)
+	}
+	e.EvaluateToolCalls("sess-t12", []policy.ToolCall{{ID: "b", Name: "bash", Arguments: "id_rsa"}})
+	flushTools(t, e)
+	if e.IsFlagged("sess-t12") {
+		t.Fatal("a changed taxonomy replaces the engine: history from before the reload must not complete a match")
+	}
+	if st := toolCorrelationStats(t, e); st.EventsObserved != 1 {
+		t.Fatalf("the new engine observes the new call only: %+v", st)
+	}
+}
+
+// GET /control/policy serves GetConfig: the correlation block is one flat
+// snake_case object, the taxonomy inlined as in the YAML block.
+func TestCorrelationTools_PolicyConfigJSONIsSnakeCase(t *testing.T) {
+	e := toolCorrelatedEngine(t, baselineRules(), credThenSend())
+	out, err := json.Marshal(e.GetConfig().Correlation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"enabled"`, `"rules"`, `"limits"`, `"max_history_events"`, `"max_sessions"`, `"tool_categories"`} {
+		if !contains(string(out), key) {
+			t.Errorf("correlation JSON lacks %s: %s", key, out)
+		}
+	}
+	for _, key := range []string{`"Enabled"`, `"Rules"`, `"Limits"`, `"Taxonomy"`, `"TaxonomyConfig"`, `"MaxSessions"`} {
+		if contains(string(out), key) {
+			t.Errorf("correlation JSON has %s: %s", key, out)
+		}
 	}
 }

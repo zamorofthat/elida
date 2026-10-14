@@ -348,7 +348,14 @@ const decisionDrainReserveFraction = 0.5
 // already spent yields an expired context, which makes the scheduler cancel
 // outstanding jobs at once.
 func decisionDrainContext(parent context.Context) (context.Context, context.CancelFunc) {
-	limit := decisionDrainLimit
+	return drainContext(parent, decisionDrainLimit)
+}
+
+// drainContext derives a shutdown step's own deadline from the shutdown
+// context: min(limit, remaining budget minus the reserve
+// (decisionDrainReserveFraction)). With no parent deadline, limit alone
+// applies; a budget already spent yields an expired context.
+func drainContext(parent context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
 	if dl, ok := parent.Deadline(); ok {
 		remaining := time.Until(dl)
 		share := time.Duration(float64(remaining) * (1 - decisionDrainReserveFraction))

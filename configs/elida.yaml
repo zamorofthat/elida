@@ -561,7 +561,8 @@ decision:
 # engine and its state. Requires policy.enabled. Audit is the safe rule
 # default; set mode: enforce explicitly for matches that should contribute
 # to the existing risk ladder (policy.mode audit still caps them). A rules
-# list here replaces the default list. Only shape: repeated is available.
+# list here replaces the default list. Shapes: repeated (count events of
+# one category) and sequence (ordered categories within the window).
 # Env override: ELIDA_CORRELATION_ENABLED.
 correlation:
   enabled: false

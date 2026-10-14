@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"elida/internal/config"
 	"elida/internal/correlation"
 	"elida/internal/policy"
+	"elida/internal/session"
 )
 
 func heavyTaxonomy() []correlation.ToolCategoryRule {
@@ -159,5 +163,72 @@ correlation:
 	}
 	if !found {
 		t.Fatalf("want an audit correlation.cred_then_send match, got %+v", fs.Violations)
+	}
+}
+
+// slowTaxonomy is a valid taxonomy that takes on the order of 100 ms or
+// more per 64 KiB call (NFA-heavy patterns over every argument byte).
+func slowTaxonomy() correlation.TaxonomyConfig {
+	pat := `(a|b|c|d|e|f|g|h)+[0-9]{2,8}(x|y|z)*`
+	var cats []correlation.ToolCategoryRule
+	for i := 0; i < 8; i++ {
+		cats = append(cats, correlation.ToolCategoryRule{
+			Category: "slow_" + string(rune('a'+i)), Tools: []string{"*"},
+			ArgumentPatterns: []string{pat, pat + "q", pat + "r", pat + "s", pat + "t", pat + "u", pat + "v", pat + "w"},
+		})
+	}
+	return correlation.TaxonomyConfig{MaxArgumentBytes: correlation.MaxArgumentBytesCeiling, ToolCategories: cats}
+}
+
+// Review I-1: shutdown closes the tool lane within its own sub-deadline
+// (min(10 s, half the remaining budget)): a lane stuck on a slow taxonomy
+// cannot consume the session drain's and telemetry flush's share, and the
+// closed lane refuses batches a detached async scan sends afterwards.
+func TestCorrelationTaxonomy_ShutdownClosesTheToolLaneWithinItsShare(t *testing.T) {
+	quietLogs(t)
+	cfg := correlationTestConfig(t)
+	cfg.Correlation.TaxonomyConfig = slowTaxonomy()
+	cfg.Correlation.Rules = []correlation.Rule{{
+		Name: "slow_twice", Shape: correlation.ShapeRepeated, Category: "slow_a", Count: 2, Window: time.Minute,
+	}}
+	cfg.ShutdownTimeout = 2 * time.Second
+	a := &app{cfg: cfg, proxyServer: &http.Server{}, manager: session.NewManager(session.NewMemoryStore(), time.Minute)}
+	if err := a.setupPolicyEngine(); err != nil {
+		t.Fatalf("setupPolicyEngine: %v", err)
+	}
+	arg := strings.Repeat("abcdefgh1", correlation.MaxArgumentBytesCeiling/9+1)
+	calls := make([]policy.ToolCall, policy.MaxToolCallsPerBatch)
+	for i := range calls {
+		calls[i] = policy.ToolCall{Name: "bash", Arguments: arg}
+	}
+	for i := 0; i < 2; i++ {
+		a.policyEngine.EvaluateToolCalls("sess-slow", calls)
+	}
+
+	start := time.Now()
+	a.shutdown(func() {})
+	if d := time.Since(start); d > 1600*time.Millisecond {
+		t.Fatalf("shutdown took %v with a stuck tool lane; the lane's share is at most half of %v", d, cfg.ShutdownTimeout)
+	}
+	a.policyEngine.EvaluateToolCalls("sess-late", calls[:1])
+	st, _ := a.policyEngine.Stats()["correlation"].(policy.CorrelationStats)
+	if st.ToolBatchesRefused != 1 {
+		t.Fatalf("shutdown must close the tool lane: a late batch is refused, got %+v", st)
+	}
+}
+
+func TestCorrelationTaxonomy_ToolLaneDrainShare(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	ctx, cancel2 := drainContext(parent, toolLaneDrainLimit)
+	defer cancel2()
+	dl, _ := ctx.Deadline()
+	if left := time.Until(dl); left > 2100*time.Millisecond || left < 1500*time.Millisecond {
+		t.Fatalf("tool-lane share of a 4 s budget = %v, want about 2 s", left)
+	}
+	ctx3, cancel3 := drainContext(context.Background(), toolLaneDrainLimit)
+	defer cancel3()
+	if dl, ok := ctx3.Deadline(); !ok || time.Until(dl) > toolLaneDrainLimit {
+		t.Fatalf("with no parent deadline the 10 s limit applies, got %v %v", dl, ok)
 	}
 }

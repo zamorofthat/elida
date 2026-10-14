@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -547,8 +548,11 @@ type Engine struct {
 	// mu.
 	taxonomy *correlation.Taxonomy
 	// toolSessions holds each live session's tool-correlation state (see
-	// toollane.go). Guarded by mu.
+	// toollane.go), in an LRU (toolLRU, front = most recently used).
+	// Guarded by mu.
 	toolSessions map[string]*toolSession
+	toolLRU      list.List
+	toolEpoch    uint64
 	// tools is the off-request-path lane that categorizes tool calls.
 	tools toolLane
 }
@@ -576,13 +580,17 @@ const CorrelationRulePrefix = correlation.RuleNamePrefix
 const CategoryCorrelationMatch = correlation.CategoryMatch
 
 // CorrelationConfig is the policy engine's temporal-correlation input.
+//
+// The embedded TaxonomyConfig (tool_categories, max_argument_bytes) maps
+// tool calls to categories (Plan B D7); empty means tool calls are not
+// correlated. It is inlined, as in the YAML correlation block, so GET
+// /control/policy serves one flat, snake_case object.
 type CorrelationConfig struct {
-	Enabled bool
-	Rules   []correlation.Rule
-	Limits  correlation.Limits
-	// Taxonomy maps tool calls to categories (Plan B D7). Empty means tool
-	// calls are not correlated.
-	Taxonomy correlation.TaxonomyConfig
+	Enabled bool               `yaml:"enabled" json:"enabled"`
+	Rules   []correlation.Rule `yaml:"rules" json:"rules"`
+	Limits  correlation.Limits `yaml:"limits" json:"limits"`
+
+	correlation.TaxonomyConfig `yaml:",inline"`
 }
 
 // newCorrelationEngine builds the correlator and the tool taxonomy for
@@ -600,7 +608,7 @@ func newCorrelationEngine(cfg CorrelationConfig, auditMode bool) (*correlation.E
 		slog.Error("correlation engine disabled by invalid configuration", "error", err)
 		return nil, nil
 	}
-	taxonomy, err := correlation.NewTaxonomy(cfg.Taxonomy)
+	taxonomy, err := correlation.NewTaxonomy(cfg.TaxonomyConfig)
 	if err != nil {
 		slog.Error("correlation engine disabled by invalid configuration", "error", err)
 		return nil, nil
@@ -624,7 +632,7 @@ func newCorrelationEngine(cfg CorrelationConfig, auditMode bool) (*correlation.E
 // same engine. A nil and an empty rule list are equal.
 func correlationConfigEqual(a, b CorrelationConfig) bool {
 	if a.Enabled != b.Enabled || a.Limits != b.Limits || len(a.Rules) != len(b.Rules) ||
-		!reflect.DeepEqual(a.Taxonomy, b.Taxonomy) {
+		!reflect.DeepEqual(a.TaxonomyConfig, b.TaxonomyConfig) {
 		return false
 	}
 	for i := range a.Rules {
@@ -656,14 +664,14 @@ func cloneCorrelationConfig(c CorrelationConfig) CorrelationConfig {
 		}
 		c.Rules = rules
 	}
-	if c.Taxonomy.ToolCategories != nil {
-		cats := make([]correlation.ToolCategoryRule, len(c.Taxonomy.ToolCategories))
-		for i, r := range c.Taxonomy.ToolCategories {
+	if c.ToolCategories != nil {
+		cats := make([]correlation.ToolCategoryRule, len(c.ToolCategories))
+		for i, r := range c.ToolCategories {
 			r.Tools = cloneStrings(r.Tools)
 			r.ArgumentPatterns = cloneStrings(r.ArgumentPatterns)
 			cats[i] = r
 		}
-		c.Taxonomy.ToolCategories = cats
+		c.ToolCategories = cats
 	}
 	return c
 }
@@ -759,6 +767,7 @@ func NewEngine(cfg Config) *Engine {
 		correlationConfig:  cloneCorrelationConfig(cfg.Correlation),
 		toolSessions:       make(map[string]*toolSession),
 	}
+	e.tools.init()
 	e.correlation, e.taxonomy = newCorrelationEngine(cfg.Correlation, auditMode)
 
 	// Compile regex patterns for content rules
@@ -1667,11 +1676,13 @@ func correlationGroup(v Violation) string {
 // duplicates, and matches discarded because their session ended while
 // Observe ran. Served at GET /control/flagged/stats under "correlation".
 //
-// The Tool* counters describe the tool lane (toollane.go): batches queued,
-// batches dropped because the lane was full, calls dropped past
-// MaxToolCallsPerBatch, batches discarded because their session ended (or
-// the correlator was replaced) before they ran, and tool-session states
-// evicted at MaxToolSessions.
+// The Tool* counters describe the tool lane (toollane.go): batches queued;
+// batches dropped because the lane, the session's quota or the byte budget
+// was full; calls dropped past MaxToolCallsPerBatch; batches discarded
+// because their session ended or was retained, or the correlator was
+// replaced, before they ran; tool-session states evicted by the LRU;
+// batches refused after CloseToolLane; and batches abandoned (queued or
+// mid-categorization) when CloseToolLane stopped the workers.
 type CorrelationStats struct {
 	correlation.Stats
 	EventsQueued     uint64 `json:"events_queued"`
@@ -1684,6 +1695,8 @@ type CorrelationStats struct {
 	ToolCallsDropped     uint64 `json:"tool_calls_dropped"`
 	ToolBatchesDiscarded uint64 `json:"tool_batches_discarded"`
 	ToolSessionsEvicted  uint64 `json:"tool_sessions_evicted"`
+	ToolBatchesRefused   uint64 `json:"tool_batches_refused"`
+	ToolBatchesAbandoned uint64 `json:"tool_batches_abandoned"`
 }
 
 // matchViolationLocked turns a correlation match into a violation. The
@@ -2244,7 +2257,7 @@ func (e *Engine) RemoveFlaggedSession(sessionID string) {
 		e.correlation.Forget(sessionID)
 	}
 	// Tool batches still queued for this session instance are discarded.
-	delete(e.toolSessions, sessionID)
+	e.endToolSessionLocked(sessionID)
 	e.removeFlaggedLocked(sessionID)
 }
 
@@ -2287,7 +2300,7 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 		e.correlation.Forget(sessionID)
 	}
 	// Tool batches still queued for this session instance are discarded.
-	delete(e.toolSessions, sessionID)
+	e.endToolSessionLocked(sessionID)
 
 	flagged, ok := e.flaggedSessions[sessionID]
 	if !ok {
@@ -2435,6 +2448,8 @@ func (e *Engine) Stats() map[string]interface{} {
 			ToolCallsDropped:     e.tools.callsDropped.Load(),
 			ToolBatchesDiscarded: e.tools.batchesDiscarded.Load(),
 			ToolSessionsEvicted:  e.tools.sessionsEvicted.Load(),
+			ToolBatchesRefused:   e.tools.batchesRefused.Load(),
+			ToolBatchesAbandoned: e.tools.batchesAbandoned.Load(),
 		}
 	}
 	return stats
@@ -2694,7 +2709,7 @@ func (e *Engine) EvaluateToolCalls(sessionID string, toolCalls []ToolCall) *Cont
 	// nothing; only a completed correlation match is recorded, and never
 	// as part of this result.
 	if taxonomy != nil {
-		e.enqueueToolCalls(sessionID, taxonomy.MaxArgumentBytes(), toolCalls)
+		e.enqueueToolCalls(sessionID, taxonomy, toolCalls)
 	}
 
 	if len(toolRules) == 0 {

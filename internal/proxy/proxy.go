@@ -1336,8 +1336,11 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 			)
 		}
 	}
-	// Evaluate tool calls in async-scanned response
-	if toolCalls := ExtractToolCallsFromResponse([]byte(content)); len(toolCalls) > 0 {
+	// Evaluate tool calls in async-scanned response. A session that ended
+	// (killed, terminated or timed out) while this scan ran is skipped: its
+	// record may already be persisted and released, and a late batch must
+	// not re-create its policy or correlation state.
+	if toolCalls := p.liveToolCalls(sessionID, content); len(toolCalls) > 0 {
 		policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
 		if result := p.policy.EvaluateToolCalls(sessionID, policyToolCalls); result != nil {
 			for _, v := range result.Violations {
@@ -1356,6 +1359,17 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 		// Persist flagged session immediately to survive crashes
 		p.persistFlaggedSession(sessSnap, backend.Name)
 	}
+}
+
+// liveToolCalls extracts the tool calls of an async-scanned response, or
+// none when the session is no longer active in the manager.
+func (p *Proxy) liveToolCalls(sessionID, content string) []ToolCallInfo {
+	if p.manager != nil {
+		if sess, ok := p.manager.Get(sessionID); !ok || !sess.IsActive() {
+			return nil
+		}
+	}
+	return ExtractToolCallsFromResponse([]byte(content))
 }
 
 // logResponse logs a standard response

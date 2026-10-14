@@ -899,10 +899,10 @@ func (a *app) setupPolicyEngine() error {
 			Thresholds: riskThresholds,
 		},
 		Correlation: policy.CorrelationConfig{
-			Enabled:  a.cfg.Correlation.Enabled,
-			Rules:    a.cfg.Correlation.Rules,
-			Limits:   a.cfg.Correlation.Limits(),
-			Taxonomy: a.cfg.Correlation.TaxonomyConfig,
+			Enabled:        a.cfg.Correlation.Enabled,
+			Rules:          a.cfg.Correlation.Rules,
+			Limits:         a.cfg.Correlation.Limits(),
+			TaxonomyConfig: a.cfg.Correlation.TaxonomyConfig,
 		},
 	})
 
@@ -923,6 +923,26 @@ func (a *app) setupPolicyEngine() error {
 
 	slog.Info("policy engine enabled", "rules", len(policyRules))
 	return nil
+}
+
+// toolLaneDrainLimit caps how long shutdown waits for the tool lane
+// (policy.Engine.CloseToolLane). Like the semantic drain it also keeps
+// decisionDrainReserveFraction of the remaining budget for the steps after
+// it: a slow taxonomy loses the tail of its correlation events, never the
+// session drain or the telemetry flush.
+const toolLaneDrainLimit = 10 * time.Second
+
+// shutdownToolLane closes the policy engine's tool lane under its own
+// sub-deadline.
+func (a *app) shutdownToolLane(ctx context.Context) {
+	if a.policyEngine == nil {
+		return
+	}
+	drainCtx, cancel := drainContext(ctx, toolLaneDrainLimit)
+	defer cancel()
+	if err := a.policyEngine.CloseToolLane(drainCtx); err != nil {
+		slog.Warn("tool-call correlation not drained before shutdown; queued batches abandoned", "error", err)
+	}
 }
 
 // logTaxonomyWarnings logs, once at startup, each non-fatal finding about
@@ -1245,14 +1265,11 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 	// before those sessions are persisted.
 	a.shutdownDecision(shutdownCtx)
 
-	// Step 1c: Let the tool lane finish categorizing tool calls already
-	// queued, so their correlation matches land before sessions are
-	// persisted below.
-	if a.policyEngine != nil {
-		if err := a.policyEngine.FlushToolCalls(shutdownCtx); err != nil {
-			slog.Warn("tool-call correlation not drained before shutdown", "error", err)
-		}
-	}
+	// Step 1c: Close the tool lane: refuse new tool batches (a detached
+	// async scan can still finish after step 1), let the queued ones land
+	// their correlation matches before sessions are persisted below, and
+	// stop the workers, all within the lane's own sub-deadline.
+	a.shutdownToolLane(shutdownCtx)
 
 	// Step 2: Stop the session manager background loop
 	cancel()
