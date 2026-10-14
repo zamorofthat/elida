@@ -49,6 +49,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows that miss the inline lane are coverage gaps recorded with their
   capacity reason. They are no longer counted in `async_dropped` or
   `async_queue_full`.
+- Temporal correlation, disabled by default (`correlation.enabled: false`,
+  env `ELIDA_CORRELATION_ENABLED`). Bounded, content-free correlation of a
+  session's policy events. It has two rule shapes: `repeated` (with
+  `count_by: message`) and `sequence` (ordered by event time). The shipped
+  audit-only rule, `slow_burn_injection`, matches `injection_elevated`
+  evidence from three distinct messages within 15 minutes.
+  - In `audit` and `enforce`, a match is a `correlation.<rule>` violation
+    that is evidence-only unless the rule is `mode: enforce` (capped by
+    `policy.mode: audit`).
+  - In the default `decision.mode: shadow`, a separate shadow correlator
+    records matches as `correlation_shadow` entries on
+    `GET /control/sessions/{id}`. These are calibration data, never
+    violations.
+  - `correlation.tool_categories` maps backend tool calls to categories by
+    name glob and argument pattern. Categorization runs off the request
+    path. `max_argument_bytes` and compiled-instruction caps bound it, and
+    a soft startup WARN reports its estimated cost.
+  - The `correlation:` block is restart-only and is not part of Settings.
+    Startup logs a one-line summary.
+  - Limitations are in `docs/semantic-detection.md`.
 
 ### Changed
 - Release archives now carry the semantic-injection model under
