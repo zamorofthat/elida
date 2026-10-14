@@ -119,6 +119,11 @@ type DecisionStatus struct {
 	// was disabled at runtime: dropped unrecorded and settled as unanswered
 	// (also in coverage_gaps as async_dropped_disabled).
 	AsyncDroppedDisabled int64 `json:"async_dropped_disabled"`
+	// ShadowMatchesDropped counts shadow correlation matches discarded
+	// because their session instance ended (or its ID was reused) while
+	// the match was being computed. A content-free integer; 0 when no
+	// shadow correlator runs.
+	ShadowMatchesDropped int64 `json:"shadow_matches_dropped"`
 
 	// Limits are the restart-only values in force; the Settings page shows
 	// them read-only. Changing one needs elida.yaml and a restart.

@@ -615,6 +615,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		st.AlreadyAssessed = a.decisionRunner.AlreadyAssessed()
 		st.AsyncDroppedNoSession = a.decisionRunner.AsyncDroppedNoSession()
 		st.AsyncDroppedDisabled = a.decisionRunner.AsyncDroppedDisabled()
+		st.ShadowMatchesDropped = a.decisionRunner.ShadowMatchesDropped()
 	}
 	if a.decisionScheduler != nil {
 		m := a.decisionScheduler.Metrics()

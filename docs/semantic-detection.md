@@ -156,7 +156,8 @@ when a decision is handled, owns no goroutines or queues, and its in-memory
 state ends with the process. It runs outside the semantic runner's
 session-registry lock, so a slow correlation on one session never delays
 another session's assessment. A match computed while its session ended (or
-its ID was reused) is dropped, and that instance's state is forgotten. A
+its ID was reused) is dropped, counted in `shadow_matches_dropped` at
+`GET /control/decision`, and that instance's state is forgotten. A
 match accepted just before the session ends can still be written to the
 ended session's in-memory record after its end callback ran; that is
 harmless while `correlation_shadow` is not persisted.
