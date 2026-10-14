@@ -1364,6 +1364,7 @@ func proxyToolCallsToPolicyToolCalls(toolCalls []ToolCallInfo) []policy.ToolCall
 	result := make([]policy.ToolCall, len(toolCalls))
 	for i, tc := range toolCalls {
 		result[i] = policy.ToolCall{
+			ID:        tc.ID,
 			Name:      tc.Name,
 			Arguments: tc.Arguments,
 		}
