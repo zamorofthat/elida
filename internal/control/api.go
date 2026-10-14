@@ -673,6 +673,7 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// Detail path only: the snapshot already holds a deep copy taken under
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
+	info.CorrelationShadow = snap.CorrelationShadow
 	// GetFlaggedSession returns a deep copy, so the list is the caller's.
 	if h.policyEngine != nil {
 		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
@@ -778,6 +779,10 @@ type SessionInfo struct {
 	// Fifty entries per session would bloat every list response, and
 	// calibration review happens one session at a time.
 	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
+	// CorrelationShadow is populated only on the single-session detail
+	// path, for the same reason as SemanticShadow: shadow-mode correlation
+	// matches, calibration data that is never a violation.
+	CorrelationShadow []session.CorrelationShadow `json:"correlation_shadow,omitempty"`
 
 	// SemanticDecisions is the policy engine's per-decision record list
 	// (detail path only, like SemanticShadow): what explains each semantic

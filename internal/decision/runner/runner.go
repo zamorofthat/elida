@@ -90,11 +90,13 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"elida/internal/config"
+	"elida/internal/correlation"
 	"elida/internal/decision"
 	"elida/internal/decision/preprocess"
 	"elida/internal/decision/scheduler"
@@ -129,6 +131,16 @@ const (
 // maintain a score of its own. *policy.Engine satisfies it.
 type PolicyRecorder interface {
 	RecordSemanticViolation(sessionID string, v policy.Violation)
+}
+
+// ShadowCorrelator is temporal correlation fed by shadow-mode decisions.
+// *correlation.Engine satisfies it. It must be a correlator of its own, not
+// the policy engine's, so a shadow match can never be recorded as a
+// violation: a policy-observed event can never complete a match that
+// contains shadow evidence.
+type ShadowCorrelator interface {
+	Observe(sessionID string, events []correlation.Event) []correlation.Match
+	Forget(sessionID string)
 }
 
 // WouldContributePoints is what a violation of this severity from this
@@ -253,6 +265,20 @@ type Config struct {
 	// New rejects a typed nil (a nil *policy.Engine behind the interface),
 	// which would otherwise be called on the first finding.
 	Policy PolicyRecorder
+	// ShadowCorrelator receives elevated-band, non-vetoed decisions as
+	// injection_elevated events (event ID = DecisionID) in effective shadow
+	// mode only; in audit and enforce the policy engine correlates the
+	// recorded violation instead, so one decision reaches at most one
+	// correlator. Matches become session CorrelationShadow entries, never
+	// violations, never risk. Nil, or a typed nil such as a nil
+	// *correlation.Engine, disables shadow correlation.
+	//
+	// It is a startup field, not part of Live: Reconfigure does not touch
+	// it. A runtime switch between shadow and audit therefore splits one
+	// session's evidence between the two correlators (shadow decisions
+	// here, violation events in the policy engine's). That can miss a
+	// match; it never counts one decision twice.
+	ShadowCorrelator ShadowCorrelator
 	// ThresholdSetMatches reports whether the configured threshold set
 	// matches the loaded model's own. Enforce mode is refused when it does
 	// not: strict enforcement requires calibration evidence for the exact
@@ -521,6 +547,14 @@ func New(cfg Config) (*Runner, error) {
 		// a non-nil interface and would be called on the first finding.
 		if rv := reflect.ValueOf(cfg.Policy); rv.Kind() == reflect.Pointer && rv.IsNil() {
 			return nil, fmt.Errorf("runner: Policy is a nil %T; pass a nil interface for shadow-only behavior", cfg.Policy)
+		}
+	}
+	if cfg.ShadowCorrelator != nil {
+		// Unlike Policy, a typed nil here means "disabled" (a nil
+		// *correlation.Engine is what a disabled block leaves). Normalize it
+		// so the nil checks in correlateShadow and Unbind are the only ones.
+		if rv := reflect.ValueOf(cfg.ShadowCorrelator); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			cfg.ShadowCorrelator = nil
 		}
 	}
 	// The same value checks Reconfigure applies, so Reconfigure(r.Live())
@@ -996,6 +1030,12 @@ func (r *Runner) Unbind(sess *session.Session) {
 		return
 	}
 	delete(r.bound, sess.ID)
+	// Session end: shadow correlation state must not outlive the session.
+	// Only the owning session forgets it, and it does so under boundMu, so
+	// a newer session binding the same ID afterwards starts empty.
+	if r.cfg.ShadowCorrelator != nil {
+		r.cfg.ShadowCorrelator.Forget(sess.ID)
+	}
 }
 
 func (r *Runner) lookupSession(id string) *session.Session {
@@ -1469,6 +1509,12 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 		r.recordShadow(sess, in, v)
 
 		if st.effective == config.DecisionModeShadow || r.cfg.Policy == nil {
+			// Effective shadow (the live mode this call snapshotted): no
+			// violations. Elevated-band evidence still feeds the shadow
+			// correlator, so slow-burn calibration data exists in shadow
+			// deployments. Outside this branch the decision goes to the
+			// policy engine instead, never to both.
+			r.correlateShadow(sess, in, v)
 			continue
 		}
 		// A vetoed decision is not a finding in any mode. The aux head
@@ -1613,4 +1659,47 @@ func (r *Runner) recordShadow(sess *session.Session, in decision.Input, v Verdic
 		CoverageComplete: v.Coverage.Complete,
 		LatencyMs:        v.Latency.Milliseconds(),
 	})
+}
+
+// correlateShadow feeds one shadow decision to the shadow correlator when it
+// is in the injection_elevated band (Elevated > 0, Elevated <= p < Main, not
+// vetoed: exactly the band handle records as injection_elevated in audit and
+// enforce) and records any match on the session. The caller holds the
+// verdict's claim, so a DecisionID is fed at most once. The event ID is the
+// DecisionID, the group is source_role:message_index (the policy engine's
+// correlationGroup format, so count_by: message behaves the same in both
+// modes), and nothing here touches risk or creates a violation.
+func (r *Runner) correlateShadow(sess *session.Session, in decision.Input, v Verdict) {
+	c := r.cfg.ShadowCorrelator
+	th := r.cfg.Thresholds
+	if c == nil || v.Vetoed || th.Elevated <= 0 || v.Probability < th.Elevated || v.Probability >= th.Main {
+		return
+	}
+	now := r.cfg.Clock()
+	ev := correlation.Event{
+		ID:        v.DecisionID,
+		Category:  CategoryInjectionElevated,
+		Group:     in.SourceRole + ":" + strconv.Itoa(in.MessageIndex),
+		Timestamp: now,
+	}
+	for _, m := range c.Observe(sess.ID, []correlation.Event{ev}) {
+		sess.RecordCorrelationShadow(session.CorrelationShadow{
+			Timestamp:  now,
+			MatchID:    m.ID,
+			Rule:       m.Rule,
+			Shape:      string(m.Shape),
+			Severity:   m.Severity,
+			Mode:       string(m.Mode),
+			EventIDs:   m.EventIDs,
+			Categories: m.Categories,
+			FirstEvent: m.FirstEvent,
+			LastEvent:  m.LastEvent,
+		})
+		slog.Info("shadow correlation match recorded",
+			"session_id", sess.ID,
+			"rule", m.Rule,
+			"match_id", m.ID,
+			"events", len(m.EventIDs),
+		)
+	}
 }
