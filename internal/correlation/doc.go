@@ -19,6 +19,15 @@
 // Eviction loses history (a match may be missed); it never produces a
 // match. DefaultMaxHistoryEvents documents the measured memory.
 //
-// Lock order. The policy engine calls Observe while holding its own lock, so
-// this package must never call back into the policy engine.
+// Because each shard enforces its own share of Limits.MaxSessions with its
+// own LRU, an uneven hash spread evicts in a full shard before the global
+// cap is reached: at the default cap, 4096 distinct live sessions evict
+// about 5% (205 measured), and live sessions start losing history at about
+// 85% of MaxSessions. Size max_sessions with that headroom.
+//
+// Lock order. Callers do not hold their own locks across Observe: the
+// policy engine collects events under its lock, releases it, calls Observe,
+// then relocks, and the semantic runner's shadow correlation likewise
+// observes outside its session-registry lock. This package must still never
+// call back into a caller.
 package correlation

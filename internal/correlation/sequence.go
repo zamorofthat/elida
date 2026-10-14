@@ -118,8 +118,10 @@ func (s *sessionState) fillForward(r Rule, bit uint64, picked []int, k int, limi
 
 // repickLast replaces the last pick, which is inside the cooldown, with the
 // earliest later eligible event that clears the cooldown and is no later
-// than limit. The earlier picks stay: they are the earliest possible, so
-// any chain that clears the cooldown can end where this one does.
+// than limit. The earlier picks stay: the prefix picks are the latest
+// possible (maximizing first, hence limit) and the suffix picks the
+// earliest, so any chain that clears the cooldown can end where this one
+// does.
 func (s *sessionState) repickLast(ri int, r Rule, bit uint64, picked []int, limit time.Time) bool {
 	last := len(r.Sequence) - 1
 	for i := picked[last] + 1; i < len(s.history); i++ {
