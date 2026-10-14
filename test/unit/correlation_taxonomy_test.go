@@ -486,7 +486,7 @@ func TestTaxonomy_SoftInstructionWarningBoundary(t *testing.T) {
 		return newTaxonomy(t, 0, r)
 	}
 	var atLimit, overLimit bool
-	for v := 1; v <= 250 && !(atLimit && overLimit); v++ {
+	for v := 1; v <= 250 && (!atLimit || !overLimit); v++ {
 		tx := build(v)
 		switch n := tx.Instructions(); n {
 		case correlation.WarnTaxonomyInstructions:

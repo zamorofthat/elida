@@ -61,11 +61,11 @@ func TestShadowCorrelator_FollowsCorrelationConfig(t *testing.T) {
 	if err := noPolicy.setupPolicyEngine(); err != nil {
 		t.Fatalf("setupPolicyEngine: %v", err)
 	}
-	c, err := noPolicy.shadowCorrelator()
-	if err != nil || c == nil {
-		t.Fatalf("policy disabled: want a shadow correlator, got (%v, %v)", c, err)
+	npc, npErr := noPolicy.shadowCorrelator()
+	if npErr != nil || npc == nil {
+		t.Fatalf("policy disabled: want a shadow correlator, got (%v, %v)", npc, npErr)
 	}
-	if got, want := len(c.Rules()), len(noPolicyCfg.Correlation.Rules); got != want {
+	if got, want := len(npc.Rules()), len(noPolicyCfg.Correlation.Rules); got != want {
 		t.Fatalf("the shadow correlator has %d rules, the correlation block %d", got, want)
 	}
 
