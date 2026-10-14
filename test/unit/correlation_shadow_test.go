@@ -33,6 +33,14 @@ func shadowCorrRunner(t *testing.T, mode string, scores map[decision.Signal]floa
 // a ScoreFunc gate).
 func shadowCorrRunnerWith(t *testing.T, mode string, f *decisiontest.FakeProvider) (*runner.Runner, *policy.Engine, *correlation.Engine) {
 	t.Helper()
+	return shadowCorrRunnerWrapped(t, mode, f, nil)
+}
+
+// shadowCorrRunnerWrapped is shadowCorrRunnerWith whose runner sees the
+// shipped correlator through wrap (nil: the correlator itself), for a test
+// that gates Observe. The returned engine is the unwrapped one.
+func shadowCorrRunnerWrapped(t *testing.T, mode string, f *decisiontest.FakeProvider, wrap func(*correlation.Engine) runner.ShadowCorrelator) (*runner.Runner, *policy.Engine, *correlation.Engine) {
+	t.Helper()
 	sch, err := scheduler.New(scheduler.Config{
 		Provider:         f,
 		TokenCounter:     decisiontest.ByteTokenCounter{BytesPerToken: 4},
@@ -58,6 +66,10 @@ func shadowCorrRunnerWith(t *testing.T, mode string, f *decisiontest.FakeProvide
 	if err != nil || shadowCorr == nil {
 		t.Fatalf("default correlation.New = (%v, %v)", shadowCorr, err)
 	}
+	var seen runner.ShadowCorrelator = shadowCorr
+	if wrap != nil {
+		seen = wrap(shadowCorr)
+	}
 	pe := newRiskLadderEngine(baselineRules(), baselineThresholds())
 	r, err := runner.New(runner.Config{
 		Mode:       mode,
@@ -73,7 +85,7 @@ func shadowCorrRunnerWith(t *testing.T, mode string, f *decisiontest.FakeProvide
 			return score, action
 		},
 		ThresholdSetMatches: true,
-		ShadowCorrelator:    shadowCorr,
+		ShadowCorrelator:    seen,
 	})
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
