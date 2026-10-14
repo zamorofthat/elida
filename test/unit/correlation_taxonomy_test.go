@@ -410,3 +410,63 @@ const (
 	pinnedToolEventIDCall = "te_45330787751e6d5b58fe9446888ca899"
 	pinnedToolEventIDAnon = "te_0ac9b0c80261b658f6ca87b62e98f3b7"
 )
+
+// A taxonomy over WarnTaxonomyInstructions is accepted, with one non-fatal
+// warning carrying the summed instructions and the estimated cost.
+func TestTaxonomy_SoftInstructionWarning(t *testing.T) {
+	small := testTaxonomy(t)
+	if n := small.Instructions(); n == 0 || n > correlation.WarnTaxonomyInstructions {
+		t.Fatalf("test taxonomy instructions = %d", n)
+	}
+	if w := small.Warnings(); w != nil {
+		t.Fatalf("a small taxonomy must not warn: %v", w)
+	}
+	if w := correlation.TaxonomyWarnings(correlation.TaxonomyConfig{ToolCategories: testTaxonomyRules}); w != nil {
+		t.Fatalf("TaxonomyWarnings on a small taxonomy: %v", w)
+	}
+
+	big := correlation.ToolCategoryRule{Category: "big", Tools: []string{"*"}}
+	for j := 0; j < correlation.MaxPatternsPerEntry; j++ {
+		big.ArgumentPatterns = append(big.ArgumentPatterns, fmt.Sprintf(`[a-h]{200}%d`, j))
+	}
+	cfg := correlation.TaxonomyConfig{ToolCategories: []correlation.ToolCategoryRule{big}}
+	if errs := correlation.ValidateTaxonomy(cfg); len(errs) != 0 {
+		t.Fatalf("over the soft limit is still valid: %v", errs)
+	}
+	tx := newTaxonomy(t, 0, big)
+	n := tx.Instructions()
+	if n <= correlation.WarnTaxonomyInstructions || n > correlation.MaxTaxonomyInstructions {
+		t.Fatalf("big taxonomy instructions = %d", n)
+	}
+	w := tx.Warnings()
+	if len(w) != 1 || w[0].Field != "tool_categories" || !strings.Contains(w[0].Message, fmt.Sprint(n)) || !strings.Contains(w[0].Message, "estimated worst-case cost") {
+		t.Fatalf("want one warning naming %d instructions and the cost, got %v", n, w)
+	}
+	if got := correlation.TaxonomyWarnings(cfg); fmt.Sprint(got) != fmt.Sprint(w) {
+		t.Fatalf("TaxonomyWarnings = %v, Warnings = %v", got, w)
+	}
+	var nilTx *correlation.Taxonomy
+	if nilTx.Warnings() != nil || nilTx.Instructions() != 0 {
+		t.Fatal("a nil taxonomy has no warnings and no instructions")
+	}
+	if correlation.TaxonomyWarnings(correlation.TaxonomyConfig{ToolCategories: []correlation.ToolCategoryRule{{Category: "c"}}}) != nil {
+		t.Fatal("an invalid configuration has errors, not warnings")
+	}
+}
+
+func TestTaxonomy_EstimatedWorstCaseCost(t *testing.T) {
+	cases := []struct {
+		insts, bytes int
+		want         time.Duration
+	}{
+		{correlation.MaxTaxonomyInstructions, correlation.DefaultMaxArgumentBytes, 1400 * time.Millisecond},
+		{correlation.MaxTaxonomyInstructions / 2, correlation.MaxArgumentBytesCeiling, 2800 * time.Millisecond},
+		{correlation.WarnTaxonomyInstructions, correlation.DefaultMaxArgumentBytes, 175 * time.Millisecond},
+		{0, correlation.DefaultMaxArgumentBytes, 0},
+	}
+	for _, tc := range cases {
+		if got := correlation.EstimatedWorstCaseCost(tc.insts, tc.bytes); got != tc.want {
+			t.Errorf("EstimatedWorstCaseCost(%d, %d) = %v, want %v", tc.insts, tc.bytes, got, tc.want)
+		}
+	}
+}

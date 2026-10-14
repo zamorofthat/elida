@@ -42,8 +42,18 @@ import (
 //
 // (89 µs for the realistic taxonomy at 1 KiB.) The bound is real but
 // coarse: operators own the patterns, and a pathological taxonomy can still
-// add over a second per tool call at the default scan size.
+// add over a second per tool call at the default scan size. What an
+// attacker controls, the argument bytes, is bounded by max_argument_bytes;
+// the program size is operator-authored. A taxonomy over
+// WarnTaxonomyInstructions is accepted with a warning (TaxonomyWarnings,
+// Taxonomy.Warnings) that carries EstimatedWorstCaseCost.
+//
+// Callers must run Categorize off the request path (an async lane or the
+// session-end path) and never under a proxy or policy lock.
 const (
+	// WarnTaxonomyInstructions is the soft limit on summed compiled
+	// instructions: above it the taxonomy is accepted with a warning.
+	WarnTaxonomyInstructions = 1024
 	// MaxTaxonomyEntries caps tool_categories entries.
 	MaxTaxonomyEntries = 64
 	// MaxGlobsPerEntry caps the tools globs of one entry.
@@ -112,6 +122,61 @@ type Taxonomy struct {
 	rules      []compiledToolCategory
 	categories []string
 	maxArgs    int
+	// instructions is the summed compiled program length, globs included.
+	instructions int
+}
+
+// Cost estimate calibration: the worst case measured at a full
+// MaxTaxonomyInstructions budget of NFA-heavy patterns over the default
+// scan size on an Apple M1 Pro (see the table above).
+const (
+	worstCaseAtFullBudget = 1400 * time.Millisecond
+	worstCaseBytes        = DefaultMaxArgumentBytes
+)
+
+// EstimatedWorstCaseCost estimates the worst-case Categorize time per tool
+// call for a taxonomy of the given summed compiled instructions scanning
+// maxArgumentBytes of arguments: roughly
+// 1.4 s x (instructions / 8192) x (maxArgumentBytes / 16 KiB), the measured
+// NFA-heavy worst case on an Apple M1 Pro scaled linearly. It is an order of
+// magnitude for an operator warning, not a guarantee: literal-led patterns
+// run far faster, and other machines differ.
+func EstimatedWorstCaseCost(instructions, maxArgumentBytes int) time.Duration {
+	return time.Duration(float64(worstCaseAtFullBudget) *
+		(float64(instructions) / MaxTaxonomyInstructions) *
+		(float64(maxArgumentBytes) / worstCaseBytes))
+}
+
+// TaxonomyWarnings returns the non-fatal findings for a configuration that
+// ValidateTaxonomy accepts: today, a summed program length over
+// WarnTaxonomyInstructions, with the estimated worst-case cost per call. It
+// returns nil for an invalid or empty configuration. The package does not
+// log; the caller logs these at startup.
+func TaxonomyWarnings(cfg TaxonomyConfig) []FieldError {
+	_, t := compileTaxonomy(cfg)
+	return t.Warnings()
+}
+
+// Warnings returns the non-fatal findings of the configuration t was built
+// from (see TaxonomyWarnings), or nil.
+func (t *Taxonomy) Warnings() []FieldError {
+	if t == nil || t.instructions <= WarnTaxonomyInstructions {
+		return nil
+	}
+	return []FieldError{{
+		Field: "tool_categories",
+		Message: fmt.Sprintf("compiled globs and patterns total %d instructions, over the soft limit of %d; estimated worst-case cost per tool call about %v at max_argument_bytes %d",
+			t.instructions, WarnTaxonomyInstructions, EstimatedWorstCaseCost(t.instructions, t.maxArgs).Round(time.Millisecond), t.maxArgs),
+	}}
+}
+
+// Instructions returns the summed compiled program length of every glob and
+// argument pattern, or 0 for a nil taxonomy.
+func (t *Taxonomy) Instructions() int {
+	if t == nil {
+		return 0
+	}
+	return t.instructions
 }
 
 // ValidateTaxonomy checks the configuration against the bounds above and
@@ -227,6 +292,7 @@ func compileTaxonomy(cfg TaxonomyConfig) ([]FieldError, *Taxonomy) {
 	if len(errs) > 0 || len(rules) == 0 {
 		return errs, nil
 	}
+	t.instructions = total
 	return nil, t
 }
 
