@@ -24,6 +24,7 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/correlation"
 	"elida/internal/decision/embedded"
 	"elida/internal/decision/runner"
 	"elida/internal/decision/scheduler"
@@ -858,6 +859,9 @@ func (a *app) setupPolicyEngine() error {
 	if err := a.cfg.Correlation.Validate(); err != nil {
 		return err
 	}
+	if a.cfg.Correlation.Enabled {
+		logTaxonomyWarnings(a.cfg.Correlation.TaxonomyConfig)
+	}
 	policyRules := make([]policy.Rule, len(a.cfg.Policy.Rules))
 	for i, r := range a.cfg.Policy.Rules {
 		policyRules[i] = policy.Rule{
@@ -895,9 +899,10 @@ func (a *app) setupPolicyEngine() error {
 			Thresholds: riskThresholds,
 		},
 		Correlation: policy.CorrelationConfig{
-			Enabled: a.cfg.Correlation.Enabled,
-			Rules:   a.cfg.Correlation.Rules,
-			Limits:  a.cfg.Correlation.Limits(),
+			Enabled:  a.cfg.Correlation.Enabled,
+			Rules:    a.cfg.Correlation.Rules,
+			Limits:   a.cfg.Correlation.Limits(),
+			Taxonomy: a.cfg.Correlation.TaxonomyConfig,
 		},
 	})
 
@@ -918,6 +923,27 @@ func (a *app) setupPolicyEngine() error {
 
 	slog.Info("policy engine enabled", "rules", len(policyRules))
 	return nil
+}
+
+// logTaxonomyWarnings logs, once at startup, each non-fatal finding about
+// the tool-call taxonomy (today: a compiled program over the soft limit),
+// with its instruction count and estimated worst-case cost per call. The
+// configuration has already been validated.
+func logTaxonomyWarnings(cfg correlation.TaxonomyConfig) {
+	tx, err := correlation.NewTaxonomy(cfg)
+	if err != nil || tx == nil {
+		return
+	}
+	for _, w := range tx.Warnings() {
+		slog.Warn("correlation tool taxonomy is expensive to evaluate",
+			"field", "correlation."+w.Field,
+			"instructions", tx.Instructions(),
+			"soft_limit", correlation.WarnTaxonomyInstructions,
+			"max_argument_bytes", tx.MaxArgumentBytes(),
+			"estimated_worst_case_per_call", correlation.EstimatedWorstCaseCost(tx.Instructions(), tx.MaxArgumentBytes()).Round(time.Millisecond).String(),
+			"message", w.Message,
+		)
+	}
 }
 
 func (a *app) initInstructionIntegrity() {
@@ -1218,6 +1244,15 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 	// session drain below, so async results still land on their sessions
 	// before those sessions are persisted.
 	a.shutdownDecision(shutdownCtx)
+
+	// Step 1c: Let the tool lane finish categorizing tool calls already
+	// queued, so their correlation matches land before sessions are
+	// persisted below.
+	if a.policyEngine != nil {
+		if err := a.policyEngine.FlushToolCalls(shutdownCtx); err != nil {
+			slog.Warn("tool-call correlation not drained before shutdown", "error", err)
+		}
+	}
 
 	// Step 2: Stop the session manager background loop
 	cancel()

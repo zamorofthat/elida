@@ -81,11 +81,18 @@ type Config struct {
 // CorrelationConfig configures bounded, per-session temporal correlation.
 // Rules default to audit mode in the correlation package; an operator must
 // explicitly select enforce before a match can contribute to the risk ladder.
+//
+// The tool-call taxonomy (tool_categories, max_argument_bytes) is inlined
+// into the same block: it maps tool calls to the categories rules count.
+// No taxonomy ships by default, so tool calls are not correlated until an
+// operator configures one.
 type CorrelationConfig struct {
 	Enabled          bool               `yaml:"enabled"`
 	MaxHistoryEvents int                `yaml:"max_history_events"`
 	MaxSessions      int                `yaml:"max_sessions"`
 	Rules            []correlation.Rule `yaml:"rules"`
+
+	correlation.TaxonomyConfig `yaml:",inline"`
 }
 
 // DefaultCorrelationRules is the shipped rule set (Plan B D8): one
@@ -115,11 +122,18 @@ func (c CorrelationConfig) Limits() correlation.Limits {
 	return correlation.Limits{MaxHistoryEvents: c.MaxHistoryEvents, MaxSessions: c.MaxSessions}
 }
 
-// validationErrors checks the block against correlation.Validate, exactly
-// as correlation.New will check it.
+// validationErrors checks the block against correlation.Validate and
+// correlation.ValidateTaxonomy, exactly as correlation.New and
+// correlation.NewTaxonomy will check it.
 func (c CorrelationConfig) validationErrors() []ValidationError {
 	var errs []ValidationError
 	for _, err := range correlation.Validate(c.Rules, c.Limits()) {
+		errs = append(errs, ValidationError{
+			Field:   "correlation." + err.Field,
+			Message: err.Message,
+		})
+	}
+	for _, err := range correlation.ValidateTaxonomy(c.TaxonomyConfig) {
 		errs = append(errs, ValidationError{
 			Field:   "correlation." + err.Field,
 			Message: err.Message,
@@ -812,6 +826,9 @@ func defaults() *Config {
 			MaxHistoryEvents: correlation.DefaultMaxHistoryEvents,
 			MaxSessions:      correlation.DefaultMaxSessions,
 			Rules:            DefaultCorrelationRules(),
+			TaxonomyConfig: correlation.TaxonomyConfig{
+				MaxArgumentBytes: correlation.DefaultMaxArgumentBytes,
+			},
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -1364,7 +1381,7 @@ func (c *Config) Validate() *ValidationResult {
 		}
 	}
 
-	if c.Correlation.Enabled || len(c.Correlation.Rules) > 0 {
+	if c.Correlation.Enabled || len(c.Correlation.Rules) > 0 || len(c.Correlation.ToolCategories) > 0 {
 		errors = append(errors, c.Correlation.validationErrors()...)
 	}
 

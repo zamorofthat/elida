@@ -579,3 +579,20 @@ correlation:
       cooldown: 15m
       severity: warning
       mode: audit
+  # Tool-call taxonomy: maps tool calls returned by the backend to the
+  # categories rules count (for example a sequence rule
+  # credential_discovery -> external_transmission). None ships: tool calls
+  # are not correlated until categories are configured. Tools are
+  # case-insensitive globs over the whole name ('*' and '?' match any
+  # character); argument_patterns are case-insensitive RE2 regexes over the
+  # first max_argument_bytes of the call's arguments (default 16384, at most
+  # 65536). Arguments are scanned and dropped, never stored or logged.
+  # Categorization runs off the request path. A taxonomy over 1024 compiled
+  # instructions starts with a WARN that estimates its worst-case cost.
+  max_argument_bytes: 16384
+  # tool_categories:
+  #   - category: credential_discovery
+  #     tools: [read_file, bash]
+  #     argument_patterns: ['\.aws/credentials', 'id_rsa']
+  #   - category: external_transmission
+  #     tools: ['http_*', web_fetch]
