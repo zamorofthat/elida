@@ -908,6 +908,6 @@ may name a rule with it. `GET /control/flagged/stats` reports a
 count) while correlation is enabled.
 
 `count_by: message` counts distinct messages (source role and message
-index). Events with message index 0 (metric, anomaly and tool violations, and
-findings in a request's first message) are treated as having no message and
-count individually.
+index; index 0 is a real message, so several windows of one long first
+message count once). Events with no message at all (metric and anomaly
+violations, which carry no source role) count individually.

@@ -122,3 +122,74 @@ func TestCorrelationLock_MatchDedupAndEndedSession(t *testing.T) {
 		t.Fatal("the ended session's correlation state must be forgotten")
 	}
 }
+
+// endDuringObserve simulates a session end (the flagged entry is deleted;
+// the session-end Forget already ran) while Observe is in flight.
+func endDuringObserve(e *Engine, sessionID string) func() {
+	return func() {
+		e.mu.Lock()
+		e.removeFlaggedLocked(sessionID)
+		e.mu.Unlock()
+	}
+}
+
+// Re-review N-2: a session that ends during an Observe that returns no
+// match has the state that Observe re-created forgotten, so a reused ID
+// cannot inherit partial history.
+func TestCorrelationLock_EndedSessionWithoutMatchIsForgotten(t *testing.T) {
+	e := lockTestEngine(t, 1)
+	e.beforeObserve = endDuringObserve(e, "sess-n2")
+	e.recordViolations("sess-n2", []Violation{lockInput("ev_a", time.Now())})
+	if got := e.correlation.Stats().Sessions; got != 0 {
+		t.Fatalf("an ended session's re-created state must be forgotten, sessions = %d", got)
+	}
+	// A reused ID starts empty: one new event does not complete a match.
+	e.beforeObserve = nil
+	e.recordViolations("sess-n2", []Violation{lockInput("ev_b", time.Now())})
+	if fs := e.GetFlaggedSession("sess-n2"); fs.ViolationCounts["correlation.r0"] != 0 {
+		t.Fatal("a reused session ID inherited the ended instance's history")
+	}
+}
+
+// Re-review N-3: a match for a session instance that was replaced by a
+// reused ID during Observe is dropped and counted, not recorded on the new
+// instance.
+func TestCorrelationLock_ReplacedInstanceDropsMatch(t *testing.T) {
+	e := lockTestEngine(t, 1)
+	now := time.Now()
+	e.recordViolations("sess-n3", []Violation{lockInput("ev_a", now)})
+	e.beforeObserve = func() {
+		e.mu.Lock()
+		e.removeFlaggedLocked("sess-n3")
+		e.recordViolationsLocked("sess-n3", []Violation{{RuleName: "other", Severity: SeverityWarning, Timestamp: now}}, nil)
+		e.mu.Unlock()
+	}
+	e.recordViolations("sess-n3", []Violation{lockInput("ev_b", now.Add(time.Second))})
+	fs := e.GetFlaggedSession("sess-n3")
+	if fs == nil || fs.ViolationCounts["correlation.r0"] != 0 {
+		t.Fatalf("the old instance's match landed on the new instance: %+v", fs)
+	}
+	if got := e.correlationDiscarded.Load(); got != 1 {
+		t.Fatalf("want one discarded match, got %d", got)
+	}
+}
+
+// Re-review N-4: a match from an engine that ReloadConfig replaced during
+// Observe is dropped and counted.
+func TestCorrelationLock_SwappedEngineDropsMatch(t *testing.T) {
+	e := lockTestEngine(t, 1)
+	now := time.Now()
+	e.recordViolations("sess-n4", []Violation{lockInput("ev_a", now)})
+	e.beforeObserve = func() {
+		cfg := e.GetConfig()
+		cfg.Correlation.Rules[0].Count = 3
+		e.ReloadConfig(cfg)
+	}
+	e.recordViolations("sess-n4", []Violation{lockInput("ev_b", now.Add(time.Second))})
+	if fs := e.GetFlaggedSession("sess-n4"); fs.ViolationCounts["correlation.r0"] != 0 {
+		t.Fatal("a match from a replaced engine must not be recorded")
+	}
+	if got := e.correlationDiscarded.Load(); got != 1 {
+		t.Fatalf("want one discarded match, got %d", got)
+	}
+}

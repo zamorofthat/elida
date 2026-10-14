@@ -1562,6 +1562,9 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 	e.mu.Lock()
 	corr := e.correlation
 	inputs := e.recordViolationsLocked(sessionID, violations, corr)
+	// The flagged entry identifies this session instance: release and
+	// remove delete it, and a reused ID gets a new one.
+	instance := e.flaggedSessions[sessionID]
 	e.mu.Unlock()
 
 	if len(inputs) == 0 {
@@ -1572,18 +1575,26 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 		e.beforeObserve()
 	}
 	matches := corr.Observe(sessionID, inputs)
-	if len(matches) == 0 {
-		return
-	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if _, live := e.flaggedSessions[sessionID]; !live || e.retained[sessionID] != 0 {
-		// The session ended (released, removed or retained) while Observe
-		// ran. Its correlation state may have been re-created by this
-		// Observe after the session-end Forget, so forget it again.
-		e.correlationDiscarded.Add(uint64(len(matches)))
+	if current := e.flaggedSessions[sessionID]; current != instance || e.retained[sessionID] != 0 {
+		// The session instance ended (released, removed or retained), or
+		// was replaced by a reused ID, while Observe ran. This Observe may
+		// have re-created its correlation state after the session-end
+		// Forget, so forget it again: a reused ID must not inherit partial
+		// history. Its matches belong to an instance that is gone.
 		corr.Forget(sessionID)
+		e.correlationDiscarded.Add(uint64(len(matches)))
+		return
+	}
+	if len(matches) == 0 {
+		return
+	}
+	if e.correlation != corr {
+		// The engine was replaced (ReloadConfig with a changed block)
+		// during Observe: its matches follow rules no longer in force.
+		e.correlationDiscarded.Add(uint64(len(matches)))
 		return
 	}
 	matchViolations := make([]Violation, len(matches))
@@ -1594,12 +1605,13 @@ func (e *Engine) recordViolations(sessionID string, violations []Violation) {
 }
 
 // correlationGroup is an event's count_by: message key: its source role and
-// message index. MessageIndex 0 is treated as unknown, because metric,
-// anomaly and tool violations leave it 0 rather than -1: such an event (and,
-// as a documented limitation, a finding in the first message) is its own
-// group, so count_by: message falls back to counting events for it.
+// message index. A violation attributed to a message (it carries a source
+// role, or semantic evidence) is keyed on role:index, index 0 included:
+// several windows of one long message are one message. Only a violation
+// with no message at all (metric and anomaly violations: no role, no
+// semantic evidence) is its own group, so it counts per event.
 func correlationGroup(v Violation) string {
-	if v.MessageIndex <= 0 {
+	if v.Semantic == nil && v.SourceRole == "" {
 		return ""
 	}
 	return v.SourceRole + ":" + strconv.Itoa(v.MessageIndex)

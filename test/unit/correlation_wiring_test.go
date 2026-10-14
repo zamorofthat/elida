@@ -3,6 +3,7 @@ package unit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -354,48 +355,82 @@ func TestCorrelationWiring_MatchViolationShape(t *testing.T) {
 	}
 }
 
-// Wiring review M-6: count_by: message groups by source role and message
-// index, and treats MessageIndex 0 (what metric, anomaly and tool
-// violations carry) as unknown: such events count individually.
-func TestCorrelationWiring_CountByMessageGroups(t *testing.T) {
-	newEngine := func() *policy.Engine {
-		return policy.NewEngine(policy.Config{
-			Enabled: true, Mode: "enforce",
-			Correlation: policy.CorrelationConfig{
-				Enabled: true, Limits: okLimits(),
-				Rules: []correlation.Rule{{
-					Name: "repeated_injection", Shape: correlation.ShapeRepeated,
-					Category: "semantic_injection", Count: 2, CountBy: correlation.CountByMessage,
-					Window: time.Minute, Severity: "warning",
-				}},
-			},
-		})
+// slowBurnEngine runs the shipped slow_burn_injection rule (D8) plus a
+// count_by: message rule on policy_violation for role-less events.
+func slowBurnEngine() *policy.Engine {
+	rules := config.DefaultCorrelationRules()
+	rules = append(rules, correlation.Rule{
+		Name: "roleless", Shape: correlation.ShapeRepeated, Category: "policy_violation",
+		Count: 3, CountBy: correlation.CountByMessage, Window: time.Minute,
+	})
+	return policy.NewEngine(policy.Config{
+		Enabled: true, Mode: "enforce",
+		Correlation: policy.CorrelationConfig{Enabled: true, Limits: okLimits(), Rules: rules},
+	})
+}
+
+// recordElevated records one injection_elevated window of message idx, as
+// the semantic runner does (one decision per window).
+func recordElevated(e *policy.Engine, sess, decisionID string, role string, idx int, at time.Time) {
+	e.RecordSemanticViolation(sess, policy.Violation{
+		RuleName: "injection_elevated", EventCategory: "injection_elevated",
+		Severity: policy.SeverityInfo, Action: "flag", SourceRole: role, MessageIndex: idx,
+		Timestamp: at, EvidenceOnly: true,
+		Semantic: &policy.SemanticEvidence{DecisionID: decisionID, Signal: "injection", Probability: 0.35},
+	})
+}
+
+func hasRule(fs *policy.FlaggedSession, name string) bool {
+	if fs == nil {
+		return false
 	}
-	record := func(e *policy.Engine, sess, id string, idx int, at time.Time) {
-		e.RecordSemanticViolation(sess, policy.Violation{
-			RuleName: "semantic_injection", EventID: id, EventCategory: "semantic_injection",
-			Severity: policy.SeverityWarning, SourceRole: "tool", MessageIndex: idx,
-			Timestamp: at, EvidenceOnly: true,
-		})
+	for _, v := range fs.Violations {
+		if v.RuleName == name {
+			return true
+		}
 	}
+	return false
+}
+
+// Re-review N-1: count_by: message keys on role:index for any violation
+// attributed to a message, index 0 included. One long first message with
+// three elevated windows is one message, not a slow burn.
+func TestCorrelationWiring_OneLongIndexZeroMessageIsNotASlowBurn(t *testing.T) {
+	e := slowBurnEngine()
 	now := time.Now()
-
-	e := newEngine()
-	record(e, "sess-zero", "ev_1", 0, now)
-	record(e, "sess-zero", "ev_2", 0, now.Add(time.Second))
-	if correlationMatch(e.GetFlaggedSession("sess-zero")) == nil {
-		t.Fatal("MessageIndex 0 is unknown: two events must count as two")
+	for i := 0; i < 3; i++ {
+		recordElevated(e, "sess-long", fmt.Sprintf("dec_w%d", i), "user", 0, now.Add(time.Duration(i)*time.Second))
 	}
-
-	e = newEngine()
-	record(e, "sess-msg", "ev_1", 3, now)
-	record(e, "sess-msg", "ev_2", 3, now.Add(time.Second))
-	if correlationMatch(e.GetFlaggedSession("sess-msg")) != nil {
-		t.Fatal("two events of one message count once")
+	if hasRule(e.GetFlaggedSession("sess-long"), "correlation.slow_burn_injection") {
+		t.Fatal("three windows of one index-0 message must not satisfy slow_burn_injection")
 	}
-	record(e, "sess-msg", "ev_3", 4, now.Add(2*time.Second))
-	if correlationMatch(e.GetFlaggedSession("sess-msg")) == nil {
-		t.Fatal("a second message completes the match")
+}
+
+func TestCorrelationWiring_ThreeMessagesFromIndexZeroAreASlowBurn(t *testing.T) {
+	e := slowBurnEngine()
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		recordElevated(e, "sess-three", fmt.Sprintf("dec_m%d", i), "user", i, now.Add(time.Duration(i)*time.Second))
+	}
+	if !hasRule(e.GetFlaggedSession("sess-three"), "correlation.slow_burn_injection") {
+		t.Fatal("three distinct messages (indices 0, 1, 2) must satisfy slow_burn_injection")
+	}
+}
+
+// A violation with no message at all (no source role, no semantic
+// evidence: metric and anomaly violations) counts per event.
+func TestCorrelationWiring_RolelessViolationCountsPerEvent(t *testing.T) {
+	e := slowBurnEngine()
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		e.RecordSemanticViolation("sess-roleless", policy.Violation{
+			RuleName: "metric_rule", EventID: fmt.Sprintf("ev_m%d", i), EventCategory: "policy_violation",
+			Severity: policy.SeverityWarning, Action: "flag", Timestamp: now.Add(time.Duration(i) * time.Second),
+			EvidenceOnly: true,
+		})
+	}
+	if !hasRule(e.GetFlaggedSession("sess-roleless"), "correlation.roleless") {
+		t.Fatal("role-less violations have no message: each counts on its own")
 	}
 }
 
