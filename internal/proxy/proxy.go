@@ -1345,7 +1345,7 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 	if toolCalls := ExtractToolCallsFromResponse([]byte(content)); len(toolCalls) > 0 {
 		policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
 		evaluate := p.policy.EvaluateToolCalls
-		if !p.sessionActive(sessionID) {
+		if !p.sessionActive(sessionID, sessSnap) {
 			evaluate = p.policy.EvaluateToolCallsUncorrelated
 		}
 		if result := evaluate(sessionID, policyToolCalls); result != nil {
@@ -1367,14 +1367,23 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 	}
 }
 
-// sessionActive reports whether the session is still active in the
-// manager (true when the proxy has no manager).
-func (p *Proxy) sessionActive(sessionID string) bool {
+// sessionActive reports whether the session INSTANCE the scan was started
+// for (sessSnap, the snapshot taken when the response completed) is still
+// the active session under sessionID (true when the proxy has no manager).
+// The instance is compared by start time, not by ID alone (the runner's
+// sameInstance rule): a session that ended without a kill while its
+// detached scan was pending can have its ID reused by a new instance, and
+// the old instance's late tool calls must not be correlated into the new
+// instance's history.
+func (p *Proxy) sessionActive(sessionID string, sessSnap *session.Session) bool {
 	if p.manager == nil {
 		return true
 	}
 	sess, ok := p.manager.Get(sessionID)
-	return ok && sess.IsActive()
+	if !ok || !sess.IsActive() {
+		return false
+	}
+	return sessSnap == nil || sess.StartTime.Equal(sessSnap.StartTime)
 }
 
 // logResponse logs a standard response
