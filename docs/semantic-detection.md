@@ -108,13 +108,18 @@ reserved decision, and startup logs a WARN for every enforce rule.
 **Restart-only, outside Settings.** The `correlation:` block is not part of
 `settings.yaml` or `/control/settings`. A settings save keeps the
 correlation engine and its state, and changing the block needs a restart.
-Correlation needs `policy.enabled: true`.
+Policy correlation (violation events and tool activity) needs
+`policy.enabled: true`. Shadow correlation of semantic decisions (below)
+does not: with `policy.enabled: false`, decision is capped to shadow, the
+shadow correlator still runs, and startup logs a WARN that policy
+correlation is inactive while shadow correlation is active.
 
 At startup ELIDA logs one `temporal correlation enabled` line. It carries:
 
 - the rule count, the shapes, and the mode of each rule;
 - the limits;
-- whether the semantic runner has a shadow correlator;
+- whether policy correlation runs and whether the semantic runner has a
+  shadow correlator;
 - the taxonomy size and its warnings;
 - the tool-lane bounds.
 
@@ -148,7 +153,13 @@ instance:
 
 The shadow correlator needs no shutdown drain. It is updated synchronously
 when a decision is handled, owns no goroutines or queues, and its in-memory
-state ends with the process.
+state ends with the process. It runs outside the semantic runner's
+session-registry lock, so a slow correlation on one session never delays
+another session's assessment. A match computed while its session ended (or
+its ID was reused) is dropped, and that instance's state is forgotten. A
+match accepted just before the session ends can still be written to the
+ended session's in-memory record after its end callback ran; that is
+harmless while `correlation_shadow` is not persisted.
 
 **Tool activity (`tool_categories`).** `correlation.tool_categories` maps
 tool calls returned by the backend to categories, so rules can use them.
@@ -161,8 +172,9 @@ For example, `sequence: [credential_discovery, external_transmission]`.
   16 KiB, at most 64 KiB).
 - Categorization runs off the request path, on a bounded tool lane: 4
   workers, 256 batches queued per worker, 64 batches per session, 32 MiB
-  of queued arguments, and 128 calls per batch. What overflows is dropped
-  and counted.
+  of queued arguments, 128 calls per batch, and 256 remembered provider
+  call IDs per session (later calls use the anonymous event form and still
+  count). What overflows is dropped and counted.
 - Arguments are scanned and then dropped. They are never stored or
   logged.
 - A categorized call that completes no match records nothing.
@@ -281,7 +293,9 @@ Each entry says what is not caught or not guaranteed, and how it fails.
     recently active evicted first, so a client that opens many session IDs
     can evict another session's history. Eviction is per shard, so at full
     occupancy some live sessions are evicted before the global cap is
-    reached.
+    reached: at the default 4096, about 5% of 4096 distinct live sessions
+    are evicted, and live sessions start losing history at about 85% of
+    `max_sessions`. Size `max_sessions` with that headroom.
   - An evicted session also loses its cooldown and its "already matched"
     memory, so after eviction the same rule can match again on new events.
   - Eviction can cause a missed match, never a false one, and evictions are

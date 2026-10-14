@@ -558,7 +558,8 @@ decision:
 
 # Bounded temporal correlation over content-free policy event metadata.
 # Restart-only: it is not a settings.yaml key, and a settings save keeps the
-# engine and its state. Requires policy.enabled. Audit is the safe rule
+# engine and its state. Policy correlation requires policy.enabled; shadow
+# correlation of semantic decisions does not. Audit is the safe rule
 # default; set mode: enforce explicitly for matches that should contribute
 # to the existing risk ladder (policy.mode audit still caps them). A rules
 # list here replaces the default list. Shapes: repeated (count events of
