@@ -1336,10 +1336,19 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 			)
 		}
 	}
-	// Evaluate tool calls in async-scanned response
+	// Evaluate tool calls in async-scanned response. For a session that
+	// ended (killed, terminated or timed out) while this scan ran, tool
+	// rules are still evaluated and a flagged session still persisted
+	// below, like EvaluateResponseContent above, but the calls skip
+	// temporal correlation: a late batch must not re-create the ended
+	// session's tool correlation state.
 	if toolCalls := ExtractToolCallsFromResponse([]byte(content)); len(toolCalls) > 0 {
 		policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
-		if result := p.policy.EvaluateToolCalls(sessionID, policyToolCalls); result != nil {
+		evaluate := p.policy.EvaluateToolCalls
+		if !p.sessionActive(sessionID, sessSnap) {
+			evaluate = p.policy.EvaluateToolCallsUncorrelated
+		}
+		if result := evaluate(sessionID, policyToolCalls); result != nil {
 			for _, v := range result.Violations {
 				slog.Info("async tool call scan: violation detected",
 					"session_id", sessionID,
@@ -1358,12 +1367,32 @@ func (p *Proxy) asyncScanResponse(sessionID string, sessSnap *session.Session, b
 	}
 }
 
+// sessionActive reports whether the session INSTANCE the scan was started
+// for (sessSnap, the snapshot taken when the response completed) is still
+// the active session under sessionID (true when the proxy has no manager).
+// The instance is compared by start time, not by ID alone (the runner's
+// sameInstance rule): a session that ended without a kill while its
+// detached scan was pending can have its ID reused by a new instance, and
+// the old instance's late tool calls must not be correlated into the new
+// instance's history.
+func (p *Proxy) sessionActive(sessionID string, sessSnap *session.Session) bool {
+	if p.manager == nil {
+		return true
+	}
+	sess, ok := p.manager.Get(sessionID)
+	if !ok || !sess.IsActive() {
+		return false
+	}
+	return sessSnap == nil || sess.StartTime.Equal(sessSnap.StartTime)
+}
+
 // logResponse logs a standard response
 // proxyToolCallsToPolicyToolCalls converts proxy ToolCallInfo to policy ToolCall
 func proxyToolCallsToPolicyToolCalls(toolCalls []ToolCallInfo) []policy.ToolCall {
 	result := make([]policy.ToolCall, len(toolCalls))
 	for i, tc := range toolCalls {
 		result[i] = policy.ToolCall{
+			ID:        tc.ID,
 			Name:      tc.Name,
 			Arguments: tc.Arguments,
 		}

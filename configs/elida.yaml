@@ -558,10 +558,17 @@ decision:
 
 # Bounded temporal correlation over content-free policy event metadata.
 # Restart-only: it is not a settings.yaml key, and a settings save keeps the
-# engine and its state. Requires policy.enabled. Audit is the safe rule
+# engine and its state. Policy correlation requires policy.enabled; shadow
+# correlation of semantic decisions does not. Audit is the safe rule
 # default; set mode: enforce explicitly for matches that should contribute
 # to the existing risk ladder (policy.mode audit still caps them). A rules
-# list here replaces the default list. Only shape: repeated is available.
+# list here replaces the default list. Shapes: repeated (count events of
+# one category) and sequence (ordered categories within the window).
+# In decision.mode shadow (the default) a separate shadow correlator with
+# the same rules correlates elevated-band shadow decisions and records
+# matches as correlation_shadow entries on the session (calibration data,
+# never violations or risk); in audit and enforce the policy engine
+# correlates the recorded injection_elevated evidence instead.
 # Env override: ELIDA_CORRELATION_ENABLED.
 correlation:
   enabled: false
@@ -579,3 +586,20 @@ correlation:
       cooldown: 15m
       severity: warning
       mode: audit
+  # Tool-call taxonomy: maps tool calls returned by the backend to the
+  # categories rules count (for example a sequence rule
+  # credential_discovery -> external_transmission). None ships: tool calls
+  # are not correlated until categories are configured. Tools are
+  # case-insensitive globs over the whole name ('*' and '?' match any
+  # character); argument_patterns are case-insensitive RE2 regexes over the
+  # first max_argument_bytes of the call's arguments (default 16384, at most
+  # 65536). Arguments are scanned and dropped, never stored or logged.
+  # Categorization runs off the request path. A taxonomy over 1024 compiled
+  # instructions starts with a WARN that estimates its worst-case cost.
+  max_argument_bytes: 16384
+  # tool_categories:
+  #   - category: credential_discovery
+  #     tools: [read_file, bash]
+  #     argument_patterns: ['\.aws/credentials', 'id_rsa']
+  #   - category: external_transmission
+  #     tools: ['http_*', web_fetch]

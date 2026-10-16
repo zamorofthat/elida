@@ -857,8 +857,12 @@ when that session ends.
 `/control/settings`. A settings save or reset reloads the policy engine but
 keeps the correlation engine and every session's correlation state; changing
 the block needs a restart. `ELIDA_CORRELATION_ENABLED=true|false` overrides
-`enabled`. Correlation reads the policy engine's violation events, so it
-needs `policy.enabled: true`; startup logs a WARN otherwise.
+`enabled`. Policy correlation (violation events and tool activity) reads the
+policy engine's events, so it needs `policy.enabled: true`; shadow
+correlation of semantic decisions does not (see
+[semantic detection](semantic-detection.md#temporal-correlation)). With the
+policy engine disabled, startup logs a WARN that policy correlation is
+inactive while shadow correlation is active.
 
 **Defaults.** Correlation is disabled by default. The shipped rule set is one
 audit-only rule:
@@ -880,16 +884,108 @@ correlation:
       mode: audit
 ```
 
-A `rules:` list in `elida.yaml` replaces the default list; it is not merged.
-`injection_elevated` evidence is recorded only when semantic detection runs
-in `audit` or `enforce`; in `shadow` the rule sees nothing.
+A `rules:` list in `elida.yaml` replaces the default list; it is not merged
+(copy `slow_burn_injection` to keep it). `injection_elevated` violations are
+recorded only when semantic detection runs in `audit` or `enforce`. In the
+default `shadow` mode a separate shadow correlator, built from the same
+rules and limits, correlates the elevated-band shadow decisions instead,
+and records matches as `correlation_shadow` entries on the session (see
+[semantic detection](semantic-detection.md#temporal-correlation)), never as
+violations.
+
+**Reference.** Every key is restart-only.
+
+| Key | Default | Notes |
+|---|---|---|
+| `correlation.enabled` | `false` | Env `ELIDA_CORRELATION_ENABLED=true\|false`. Policy correlation (violation events and tool activity) needs `policy.enabled: true`; shadow correlation of semantic decisions does not. |
+| `correlation.max_history_events` | `64` | Events kept per session, shared by every category any rule wants; 1 to 1024, and at least the largest rule's `count` or sequence length. |
+| `correlation.max_sessions` | `4096` | Sessions tracked, least recently active evicted first (per shard); 1 to 100000. |
+| `correlation.rules` | `slow_burn_injection` | Replaces the default list. At most 64 rules. |
+| `correlation.tool_categories` | none | Tool-call taxonomy: entries mapping tool name globs and optional argument patterns to a category. At most 64 entries. |
+| `correlation.max_argument_bytes` | `16384` | How much of a tool call's arguments argument patterns scan; at most 65536. |
+
+Rule fields:
+
+| Field | Applies to | Notes |
+|---|---|---|
+| `name` | all | `[a-z0-9_]`, at most 64 bytes, unique; recorded as `correlation.<name>`. |
+| `shape` | all | `repeated` or `sequence`. |
+| `category` | repeated | The category counted. |
+| `count` | repeated | 2 to 32. |
+| `count_by` | repeated | `event` (default) or `message` (source role and message index). |
+| `sequence` | sequence | 2 to 8 categories, in order by event time. |
+| `window` | all | First to last event, inclusive; at most 24h. |
+| `cooldown` | all | Default: `window`; at most 24h. |
+| `severity` | all | `info`, `warning` (default) or `critical`. |
+| `mode` | all | `audit` (default) or `enforce` (reserved decision; startup WARN; capped by `policy.mode: audit`). |
+
+Categories available to rules are the policy event categories (for example
+`injection_elevated`, `semantic_injection`, `prompt_injection`,
+rule-derived content categories) and the categories defined in
+`tool_categories`. `correlation_match` is reserved.
+
+`tool_categories` entry fields and limits:
+
+| Field | Notes |
+|---|---|
+| `category` | Category name, same charset as rule categories. |
+| `tools` | 1 to 32 case-insensitive globs over the whole tool name (`*` and `?` match any character, `/` included; at most 128 bytes each). |
+| `argument_patterns` | Optional, at most 8 case-insensitive RE2 regexes (at most 1024 bytes each). Without patterns, the tool name alone categorizes the call. |
+
+Every glob and pattern is compiled at load. One is rejected above 256
+compiled instructions, and the whole taxonomy above 8192. Over 1024 summed
+instructions the taxonomy is accepted with a startup WARN that estimates
+its worst-case cost per call. See the
+[cost model](semantic-detection.md#temporal-correlation).
+
+```yaml
+correlation:
+  enabled: true
+  rules:
+    - name: slow_burn_injection
+      shape: repeated
+      category: injection_elevated
+      count: 3
+      count_by: message
+      window: 15m
+    - name: cred_then_send
+      shape: sequence
+      sequence: [credential_discovery, external_transmission]
+      window: 10m
+  max_argument_bytes: 16384
+  tool_categories:
+    - category: credential_discovery
+      tools: [read_file, bash]
+      argument_patterns: ['\.aws/credentials', 'id_rsa']
+    - category: external_transmission
+      tools: ['http_*', web_fetch]
+```
 
 **Validation.** Rule names, categories, counts, windows and memory limits are
 validated when the file is loaded, exactly as the engine will be built (an
 explicit `max_history_events: 0` is an error, not "use the default"). An
-enabled block that cannot be built refuses startup. `shape` must be
-`repeated`: ordered sequences (`shape: sequence`) are not available yet, and
-validation rejects them until they land (Plan B Task 3).
+enabled block that cannot be built refuses startup.
+
+**Shapes.** `shape: repeated` matches `count` events of one `category`
+within `window`. `shape: sequence` matches 2 to 8 categories listed under
+`sequence:`, in that order by event time, with the first and last no more
+than `window` apart (inclusive); it takes no `category`, `count` or
+`count_by`:
+
+```yaml
+    - name: probe_then_exfil
+      shape: sequence
+      sequence: [injection_elevated, policy_violation]
+      window: 10m
+```
+
+Order is decided by event timestamps, not by arrival, so an asynchronous
+semantic result that lands after later events still fills its step. Events
+with equal timestamps follow arrival order. A step may repeat a category
+(`[a, a, b]` needs two `a` events before the `b`). For both shapes, each
+event contributes to at most one match of a rule (it may also contribute to
+other rules), and `cooldown` (default: `window`) suppresses a further match
+of the rule until that long after the previous match's last event.
 
 **Modes.** The default `mode` is `audit`: a match is evidence-only, adds no
 risk, and is exported as an informational OCSF 2004 Detection Finding with

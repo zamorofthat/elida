@@ -90,11 +90,13 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"elida/internal/config"
+	"elida/internal/correlation"
 	"elida/internal/decision"
 	"elida/internal/decision/preprocess"
 	"elida/internal/decision/scheduler"
@@ -129,6 +131,16 @@ const (
 // maintain a score of its own. *policy.Engine satisfies it.
 type PolicyRecorder interface {
 	RecordSemanticViolation(sessionID string, v policy.Violation)
+}
+
+// ShadowCorrelator is temporal correlation fed by shadow-mode decisions.
+// *correlation.Engine satisfies it. It must be a correlator of its own, not
+// the policy engine's, so a shadow match can never be recorded as a
+// violation: a policy-observed event can never complete a match that
+// contains shadow evidence.
+type ShadowCorrelator interface {
+	Observe(sessionID string, events []correlation.Event) []correlation.Match
+	Forget(sessionID string)
 }
 
 // WouldContributePoints is what a violation of this severity from this
@@ -253,6 +265,20 @@ type Config struct {
 	// New rejects a typed nil (a nil *policy.Engine behind the interface),
 	// which would otherwise be called on the first finding.
 	Policy PolicyRecorder
+	// ShadowCorrelator receives elevated-band, non-vetoed decisions as
+	// injection_elevated events (event ID = DecisionID) in effective shadow
+	// mode only; in audit and enforce the policy engine correlates the
+	// recorded violation instead, so one decision reaches at most one
+	// correlator. Matches become session CorrelationShadow entries, never
+	// violations, never risk. Nil, or a typed nil such as a nil
+	// *correlation.Engine, disables shadow correlation.
+	//
+	// It is a startup field, not part of Live: Reconfigure does not touch
+	// it. A runtime switch between shadow and audit therefore splits one
+	// session's evidence between the two correlators (shadow decisions
+	// here, violation events in the policy engine's). That can miss a
+	// match; it never counts one decision twice.
+	ShadowCorrelator ShadowCorrelator
 	// ThresholdSetMatches reports whether the configured threshold set
 	// matches the loaded model's own. Enforce mode is refused when it does
 	// not: strict enforcement requires calibration evidence for the exact
@@ -350,7 +376,8 @@ type Runner struct {
 	// bound is the session registry: async results and the per-session
 	// assessed-message set find their session through it. Entries leave only
 	// through Unbind; MaxBoundSessions caps it. boundMu also guards every
-	// assessedSet.
+	// assessedSet, and it is held around every shadow correlator Observe
+	// and Forget (lock order: boundMu, then the correlator's shard lock).
 	boundMu sync.Mutex
 	bound   map[string]*boundSession
 
@@ -371,6 +398,10 @@ type Runner struct {
 	asyncDroppedNoSession atomic.Int64
 	// bindRefused counts sessions not bound because the registry was full.
 	bindRefused atomic.Int64
+	// shadowMatchesDropped counts shadow correlation matches discarded
+	// because their session instance was unbound while its Observe ran
+	// outside boundMu.
+	shadowMatchesDropped atomic.Int64
 
 	// dropLogMu guards the rate limit of the drop and refusal WARNs.
 	dropLogMu       sync.Mutex
@@ -521,6 +552,14 @@ func New(cfg Config) (*Runner, error) {
 		// a non-nil interface and would be called on the first finding.
 		if rv := reflect.ValueOf(cfg.Policy); rv.Kind() == reflect.Pointer && rv.IsNil() {
 			return nil, fmt.Errorf("runner: Policy is a nil %T; pass a nil interface for shadow-only behavior", cfg.Policy)
+		}
+	}
+	if cfg.ShadowCorrelator != nil {
+		// Unlike Policy, a typed nil here means "disabled" (a nil
+		// *correlation.Engine is what a disabled block leaves). Normalize it
+		// so the nil checks in correlateShadow and Unbind are the only ones.
+		if rv := reflect.ValueOf(cfg.ShadowCorrelator); rv.Kind() == reflect.Pointer && rv.IsNil() {
+			cfg.ShadowCorrelator = nil
 		}
 	}
 	// The same value checks Reconfigure applies, so Reconfigure(r.Live())
@@ -910,17 +949,53 @@ func (r *Runner) CoverageGaps() map[string]int64 {
 // coverage gap: the content was analyzed on an earlier request.
 func (r *Runner) AlreadyAssessed() int64 { return r.alreadyAssessed.Load() }
 
+// sameInstance reports whether a and b are the same session instance: the
+// same pointer, or the same ID and start time. A session store that returns
+// a fresh copy per lookup (the Redis store) yields a new pointer for the
+// same instance on every request; a session re-created under a reused ID
+// has a new start time. StartTime is set once, at construction.
+func sameInstance(a, b *session.Session) bool {
+	return a == b || (a.ID == b.ID && a.StartTime.Equal(b.StartTime))
+}
+
 // Bind registers a session so an async completion and the assessed-message
 // set can find it. A live binding is never evicted. At MaxBoundSessions live
 // bindings a new session is not bound: it is counted, logged at WARN at most
 // once a minute, assessed without history, and its async results are
 // dropped (AsyncDroppedNoSession).
+//
+// A session that is no longer active is never bound: every session-end path
+// moves the session off Active before the end callback calls Unbind, so a
+// request that starts after Unbind on the ended session cannot re-create
+// its binding (and its shadow correlation state). Such a request is
+// assessed without history, like a refused one.
+//
+// Shadow correlation state belongs to one session instance: the shadow
+// correlator is keyed by shadowKey (ID and start time), not by the bare ID.
+// When Bind installs a new instance for an ID (a fresh entry, or a new
+// instance replacing a retained old one whose Unbind has not run yet), the
+// shadow correlator forgets the replaced instance's key, and the new
+// instance starts under a key of its own, so it never completes a match with
+// an earlier instance's evidence.
 func (r *Runner) Bind(sess *session.Session) {
 	if sess == nil {
 		return
 	}
 	r.boundMu.Lock()
+	// IsActive is checked under boundMu: every session-end path moves the
+	// session off Active before Unbind takes this lock, so a Bind that
+	// checked before the state change and locked after Unbind would
+	// otherwise re-bind the ended session permanently (no further Unbind
+	// comes) with its shadow correlation state.
+	if !sess.IsActive() {
+		r.boundMu.Unlock()
+		return
+	}
 	if b, ok := r.bound[sess.ID]; ok {
+		if !sameInstance(b.sess, sess) {
+			r.forgetShadow(shadowKey(b.sess))
+			r.forgetShadow(shadowKey(sess))
+		}
 		// Refresh the pointer: a session re-created under the same ID must
 		// not leave async results landing on the stale one.
 		b.sess = sess
@@ -935,6 +1010,7 @@ func (r *Runner) Bind(sess *session.Session) {
 			"max_bound_sessions", MaxBoundSessions)
 		return
 	}
+	r.forgetShadow(shadowKey(sess))
 	r.bound[sess.ID] = &boundSession{
 		sess:     sess,
 		assessed: newAssessedSet(),
@@ -942,6 +1018,31 @@ func (r *Runner) Bind(sess *session.Session) {
 	}
 	r.boundMu.Unlock()
 }
+
+// shadowKey is the shadow correlator's key for one session instance: the
+// session ID and its start time (set once, at construction), so two
+// instances of a reused ID never share correlation state, and an older
+// instance's late Observe can never write into a newer instance's history.
+// It matches sameInstance: a fresh pointer to the same instance (the Redis
+// store) yields the same key.
+func shadowKey(sess *session.Session) string {
+	return sess.ID + "@" + strconv.FormatInt(sess.StartTime.UnixNano(), 10)
+}
+
+// forgetShadow drops the shadow correlator's state for one instance key.
+// An Observe for that key may be running outside boundMu at the same time;
+// correlateShadow re-checks the binding after Observe and forgets again if
+// the instance is no longer bound, so no state outlives the binding.
+func (r *Runner) forgetShadow(key string) {
+	if r.cfg.ShadowCorrelator != nil {
+		r.cfg.ShadowCorrelator.Forget(key)
+	}
+}
+
+// ShadowMatchesDropped returns how many shadow correlation matches were
+// discarded because their session instance ended (or was replaced) while
+// the match was being computed.
+func (r *Runner) ShadowMatchesDropped() int64 { return r.shadowMatchesDropped.Load() }
 
 // logRateLimited logs one content-free WARN at most once per
 // dropLogInterval for the counter at since, carrying how many events it
@@ -991,11 +1092,25 @@ func (r *Runner) Unbind(sess *session.Session) {
 	r.boundMu.Lock()
 	defer r.boundMu.Unlock()
 	b, ok := r.bound[sess.ID]
-	if !ok || b.sess != sess {
+	if !ok || !sameInstance(b.sess, sess) {
 		// Not bound, or a newer session now owns this ID.
 		return
 	}
 	delete(r.bound, sess.ID)
+	// Session end: shadow correlation state must not outlive the session.
+	// Only the owning instance forgets its key. A correlateShadow Observe
+	// already running outside boundMu for this instance re-checks the
+	// binding afterwards and forgets the key again, so no state is left.
+	r.forgetShadow(shadowKey(b.sess))
+}
+
+// instanceBound reports whether this session instance currently owns its
+// ID's binding.
+func (r *Runner) instanceBound(sess *session.Session) bool {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sess.ID]
+	return ok && sameInstance(b.sess, sess)
 }
 
 func (r *Runner) lookupSession(id string) *session.Session {
@@ -1469,6 +1584,12 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 		r.recordShadow(sess, in, v)
 
 		if st.effective == config.DecisionModeShadow || r.cfg.Policy == nil {
+			// Effective shadow (the live mode this call snapshotted): no
+			// violations. Elevated-band evidence still feeds the shadow
+			// correlator, so slow-burn calibration data exists in shadow
+			// deployments. Outside this branch the decision goes to the
+			// policy engine instead, never to both.
+			r.correlateShadow(sess, in, v)
 			continue
 		}
 		// A vetoed decision is not a finding in any mode. The aux head
@@ -1613,4 +1734,77 @@ func (r *Runner) recordShadow(sess *session.Session, in decision.Input, v Verdic
 		CoverageComplete: v.Coverage.Complete,
 		LatencyMs:        v.Latency.Milliseconds(),
 	})
+}
+
+// correlateShadow feeds one shadow decision to the shadow correlator when it
+// is in the injection_elevated band (Elevated > 0, Elevated <= p < Main, not
+// vetoed: exactly the band handle records as injection_elevated in audit and
+// enforce) and records any match on the session. The caller holds the
+// verdict's claim, so a DecisionID is fed at most once. The event ID is the
+// DecisionID, the group is source_role:message_index (the policy engine's
+// correlationGroup format, so count_by: message behaves the same in both
+// modes), and nothing here touches risk or creates a violation. Only a
+// bound session instance is observed (see Bind and Unbind).
+//
+// Observe runs OUTSIDE boundMu: boundMu is taken by every session's
+// AssessRequest on the inline path, so a slow Observe on one session must
+// not serialize unrelated sessions (the policy engine's correlator follows
+// the same collect, unlock, Observe, relock pattern). The binding is checked
+// before and after; the correlator is keyed by instance (shadowKey), so a
+// late Observe can only touch its own instance's state, and if that
+// instance was unbound or replaced meanwhile its matches are dropped
+// (ShadowMatchesDropped) and its key forgotten.
+//
+// RecordCorrelationShadow runs after boundMu is released, so a match
+// accepted just before Unbind can land on the ended session's in-memory
+// object after its end callback ran. That is harmless while
+// correlation_shadow is not persisted; a change that persists it must
+// snapshot after any in-flight correlation or accept that loss.
+func (r *Runner) correlateShadow(sess *session.Session, in decision.Input, v Verdict) {
+	c := r.cfg.ShadowCorrelator
+	th := r.cfg.Thresholds
+	if c == nil || v.Vetoed || th.Elevated <= 0 || v.Probability < th.Elevated || v.Probability >= th.Main {
+		return
+	}
+	now := r.cfg.Clock()
+	ev := correlation.Event{
+		ID:        v.DecisionID,
+		Category:  CategoryInjectionElevated,
+		Group:     in.SourceRole + ":" + strconv.Itoa(in.MessageIndex),
+		Timestamp: now,
+	}
+	// Observe only while this session instance is bound. An unbound
+	// session (ended, or refused at MaxBoundSessions) is not correlated.
+	if !r.instanceBound(sess) {
+		return
+	}
+	key := shadowKey(sess)
+	matches := c.Observe(key, []correlation.Event{ev})
+	if !r.instanceBound(sess) {
+		// Unbound or replaced while Observe ran: Unbind/Bind may have
+		// forgotten the key before this Observe wrote to it.
+		c.Forget(key)
+		r.shadowMatchesDropped.Add(int64(len(matches)))
+		return
+	}
+	for _, m := range matches {
+		sess.RecordCorrelationShadow(session.CorrelationShadow{
+			Timestamp:  now,
+			MatchID:    m.ID,
+			Rule:       m.Rule,
+			Shape:      string(m.Shape),
+			Severity:   m.Severity,
+			Mode:       string(m.Mode),
+			EventIDs:   m.EventIDs,
+			Categories: m.Categories,
+			FirstEvent: m.FirstEvent,
+			LastEvent:  m.LastEvent,
+		})
+		slog.Info("shadow correlation match recorded",
+			"session_id", sess.ID,
+			"rule", m.Rule,
+			"match_id", m.ID,
+			"events", len(m.EventIDs),
+		)
+	}
 }

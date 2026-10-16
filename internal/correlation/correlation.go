@@ -138,10 +138,10 @@ type Limits struct {
 	// this does not arise. Follow-up, before tool-call categories ship
 	// (Plan B Task 7): reserve a share of the budget for
 	// injection_elevated, or give each rule its own budget.
-	MaxHistoryEvents int
+	MaxHistoryEvents int `json:"max_history_events"`
 	// MaxSessions caps the sessions tracked across all shards (see
 	// MaxShards).
-	MaxSessions int
+	MaxSessions int `json:"max_sessions"`
 }
 
 // Event is one correlation input. It carries no content.

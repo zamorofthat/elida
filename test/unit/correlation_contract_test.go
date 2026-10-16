@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -69,6 +70,21 @@ func TestCorrelationValidate_Rejects(t *testing.T) {
 		{"zero window", repeatedRule("x", "a", 3, 0), okLimits(), "rules[0].window"},
 		{"window above max", repeatedRule("x", "a", 3, correlation.MaxWindow+time.Second), okLimits(), "rules[0].window"},
 		{"negative cooldown", func() correlation.Rule { r := repeatedRule("x", "a", 3, time.Minute); r.Cooldown = -1; return r }(), okLimits(), "rules[0].cooldown"},
+		// Task 1 review M-1 and M-2: the cooldown upper bound, the name
+		// length cap, the repeated-rule category charset, and count_by on a
+		// sequence rule.
+		{"cooldown above max", func() correlation.Rule {
+			r := repeatedRule("x", "a", 3, time.Minute)
+			r.Cooldown = correlation.MaxWindow + time.Second
+			return r
+		}(), okLimits(), "rules[0].cooldown"},
+		{"name too long", repeatedRule(strings.Repeat("a", 65), "a", 3, time.Minute), okLimits(), "rules[0].name"},
+		{"repeated category charset", repeatedRule("x", "Bad-Cat", 3, time.Minute), okLimits(), "rules[0].category"},
+		{"sequence with count_by", func() correlation.Rule {
+			r := sequenceRule("x", time.Minute, "a", "b")
+			r.CountBy = correlation.CountByEvent
+			return r
+		}(), okLimits(), "rules[0].count_by"},
 		{"bad severity", func() correlation.Rule { r := repeatedRule("x", "a", 3, time.Minute); r.Severity = "high"; return r }(), okLimits(), "rules[0].severity"},
 		{"bad mode", func() correlation.Rule { r := repeatedRule("x", "a", 3, time.Minute); r.Mode = "block"; return r }(), okLimits(), "rules[0].mode"},
 		{"history zero", repeatedRule("x", "a", 3, time.Minute), correlation.Limits{MaxHistoryEvents: 0, MaxSessions: 10}, "max_history_events"},
@@ -102,8 +118,18 @@ func TestCorrelationValidate_DuplicateNamesAndTooManyRules(t *testing.T) {
 	for i := 0; i <= correlation.MaxRules; i++ {
 		many = append(many, repeatedRule("r"+strings.Repeat("x", i%40)+string(rune('a'+i%26)), "a", 3, time.Minute))
 	}
-	if !strings.Contains(strings.Join(fieldsOf(correlation.Validate(many, okLimits())), ","), "rules") {
-		t.Fatalf("more than %d rules must be rejected", correlation.MaxRules)
+	// Task 1 review M-3: the exact "rules" field and its message, not a
+	// substring that any rules[i].x error would also satisfy.
+	errs := correlation.Validate(many, okLimits())
+	want := fmt.Sprintf("at most %d rules, got %d", correlation.MaxRules, len(many))
+	found := false
+	for _, e := range errs {
+		if e.Field == "rules" && e.Message == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("more than %d rules must be rejected on field \"rules\" with %q, got %v", correlation.MaxRules, want, errs)
 	}
 }
 

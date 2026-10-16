@@ -119,6 +119,11 @@ type DecisionStatus struct {
 	// was disabled at runtime: dropped unrecorded and settled as unanswered
 	// (also in coverage_gaps as async_dropped_disabled).
 	AsyncDroppedDisabled int64 `json:"async_dropped_disabled"`
+	// ShadowMatchesDropped counts shadow correlation matches discarded
+	// because their session instance ended (or its ID was reused) while
+	// the match was being computed. A content-free integer; 0 when no
+	// shadow correlator runs.
+	ShadowMatchesDropped int64 `json:"shadow_matches_dropped"`
 
 	// Limits are the restart-only values in force; the Settings page shows
 	// them read-only. Changing one needs elida.yaml and a restart.
@@ -673,6 +678,7 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// Detail path only: the snapshot already holds a deep copy taken under
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
+	info.CorrelationShadow = snap.CorrelationShadow
 	// GetFlaggedSession returns a deep copy, so the list is the caller's.
 	if h.policyEngine != nil {
 		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
@@ -778,6 +784,10 @@ type SessionInfo struct {
 	// Fifty entries per session would bloat every list response, and
 	// calibration review happens one session at a time.
 	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
+	// CorrelationShadow is populated only on the single-session detail
+	// path, for the same reason as SemanticShadow: shadow-mode correlation
+	// matches, calibration data that is never a violation.
+	CorrelationShadow []session.CorrelationShadow `json:"correlation_shadow,omitempty"`
 
 	// SemanticDecisions is the policy engine's per-decision record list
 	// (detail path only, like SemanticShadow): what explains each semantic

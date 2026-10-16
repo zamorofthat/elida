@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -459,6 +460,10 @@ type CapturedRequest struct {
 // ToolCall represents a tool call to be evaluated by the policy engine.
 // This is the policy package's view of tool call data, decoupled from proxy internals.
 type ToolCall struct {
+	// ID is the provider's tool-call ID (OpenAI "call_...", Anthropic
+	// "toolu_..."), or empty. Correlation uses it as the call's identity
+	// only while it is unique within the session.
+	ID        string
 	Name      string // Tool/function name
 	Arguments string // JSON-encoded arguments
 }
@@ -536,6 +541,25 @@ type Engine struct {
 	// beforeObserve is a test seam: when set, recordViolations calls it
 	// with e.mu released, just before Observe.
 	beforeObserve func()
+
+	// taxonomy categorizes tool calls for correlation. It is built from
+	// the correlation block and replaced with the correlator; nil when
+	// correlation is off or no tool_categories are configured. Guarded by
+	// mu.
+	taxonomy *correlation.Taxonomy
+	// toolSessions holds each live session's tool-correlation state (see
+	// toollane.go), in an LRU (toolLRU, front = most recently used).
+	// Guarded by mu.
+	toolSessions map[string]*toolSession
+	// toolEvicted holds, per session ID, states evicted from toolSessions
+	// while a batch of theirs was queued or running, so a session end can
+	// still mark them ended (see evictToolSessionLocked). Drained states
+	// are pruned lazily. Guarded by mu.
+	toolEvicted map[string][]*toolSession
+	toolLRU     list.List
+	toolEpoch   uint64
+	// tools is the off-request-path lane that categorizes tool calls.
+	tools toolLane
 }
 
 // Config for the policy engine
@@ -561,24 +585,38 @@ const CorrelationRulePrefix = correlation.RuleNamePrefix
 const CategoryCorrelationMatch = correlation.CategoryMatch
 
 // CorrelationConfig is the policy engine's temporal-correlation input.
+//
+// The embedded TaxonomyConfig (tool_categories, max_argument_bytes) maps
+// tool calls to categories (Plan B D7); empty means tool calls are not
+// correlated. It is inlined, as in the YAML correlation block, so GET
+// /control/policy serves one flat, snake_case object.
 type CorrelationConfig struct {
-	Enabled bool
-	Rules   []correlation.Rule
-	Limits  correlation.Limits
+	Enabled bool               `yaml:"enabled" json:"enabled"`
+	Rules   []correlation.Rule `yaml:"rules" json:"rules"`
+	Limits  correlation.Limits `yaml:"limits" json:"limits"`
+
+	correlation.TaxonomyConfig `yaml:",inline"`
 }
 
-// newCorrelationEngine builds the correlator for cfg, or nil when it is
-// disabled. It logs one WARN per enforce-mode rule (Plan B D5): promoting a
-// rule to enforce is a reserved decision, and under policy.mode audit the
-// rule is capped to audit at record time, which the WARN says.
-func newCorrelationEngine(cfg CorrelationConfig, auditMode bool) *correlation.Engine {
+// newCorrelationEngine builds the correlator and the tool taxonomy for
+// cfg, or nils when it is disabled. It logs one WARN per enforce-mode rule
+// (Plan B D5): promoting a rule to enforce is a reserved decision, and under
+// policy.mode audit the rule is capped to audit at record time, which the
+// WARN says. An invalid block disables correlation as a whole, taxonomy
+// included (startup validation refuses it first).
+func newCorrelationEngine(cfg CorrelationConfig, auditMode bool) (*correlation.Engine, *correlation.Taxonomy) {
 	if !cfg.Enabled {
-		return nil
+		return nil, nil
 	}
 	engine, err := correlation.New(cfg.Rules, cfg.Limits)
 	if err != nil {
 		slog.Error("correlation engine disabled by invalid configuration", "error", err)
-		return nil
+		return nil, nil
+	}
+	taxonomy, err := correlation.NewTaxonomy(cfg.TaxonomyConfig)
+	if err != nil {
+		slog.Error("correlation engine disabled by invalid configuration", "error", err)
+		return nil, nil
 	}
 	for _, r := range engine.Rules() {
 		if r.Mode != correlation.ModeEnforce {
@@ -592,13 +630,14 @@ func newCorrelationEngine(cfg CorrelationConfig, auditMode bool) *correlation.En
 		slog.Warn("correlation rule is in enforce mode: its matches contribute risk to the ladder",
 			"rule", r.Name)
 	}
-	return engine
+	return engine, taxonomy
 }
 
 // correlationConfigEqual reports whether two correlation blocks build the
 // same engine. A nil and an empty rule list are equal.
 func correlationConfigEqual(a, b CorrelationConfig) bool {
-	if a.Enabled != b.Enabled || a.Limits != b.Limits || len(a.Rules) != len(b.Rules) {
+	if a.Enabled != b.Enabled || a.Limits != b.Limits || len(a.Rules) != len(b.Rules) ||
+		!reflect.DeepEqual(a.TaxonomyConfig, b.TaxonomyConfig) {
 		return false
 	}
 	for i := range a.Rules {
@@ -630,7 +669,25 @@ func cloneCorrelationConfig(c CorrelationConfig) CorrelationConfig {
 		}
 		c.Rules = rules
 	}
+	if c.ToolCategories != nil {
+		cats := make([]correlation.ToolCategoryRule, len(c.ToolCategories))
+		for i, r := range c.ToolCategories {
+			r.Tools = cloneStrings(r.Tools)
+			r.ArgumentPatterns = cloneStrings(r.ArgumentPatterns)
+			cats[i] = r
+		}
+		c.ToolCategories = cats
+	}
 	return c
+}
+
+// cloneStrings copies s, keeping nil as nil (so a cloned block stays
+// DeepEqual to its source).
+func cloneStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string{}, s...)
 }
 
 // RiskLadderConfig configures progressive escalation based on cumulative risk score
@@ -712,9 +769,12 @@ func NewEngine(cfg Config) *Engine {
 		seenSemanticEvents: make(map[string]*seenDecisionIDs),
 		seenMatchEvents:    make(map[string]*seenDecisionIDs),
 		retained:           make(map[string]uint64),
-		correlation:        newCorrelationEngine(cfg.Correlation, auditMode),
 		correlationConfig:  cloneCorrelationConfig(cfg.Correlation),
+		toolSessions:       make(map[string]*toolSession),
+		toolEvicted:        make(map[string][]*toolSession),
 	}
+	e.tools.init()
+	e.correlation, e.taxonomy = newCorrelationEngine(cfg.Correlation, auditMode)
 
 	// Compile regex patterns for content rules
 	for _, rule := range cfg.Rules {
@@ -798,7 +858,7 @@ func (e *Engine) ReloadConfig(cfg Config) {
 	// resets every session's correlation history, so that is logged.
 	if !correlationConfigEqual(e.correlationConfig, cfg.Correlation) {
 		previous := e.correlation
-		e.correlation = newCorrelationEngine(cfg.Correlation, cfg.Mode == "audit")
+		e.correlation, e.taxonomy = newCorrelationEngine(cfg.Correlation, cfg.Mode == "audit")
 		e.correlationConfig = cloneCorrelationConfig(cfg.Correlation)
 		if previous != nil || e.correlation != nil {
 			slog.Info("correlation engine replaced; per-session correlation state reset",
@@ -1621,12 +1681,38 @@ func correlationGroup(v Violation) string {
 // own: events queued to Observe, matches recorded, matches refused as
 // duplicates, and matches discarded because their session ended while
 // Observe ran. Served at GET /control/flagged/stats under "correlation".
+//
+// The Tool* counters describe the tool lane (toollane.go): batches queued;
+// batches dropped because the lane, the session's quota or the byte budget
+// was full; calls dropped past MaxToolCallsPerBatch; batches discarded
+// because their session ended or was retained, or the correlator was
+// replaced, before they ran; tool-session states evicted by the LRU;
+// batches refused after CloseToolLane; and batches abandoned (queued or
+// mid-categorization) when CloseToolLane stopped the workers.
 type CorrelationStats struct {
 	correlation.Stats
 	EventsQueued     uint64 `json:"events_queued"`
 	MatchesRecorded  uint64 `json:"matches_recorded"`
 	MatchesDuplicate uint64 `json:"matches_duplicate"`
 	MatchesDiscarded uint64 `json:"matches_discarded"`
+
+	ToolBatchesQueued    uint64 `json:"tool_batches_queued"`
+	ToolBatchesDropped   uint64 `json:"tool_batches_dropped"`
+	ToolCallsDropped     uint64 `json:"tool_calls_dropped"`
+	ToolBatchesDiscarded uint64 `json:"tool_batches_discarded"`
+	ToolSessionsEvicted  uint64 `json:"tool_sessions_evicted"`
+	ToolBatchesRefused   uint64 `json:"tool_batches_refused"`
+	ToolBatchesAbandoned uint64 `json:"tool_batches_abandoned"`
+}
+
+// CorrelationSetup returns the installed correlator's normalized rules and
+// the tool taxonomy, for a startup summary that describes what was built
+// rather than rebuilding it. Both are nil when correlation is off; the
+// taxonomy is nil when no tool_categories are configured.
+func (e *Engine) CorrelationSetup() ([]correlation.Rule, *correlation.Taxonomy) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.correlation.Rules(), e.taxonomy
 }
 
 // matchViolationLocked turns a correlation match into a violation. The
@@ -2186,6 +2272,8 @@ func (e *Engine) RemoveFlaggedSession(sessionID string) {
 	if e.correlation != nil {
 		e.correlation.Forget(sessionID)
 	}
+	// Tool batches still queued for this session instance are discarded.
+	e.endToolSessionLocked(sessionID)
 	e.removeFlaggedLocked(sessionID)
 }
 
@@ -2227,6 +2315,8 @@ func (e *Engine) ReleaseFlaggedSession(sessionID string) bool {
 	if e.correlation != nil {
 		e.correlation.Forget(sessionID)
 	}
+	// Tool batches still queued for this session instance are discarded.
+	e.endToolSessionLocked(sessionID)
 
 	flagged, ok := e.flaggedSessions[sessionID]
 	if !ok {
@@ -2368,6 +2458,14 @@ func (e *Engine) Stats() map[string]interface{} {
 			MatchesRecorded:  e.correlationRecorded.Load(),
 			MatchesDuplicate: e.correlationDuplicates.Load(),
 			MatchesDiscarded: e.correlationDiscarded.Load(),
+
+			ToolBatchesQueued:    e.tools.batchesQueued.Load(),
+			ToolBatchesDropped:   e.tools.batchesDropped.Load(),
+			ToolCallsDropped:     e.tools.callsDropped.Load(),
+			ToolBatchesDiscarded: e.tools.batchesDiscarded.Load(),
+			ToolSessionsEvicted:  e.tools.sessionsEvicted.Load(),
+			ToolBatchesRefused:   e.tools.batchesRefused.Load(),
+			ToolBatchesAbandoned: e.tools.batchesAbandoned.Load(),
 		}
 	}
 	return stats
@@ -2605,17 +2703,45 @@ func compileToolRules(rules []Rule) []CompiledToolRule {
 	return result
 }
 
-// EvaluateToolCalls checks extracted tool calls against tool call policy rules
+// EvaluateToolCalls checks extracted tool calls against tool call policy
+// rules. When a tool taxonomy is configured it also queues the calls for
+// temporal correlation; that never affects the result.
 func (e *Engine) EvaluateToolCalls(sessionID string, toolCalls []ToolCall) *ContentCheckResult {
+	return e.evaluateToolCalls(sessionID, toolCalls, true)
+}
+
+// EvaluateToolCallsUncorrelated is EvaluateToolCalls without the temporal
+// correlation step: tool rules are evaluated and their violations recorded
+// exactly as EvaluateToolCalls does, but the calls are not queued on the
+// tool lane. The detached async response scan uses it for a session that
+// is no longer active, so a late batch keeps its tool-rule evidence (the
+// caller persists a flagged session as before) without re-creating tool
+// correlation state for an ended session.
+func (e *Engine) EvaluateToolCallsUncorrelated(sessionID string, toolCalls []ToolCall) *ContentCheckResult {
+	return e.evaluateToolCalls(sessionID, toolCalls, false)
+}
+
+func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, correlate bool) *ContentCheckResult {
 	if len(toolCalls) == 0 {
 		return nil
 	}
 
-	// Snapshot rules and audit mode under read lock
+	// Snapshot rules, audit mode and the taxonomy under read lock
 	e.mu.RLock()
 	toolRules := e.compiledToolRules
 	auditMode := e.auditMode
+	taxonomy := e.taxonomy
 	e.mu.RUnlock()
+
+	// Temporal correlation sees categorized tool calls whether or not any
+	// tool rule exists. The calls are only queued here: categorization and
+	// Observe run on the tool lane, off the request path and outside every
+	// lock (see toollane.go). On its own a categorized call records
+	// nothing; only a completed correlation match is recorded, and never
+	// as part of this result.
+	if taxonomy != nil && correlate {
+		e.enqueueToolCalls(sessionID, taxonomy, toolCalls)
+	}
 
 	if len(toolRules) == 0 {
 		return nil
