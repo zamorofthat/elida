@@ -12,7 +12,7 @@ RUN bun run build
 # The float32 ONNX graph is derived from upstream's int8 publication by
 # scripts/models/dequantize.py, which needs Python. Doing it in its own
 # stage keeps the Go builder pure: no Python, no pip, nothing but go build.
-FROM python:3.13-slim AS model-builder
+FROM python:3.14-slim AS model-builder
 
 # The pinned upstream commit (see scripts/models/README.md). fetch.sh refuses
 # any value other than the commit its checksums were recorded at, so this
