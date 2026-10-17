@@ -211,6 +211,10 @@ We thank the security researchers who have helped improve ELIDA's security:
 - **General Questions**: [GitHub Discussions](https://github.com/zamorofthat/elida/discussions)
 - **Bug Reports**: [GitHub Issues](https://github.com/zamorofthat/elida/issues)
 
+## Known Limitations
+
+ELIDA is one layer of defense, not a guarantee. For an honest account of what it does not catch, known bypass classes, and the controls you should run alongside it, see [SECURITY_LIMITATIONS.md](https://github.com/zamorofthat/elida/blob/main/SECURITY_LIMITATIONS.md).
+
 ---
 
 *This security policy follows [OpenSSF Security Policies](https://github.com/ossf/oss-vulnerability-guide) and [GitHub's recommended format](https://docs.github.com/en/code-security/getting-started/adding-a-security-policy-to-your-repository).*

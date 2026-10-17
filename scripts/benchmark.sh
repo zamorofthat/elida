@@ -28,6 +28,53 @@ NC='\033[0m'
 PROXY_URL="${ELIDA_PROXY_URL:-http://localhost:8080}"
 CONTROL_URL="${ELIDA_CONTROL_URL:-http://localhost:9090}"
 
+# Direct-to-backend baseline URL for --overhead (bypasses ELIDA).
+# Defaults to ELIDA_BACKEND if set, else a placeholder the user must override.
+DIRECT_URL="${ELIDA_BACKEND:-http://localhost:9999}"
+
+# The overhead legs append /v1/chat/completions themselves, but ELIDA_BACKEND is
+# conventionally set to the versioned root (e.g. https://api.openai.com/v1).
+# Leaving that in place would request /v1/v1/chat/completions and flatter the
+# baseline with a fast 404, so strip a trailing slash and /v1 and say so.
+DIRECT_URL="${DIRECT_URL%/}"
+DIRECT_URL_TRIMMED=0
+if [ "${DIRECT_URL%/v1}" != "$DIRECT_URL" ]; then
+    DIRECT_URL="${DIRECT_URL%/v1}"
+    DIRECT_URL_TRIMMED=1
+fi
+
+# Dry-run: when 1, run_cmd prints commands instead of executing them.
+DRY_RUN=0
+
+# Temp dir holding the Lua script for the wrk POST body (created on demand,
+# removed on exit).
+WRK_TMPDIR=""
+WRK_LUA=""
+cleanup() {
+    [ -n "$WRK_TMPDIR" ] && rm -rf "$WRK_TMPDIR"
+    return 0
+}
+trap cleanup EXIT
+
+# run_cmd echoes a command in dry-run mode, otherwise executes it.
+run_cmd() {
+    if [ "$DRY_RUN" = "1" ]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} $*"
+    else
+        eval "$@"
+    fi
+}
+
+# run_bench is run_cmd for load-generator legs. A failing leg (unreachable
+# baseline URL, missing backend) must not abort the remaining legs under set -e.
+run_bench() {
+    if [ "$DRY_RUN" = "1" ]; then
+        echo -e "  ${YELLOW}[dry-run]${NC} $*"
+    else
+        eval "$@" || true
+    fi
+}
+
 # Cross-platform milliseconds (macOS date doesn't support %N)
 get_ms() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -519,6 +566,103 @@ compare_modes() {
     start_elida "audit"
 }
 
+# make_wrk_lua writes a Lua script that turns wrk's default GET into the POST
+# the proxy actually needs to scan. Sets WRK_LUA to the script path.
+make_wrk_lua() {
+    local body="$1"
+    WRK_TMPDIR="$(mktemp -d -t elida-wrk)"
+    WRK_LUA="${WRK_TMPDIR}/post.lua"
+    cat > "$WRK_LUA" <<LUA
+wrk.method = "POST"
+wrk.headers["Content-Type"] = "application/json"
+wrk.headers["X-Session-ID"] = "overhead-wrk"
+wrk.body = '${body}'
+LUA
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "  wrk POST body script (written to a temp file at run time):"
+        sed 's/^/    /' "$WRK_LUA"
+        echo ""
+    fi
+}
+
+# Proxy overhead: direct-to-backend baseline vs through-ELIDA, and chunked vs buffered.
+benchmark_overhead() {
+    print_header "Proxy Overhead (direct vs proxied)"
+
+    local payload='{"model": "test", "messages": [{"role": "user", "content": "benchmark overhead probe"}], "stream": true}'
+    local duration="10s"
+    local conns=10
+    local threads=2
+
+    echo "Baseline (direct):  ${DIRECT_URL}"
+    echo "Proxied (ELIDA):    ${PROXY_URL}"
+    echo "Load: ${threads} threads, ${conns} connections, ${duration}"
+    echo ""
+    if [ "$DIRECT_URL" = "http://localhost:9999" ]; then
+        echo -e "  ${YELLOW}Note:${NC} set ELIDA_BACKEND to your real backend URL for a meaningful direct baseline."
+    fi
+    if [ "$DIRECT_URL_TRIMMED" = "1" ]; then
+        echo -e "  ${YELLOW}Note:${NC} stripped a trailing /v1 from ELIDA_BACKEND; the baseline URL is now ${DIRECT_URL}"
+        echo "        (these legs append /v1/chat/completions themselves)."
+    fi
+    echo ""
+
+    if command -v wrk &> /dev/null; then
+        echo "Tool: wrk"
+        echo ""
+        # wrk defaults to GET with no body, which would never reach the content
+        # scanner. A POST body requires a Lua script, so write one.
+        make_wrk_lua "$payload"
+        echo "-- Direct baseline --"
+        run_bench "wrk -t${threads} -c${conns} -d${duration} --latency -s '${WRK_LUA}' '${DIRECT_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (chunked, default) --"
+        run_bench "wrk -t${threads} -c${conns} -d${duration} --latency -s '${WRK_LUA}' '${PROXY_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (buffered) --"
+        echo "  Not run here: buffered mode needs a restart. Set"
+        echo "  ELIDA_POLICY_STREAMING_MODE=buffered plus a response block rule,"
+        echo "  then re-run this mode and compare against the chunked leg above."
+    elif command -v hey &> /dev/null; then
+        echo "Tool: hey"
+        echo ""
+        echo "-- Direct baseline --"
+        run_bench "hey -z ${duration} -c ${conns} -m POST -T 'application/json' -d '${payload}' '${DIRECT_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (chunked, default) --"
+        run_bench "hey -z ${duration} -c ${conns} -m POST -T 'application/json' -d '${payload}' '${PROXY_URL}/v1/chat/completions'"
+        echo ""
+        echo "-- Through ELIDA (buffered) --"
+        echo "  Not run here: buffered mode needs a restart. Set"
+        echo "  ELIDA_POLICY_STREAMING_MODE=buffered plus a response block rule,"
+        echo "  then re-run this mode and compare against the chunked leg above."
+    else
+        echo -e "  ${YELLOW}Neither 'wrk' nor 'hey' found — falling back to a curl latency loop.${NC}"
+        echo "  Install wrk (brew install wrk) or hey (go install github.com/rakyll/hey@latest) for distribution stats."
+        echo ""
+        local iterations=30
+        for label in "Direct baseline:${DIRECT_URL}" "Through ELIDA:${PROXY_URL}"; do
+            local name="${label%%:*}"
+            local url="${label#*:}"
+            local total_ms=0
+            local start_ms end_ms
+            for i in $(seq 1 $iterations); do
+                start_ms=$(get_ms)
+                run_cmd "curl -s -X POST '${url}/v1/chat/completions' -H 'Content-Type: application/json' -H 'X-Session-ID: overhead-${i}' -d '${payload}' > /dev/null 2>&1 || true"
+                end_ms=$(get_ms)
+                total_ms=$((total_ms + (end_ms - start_ms)))
+            done
+            if [ "$DRY_RUN" != "1" ]; then
+                print_metric "${name} avg latency (${iterations} req)" "$((total_ms / iterations))" "" "ms"
+            fi
+        done
+    fi
+
+    echo ""
+    echo "Interpretation: proxied-minus-direct is ELIDA's added latency."
+    echo "Expected: ~2ms for chunked streaming, ~100ms for buffered (holds full response)."
+}
+
 # Summary
 print_summary() {
     print_header "Benchmark Summary"
@@ -542,9 +686,43 @@ print_summary() {
 
 # Main
 main() {
-    check_elida
+    # Pull --dry-run out of the arguments wherever it appears; the first
+    # remaining argument is the mode.
+    local mode=""
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run) DRY_RUN=1 ;;
+            *) [ -z "$mode" ] && mode="$arg" ;;
+        esac
+    done
 
-    case "${1:-all}" in
+    if [ "$DRY_RUN" = "1" ]; then
+        echo -e "${YELLOW}Dry-run mode: printing commands without executing.${NC}"
+        # Only --overhead has a dry-run. The other benchmarks drive real
+        # traffic through a running ELIDA, so falling through to them would
+        # print metrics measured against a dead proxy. Redirect instead.
+        case "${mode:-all}" in
+            --overhead|--help|-h)
+                ;;
+            *)
+                echo ""
+                echo "Only --overhead supports a dry-run. The memory, latency, sessions,"
+                echo "policy and compare-modes benchmarks drive real traffic through a"
+                echo "running ELIDA and have no dry-run — they are skipped here."
+                echo "Showing what --overhead would run."
+                mode="--overhead"
+                ;;
+        esac
+    elif [ "${mode:-all}" != "--help" ] && [ "${mode:-all}" != "-h" ]; then
+        # A live benchmark needs ELIDA up; printing help does not.
+        check_elida
+    fi
+
+    case "${mode:-all}" in
+        --overhead)
+            benchmark_overhead
+            ;;
         --memory)
             benchmark_memory
             ;;
@@ -572,7 +750,14 @@ main() {
             echo "  --sessions       Session creation throughput"
             echo "  --policy         Policy evaluation overhead"
             echo "  --compare-modes  Compare no-policy vs audit vs enforce modes"
+            echo "  --overhead       Direct-vs-proxied overhead (wrk/hey, chunked vs buffered)"
             echo "  --help, -h       Show this help"
+            echo ""
+            echo "Global flag:"
+            echo "  --dry-run        Print the --overhead commands without executing them."
+            echo "                   Needs no running ELIDA. Only --overhead has a dry-run;"
+            echo "                   any other mode is skipped rather than run for real."
+            echo "                   e.g. ./scripts/benchmark.sh --dry-run --overhead"
             ;;
         all|*)
             benchmark_memory
