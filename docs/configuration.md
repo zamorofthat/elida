@@ -901,6 +901,7 @@ violations.
 | `correlation.max_history_events` | `64` | Events kept per session, shared by every category any rule wants; 1 to 1024, and at least the largest rule's `count` or sequence length. |
 | `correlation.max_sessions` | `4096` | Sessions tracked, least recently active evicted first (per shard); 1 to 100000. |
 | `correlation.rules` | `slow_burn_injection` | Replaces the default list. At most 64 rules. |
+| `correlation.builtin_chains` | `false` | Adds `builtin_credential_exfiltration` and `builtin_sensitive_exfiltration` (audit-only sequences, 15m) and the `credential_discovery`, `sensitive_access`, `external_transmission` tool categories listed under [Built-in chains](#built-in-chains). A rule with the same name replaces a built-in. |
 | `correlation.tool_categories` | none | Tool-call taxonomy: entries mapping tool name globs and optional argument patterns to a category. At most 64 entries. |
 | `correlation.max_argument_bytes` | `16384` | How much of a tool call's arguments argument patterns scan; at most 65536. |
 
@@ -960,6 +961,44 @@ correlation:
     - category: external_transmission
       tools: ['http_*', web_fetch]
 ```
+
+### Built-in chains
+
+`correlation.builtin_chains: true` adds a shipped, audit-only preset: two
+sequence rules and the tool categories they need. It is off by default and
+it is a heuristic. Tool names and argument shapes vary by agent framework,
+so the globs and patterns are listed here in full for operators to judge.
+Nothing about them is hidden in the binary.
+
+Rules (both `shape: sequence`, `window: 15m`, `severity: warning`,
+`mode: audit`):
+
+| Rule | Sequence |
+|---|---|
+| `builtin_credential_exfiltration` | `credential_discovery`, `external_transmission` |
+| `builtin_sensitive_exfiltration` | `sensitive_access`, `external_transmission` |
+
+Tool categories (globs are case-insensitive over the whole tool name;
+patterns are case-insensitive RE2 over the arguments):
+
+| Category | Tools | Argument patterns |
+|---|---|---|
+| `credential_discovery` | `*` | `\.aws/credentials`, `\.ssh/id_[a-z0-9]+`, `\.netrc\b`, `\.git-credentials`, `\.kube/config`, `\.docker/config\.json`, `(^\|[/\\"' ])\.env\b` |
+| `sensitive_access` | `*` | `/etc/shadow`, `/etc/sudoers`, `/proc/self/environ`, `\.(bash\|zsh)_history` |
+| `external_transmission` | `*fetch*`, `*http*`, `*request*`, `*upload*`, `*webhook*`, `send_*`, `post_*` | none (the name alone categorizes the call) |
+| `external_transmission` | `bash`, `sh`, `shell`, `terminal`, `run_command`, `*exec*` | `\b(curl\|wget)\b[^\n]*https?://`, `\bnc\b\s+\S+\s+\d+`, `\bscp\b\s+\S+\s+\S+@` |
+
+Merge rule: the built-in taxonomy entries are appended after the configured
+`tool_categories` (a category may repeat; a call still gets it once), and a
+built-in rule is appended unless a configured rule already has its name.
+Redefining `builtin_credential_exfiltration` under `rules:` therefore
+replaces it, for example with another window or, as a reserved decision,
+`mode: enforce`. Validation and the compiled-instruction caps apply to the
+merged set, which is also what the startup summary describes
+(`builtin_chains=true`). The preset compiles to well under the 1024
+instruction soft limit, so it adds no startup warning. Matches are recorded
+as evidence-only `correlation.builtin_credential_exfiltration` and
+`correlation.builtin_sensitive_exfiltration` violations and add no risk.
 
 **Validation.** Rule names, categories, counts, windows and memory limits are
 validated when the file is loaded, exactly as the engine will be built (an
