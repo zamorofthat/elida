@@ -872,8 +872,11 @@ func (a *app) setupPolicyEngine() error {
 	if err := a.cfg.Correlation.Validate(); err != nil {
 		return err
 	}
-	if a.cfg.Correlation.Enabled {
-		logTaxonomyWarnings(a.cfg.Correlation.TaxonomyConfig)
+	// The effective block: the configured rules and taxonomy plus the
+	// built-in chains when builtin_chains is set (Plan B Task 10).
+	cc := a.cfg.Correlation.Effective()
+	if cc.Enabled {
+		logTaxonomyWarnings(cc.TaxonomyConfig)
 	}
 	policyRules := make([]policy.Rule, len(a.cfg.Policy.Rules))
 	for i, r := range a.cfg.Policy.Rules {
@@ -912,10 +915,10 @@ func (a *app) setupPolicyEngine() error {
 			Thresholds: riskThresholds,
 		},
 		Correlation: policy.CorrelationConfig{
-			Enabled:        a.cfg.Correlation.Enabled,
-			Rules:          a.cfg.Correlation.Rules,
-			Limits:         a.cfg.Correlation.Limits(),
-			TaxonomyConfig: a.cfg.Correlation.TaxonomyConfig,
+			Enabled:        cc.Enabled,
+			Rules:          cc.Rules,
+			Limits:         cc.Limits(),
+			TaxonomyConfig: cc.TaxonomyConfig,
 		},
 	})
 
@@ -988,16 +991,17 @@ func logTaxonomyWarnings(cfg correlation.TaxonomyConfig) {
 // exactly the mode this correlator serves. An invalid correlation block
 // fails startup like any invalid security configuration (setupPolicyEngine
 // validates it when the policy engine runs; it is validated here when not).
+// It reads the effective block, so the built-in chains apply here too.
 func (a *app) shadowCorrelator() (*correlation.Engine, error) {
-	cc := a.cfg.Correlation
-	if !cc.Enabled {
+	if !a.cfg.Correlation.Enabled {
 		return nil, nil
 	}
 	if a.policyEngine == nil {
-		if err := cc.Validate(); err != nil {
+		if err := a.cfg.Correlation.Validate(); err != nil {
 			return nil, err
 		}
 	}
+	cc := a.cfg.Correlation.Effective()
 	eng, err := correlation.New(cc.Rules, cc.Limits())
 	if err != nil {
 		return nil, fmt.Errorf("invalid correlation configuration for the shadow correlator: %w", err)
@@ -1013,9 +1017,11 @@ func (a *app) shadowCorrelator() (*correlation.Engine, error) {
 // taxonomy, else the shadow correlator) and builds nothing itself. Rule
 // names are operator configuration; no tool glob, argument pattern or
 // traffic content is logged. Per-rule enforce WARNs and taxonomy cost WARNs
-// are logged separately.
+// are logged separately. The taxonomy count is the effective one (built-in
+// entries included when builtin_chains is set), and builtin_chains says
+// whether the preset is on.
 func (a *app) logCorrelationSummary() {
-	cc := a.cfg.Correlation
+	cc := a.cfg.Correlation.Effective()
 	if !cc.Enabled {
 		slog.Info("temporal correlation disabled")
 		return
@@ -1054,6 +1060,7 @@ func (a *app) logCorrelationSummary() {
 		"max_history_events", cc.MaxHistoryEvents,
 		"max_sessions", cc.MaxSessions,
 		"shadow_correlator", a.shadowCorr != nil,
+		"builtin_chains", cc.BuiltinChains,
 		"tool_categories", len(cc.ToolCategories),
 		"taxonomy_instructions", instructions,
 		"max_argument_bytes", maxArgs,
