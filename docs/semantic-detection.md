@@ -105,6 +105,23 @@ contributes its severity to the existing risk ladder, except under
 `policy.mode: audit`, which caps it to evidence. Promoting a rule is a
 reserved decision, and startup logs a WARN for every enforce rule.
 
+**Built-in chains (`builtin_chains`).** `correlation.builtin_chains: true`
+adds two audit-only sequence rules, `builtin_credential_exfiltration`
+(`credential_discovery` then `external_transmission`) and
+`builtin_sensitive_exfiltration` (`sensitive_access` then
+`external_transmission`), both within 15 minutes, together with the tool
+categories they need. It is off by default and is a heuristic: tool names
+and argument shapes vary by agent framework, and its globs and patterns are
+listed in full under
+[configuration](configuration.md#built-in-chains) so an operator can judge
+them. Built-in taxonomy entries are appended after the configured
+`tool_categories`, and a built-in rule is skipped when a configured rule has
+its name, so a rule may be overridden by redefining it under that name, for
+example with another window or, as a reserved decision, `mode: enforce` to
+promote it. A match is recorded as an evidence-only
+`correlation.builtin_credential_exfiltration` (or
+`..._sensitive_exfiltration`) violation and adds no risk.
+
 **Restart-only, outside Settings.** The `correlation:` block is not part of
 `settings.yaml` or `/control/settings`. A settings save keeps the
 correlation engine and its state, and changing the block needs a restart.
@@ -120,6 +137,7 @@ At startup ELIDA logs one `temporal correlation enabled` line. It carries:
 - the limits;
 - whether policy correlation runs and whether the semantic runner has a
   shadow correlator;
+- whether the built-in chains are on (`builtin_chains`);
 - the taxonomy size and its warnings;
 - the tool-lane bounds.
 
