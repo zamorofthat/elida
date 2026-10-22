@@ -12,9 +12,11 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 
 ```bash
 # Health check (unauthenticated). With semantic detection wired it also
-# reports "decision": {"capability", "reason"}: the capability enum
-# (inline, async_only, degraded, disabled) and a fixed reason. Model
-# identity and counters are only on the authenticated /control/decision.
+# reports "decision": {"capability", "reason", "effective_mode",
+# "threshold_set_matches", "breaker_open"}: the capability enum (inline,
+# async_only, degraded, disabled), a fixed reason, the effective mode
+# (disabled|shadow|audit|enforce) and two booleans; enums and booleans only.
+# Model identity and counters are only on the authenticated /control/decision.
 curl http://localhost:9090/control/health
 
 # Aggregate stats
@@ -29,6 +31,15 @@ curl http://localhost:9090/control/sessions?active=true
 
 # Get session details
 curl http://localhost:9090/control/sessions/{session-id}
+
+# Turns (live sessions): violation turns carry event_id, event_category,
+# source_role, evidence_only and, for a correlation match,
+# correlation: {match_id, event_count}
+curl http://localhost:9090/control/sessions/{session-id}/turns
+
+# Semantic detection status (authenticated): includes shadow_matches_dropped
+# and, when a shadow correlator runs, shadow_correlation (its counters)
+curl http://localhost:9090/control/decision
 
 # View session history (persisted)
 curl http://localhost:9090/control/history
@@ -72,6 +83,18 @@ Three detail responses explain each semantic violation and enforcement action:
 A violation object (`violations[]` in the flagged and history responses) carries `semantic` for a semantic rule: the same metadata as `evidence`, from the rule's representative decision (the most consequential so far). Its `event_id` names that decision. That decision's record may have been evicted by the bound, so a lookup by `event_id` can miss.
 
 When a session ID is reused, history (`GET /control/history/{id}`) keeps the earlier sessions' records ahead of the current session's, with duplicate `event_id`s removed. Carried records are capped so the total stays at 256 or fewer, keeping the newest. The current session's own records are always kept. `semantic_decisions_dropped` also counts the carried records the cap removed.
+
+#### Correlation evidence
+
+A `correlation.<rule>` violation (in `violations[]` of the flagged, history and history-list responses) carries `correlation` (object): `match_id` (string), `rule` (string), `shape` (string, `repeated` or `sequence`), `mode` (string, `audit` or `enforce`), `event_ids` (string array: the contributing events in time order; semantic decisions' `event_id`s, tool event IDs `te_…`, or other violations' `event_id`s), `categories` (string array), `first_event` and `last_event` (RFC3339 timestamps). It is absent on every other violation and on rows written before it existed. The violation's own `event_id` is the match ID (`cm_…`). Only the retained match per rule is shown and persisted in full (one display entry per rule); a later firing of the rule replaces the earlier evidence. Earlier firings leave at most an in-memory event identity (`violation_events` on the live `GET /control/flagged/{id}`, not persisted) and the rule's violation count, never their correlation evidence; `violation_detected` rows are written at session end from the retained list. Neither surface promises a complete match ledger.
+
+Shadow-mode matches are `correlation_shadow` (array) on `GET /control/sessions/{id}` (live) and `GET /control/history/{id}` (persisted), omitted when empty. Each entry has `timestamp`, `match_id`, `rule`, `shape`, `severity`, `mode`, `event_ids` (shadow decision IDs), `categories`, `first_event` and `last_event`. Entries are newest first, at most 50; on reuse of a session ID the earlier sessions' entries are carried behind the current session's, deduplicated by `match_id`, 50 in total, and carrying does not recover entries already dropped. The list endpoints omit it.
+
+`GET /control/decision` reports `shadow_matches_dropped` (integer: shadow matches discarded because their session ended or its ID was reused while the match was computed) and `shadow_correlation` (object, present only when a shadow correlator runs): the shadow correlator's engine counters, the same engine fields policy correlation reports under `correlation` on `GET /control/flagged/stats` (`rules`, `shards`, `sessions`, `history_events`, `events_observed`, `events_ignored`, `duplicate_events`, `events_dropped`, `history_evicted`, `sessions_evicted`, `matches`, `cooldown_suppressed`, `duplicate_matches`).
+
+`GET /control/sessions/{id}/turns` violation turns carry `event_id` (string), `event_category` (string), `source_role` (string), `evidence_only` (bool) and, for a correlation match only, `correlation` (object: `match_id` string, `event_count` integer, the full count of contributing events), each omitted when empty. The full evidence is on the flagged and history responses.
+
+`violation_detected` events (`GET /control/events`) carry `event_id`, `event_category` and `source_role` (strings, omitted when empty) beside the existing fields.
 
 ### Voice Sessions (WebSocket)
 
