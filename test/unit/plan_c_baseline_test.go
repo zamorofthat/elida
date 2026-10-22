@@ -77,46 +77,6 @@ func TestBaselineC_MatchViolationShape(t *testing.T) {
 	}
 }
 
-// FLIP in Task 5. Today a violation turn carries only timestamp, type,
-// rule_name, content, severity and action.
-func TestBaselineC_ViolationTurnKeysToday(t *testing.T) {
-	e, _ := matchEngine(t)
-	store := session.NewMemoryStore()
-	manager := session.NewManager(store, 5*time.Minute)
-	manager.GetOrCreate("sess-c-match", "https://backend", "127.0.0.1:1")
-	h := control.New(store, manager, control.WithPolicy(e))
-	w := doJSON(t, h, http.MethodGet, "/control/sessions/sess-c-match/turns?full=true", nil)
-	var resp struct {
-		Turns []json.RawMessage `json:"turns"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || len(resp.Turns) == 0 {
-		t.Fatalf("turns: %d %s", w.Code, w.Body.String())
-	}
-	for _, raw := range resp.Turns {
-		keys := jsonKeys(t, raw)
-		if keys["event_id"] || keys["correlation"] || keys["evidence_only"] {
-			t.Fatalf("today a violation turn has no identity fields: %s", raw)
-		}
-	}
-}
-
-// FLIP in Task 5. Today /control/health's decision block is exactly
-// capability and reason.
-func TestBaselineC_HealthDecisionKeysToday(t *testing.T) {
-	h, _ := newTestHandler()
-	h.SetDecisionProvider(fixedDecision{control.DecisionStatus{Capability: "inline", EffectiveMode: "audit", ThresholdSetMatches: true}})
-	w := doJSON(t, h, http.MethodGet, "/control/health", nil)
-	var body struct {
-		Decision map[string]any `json:"decision"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("health: %v", err)
-	}
-	if len(body.Decision) != 2 || body.Decision["capability"] != "inline" || body.Decision["reason"] == "" {
-		t.Fatalf("today decision = %v", body.Decision)
-	}
-}
-
 // KEEP. /control/decision without a shadow correlator has no
 // shadow_correlation key (Task 5 adds it only when one runs).
 func TestBaselineC_DecisionStatusHasNoShadowCorrelationKeyWhenUnwired(t *testing.T) {

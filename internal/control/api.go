@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"elida/internal/config"
+	"elida/internal/correlation"
 	"elida/internal/dashboard"
 	"elida/internal/fingerprint"
 	"elida/internal/panel"
@@ -124,6 +125,11 @@ type DecisionStatus struct {
 	// the match was being computed. A content-free integer; 0 when no
 	// shadow correlator runs.
 	ShadowMatchesDropped int64 `json:"shadow_matches_dropped"`
+	// ShadowCorrelation is the semantic runner's shadow correlator's
+	// counters (content-free sizes and counts). Nil when no shadow
+	// correlator runs (correlation disabled, or semantic detection off).
+	// Policy correlation's counters are on /control/flagged/stats.
+	ShadowCorrelation *correlation.Stats `json:"shadow_correlation,omitempty"`
 
 	// Limits are the restart-only values in force; the Settings page shows
 	// them read-only. Changing one needs elida.yaml and a restart.
@@ -551,10 +557,15 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"timestamp": time.Now(),
 	}
 	if h.decisionProvider != nil {
-		capability := h.decisionProvider.DecisionStatus().Capability
-		response["decision"] = map[string]string{
-			"capability": capability,
-			"reason":     healthCapabilityReason(capability),
+		st := h.decisionProvider.DecisionStatus()
+		// Enums and booleans only: no model identity, checksum, threshold
+		// set, path or provider reason on the unauthenticated route.
+		response["decision"] = map[string]any{
+			"capability":            st.Capability,
+			"reason":                healthCapabilityReason(st.Capability),
+			"effective_mode":        st.EffectiveMode,
+			"threshold_set_matches": st.ThresholdSetMatches,
+			"breaker_open":          st.BreakerOpen,
 		}
 	}
 
@@ -849,6 +860,21 @@ type TurnEntry struct {
 	Severity  string         `json:"severity,omitempty"`
 	Action    string         `json:"action,omitempty"`
 	Backend   string         `json:"backend,omitempty"`
+	// Violation turns only: the occurrence's identity, so the dashboard can
+	// join a turn to the per-decision records and correlation evidence it
+	// fetches from the flagged and session detail endpoints.
+	EventID       string           `json:"event_id,omitempty"`
+	EventCategory string           `json:"event_category,omitempty"`
+	SourceRole    string           `json:"source_role,omitempty"`
+	EvidenceOnly  bool             `json:"evidence_only,omitempty"`
+	Correlation   *TurnCorrelation `json:"correlation,omitempty"`
+}
+
+// TurnCorrelation summarizes a correlation match on a violation turn: the
+// full evidence is on GET /control/flagged/{id} and the history record.
+type TurnCorrelation struct {
+	MatchID    string `json:"match_id"`
+	EventCount int    `json:"event_count"`
 }
 
 // TurnsResponse is the response for GET /control/sessions/{id}/turns.
@@ -899,14 +925,15 @@ func (h *Handler) getSessionTurns(w http.ResponseWriter, r *http.Request, id str
 	if h.policyEngine != nil {
 		if flagged := h.policyEngine.GetFlaggedSession(id); flagged != nil {
 			for _, v := range flagged.Violations {
-				turns = append(turns, TurnEntry{
-					Timestamp: v.Timestamp,
-					Type:      "violation",
-					RuleName:  v.RuleName,
-					Content:   v.Description,
-					Severity:  string(v.Severity),
-					Action:    v.Action,
-				})
+				turn := TurnEntry{
+					Timestamp: v.Timestamp, Type: "violation", RuleName: v.RuleName, Content: v.Description,
+					Severity: string(v.Severity), Action: v.Action,
+					EventID: v.EventID, EventCategory: v.EventCategory, SourceRole: v.SourceRole, EvidenceOnly: v.EvidenceOnly,
+				}
+				if v.Correlation != nil {
+					turn.Correlation = &TurnCorrelation{MatchID: v.Correlation.MatchID, EventCount: len(v.Correlation.EventIDs)}
+				}
+				turns = append(turns, turn)
 			}
 		}
 	}
