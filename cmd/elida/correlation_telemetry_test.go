@@ -44,3 +44,23 @@ func TestTelemetryRecord_CarriesCorrelationEvidenceAndNoContent(t *testing.T) {
 		}
 	}
 }
+
+func TestTelemetryRecord_CarriesCorrelationShadow(t *testing.T) {
+	a, send := shadowStorageApp(t)
+	for _, body := range slowBurnBodies() {
+		send(body)
+	}
+	sess, _ := a.manager.Get("sess-cs-e2e")
+	snap := sess.Snapshot()
+	record := storage.SessionRecord{ID: "sess-cs-e2e", StartTime: snap.StartTime,
+		CorrelationShadow: storage.CorrelationShadowFromSession(snap.CorrelationShadow)}
+	tr := telemetryRecordFrom(&record, &snap, time.Now(), nil)
+	if len(tr.CorrelationShadow) != 1 || tr.CorrelationShadow[0].Metadata.Rule != "slow_burn_injection" ||
+		tr.CorrelationShadow[0].Metadata.EventCount != 3 || tr.CorrelationShadow[0].Severity != "warning" {
+		t.Fatalf("shadow matches must reach the export record: %+v", tr.CorrelationShadow)
+	}
+	raw, _ := json.Marshal(tr.CorrelationShadow)
+	if strings.Contains(string(raw), slowBurnMarker) {
+		t.Fatalf("request content reached the exported shadow list: %s", raw)
+	}
+}

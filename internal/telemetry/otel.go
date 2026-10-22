@@ -417,6 +417,33 @@ func (p *Provider) EmitSemanticDecisionLog(ctx context.Context, sessionID string
 	p.logger.Emit(ctx, rec)
 }
 
+// EmitCorrelationShadowLog emits one Info log record for one shadow-mode
+// correlation match. Strings pass safeToken and lists the export caps; no
+// content exists to redact.
+func (p *Provider) EmitCorrelationShadowLog(ctx context.Context, sessionID string, s CorrelationShadow, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+	var rec otellog.Record
+	ts := s.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	rec.SetTimestamp(ts)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetBody(attribute.StringValue("shadow correlation match: " + safeToken(s.Metadata.Rule) + " (calibration only, never a violation)"))
+	rec.AddAttributes(
+		attribute.String("gen_ai.conversation.id", sessionID),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.Bool("elida.correlation.shadow", true),
+		attribute.String("elida.correlation.severity", safeToken(s.Severity)),
+	)
+	rec.AddAttributes(correlationAttributes("elida.correlation.", s.Metadata)...)
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
 // EmitSessionKilledLog emits a session kill/terminate OTEL log record
 func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, backend, model string, durationMs int64, requestCount int) {
 	if p.logger == nil {
@@ -676,6 +703,10 @@ const (
 	// the policy engine dropped past its per-session cap.
 	AttrSemanticDecisionCount   = "elida.semantic.decisions.count"
 	AttrSemanticDecisionDropped = "elida.semantic.decisions.dropped"
+
+	// AttrCorrelationShadowCount is how many shadow correlation matches the
+	// session exported as logs (set only when OTEL logs are on).
+	AttrCorrelationShadowCount = "elida.correlation.shadow.count"
 )
 
 // Violation represents a policy violation for telemetry export
@@ -881,6 +912,14 @@ type SemanticDecision struct {
 	Metadata              SemanticMetadata
 }
 
+// CorrelationShadow is one shadow-mode correlation match for export:
+// calibration data, never a finding. Identifiers and times only.
+type CorrelationShadow struct {
+	Timestamp time.Time
+	Severity  string
+	Metadata  CorrelationMetadata
+}
+
 // exportedSeverity is the severity a violation is exported at: its own,
 // except that evidence-only violations are informational.
 func (v Violation) exportedSeverity() string {
@@ -917,9 +956,13 @@ type SessionRecord struct {
 	// decisions dropped past that cap.
 	SemanticDecisions        []SemanticDecision
 	SemanticDecisionsDropped int
-	Captures                 []CapturedRequest
-	CaptureCount             int
-	Model                    string // For GenAI semconv
+	// CorrelationShadow holds the ending session instance's shadow
+	// correlation matches (at most 50); each is exported as one OTEL log,
+	// never as an OCSF finding.
+	CorrelationShadow []CorrelationShadow
+	Captures          []CapturedRequest
+	CaptureCount      int
+	Model             string // For GenAI semconv
 
 	// WebSocket fields
 	IsWebSocket  bool
@@ -1060,6 +1103,9 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 		}
 		attrs = append(attrs, attribute.Int(AttrSemanticDecisionDropped, record.SemanticDecisionsDropped))
 	}
+	if len(record.CorrelationShadow) > 0 && p.logger != nil {
+		attrs = append(attrs, attribute.Int(AttrCorrelationShadowCount, len(record.CorrelationShadow)))
+	}
 
 	// Add WebSocket attributes if this is a WebSocket session
 	if record.IsWebSocket {
@@ -1131,6 +1177,12 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	// rule, carrying the representative decision.
 	for _, d := range record.SemanticDecisions {
 		p.EmitSemanticDecisionLog(ctx, record.SessionID, d, record.Model, record.Backend)
+	}
+
+	// One log per shadow correlation match (at most 50 per session). No
+	// OCSF finding: a shadow match is calibration data.
+	for _, s := range record.CorrelationShadow {
+		p.EmitCorrelationShadowLog(ctx, record.SessionID, s, record.Model, record.Backend)
 	}
 
 	// Emit OCSF Detection Finding events for policy violations

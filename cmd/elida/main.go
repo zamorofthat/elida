@@ -796,6 +796,16 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 		})
 	}
 	telemRecord.SemanticDecisionsDropped = record.SemanticDecisionsDropped
+	for _, c := range record.CorrelationShadow {
+		telemRecord.CorrelationShadow = append(telemRecord.CorrelationShadow, telemetry.CorrelationShadow{
+			Timestamp: c.Timestamp, Severity: c.Severity,
+			Metadata: telemetry.CorrelationMetadata{
+				MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode, EventCount: len(c.EventIDs),
+				Categories: append([]string(nil), c.Categories...), FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+				EventIDs: append([]string(nil), c.EventIDs...),
+			},
+		})
+	}
 	for _, c := range record.CapturedContent {
 		telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
 			Timestamp:    c.Timestamp.Format(time.RFC3339),
