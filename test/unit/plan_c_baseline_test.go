@@ -49,18 +49,6 @@ type fixedDecision struct{ st control.DecisionStatus }
 
 func (f fixedDecision) DecisionStatus() control.DecisionStatus { return f.st }
 
-// FLIP in Task 1. Today storage.Violation has no Correlation field, so the
-// match evidence is dropped by both converters, and violation_detected rows
-// carry no identity.
-func TestBaselineC_StorageViolationHasNoCorrelation(t *testing.T) {
-	if _, ok := reflect.TypeOf(storage.Violation{}).FieldByName("Correlation"); ok {
-		t.Fatal("today storage.Violation has no Correlation field")
-	}
-	if _, ok := reflect.TypeOf(storage.ViolationDetectedData{}).FieldByName("EventID"); ok {
-		t.Fatal("today violation_detected rows carry no event_id")
-	}
-}
-
 // FLIP in Task 2. Today correlation_shadow is in memory only.
 func TestBaselineC_StorageRecordHasNoCorrelationShadow(t *testing.T) {
 	if _, ok := reflect.TypeOf(storage.SessionRecord{}).FieldByName("CorrelationShadow"); ok {

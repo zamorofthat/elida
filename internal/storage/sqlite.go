@@ -65,6 +65,11 @@ type Violation struct {
 	// rule (see policy.mergeSemanticViolation). Absent on older rows and on
 	// non-semantic violations. It carries no request content.
 	Semantic *SemanticEvidence `json:"semantic,omitempty"`
+	// Correlation is the match evidence for a temporal-correlation violation
+	// (rule correlation.<name>): the contributing event IDs, categories and
+	// times. Nil for every other violation and absent on rows written before
+	// Plan C. It carries no request content.
+	Correlation *CorrelationEvidence `json:"correlation,omitempty"`
 }
 
 // TranscriptEntry represents a single utterance in a voice session
@@ -238,6 +243,35 @@ func SemanticEvidenceFromPolicy(e *policy.SemanticEvidence) *SemanticEvidence {
 	}
 	s := SemanticEvidence(*e)
 	return &s
+}
+
+// CorrelationEvidence mirrors policy.CorrelationEvidence for persistence:
+// what a temporal-correlation match was made of. Identifiers, categories
+// and timestamps only, never content. Same fields, types and JSON tags as
+// the policy type.
+type CorrelationEvidence struct {
+	MatchID    string    `json:"match_id"`
+	Rule       string    `json:"rule"`
+	Shape      string    `json:"shape"`
+	Mode       string    `json:"mode"`
+	EventIDs   []string  `json:"event_ids"`
+	Categories []string  `json:"categories"`
+	FirstEvent time.Time `json:"first_event"`
+	LastEvent  time.Time `json:"last_event"`
+}
+
+// CorrelationEvidenceFromPolicy copies a match's evidence into its persisted
+// form, copying the slices so the record never aliases the engine's view.
+func CorrelationEvidenceFromPolicy(c *policy.CorrelationEvidence) *CorrelationEvidence {
+	if c == nil {
+		return nil
+	}
+	return &CorrelationEvidence{
+		MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode,
+		EventIDs:   append([]string(nil), c.EventIDs...),
+		Categories: append([]string(nil), c.Categories...),
+		FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+	}
 }
 
 // SemanticDecisionsFromPolicy copies the policy engine's per-decision records

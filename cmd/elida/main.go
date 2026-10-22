@@ -476,6 +476,8 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			Timestamp:     v.Timestamp,
 			// Decision metadata carries no content, so it needs no redaction.
 			Semantic: storage.SemanticEvidenceFromPolicy(v.Semantic),
+			// Match evidence carries no content either.
+			Correlation: storage.CorrelationEvidenceFromPolicy(v.Correlation),
 		})
 	}
 	// Same ending-instance rule as the violations above. The records carry
@@ -617,12 +619,15 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 			continue
 		}
 		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
-			RuleName:     v.RuleName,
-			Description:  v.Description,
-			Severity:     v.Severity,
-			MatchedText:  v.MatchedText,
-			Action:       v.Action,
-			EvidenceOnly: v.EvidenceOnly,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      v.Severity,
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			EventCategory: v.EventCategory,
+			SourceRole:    v.SourceRole,
 		}); eventErr != nil {
 			slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
 		}
