@@ -284,31 +284,38 @@ export function SessionDetailModal({ session, onClose, onKill }) {
       fn()
     }
 
-    const fetchHistory = () => {
+    // At most one history request is in flight: a tick that lands while one
+    // is pending is skipped, so attempts never overlap and only results, not
+    // dispatches, count toward the retry budget. settleHistory also ignores
+    // a result that arrives once the history phase is over (the record was
+    // loaded or the retries were spent), so it can never overwrite a loaded
+    // record or its status.
+    let historyInFlight = false
+    const settleHistory = (record, status) => {
+      historyInFlight = false
+      if (controller.signal.aborted || phase !== 'history') return
+      if (record) {
+        setHistoryDetail(record)
+        setHistoryStatus('')
+        stop()
+        return
+      }
       historyTries++
+      if (status === 404 && historyTries < HISTORY_RETRIES) {
+        setHistoryStatus('pending')
+        return
+      }
+      setHistoryStatus('unavailable')
+      stop()
+    }
+    const fetchHistory = () => {
+      if (historyInFlight) return
+      historyInFlight = true
       get('/control/history/' + id)
-        .then(res => {
-          if (controller.signal.aborted) return
-          if (res.ok) {
-            return res.json().then(record => {
-              if (controller.signal.aborted) return
-              setHistoryDetail(record)
-              setHistoryStatus('')
-              stop()
-            })
-          }
-          if (res.status === 404 && historyTries < HISTORY_RETRIES) {
-            setHistoryStatus('pending')
-            return
-          }
-          setHistoryStatus('unavailable')
-          stop()
-        })
-        .catch(() => {
-          if (controller.signal.aborted) return
-          setHistoryStatus('unavailable')
-          stop()
-        })
+        .then(res => (res.ok
+          ? res.json().then(record => settleHistory(record, res.status))
+          : settleHistory(null, res.status)))
+        .catch(() => settleHistory(null, 0))
     }
 
     const toHistory = () => {

@@ -13,6 +13,9 @@ import fixture from './__fixtures__/history-correlation.json'
 
 const SID = 'sess-live-1'
 const POLL = 3000
+// More ticks than the modal's bounded history retries, so an overlapping
+// dispatch or a dispatch-counted budget would show up as 'unavailable'.
+const HISTORY_RETRY_PROBE = 8
 
 function json(body, status = 200) {
   return { status, ok: status < 400, json: () => Promise.resolve(body) }
@@ -224,6 +227,41 @@ describe('SessionDetailModal evidence lifecycle', () => {
     expect(r.container.querySelectorAll('.evidence-decision').length).toBe(1)
     await tick()
     expect(count('/control/history/' + SID)).toBe(hits)
+  })
+
+  it('never overlaps history attempts, counts results toward the retry budget and leaves a loaded record untouched', async () => {
+    const slow = deferred()
+    let historyHits = 0
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
+    routes['/control/history/' + SID] = () => (++historyHits === 1 ? slow.promise : json(fixture))
+    const r = open()
+    await flush()
+    expect(historyHits).toBe(1)
+    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+
+    // Ticks while the first attempt is still pending dispatch nothing and
+    // spend no retries.
+    for (let i = 0; i < HISTORY_RETRY_PROBE; i++) await tick()
+    expect(historyHits).toBe(1)
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+
+    // The slow attempt settles as a 404: one retry spent, next tick loads.
+    slow.resolve(json({}, 404))
+    await flush()
+    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+    await tick()
+    expect(historyHits).toBe(2)
+    expect(r.container.querySelectorAll('.evidence-decision').length).toBe(3)
+    expect(r.container.querySelector('.evidence-pending')).toBeNull()
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+
+    // Once loaded, nothing later touches the record or its status.
+    await tick()
+    await tick()
+    expect(historyHits).toBe(2)
+    expect(r.container.querySelectorAll('.evidence-decision').length).toBe(3)
+    expect(r.container.querySelector('.evidence-pending')).toBeNull()
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
   })
 
   it('does not retry on a non-404 history error', async () => {
