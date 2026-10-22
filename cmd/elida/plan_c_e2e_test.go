@@ -124,13 +124,24 @@ func planCOTELExport(t *testing.T) string {
 	for i, p := range parts {
 		parts[i] = "^" + regexp.QuoteMeta(p) + "$"
 	}
+	// The child gets a deadline so a hang cannot block until the package
+	// timeout: the test's own deadline minus a margin, else two minutes.
+	budget := 2 * time.Minute
+	if d, ok := t.Deadline(); ok {
+		budget = max(time.Until(d)-30*time.Second, 30*time.Second)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	// #nosec G204 -- re-executes this test binary with a fixed test filter
-	cmd := exec.Command(os.Args[0], "-test.run="+strings.Join(parts, "/"), "-test.count=1")
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run="+strings.Join(parts, "/"), "-test.count=1")
 	cmd.Env = append(os.Environ(), planCOTELChildEnv+"=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			t.Fatalf("OTEL child run timed out after %s: %v\nstderr: %s\nstdout tail: %s", budget, err, stderr.String(), planCTail(stdout.String()))
+		}
 		t.Fatalf("OTEL child run failed: %v\nstderr: %s\nstdout tail: %s", err, stderr.String(), planCTail(stdout.String()))
 	}
 	return stdout.String()
@@ -381,6 +392,9 @@ func TestPlanC_AuditMatchReachesEverySurfaceWithoutContent(t *testing.T) {
 	code, turnsRaw := r.get(t, "/control/sessions/"+r.id+"/turns?full=true")
 	if code != http.StatusOK {
 		t.Fatalf("turns: %d", code)
+	}
+	if !strings.Contains(string(turnsRaw), planCToolArgSentinel) {
+		t.Fatal("fixture: tool arguments did not reach the raw turns")
 	}
 	var turns struct {
 		Turns []control.TurnEntry `json:"turns"`
