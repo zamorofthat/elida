@@ -354,12 +354,19 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		attribute.String("elida.violation.description", v.Description),
 		attribute.Bool("elida.violation.evidence_only", v.EvidenceOnly),
 	)
-	if v.Semantic != nil {
+	// Only a semantic or correlation violation carries an event ID and its
+	// metadata, so a plain violation keeps exactly its key set.
+	if v.Semantic != nil || v.Correlation != nil {
 		// A blanked event ID is left out, as in the OCSF finding.
 		if id := safeToken(v.EventID); id != "" {
 			rec.AddAttributes(attribute.String("elida.violation.event_id", id))
 		}
+	}
+	if v.Semantic != nil {
 		rec.AddAttributes(semanticAttributes("elida.semantic.", *v.Semantic)...)
+	}
+	if v.Correlation != nil {
+		rec.AddAttributes(correlationAttributes("elida.correlation.", *v.Correlation)...)
 	}
 
 	// Trace correlation
@@ -688,12 +695,17 @@ type Violation struct {
 	// severity, so a SIEM never reads audit evidence as a finding.
 	EvidenceOnly bool
 	// EventID is the policy engine's stable ID for the occurrence behind
-	// this violation. It is exported for semantic violations only.
+	// this violation. It is exported for semantic and correlation
+	// violations only (for a correlation match it is the match ID).
 	EventID string
 	// Semantic is the representative decision's metadata for a semantic
 	// rule: scores, identifiers and offsets, never content. Every string in
 	// it is exported through safeToken.
 	Semantic *SemanticMetadata
+	// Correlation is a temporal-correlation match's evidence: IDs, enums,
+	// counts and times, never content. Every string is exported through
+	// safeToken and every list through the MaxExportedCorrelation* caps.
+	Correlation *CorrelationMetadata
 }
 
 // SemanticMetadata is a semantic decision's metadata for export, the
@@ -766,6 +778,91 @@ func semanticAttributes(prefix string, m SemanticMetadata) []attribute.KeyValue 
 		attribute.Bool(prefix+"coverage_complete", m.CoverageComplete),
 		attribute.String(prefix+"execution_mode", safeToken(m.ExecutionMode)),
 		attribute.String(prefix+"protection_scope", safeToken(m.ProtectionScope)),
+	}
+}
+
+// MaxExportedCorrelationEventIDs and MaxExportedCorrelationCategories cap
+// the list attributes of a correlation export (Plan C D10). The engine's
+// own ceilings (32 repeated events, 8 sequence steps) make them exact today;
+// they are hard caps in their own right so a future engine change cannot
+// grow an attribute past them. event_count always reports the full count.
+const (
+	MaxExportedCorrelationEventIDs   = 32
+	MaxExportedCorrelationCategories = 8
+)
+
+// correlationAttrNames is the correlation export allowlist, in export
+// order. Span events prefix it with "correlation.", logs with
+// "elida.correlation."; OCSF uses the bare names inside
+// unmapped."elida.correlation".
+var correlationAttrNames = []string{"match_id", "rule", "shape", "mode", "event_count", "categories", "first_event", "last_event", "event_ids"}
+
+// safeTokens applies safeToken to each entry, drops the blanked ones and
+// keeps the first limit survivors.
+func safeTokens(in []string, limit int) []string {
+	out := make([]string, 0, min(len(in), limit))
+	for _, s := range in {
+		if len(out) == limit {
+			break
+		}
+		if t := safeToken(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// distinctTokens keeps the first appearance of each entry, then applies
+// safeTokens with limit.
+func distinctTokens(in []string, limit int) []string {
+	seen := make(map[string]bool, len(in))
+	uniq := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			uniq = append(uniq, s)
+		}
+	}
+	return safeTokens(uniq, limit)
+}
+
+// safeTime renders t as RFC3339Nano in UTC, a shape safeToken accepts, or
+// "" for the zero time.
+func safeTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// CorrelationMetadata is a correlation match's evidence for export, the
+// telemetry mirror of storage.CorrelationEvidence plus the full event
+// count: identifiers, enums, counts and times, never content. Lists are
+// capped on export (MaxExportedCorrelation*), strings pass safeToken.
+type CorrelationMetadata struct {
+	MatchID    string
+	Rule       string
+	Shape      string
+	Mode       string
+	EventCount int
+	Categories []string
+	FirstEvent time.Time
+	LastEvent  time.Time
+	EventIDs   []string
+}
+
+// correlationAttributes renders m as attributes named prefix+correlationAttrNames.
+func correlationAttributes(prefix string, m CorrelationMetadata) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(prefix+"match_id", safeToken(m.MatchID)),
+		attribute.String(prefix+"rule", safeToken(m.Rule)),
+		attribute.String(prefix+"shape", safeToken(m.Shape)),
+		attribute.String(prefix+"mode", safeToken(m.Mode)),
+		attribute.Int(prefix+"event_count", m.EventCount),
+		attribute.StringSlice(prefix+"categories", distinctTokens(m.Categories, MaxExportedCorrelationCategories)),
+		attribute.String(prefix+"first_event", safeTime(m.FirstEvent)),
+		attribute.String(prefix+"last_event", safeTime(m.LastEvent)),
+		attribute.StringSlice(prefix+"event_ids", safeTokens(m.EventIDs, MaxExportedCorrelationEventIDs)),
 	}
 }
 
@@ -990,14 +1087,19 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 			attribute.String("action", v.Action),
 			attribute.Bool("evidence_only", v.EvidenceOnly),
 		}
-		// Only a semantic violation carries semantic metadata, so a plain
-		// violation keeps exactly its key set.
-		if v.Semantic != nil {
+		// Only a semantic or correlation violation carries an event ID and
+		// its metadata, so a plain violation keeps exactly its key set.
+		if v.Semantic != nil || v.Correlation != nil {
 			// A blanked event ID is left out, as in the OCSF finding.
 			if id := safeToken(v.EventID); id != "" {
 				attrs = append(attrs, attribute.String("event_id", id))
 			}
+		}
+		if v.Semantic != nil {
 			attrs = append(attrs, semanticAttributes("semantic.", *v.Semantic)...)
+		}
+		if v.Correlation != nil {
+			attrs = append(attrs, correlationAttributes("correlation.", *v.Correlation)...)
 		}
 		span.AddEvent("policy.violation", trace.WithAttributes(attrs...))
 	}

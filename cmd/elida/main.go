@@ -721,6 +721,22 @@ func telemetrySemantic(s *storage.SemanticEvidence) *telemetry.SemanticMetadata 
 	return &m
 }
 
+// telemetryCorrelation converts stored match evidence for export. Fields
+// are listed explicitly, as in telemetrySemantic; EventCount is the full
+// list length before the exporter's cap.
+func telemetryCorrelation(c *storage.CorrelationEvidence) *telemetry.CorrelationMetadata {
+	if c == nil {
+		return nil
+	}
+	return &telemetry.CorrelationMetadata{
+		MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode,
+		EventCount: len(c.EventIDs),
+		Categories: append([]string(nil), c.Categories...),
+		FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+		EventIDs: append([]string(nil), c.EventIDs...),
+	}
+}
+
 // telemetryRecordFrom builds the telemetry export record from the stored
 // record. It is pure, so the content-free guarantee is testable without an
 // exporter. The record's violations are already limited to the ending
@@ -758,6 +774,7 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 			EvidenceOnly:  v.EvidenceOnly,
 			EventID:       v.EventID,
 			Semantic:      telemetrySemantic(v.Semantic),
+			Correlation:   telemetryCorrelation(v.Correlation),
 		})
 	}
 	for _, d := range record.SemanticDecisions {
