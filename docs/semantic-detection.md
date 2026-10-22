@@ -81,7 +81,9 @@ encoding. The session ID (`gen_ai.conversation.id`) and model name
 (`gen_ai.request.model`) are not length-capped, so the estimate assumes they
 are short.
 Decisions past the cap are counted in `elida.semantic.decisions.dropped`, not
-logged. A correlation violation adds at most 9 attributes: about 1.3 KB with
+logged. A correlation violation adds at most nine `elida.correlation.*`
+attributes plus `elida.violation.event_id` (ten over a plain violation):
+about 1.3 KB with
 32 event IDs at their usual 35-byte width, about 6 KB with every string at
 the 128-byte cap. A session end emits at most 50 shadow correlation logs of
 14 attributes each.

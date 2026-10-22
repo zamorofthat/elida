@@ -17,6 +17,10 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 # async_only, degraded, disabled), a fixed reason, the effective mode
 # (disabled|shadow|audit|enforce) and two booleans; enums and booleans only.
 # Model identity and counters are only on the authenticated /control/decision.
+# These three facts are deliberately available without a key so health probes
+# can see detector state. An operator who does not want enforcement state
+# visible unauthenticated should keep the control listener on localhost (the
+# default control listen address is 127.0.0.1:9090).
 curl http://localhost:9090/control/health
 
 # Aggregate stats
@@ -92,7 +96,7 @@ Shadow-mode matches are `correlation_shadow` (array) on `GET /control/sessions/{
 
 `GET /control/decision` reports `shadow_matches_dropped` (integer: shadow matches discarded because their session ended or its ID was reused while the match was computed) and `shadow_correlation` (object, present only when a shadow correlator runs): the shadow correlator's engine counters, the same engine fields policy correlation reports under `correlation` on `GET /control/flagged/stats` (`rules`, `shards`, `sessions`, `history_events`, `events_observed`, `events_ignored`, `duplicate_events`, `events_dropped`, `history_evicted`, `sessions_evicted`, `matches`, `cooldown_suppressed`, `duplicate_matches`).
 
-`GET /control/sessions/{id}/turns` violation turns carry `event_id` (string), `event_category` (string), `source_role` (string), `evidence_only` (bool) and, for a correlation match only, `correlation` (object: `match_id` string, `event_count` integer, the full count of contributing events), each omitted when empty. The full evidence is on the flagged and history responses.
+`GET /control/sessions/{id}/turns` violation turns carry `event_id` (string), `event_category` (string), `source_role` (string), `evidence_only` (bool) and, for a correlation match only, `correlation` (object: `match_id` string, `event_count` integer, the full count of contributing events), each omitted when empty. The full evidence is on the flagged and history responses. Message turns carry the message content and tool-call turns carry the raw tool arguments; the endpoint is authenticated but is not content-free (it is the conversation-stream API).
 
 `violation_detected` events (`GET /control/events`) carry `event_id`, `event_category` and `source_role` (strings, omitted when empty) beside the existing fields.
 
