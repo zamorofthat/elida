@@ -1821,6 +1821,9 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 		ClientAddr:   snap.ClientAddr,
 		// Shadow decisions carry no content, so they need no redaction.
 		SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
+		// Shadow correlation matches carry no content either. This is a
+		// mid-session save; the session-end save replaces it.
+		CorrelationShadow: storage.CorrelationShadowFromSession(snap.CorrelationShadow),
 	}
 
 	// Add captured content

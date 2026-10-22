@@ -142,6 +142,12 @@ type SessionRecord struct {
 	// payloads small.
 	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
 
+	// CorrelationShadow holds shadow-mode correlation matches, newest first
+	// (at most session.MaxCorrelationShadow per session instance, plus
+	// carried history up to MaxCarriedCorrelationShadow in total). Loaded by
+	// GetSession only, like SemanticShadow.
+	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+
 	// SemanticDecisions holds one record per semantic decision recorded as a
 	// violation, oldest first: what explains an enforcement action after the
 	// session ended. Loaded by GetSession only, like SemanticShadow.
@@ -190,6 +196,38 @@ func SemanticShadowFromSession(in []session.SemanticShadow) []SemanticShadow {
 	out := make([]SemanticShadow, len(in))
 	for i, s := range in {
 		out[i] = SemanticShadow(s)
+	}
+	return out
+}
+
+// CorrelationShadow mirrors session.CorrelationShadow for persistence: one
+// shadow-mode correlation match (calibration data, never a violation). It
+// carries identifiers, categories and times, never content.
+type CorrelationShadow struct {
+	Timestamp  time.Time `json:"timestamp"`
+	MatchID    string    `json:"match_id"`
+	Rule       string    `json:"rule"`
+	Shape      string    `json:"shape"`
+	Severity   string    `json:"severity"`
+	Mode       string    `json:"mode"`
+	EventIDs   []string  `json:"event_ids"`
+	Categories []string  `json:"categories"`
+	FirstEvent time.Time `json:"first_event"`
+	LastEvent  time.Time `json:"last_event"`
+}
+
+// CorrelationShadowFromSession copies a session's shadow correlation list
+// into its persisted form, preserving order (newest first). The input is a
+// snapshot (session.Snapshot deep-copies the slices), so the struct
+// conversion, which compiles only while the two types have identical
+// fields, is enough. It returns nil for an empty list.
+func CorrelationShadowFromSession(in []session.CorrelationShadow) []CorrelationShadow {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CorrelationShadow, len(in))
+	for i, c := range in {
+		out[i] = CorrelationShadow(c)
 	}
 	return out
 }
@@ -371,6 +409,7 @@ func (s *SQLiteStore) migrate() error {
 		fingerprint_class TEXT DEFAULT '',
 		semantic_shadow TEXT DEFAULT '',
 		semantic_decisions TEXT DEFAULT '',
+		correlation_shadow TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -501,6 +540,9 @@ func (s *SQLiteStore) migrate() error {
 	// Per-decision semantic records (idempotent — ignore "duplicate column" errors)
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN semantic_decisions TEXT DEFAULT ''")
 
+	// Shadow-mode correlation matches (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN correlation_shadow TEXT DEFAULT ''")
+
 	// History carried from earlier sessions with the same ID (see
 	// SaveSession). Idempotent — ignore "duplicate column" errors.
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN prior_history TEXT DEFAULT ''")
@@ -567,10 +609,15 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		semanticDecisions = []byte("{}")
 	}
 
+	correlationShadow, err := json.Marshal(record.CorrelationShadow)
+	if err != nil {
+		correlationShadow = []byte("[]")
+	}
+
 	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, prior_history)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, correlation_shadow, prior_history)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -589,6 +636,7 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		record.FingerprintClass,
 		string(semanticShadow),
 		string(semanticDecisions),
+		string(correlationShadow),
 		string(priorJSON),
 	)
 	if err != nil {
@@ -615,14 +663,14 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 // GetSessionCtx retrieves a session by ID using the provided context.
 func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, correlation_shadow
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
 	var metadataStr, capturedStr, violationsStr sql.NullString
 	var fingerprintDistance sql.NullFloat64
 	var fingerprintBucket, fingerprintClass sql.NullString
-	var semanticShadowStr, semanticDecisionsStr sql.NullString
+	var semanticShadowStr, semanticDecisionsStr, correlationShadowStr sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -642,6 +690,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 		&fingerprintClass,
 		&semanticShadowStr,
 		&semanticDecisionsStr,
+		&correlationShadowStr,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -669,6 +718,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 	unmarshalJSON(semanticDecisionsStr, &sd, "semantic_decisions", record.ID)
 	record.SemanticDecisions = sd.Decisions
 	record.SemanticDecisionsDropped = sd.Dropped
+	unmarshalJSON(correlationShadowStr, &record.CorrelationShadow, "correlation_shadow", record.ID)
 
 	integrity, integrityErr := s.GetSDRIntegrity(ctx, record.ID)
 	if integrityErr != nil {

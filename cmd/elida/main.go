@@ -403,6 +403,9 @@ func (a *app) initSessionEndCallback() {
 			// Shadow decisions carry no content, so redaction does not
 			// apply to them.
 			SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
+			// Shadow correlation matches carry no content. Unbind above ran
+			// before this snapshot, so no further match can land on sess.
+			CorrelationShadow: storage.CorrelationShadowFromSession(snap.CorrelationShadow),
 		}
 
 		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)

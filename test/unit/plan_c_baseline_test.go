@@ -3,7 +3,6 @@ package unit
 import (
 	"encoding/json"
 	"net/http"
-	"reflect"
 	"testing"
 	"time"
 
@@ -11,7 +10,6 @@ import (
 	"elida/internal/correlation"
 	"elida/internal/policy"
 	"elida/internal/session"
-	"elida/internal/storage"
 )
 
 // matchEngine is an enforce-mode policy engine with one audit correlation
@@ -48,13 +46,6 @@ func jsonKeys(t *testing.T, raw []byte) map[string]bool {
 type fixedDecision struct{ st control.DecisionStatus }
 
 func (f fixedDecision) DecisionStatus() control.DecisionStatus { return f.st }
-
-// FLIP in Task 2. Today correlation_shadow is in memory only.
-func TestBaselineC_StorageRecordHasNoCorrelationShadow(t *testing.T) {
-	if _, ok := reflect.TypeOf(storage.SessionRecord{}).FieldByName("CorrelationShadow"); ok {
-		t.Fatal("today storage.SessionRecord has no CorrelationShadow field")
-	}
-}
 
 // KEEP. A plain (non-match) violation serializes with no correlation key
 // from the policy engine; storage must keep that after Task 1 (omitempty).

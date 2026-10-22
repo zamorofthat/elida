@@ -175,10 +175,14 @@ state ends with the process. It runs outside the semantic runner's
 session-registry lock, so a slow correlation on one session never delays
 another session's assessment. A match computed while its session ended (or
 its ID was reused) is dropped, counted in `shadow_matches_dropped` at
-`GET /control/decision`, and that instance's state is forgotten. A
-match accepted just before the session ends can still be written to the
-ended session's in-memory record after its end callback ran; that is
-harmless while `correlation_shadow` is not persisted.
+`GET /control/decision`, and that instance's state is forgotten. Accepting
+a match onto its session and releasing the session at its end are
+synchronized on the runner's session-registry lock (the correlation itself
+still runs outside it), so once the session-end path has released a
+session, no further shadow match can be written to it: the record persisted
+at session end holds every match accepted before the release, and an
+in-flight match rejected at session end or shutdown is counted in
+`shadow_matches_dropped` and absent from the persisted `correlation_shadow`.
 
 **Tool activity (`tool_categories`).** `correlation.tool_categories` maps
 tool calls returned by the backend to categories, so rules can use them.

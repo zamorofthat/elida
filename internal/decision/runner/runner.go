@@ -376,8 +376,12 @@ type Runner struct {
 	// bound is the session registry: async results and the per-session
 	// assessed-message set find their session through it. Entries leave only
 	// through Unbind; MaxBoundSessions caps it. boundMu also guards every
-	// assessedSet, and it is held around every shadow correlator Observe
-	// and Forget (lock order: boundMu, then the correlator's shard lock).
+	// assessedSet, the shadow correlator's Forget and the acceptance of
+	// shadow correlation matches (recordShadowMatches), so that no match
+	// lands on a session after its Unbind returned. Observe runs outside it.
+	// Lock order: boundMu, then the session's lock (Bind reads IsActive and
+	// recordShadowMatches records under it) or the correlator's shard lock;
+	// nothing takes boundMu while holding either.
 	boundMu sync.Mutex
 	bound   map[string]*boundSession
 
@@ -399,8 +403,8 @@ type Runner struct {
 	// bindRefused counts sessions not bound because the registry was full.
 	bindRefused atomic.Int64
 	// shadowMatchesDropped counts shadow correlation matches discarded
-	// because their session instance was unbound while its Observe ran
-	// outside boundMu.
+	// because their session instance was unbound or replaced while its
+	// Observe ran outside boundMu: recordShadowMatches rejected them.
 	shadowMatchesDropped atomic.Int64
 
 	// dropLogMu guards the rate limit of the drop and refusal WARNs.
@@ -1031,8 +1035,9 @@ func shadowKey(sess *session.Session) string {
 
 // forgetShadow drops the shadow correlator's state for one instance key.
 // An Observe for that key may be running outside boundMu at the same time;
-// correlateShadow re-checks the binding after Observe and forgets again if
-// the instance is no longer bound, so no state outlives the binding.
+// correlateShadow then finds the instance unbound (recordShadowMatches,
+// under boundMu) and forgets the key again, so no state outlives the
+// binding.
 func (r *Runner) forgetShadow(key string) {
 	if r.cfg.ShadowCorrelator != nil {
 		r.cfg.ShadowCorrelator.Forget(key)
@@ -1041,7 +1046,8 @@ func (r *Runner) forgetShadow(key string) {
 
 // ShadowMatchesDropped returns how many shadow correlation matches were
 // discarded because their session instance ended (or was replaced) while
-// the match was being computed.
+// the match was being computed. Such a match is counted here and absent
+// from the session, so it never reaches persistence.
 func (r *Runner) ShadowMatchesDropped() int64 { return r.shadowMatchesDropped.Load() }
 
 // logRateLimited logs one content-free WARN at most once per
@@ -1099,8 +1105,11 @@ func (r *Runner) Unbind(sess *session.Session) {
 	delete(r.bound, sess.ID)
 	// Session end: shadow correlation state must not outlive the session.
 	// Only the owning instance forgets its key. A correlateShadow Observe
-	// already running outside boundMu for this instance re-checks the
-	// binding afterwards and forgets the key again, so no state is left.
+	// already running outside boundMu for this instance accepts its matches
+	// only under boundMu (recordShadowMatches), so once this returns the
+	// instance is unbound and those matches are rejected, counted and the
+	// key forgotten again: no match lands on the session afterwards and no
+	// state is left.
 	r.forgetShadow(shadowKey(b.sess))
 }
 
@@ -1750,16 +1759,19 @@ func (r *Runner) recordShadow(sess *session.Session, in decision.Input, v Verdic
 // AssessRequest on the inline path, so a slow Observe on one session must
 // not serialize unrelated sessions (the policy engine's correlator follows
 // the same collect, unlock, Observe, relock pattern). The binding is checked
-// before and after; the correlator is keyed by instance (shadowKey), so a
-// late Observe can only touch its own instance's state, and if that
-// instance was unbound or replaced meanwhile its matches are dropped
-// (ShadowMatchesDropped) and its key forgotten.
-//
-// RecordCorrelationShadow runs after boundMu is released, so a match
-// accepted just before Unbind can land on the ended session's in-memory
-// object after its end callback ran. That is harmless while
-// correlation_shadow is not persisted; a change that persists it must
-// snapshot after any in-flight correlation or accept that loss.
+// before Observe, and the matches are accepted afterwards by
+// recordShadowMatches, which re-validates the exact instance and records
+// them in ONE boundMu critical section. Unbind and Bind take the same lock,
+// so acceptance and unbinding are atomic with respect to each other: a match
+// accepted before Unbind is on the session when Unbind returns (and so in
+// the snapshot the end callback takes after it), and a match arriving after
+// Unbind returned, or after a new instance replaced this one, is rejected,
+// counted (ShadowMatchesDropped) and its key forgotten. That synchronized
+// acceptance, not the re-check alone, is what makes the end-of-session
+// snapshot complete; the rejected in-flight matches are absent from
+// persistence by design. The correlator is keyed by instance (shadowKey),
+// so a late Observe can only touch its own instance's state. Forget and
+// the log run outside the critical section.
 func (r *Runner) correlateShadow(sess *session.Session, in decision.Input, v Verdict) {
 	c := r.cfg.ShadowCorrelator
 	th := r.cfg.Thresholds
@@ -1780,12 +1792,39 @@ func (r *Runner) correlateShadow(sess *session.Session, in decision.Input, v Ver
 	}
 	key := shadowKey(sess)
 	matches := c.Observe(key, []correlation.Event{ev})
-	if !r.instanceBound(sess) {
+	if !r.recordShadowMatches(sess, now, matches) {
 		// Unbound or replaced while Observe ran: Unbind/Bind may have
 		// forgotten the key before this Observe wrote to it.
 		c.Forget(key)
 		r.shadowMatchesDropped.Add(int64(len(matches)))
 		return
+	}
+	for _, m := range matches {
+		slog.Info("shadow correlation match recorded",
+			"session_id", sess.ID,
+			"rule", m.Rule,
+			"match_id", m.ID,
+			"events", len(m.EventIDs),
+		)
+	}
+}
+
+// recordShadowMatches accepts the matches an Observe produced for sess: it
+// re-validates that this exact session instance still owns its ID's
+// binding and records the matches on it, in one boundMu critical section.
+// It reports false, recording nothing, when the instance is no longer
+// bound (Unbind ran, or Bind installed a replacement). Holding boundMu
+// here is what makes acceptance atomic with Unbind and Bind: after either
+// returns, no match from an earlier Observe can land on the instance it
+// released. The section holds only the registry lookup and the session's
+// own lock (lock order boundMu, then the session lock, as Bind); the
+// correlator, Forget, counters and logging stay outside it.
+func (r *Runner) recordShadowMatches(sess *session.Session, now time.Time, matches []correlation.Match) bool {
+	r.boundMu.Lock()
+	defer r.boundMu.Unlock()
+	b, ok := r.bound[sess.ID]
+	if !ok || !sameInstance(b.sess, sess) {
+		return false
 	}
 	for _, m := range matches {
 		sess.RecordCorrelationShadow(session.CorrelationShadow{
@@ -1800,11 +1839,6 @@ func (r *Runner) correlateShadow(sess *session.Session, in decision.Input, v Ver
 			FirstEvent: m.FirstEvent,
 			LastEvent:  m.LastEvent,
 		})
-		slog.Info("shadow correlation match recorded",
-			"session_id", sess.ID,
-			"rule", m.Rule,
-			"match_id", m.ID,
-			"events", len(m.EventIDs),
-		)
 	}
+	return true
 }

@@ -26,6 +26,9 @@ const (
 	// bound on semantic decision records (policy.MaxSemanticDecisionsPerSession,
 	// 256).
 	MaxCarriedSemanticDecisions = policy.MaxSemanticDecisionsPerSession
+	// MaxCarriedCorrelationShadow is session.MaxCorrelationShadow, the
+	// per-session cap on shadow correlation matches.
+	MaxCarriedCorrelationShadow = session.MaxCorrelationShadow
 )
 
 // priorHistory is what a session row carries from earlier sessions with the
@@ -33,9 +36,10 @@ const (
 // the same session (same start_time) still knows which entries came before
 // it.
 type priorHistory struct {
-	Violations      []Violation       `json:"violations,omitempty"`
-	CapturedContent []CapturedRequest `json:"captured_content,omitempty"`
-	SemanticShadow  []SemanticShadow  `json:"semantic_shadow,omitempty"`
+	Violations        []Violation         `json:"violations,omitempty"`
+	CapturedContent   []CapturedRequest   `json:"captured_content,omitempty"`
+	SemanticShadow    []SemanticShadow    `json:"semantic_shadow,omitempty"`
+	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
 	// SemanticDecisions are the carried per-decision records (oldest first);
 	// SemanticDecisionsDropped counts the records the earlier sessions lost
 	// to their bounds, including carried records cut by
@@ -52,9 +56,9 @@ type priorHistory struct {
 //     which already includes its own prior history.
 func loadPriorHistory(tx *sql.Tx, id string, start time.Time) (priorHistory, error) {
 	var storedStart time.Time
-	var captured, violations, shadow, decisions, prior sql.NullString
-	err := tx.QueryRow(`SELECT start_time, captured_content, violations, semantic_shadow, semantic_decisions, prior_history FROM sessions WHERE id = ?`, id).
-		Scan(&storedStart, &captured, &violations, &shadow, &decisions, &prior)
+	var captured, violations, shadow, decisions, cshadow, prior sql.NullString
+	err := tx.QueryRow(`SELECT start_time, captured_content, violations, semantic_shadow, semantic_decisions, correlation_shadow, prior_history FROM sessions WHERE id = ?`, id).
+		Scan(&storedStart, &captured, &violations, &shadow, &decisions, &cshadow, &prior)
 	if err == sql.ErrNoRows {
 		return priorHistory{}, nil
 	}
@@ -73,6 +77,7 @@ func loadPriorHistory(tx *sql.Tx, id string, start time.Time) (priorHistory, err
 	unmarshalJSON(decisions, &sd, "semantic_decisions", id)
 	p.SemanticDecisions = sd.Decisions
 	p.SemanticDecisionsDropped = sd.Dropped
+	unmarshalJSON(cshadow, &p.CorrelationShadow, "correlation_shadow", id)
 	return p, nil
 }
 
@@ -104,6 +109,9 @@ func captureKey(c CapturedRequest) string {
 //   - Semantic shadow (newest first): the record's own, then prior;
 //     deduplicated by DecisionID; capped by MaxCarriedShadow likewise, the
 //     newest prior entries kept.
+//   - Correlation shadow (newest first): the record's own, then prior;
+//     deduplicated by MatchID; capped by MaxCarriedCorrelationShadow
+//     likewise.
 //   - Semantic decisions (oldest first): prior first, then the record's
 //     own; a prior record is dropped when the record holds the same EventID
 //     (records without one are always carried); capped by
@@ -147,6 +155,17 @@ func mergeHistory(record SessionRecord, prior priorHistory) (SessionRecord, prio
 	}
 	kept.SemanticShadow = keepHead(kept.SemanticShadow, MaxCarriedShadow-len(record.SemanticShadow))
 
+	ownM := make(map[string]bool, len(record.CorrelationShadow))
+	for _, c := range record.CorrelationShadow {
+		ownM[c.MatchID] = true
+	}
+	for _, c := range prior.CorrelationShadow {
+		if c.MatchID == "" || !ownM[c.MatchID] {
+			kept.CorrelationShadow = append(kept.CorrelationShadow, c)
+		}
+	}
+	kept.CorrelationShadow = keepHead(kept.CorrelationShadow, MaxCarriedCorrelationShadow-len(record.CorrelationShadow))
+
 	ownD := make(map[string]bool, len(record.SemanticDecisions))
 	for _, d := range record.SemanticDecisions {
 		ownD[d.EventID] = true
@@ -168,6 +187,9 @@ func mergeHistory(record SessionRecord, prior priorHistory) (SessionRecord, prio
 	}
 	if len(kept.SemanticShadow) > 0 {
 		record.SemanticShadow = append(append([]SemanticShadow(nil), record.SemanticShadow...), kept.SemanticShadow...)
+	}
+	if len(kept.CorrelationShadow) > 0 {
+		record.CorrelationShadow = append(append([]CorrelationShadow(nil), record.CorrelationShadow...), kept.CorrelationShadow...)
 	}
 	if len(kept.SemanticDecisions) > 0 {
 		record.SemanticDecisions = append(append([]SemanticDecision(nil), kept.SemanticDecisions...), record.SemanticDecisions...)
