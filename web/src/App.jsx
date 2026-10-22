@@ -14,6 +14,7 @@ import { DecisionSettings, settingsSaveUrl, saveErrorText, invalidBudgetKeys } f
 import { DashboardPage } from './components/DashboardPage'
 import { ToolUsePage } from './components/ToolUsePage'
 import { PolicyPage } from './components/PolicyPage'
+import { SemanticEvidence, anchorId, anchoredViolations } from './components/SemanticEvidence'
 
 const API_BASE = ''
 
@@ -217,6 +218,10 @@ function SessionDetails({ session, onClose }) {
   // Merge violations/captured from session object (history inline) and flaggedInfo
   const violations = flaggedInfo?.violations || session.violations || null
   const capturedContent = flaggedInfo?.captured_content || session.captured_content || null
+  const decisions = flaggedInfo?.semantic_decisions || []
+  // Ordinary violation rows carry the anchor a correlation match links to;
+  // semantic and correlation rows are anchored inside SemanticEvidence.
+  const anchored = anchoredViolations(violations, decisions)
 
   return (
     <div class="modal-overlay" onClick={onClose}>
@@ -279,8 +284,12 @@ function SessionDetails({ session, onClose }) {
             <>
               <h3>Policy Violations</h3>
               <div class="violations-list">
+                {/* The key carries the anchor state: the list row's inline
+                    violations arrive before the record's decisions, and the
+                    anchor moves to the decision row once they do. A new key
+                    recreates the node instead of leaving an empty id behind. */}
                 {violations.map((v, i) => (
-                  <div key={i} class="violation-item">
+                  <div key={i + (anchored.has(v.event_id) ? ':anchored' : '')} class="violation-item" id={anchored.has(v.event_id) ? anchorId(v.event_id) : undefined}>
                     <div class="violation-header">
                       <SeverityBadge severity={v.severity} />
                       <strong>{v.rule_name}</strong>
@@ -294,6 +303,19 @@ function SessionDetails({ session, onClose }) {
               </div>
             </>
           )}
+
+          {flaggedInfo && (flaggedInfo.semantic_decisions?.length || flaggedInfo.correlation_shadow?.length || flaggedInfo.semantic_shadow?.length || violations?.some(v => v.correlation)) ? (
+            <>
+              <h3>Semantic evidence</h3>
+              <SemanticEvidence
+                decisions={flaggedInfo.semantic_decisions}
+                violations={violations}
+                semanticShadow={flaggedInfo.semantic_shadow}
+                correlationShadow={flaggedInfo.correlation_shadow}
+                anchored={anchored}
+              />
+            </>
+          ) : null}
 
           {capturedContent && capturedContent.length > 0 && (
             <>

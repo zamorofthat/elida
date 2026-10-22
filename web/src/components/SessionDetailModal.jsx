@@ -4,6 +4,8 @@ import { formatBytes, formatDuration, formatDurationStr, truncateId } from '../u
 import { StateBadge, SeverityBadge, FingerprintBadge } from './shared/Badge'
 import { IconX } from './shared/Icons'
 import { SessionTurns } from './SessionTurns'
+import { TimelineBand } from './TimelineBand'
+import { SemanticEvidence, evidenceMarkers, anchorId, anchoredViolations } from './SemanticEvidence'
 
 // ---------------------------------------------------------------------------
 // Expandable matched text for policy violations
@@ -224,69 +226,133 @@ function Section({ title, defaultOpen, badge, children }) {
 }
 
 // ---------------------------------------------------------------------------
-// Timeline Band — horizontal dot strip
-// ---------------------------------------------------------------------------
-
-function TimelineBand({ turns }) {
-  if (!turns || turns.length === 0) return null
-
-  const typeColor = {
-    message: '#6366f1',
-    tool_call: '#f59e0b',
-    violation: '#ef4444',
-    summary: '#6b7280',
-  }
-
-  return (
-    <div class="timeline-band">
-      {turns.map((t, i) => (
-        <span
-          key={i}
-          class="timeline-dot"
-          style={{ background: typeColor[t.type] || '#6b7280' }}
-          title={`${t.type}${t.tool_name ? ': ' + t.tool_name : ''}${t.role ? ' (' + t.role + ')' : ''}`}
-        />
-      ))}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Session Detail Modal
 // ---------------------------------------------------------------------------
+
+const POLL_MS = 3000
+
+// A session that has just ended may not be in history yet: the store writes
+// the row after the session closes. A 404 is retried on this many polls
+// before the record is shown as unavailable.
+const HISTORY_RETRIES = 5
 
 export function SessionDetailModal({ session, onClose, onKill }) {
   const [turns, setTurns] = useState(null)
   const [flagged, setFlagged] = useState(null)
+  const [detail, setDetail] = useState(null)
+  // historyDetail is populated only by the successful final history fetch;
+  // historyStatus is '' | 'pending' | 'unavailable'.
+  const [historyDetail, setHistoryDetail] = useState(null)
+  const [historyStatus, setHistoryStatus] = useState('')
   const [riskCurve, setRiskCurve] = useState(null)
   const [behavior, setBehavior] = useState(null)
-  const [liveSession, setLiveSession] = useState(session)
   const modalRef = useRef(null)
 
-  // Fetch turns
+  // The modal's one poll. The first tick runs on open; later ticks run every
+  // POLL_MS and refresh the live detail (shadow lists), the flagged evidence
+  // and the turns together. When the live detail reports a final state or
+  // 404s, the poll switches to /control/history/{id}: that record becomes
+  // the authoritative evidence source (an empty list there replaces stale
+  // live evidence) and polling stops once it is loaded or the bounded 404
+  // retries are spent. Other history errors stop polling with an
+  // unavailable state; there is no fallback. Every response is checked
+  // against the controller (ID change or unmount aborts it) and a
+  // per-resource sequence number, so a slow earlier response never replaces
+  // a newer one.
   useEffect(() => {
     if (!session?.id) return
+    const id = session.id
     const controller = new AbortController()
+    setTurns(null)
+    setFlagged(null)
+    setDetail(null)
+    setHistoryDetail(null)
+    setHistoryStatus('')
 
-    apiFetch('/control/sessions/' + session.id + '/turns?full=true', { signal: controller.signal })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => { if (!controller.signal.aborted) setTurns(data?.turns || []) })
-      .catch(() => { if (!controller.signal.aborted) setTurns([]) })
+    let phase = 'live' // 'live' | 'history' | 'done'
+    let historyTries = 0
+    let seq = 0
+    const applied = { detail: 0, flagged: 0, turns: 0 }
+    let timer = null
 
-    return () => controller.abort()
-  }, [session?.id])
+    const get = (path) => apiFetch(path, { signal: controller.signal })
+    const stop = () => { phase = 'done'; clearInterval(timer) }
+    // newest applies fn only for the latest response of its kind.
+    const newest = (kind, n, fn) => {
+      if (controller.signal.aborted || n < applied[kind]) return
+      applied[kind] = n
+      fn()
+    }
 
-  // Fetch flagged info
-  useEffect(() => {
-    if (!session?.id) return
-    const controller = new AbortController()
+    const fetchHistory = () => {
+      historyTries++
+      get('/control/history/' + id)
+        .then(res => {
+          if (controller.signal.aborted) return
+          if (res.ok) {
+            return res.json().then(record => {
+              if (controller.signal.aborted) return
+              setHistoryDetail(record)
+              setHistoryStatus('')
+              stop()
+            })
+          }
+          if (res.status === 404 && historyTries < HISTORY_RETRIES) {
+            setHistoryStatus('pending')
+            return
+          }
+          setHistoryStatus('unavailable')
+          stop()
+        })
+        .catch(() => {
+          if (controller.signal.aborted) return
+          setHistoryStatus('unavailable')
+          stop()
+        })
+    }
 
-    apiFetch('/control/flagged/' + session.id, { signal: controller.signal })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => { if (!controller.signal.aborted) setFlagged(data) })
-      .catch(() => {})
+    const toHistory = () => {
+      if (phase !== 'live') return
+      phase = 'history'
+      setHistoryStatus('pending')
+      fetchHistory()
+    }
 
-    return () => controller.abort()
+    const pollLive = () => {
+      const d = ++seq
+      get('/control/sessions/' + id)
+        .then(res => {
+          if (controller.signal.aborted) return
+          if (res.status === 404) { toHistory(); return }
+          if (!res.ok) return
+          return res.json().then(data => newest('detail', d, () => {
+            setDetail(data)
+            if (data.state !== 'active') toHistory()
+          }))
+        })
+        .catch(() => {})
+
+      const f = ++seq
+      get('/control/flagged/' + id)
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data) newest('flagged', f, () => setFlagged(data)) })
+        .catch(() => {})
+
+      const t = ++seq
+      get('/control/sessions/' + id + '/turns?full=true')
+        .then(res => res.ok ? res.json() : null)
+        .then(data => newest('turns', t, () => setTurns(prev => data ? (data.turns || []) : (prev || []))))
+        .catch(() => { newest('turns', t, () => setTurns(prev => prev || [])) })
+    }
+
+    pollLive()
+    timer = setInterval(() => {
+      if (document.hidden) return
+      if (phase === 'live') pollLive()
+      else if (phase === 'history') fetchHistory()
+    }, POLL_MS)
+
+    return () => { clearInterval(timer); controller.abort() }
   }, [session?.id])
 
   // Fetch risk score curve
@@ -315,24 +381,6 @@ export function SessionDetailModal({ session, onClose, onKill }) {
     return () => controller.abort()
   }, [session?.id])
 
-  // Poll live session data
-  useEffect(() => {
-    if (!session?.id || session.state !== 'active') return
-    const controller = new AbortController()
-
-    const poll = () => {
-      apiFetch('/control/sessions/' + session.id, { signal: controller.signal })
-        .then(res => res.ok ? res.json() : null)
-        .then(data => {
-          if (!controller.signal.aborted && data) setLiveSession(data)
-        })
-        .catch(() => {})
-    }
-
-    const id = setInterval(() => { if (!document.hidden) poll() }, 3000)
-    return () => { clearInterval(id); controller.abort() }
-  }, [session?.id, session?.state])
-
   // Escape key
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose() }
@@ -342,8 +390,19 @@ export function SessionDetailModal({ session, onClose, onKill }) {
 
   if (!session) return null
 
-  const s = liveSession || session
-  const violations = flagged?.violations || []
+  const s = detail || session
+  // The persisted record, once loaded, is the authoritative source for the
+  // violations, the decision records and the shadow lists; before that the
+  // flagged evidence and the live detail are.
+  const source = historyDetail || flagged || detail
+  const violations = source?.violations || []
+  const decisions = source?.semantic_decisions || []
+  const semanticShadow = (historyDetail || detail)?.semantic_shadow || []
+  const correlationShadow = (historyDetail || detail)?.correlation_shadow || []
+  const anchored = anchoredViolations(violations, decisions)
+  const markers = evidenceMarkers({ decisions, violations, semanticShadow, correlationShadow })
+  const evidenceCount = decisions.length + violations.filter(v => v.correlation).length
+  const showEvidence = evidenceCount > 0 || semanticShadow.length > 0 || correlationShadow.length > 0 || historyStatus !== ''
   const riskScore = flagged?.risk_score || s.risk_score || 0
   const currentAction = flagged?.current_action || s.current_action || ''
 
@@ -399,7 +458,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
         </div>
 
         {/* Timeline band */}
-        <TimelineBand turns={turns} />
+        <TimelineBand turns={turns} markers={markers} />
 
         {/* Key metrics strip */}
         <div class="detail-metrics">
@@ -470,7 +529,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
             <Section title="Policy Violations" defaultOpen={true} badge={violations.length}>
               <div class="detail-violations">
                 {violations.map((v, i) => (
-                  <div key={i} class="detail-violation">
+                  <div key={i} class="detail-violation" id={anchored.has(v.event_id) ? anchorId(v.event_id) : undefined}>
                     <div class="detail-violation-header">
                       <SeverityBadge severity={v.severity} />
                       <strong>{v.rule_name}</strong>
@@ -488,6 +547,25 @@ export function SessionDetailModal({ session, onClose, onKill }) {
                   </div>
                 ))}
               </div>
+            </Section>
+          )}
+
+          {/* Semantic evidence: decision records, correlation matches, shadow */}
+          {showEvidence && (
+            <Section title="Semantic evidence" defaultOpen={true} badge={evidenceCount}>
+              {historyStatus === 'pending' && (
+                <div class="evidence-pending">Loading the persisted record…</div>
+              )}
+              {historyStatus === 'unavailable' && (
+                <div class="evidence-unavailable">Persisted record unavailable; showing the last live evidence.</div>
+              )}
+              <SemanticEvidence
+                decisions={decisions}
+                violations={violations}
+                semanticShadow={semanticShadow}
+                correlationShadow={correlationShadow}
+                anchored={anchored}
+              />
             </Section>
           )}
 
