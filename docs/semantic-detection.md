@@ -44,9 +44,11 @@ the metadata is exported whenever OTEL or OCSF export is on.
   - in the OCSF finding as `unmapped."elida.event_id"` and
     `unmapped."elida.correlation"` (bare field names).
 
-  `event_ids` carries the first 32 contributing IDs and `categories` the
-  first 8 distinct categories, in order of first appearance (both hard caps,
-  equal to the engine's own ceilings today); `event_count` is the full
+  `event_ids` carries up to 32 contributing IDs and `categories` up to 8
+  distinct categories, in order of first appearance (both hard caps, equal to
+  the engine's own ceilings today). Each entry passes the export's token
+  safety check first and an entry that fails it is dropped, so a later one
+  takes its slot: the caps count surviving entries, not leading ones; `event_count` is the full
   count. Times are RFC3339Nano in UTC. Only the match retained on the
   session at its end is exported, one per rule (see
   [Residual risk](#residual-risk)).

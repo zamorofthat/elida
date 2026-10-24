@@ -65,10 +65,13 @@ CREATE TABLE sessions (
     semantic_shadow TEXT,             -- JSON: shadow semantic decisions (newest first, max 50)
     semantic_decisions TEXT,          -- JSON: {decisions, dropped}
     correlation_shadow TEXT,          -- JSON: shadow correlation matches (newest first, max 50)
-    prior_history TEXT,               -- JSON: entries carried from earlier sessions with this ID
     created_at DATETIME
 );
 ```
+
+`prior_history TEXT` (JSON: entries carried from earlier sessions with the
+same ID) is not part of `CREATE TABLE`: it is added to existing and new
+databases by an idempotent `ALTER TABLE sessions ADD COLUMN prior_history TEXT`.
 
 ## Data Structures
 
