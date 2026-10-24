@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     name glob and argument pattern. Categorization runs off the request
     path. `max_argument_bytes` and compiled-instruction caps bound it, and
     a soft startup WARN reports its estimated cost.
+  - `correlation.builtin_chains: true` (default `false`) adds two
+    audit-only, warning-severity sequence rules,
+    `builtin_credential_exfiltration` and
+    `builtin_sensitive_exfiltration`, plus the tool categories they need
+    (`credential_discovery`, `sensitive_access`, `external_transmission`).
+    Built-in categories append after user categories; a user rule with
+    the same name replaces the built-in one. The preset is listed
+    verbatim in `docs/configuration.md`.
   - The `correlation:` block is restart-only and is not part of Settings.
     Startup logs a one-line summary.
   - Limitations are in `docs/semantic-detection.md`.
