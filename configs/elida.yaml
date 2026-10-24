@@ -574,6 +574,11 @@ correlation:
   enabled: false
   max_history_events: 64
   max_sessions: 4096
+  # Shipped chain rules (credential or sensitive-file access followed by
+  # external transmission) and the tool categories they need. Audit-only,
+  # heuristic; the globs and patterns are listed in docs/configuration.md.
+  # A rule below with a built-in's name replaces it.
+  builtin_chains: false
   rules:
     # Three distinct messages with injection_elevated evidence within 15
     # minutes. Audit-only: recorded as evidence, never adds risk.

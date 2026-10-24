@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,12 @@ type CorrelationConfig struct {
 	MaxHistoryEvents int                `yaml:"max_history_events"`
 	MaxSessions      int                `yaml:"max_sessions"`
 	Rules            []correlation.Rule `yaml:"rules"`
+	// BuiltinChains adds the shipped, audit-only chain rules and the tool
+	// taxonomy they need (BuiltinCorrelationRules, BuiltinToolCategories)
+	// to the effective block (Effective). Off by default: tool names and
+	// argument patterns vary by agent framework, and the preset is a
+	// heuristic. A user rule with a built-in's name replaces it.
+	BuiltinChains bool `yaml:"builtin_chains"`
 
 	correlation.TaxonomyConfig `yaml:",inline"`
 }
@@ -114,6 +121,141 @@ func DefaultCorrelationRules() []correlation.Rule {
 	}}
 }
 
+// BuiltinCorrelationRules are the shipped chain rules behind
+// builtin_chains: true (Plan B Task 10, D12): credential or sensitive-file
+// access followed by external transmission within 15 minutes. Audit-only;
+// promoting one is a reserved decision, done by redefining the rule under
+// its name with mode: enforce.
+func BuiltinCorrelationRules() []correlation.Rule {
+	return []correlation.Rule{
+		{
+			Name:     "builtin_credential_exfiltration",
+			Shape:    correlation.ShapeSequence,
+			Sequence: []string{"credential_discovery", "external_transmission"},
+			Window:   15 * time.Minute,
+			Severity: "warning",
+			Mode:     correlation.ModeAudit,
+		},
+		{
+			Name:     "builtin_sensitive_exfiltration",
+			Shape:    correlation.ShapeSequence,
+			Sequence: []string{"sensitive_access", "external_transmission"},
+			Window:   15 * time.Minute,
+			Severity: "warning",
+			Mode:     correlation.ModeAudit,
+		},
+	}
+}
+
+// BuiltinToolCategories is the taxonomy the built-in chains need.
+// Credential and sensitive-file categories match on argument paths from
+// any tool; transmission matches network-named tools, or shell tools whose
+// arguments run a network command. The globs and patterns are listed in
+// docs/configuration.md so operators can see the detection policy.
+func BuiltinToolCategories() []correlation.ToolCategoryRule {
+	shells := []string{"bash", "sh", "shell", "terminal", "run_command", "*exec*"}
+	return []correlation.ToolCategoryRule{
+		{
+			Category: "credential_discovery",
+			Tools:    []string{"*"},
+			ArgumentPatterns: []string{
+				`\.aws/credentials`, `\.ssh/id_[a-z0-9]+`, `\.netrc\b`, `\.git-credentials`,
+				`\.kube/config`, `\.docker/config\.json`, `(^|[/\\"' ])\.env\b`,
+			},
+		},
+		{
+			Category:         "sensitive_access",
+			Tools:            []string{"*"},
+			ArgumentPatterns: []string{`/etc/shadow`, `/etc/sudoers`, `/proc/self/environ`, `\.(bash|zsh)_history`},
+		},
+		{
+			Category: "external_transmission",
+			Tools:    []string{"*fetch*", "*http*", "*request*", "*upload*", "*webhook*", "send_*", "post_*"},
+		},
+		{
+			Category:         "external_transmission",
+			Tools:            shells,
+			ArgumentPatterns: []string{`\b(curl|wget)\b[^\n]*https?://`, `\bnc\b\s+\S+\s+\d+`, `\bscp\b\s+\S+\s+\S+@`},
+		},
+	}
+}
+
+// Effective returns the block as it is built and validated: a deep copy
+// in which, when BuiltinChains is set, the built-in taxonomy entries
+// follow the configured tool_categories and each built-in rule follows the
+// configured rules unless a configured rule has its name (the user's
+// definition wins, keeping its position and so its rules[i] field index).
+// Every consumer of the block (validation, the policy engine's correlator
+// and taxonomy, the shadow correlator, the startup summary) reads this,
+// never the raw fields. With BuiltinChains false it is a plain deep copy.
+// It is idempotent: a rule or entry already present is not added again.
+func (c CorrelationConfig) Effective() CorrelationConfig {
+	out := c
+	out.Rules = cloneCorrelationRules(c.Rules)
+	out.ToolCategories = cloneToolCategories(c.ToolCategories)
+	if !c.BuiltinChains {
+		return out
+	}
+	named := make(map[string]bool, len(out.Rules))
+	for _, r := range out.Rules {
+		named[r.Name] = true
+	}
+	for _, b := range BuiltinCorrelationRules() {
+		if !named[b.Name] {
+			out.Rules = append(out.Rules, b)
+		}
+	}
+	for _, b := range BuiltinToolCategories() {
+		if !containsToolCategory(out.ToolCategories, b) {
+			out.ToolCategories = append(out.ToolCategories, b)
+		}
+	}
+	return out
+}
+
+// cloneCorrelationRules deep-copies rules, keeping nil as nil.
+func cloneCorrelationRules(rules []correlation.Rule) []correlation.Rule {
+	if rules == nil {
+		return nil
+	}
+	out := make([]correlation.Rule, len(rules))
+	for i, r := range rules {
+		r.Sequence = cloneStringSlice(r.Sequence)
+		out[i] = r
+	}
+	return out
+}
+
+// cloneToolCategories deep-copies taxonomy entries, keeping nil as nil.
+func cloneToolCategories(cats []correlation.ToolCategoryRule) []correlation.ToolCategoryRule {
+	if cats == nil {
+		return nil
+	}
+	out := make([]correlation.ToolCategoryRule, len(cats))
+	for i, r := range cats {
+		r.Tools = cloneStringSlice(r.Tools)
+		r.ArgumentPatterns = cloneStringSlice(r.ArgumentPatterns)
+		out[i] = r
+	}
+	return out
+}
+
+func cloneStringSlice(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string{}, s...)
+}
+
+func containsToolCategory(cats []correlation.ToolCategoryRule, want correlation.ToolCategoryRule) bool {
+	for _, c := range cats {
+		if c.Category == want.Category && slices.Equal(c.Tools, want.Tools) && slices.Equal(c.ArgumentPatterns, want.ArgumentPatterns) {
+			return true
+		}
+	}
+	return false
+}
+
 // Limits returns the engine limits exactly as configured. Validation checks
 // these same values, so what validates is what is built.
 // An omitted key keeps its default (DefaultConfig); an explicit 0 is
@@ -122,18 +264,21 @@ func (c CorrelationConfig) Limits() correlation.Limits {
 	return correlation.Limits{MaxHistoryEvents: c.MaxHistoryEvents, MaxSessions: c.MaxSessions}
 }
 
-// validationErrors checks the block against correlation.Validate and
-// correlation.ValidateTaxonomy, exactly as correlation.New and
-// correlation.NewTaxonomy will check it.
+// validationErrors checks the effective block (Effective: the configured
+// rules and taxonomy plus the built-ins when builtin_chains is set) against
+// correlation.Validate and correlation.ValidateTaxonomy, exactly as
+// correlation.New and correlation.NewTaxonomy will check it. The
+// instruction caps therefore apply to the merged taxonomy.
 func (c CorrelationConfig) validationErrors() []ValidationError {
+	eff := c.Effective()
 	var errs []ValidationError
-	for _, err := range correlation.Validate(c.Rules, c.Limits()) {
+	for _, err := range correlation.Validate(eff.Rules, eff.Limits()) {
 		errs = append(errs, ValidationError{
 			Field:   "correlation." + err.Field,
 			Message: err.Message,
 		})
 	}
-	for _, err := range correlation.ValidateTaxonomy(c.TaxonomyConfig) {
+	for _, err := range correlation.ValidateTaxonomy(eff.TaxonomyConfig) {
 		errs = append(errs, ValidationError{
 			Field:   "correlation." + err.Field,
 			Message: err.Message,
@@ -1381,7 +1526,7 @@ func (c *Config) Validate() *ValidationResult {
 		}
 	}
 
-	if c.Correlation.Enabled || len(c.Correlation.Rules) > 0 || len(c.Correlation.ToolCategories) > 0 {
+	if c.Correlation.Enabled || c.Correlation.BuiltinChains || len(c.Correlation.Rules) > 0 || len(c.Correlation.ToolCategories) > 0 {
 		errors = append(errors, c.Correlation.validationErrors()...)
 	}
 
