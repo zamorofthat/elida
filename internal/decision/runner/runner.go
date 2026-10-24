@@ -1818,7 +1818,12 @@ func (r *Runner) correlateShadow(sess *session.Session, in decision.Input, v Ver
 // returns, no match from an earlier Observe can land on the instance it
 // released. The section holds only the registry lookup and the session's
 // own lock (lock order boundMu, then the session lock, as Bind); the
-// correlator, Forget, counters and logging stay outside it.
+// correlator, Forget, counters and logging stay outside it. The work is
+// bounded, but a RecordCorrelationShadow queued behind in-flight Snapshot()
+// readers of a message-heavy session holds boundMu for that interval and so
+// stalls every other session's Bind, AssessRequest and lookupSession. A
+// per-session acceptance token would remove that shared-registry coupling if
+// it is ever measured as a problem.
 func (r *Runner) recordShadowMatches(sess *session.Session, now time.Time, matches []correlation.Match) bool {
 	r.boundMu.Lock()
 	defer r.boundMu.Unlock()
