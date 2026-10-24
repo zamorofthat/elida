@@ -170,3 +170,107 @@ func TestCorrelationShadowStore_ConversionIsFieldForField(t *testing.T) {
 		}
 	}
 }
+
+// The plan's merge-stress gate: many generations over a few reused session
+// IDs, with a repeated re-save of some generations, must never grow a row
+// past its bounds, duplicate a match, or let prior_history run away.
+func TestCorrelationShadowStore_MergeStressAcrossManyGenerations(t *testing.T) {
+	const (
+		saves        = 200
+		ids          = 6
+		violsPerSave = 40 // 34 generations per ID overrun MaxCarriedViolations
+		matchesPer   = 3
+	)
+	path := filepath.Join(t.TempDir(), "cs-stress.db")
+	s, err := storage.NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+
+	t0 := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Millisecond)
+	check := func(n int, id string) {
+		t.Helper()
+		got, gerr := s.GetSession(id)
+		if gerr != nil || got == nil {
+			t.Fatalf("save %d: GetSession(%s): %v %v", n, id, got, gerr)
+		}
+		if len(got.Violations) > storage.MaxCarriedViolations {
+			t.Fatalf("save %d: %s has %d violations, cap %d", n, id, len(got.Violations), storage.MaxCarriedViolations)
+		}
+		if len(got.CorrelationShadow) > storage.MaxCarriedCorrelationShadow {
+			t.Fatalf("save %d: %s has %d correlation_shadow entries, cap %d", n, id, len(got.CorrelationShadow), storage.MaxCarriedCorrelationShadow)
+		}
+		seen := map[string]bool{}
+		for _, c := range got.CorrelationShadow {
+			if seen[c.MatchID] {
+				t.Fatalf("save %d: %s repeats match_id %s", n, id, c.MatchID)
+			}
+			seen[c.MatchID] = true
+		}
+		var prior sql.NullString
+		if qerr := raw.QueryRow(`SELECT prior_history FROM sessions WHERE id = ?`, id).Scan(&prior); qerr != nil {
+			t.Fatalf("save %d: read prior_history: %v", n, qerr)
+		}
+		var p struct {
+			Violations        []json.RawMessage `json:"violations"`
+			CorrelationShadow []struct {
+				MatchID string `json:"match_id"`
+			} `json:"correlation_shadow"`
+		}
+		if prior.Valid && prior.String != "" {
+			if uerr := json.Unmarshal([]byte(prior.String), &p); uerr != nil {
+				t.Fatalf("save %d: prior_history is not JSON: %v", n, uerr)
+			}
+		}
+		if len(p.Violations) > storage.MaxCarriedViolations || len(p.CorrelationShadow) > storage.MaxCarriedCorrelationShadow {
+			t.Fatalf("save %d: %s prior_history unbounded: %d violations, %d matches", n, id, len(p.Violations), len(p.CorrelationShadow))
+		}
+		pseen := map[string]bool{}
+		for _, c := range p.CorrelationShadow {
+			if pseen[c.MatchID] {
+				t.Fatalf("save %d: %s prior_history repeats match_id %s", n, id, c.MatchID)
+			}
+			pseen[c.MatchID] = true
+		}
+	}
+
+	for n := 0; n < saves; n++ {
+		id := fmt.Sprintf("sess-cs-stress-%d", n%ids)
+		gen := n / ids
+		start := t0.Add(time.Duration(gen) * time.Minute)
+		rec := baseRecord(id, start)
+		for v := 0; v < violsPerSave; v++ {
+			rec.Violations = append(rec.Violations, storage.Violation{
+				RuleName: "r", Severity: "warning", Action: "flag",
+				EventID: fmt.Sprintf("ev_%d_%d_%d", n%ids, gen, v),
+			})
+		}
+		for m := 0; m < matchesPer; m++ {
+			rec.CorrelationShadow = append(rec.CorrelationShadow, shadowMatch(1000*(n%ids)+gen*matchesPer+m, start.Add(time.Duration(m)*time.Second)))
+		}
+		// A match ID that recurs in every generation must still appear once.
+		rec.CorrelationShadow = append(rec.CorrelationShadow, shadowMatch(999999+n%ids, start))
+		if err := s.SaveSession(rec); err != nil {
+			t.Fatalf("save %d: %v", n, err)
+		}
+		check(n, id)
+		if n%4 == 0 { // the same generation saved again must not grow the row
+			if err := s.SaveSession(rec); err != nil {
+				t.Fatalf("re-save %d: %v", n, err)
+			}
+			check(n, id)
+		}
+	}
+
+	// The stress must actually have hit both caps.
+	got, _ := s.GetSession("sess-cs-stress-0")
+	if len(got.Violations) != storage.MaxCarriedViolations || len(got.CorrelationShadow) != storage.MaxCarriedCorrelationShadow {
+		t.Fatalf("caps not exercised: %d violations, %d matches", len(got.Violations), len(got.CorrelationShadow))
+	}
+}
