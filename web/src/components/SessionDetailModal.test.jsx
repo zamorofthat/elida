@@ -99,6 +99,7 @@ describe('SessionDetailModal evidence lifecycle', () => {
     routes['/control/sessions/' + SID] = () => live(SID, { correlation_shadow: [shadowMatch] })
     await tick()
 
+    // The shadow list grew, which counts as a change: evidence refetched.
     expect(count('/control/sessions/' + SID)).toBe(2)
     expect(count('/control/flagged/' + SID)).toBe(2)
     expect(count('/control/sessions/' + SID + '/turns?full=true')).toBe(2)
@@ -108,10 +109,11 @@ describe('SessionDetailModal evidence lifecycle', () => {
     expect(r.container.querySelector('.timeline-dot-correlation_match')).toBeTruthy()
     expect(r.container.querySelector('.timeline-dot-shadow_match')).toBeTruthy()
 
-    // One poll, not two: one more interval means exactly one more fetch each.
+    // One poll, not two: one more interval means exactly one more live
+    // detail fetch; nothing changed, so the expensive endpoints are skipped.
     await tick()
     expect(count('/control/sessions/' + SID)).toBe(3)
-    expect(count('/control/flagged/' + SID)).toBe(3)
+    expect(count('/control/flagged/' + SID)).toBe(2)
     expect(count('/control/history/' + SID)).toBe(0)
   })
 
@@ -195,6 +197,7 @@ describe('SessionDetailModal evidence lifecycle', () => {
     let historyHits = 0
     routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
     routes['/control/history/' + SID] = () => (++historyHits < 3 ? json({}, 404) : json(fixture))
+    routes['/control/flagged/' + SID] = () => json({ violations: [matchRow] }) // the notices only qualify existing evidence
     const r = open()
     await flush()
     expect(historyHits).toBe(1)
@@ -234,6 +237,7 @@ describe('SessionDetailModal evidence lifecycle', () => {
     let historyHits = 0
     routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
     routes['/control/history/' + SID] = () => (++historyHits === 1 ? slow.promise : json(fixture))
+    routes['/control/flagged/' + SID] = () => json({ violations: [matchRow] }) // the notices only qualify existing evidence
     const r = open()
     await flush()
     expect(historyHits).toBe(1)
@@ -267,6 +271,7 @@ describe('SessionDetailModal evidence lifecycle', () => {
   it('does not retry on a non-404 history error', async () => {
     routes['/control/sessions/' + SID] = () => json({}, 404)
     routes['/control/history/' + SID] = () => json({}, 503)
+    routes['/control/flagged/' + SID] = () => json({ violations: [matchRow] }) // the notices only qualify existing evidence
     const r = open()
     await flush()
     expect(count('/control/history/' + SID)).toBe(1)
@@ -315,5 +320,61 @@ describe('SessionDetailModal evidence lifecycle', () => {
     await flush()
     expect(r.container.querySelectorAll('.evidence-decision').length).toBe(1)
     expect(r.container.querySelector('.timeline-dot-shadow_match')).toBeTruthy()
+  })
+
+  const TURNS = '/control/sessions/' + SID + '/turns?full=true'
+
+  it('refreshes the expensive endpoints only when a live counter changes', async () => {
+    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 1, risk_score: 5 })
+    const r = open()
+    await flush()
+    expect(count('/control/flagged/' + SID)).toBe(1)
+    expect(count(TURNS)).toBe(1)
+
+    // Nothing changed on the next ticks: the cheap detail is polled, the
+    // content-bearing endpoints are not.
+    await tick()
+    await tick()
+    expect(count('/control/sessions/' + SID)).toBe(3)
+    expect(count('/control/flagged/' + SID)).toBe(1)
+    expect(count(TURNS)).toBe(1)
+
+    // A counter moves and new evidence is present: both are refetched once.
+    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 5 })
+    routes['/control/flagged/' + SID] = () => json({ violations: [matchRow], semantic_decisions: [decisionA] })
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(2)
+    expect(count(TURNS)).toBe(2)
+    expect(r.container.querySelectorAll('.evidence-decision').length).toBe(1)
+
+    // Same counters again: no further refetch.
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(2)
+    expect(count(TURNS)).toBe(2)
+
+    // Each tracked counter triggers a refresh.
+    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 9 })
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(3)
+    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 9, request_count: 4 })
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(4)
+    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 9, request_count: 4, violations: [matchRow] })
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(5)
+    expect(count(TURNS)).toBe(5)
+  })
+
+  it('shows no evidence section for a completed session with no evidence', async () => {
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
+    routes['/control/history/' + SID] = () => json({}, 404)
+    const r = open()
+    await flush()
+    expect(r.container.querySelector('.evidence')).toBeNull()
+    expect(r.container.querySelector('.evidence-pending')).toBeNull()
+    for (let i = 0; i < 8; i++) await tick()
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+    expect(r.container.querySelector('.evidence')).toBeNull()
+    expect(r.container.textContent).not.toContain('Semantic evidence')
   })
 })

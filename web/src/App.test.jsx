@@ -106,6 +106,7 @@ describe('History session details semantic evidence', () => {
 
   it('renders the persisted record with every match link resolving to one rendered row', async () => {
     const r = await openHistoryRow(fixture)
+    await waitFor(() => expect(r.container.querySelectorAll('.evidence-decision').length).toBe(3))
     expect(r.container.querySelectorAll('.evidence-decision').length).toBe(3)
     expect(r.container.querySelectorAll('.violation-item').length).toBe(2)
     const links = r.container.querySelectorAll('a.evidence-link')
@@ -134,5 +135,21 @@ describe('History session details semantic evidence', () => {
     const targets = r.container.querySelectorAll('[id="evidence-ev_regex"]')
     expect(targets.length).toBe(1)
     expect(targets[0].className).toContain('violation-item')
+  })
+
+  it('shows persisted correlation evidence from the list row when both detail fetches fail', async () => {
+    const regex = { rule_name: 'prompt_injection_probe', event_id: 'ev_regex', event_category: 'prompt_injection', severity: 'warning', timestamp: '2026-10-20T09:01:00Z' }
+    const match = { rule_name: 'correlation.probe_twice', event_id: 'cm_1', event_category: 'correlation_match', severity: 'warning', evidence_only: true, timestamp: '2026-10-20T09:02:00Z',
+      correlation: { match_id: 'cm_1', rule: 'probe_twice', shape: 'repeated', mode: 'audit', event_ids: ['ev_regex'], categories: ['prompt_injection'], first_event: '2026-10-20T09:01:00Z', last_event: '2026-10-20T09:02:00Z' } }
+    const row = { ...fixture, id: 'sess-rowonly', violations: [regex, match] }
+    routes['/control/history?limit=50&offset=0'] = () => json({ sessions: [row], total_count: 1 })
+    routes['/control/flagged/sess-rowonly'] = () => json({}, 500)
+    routes['/control/history/sess-rowonly'] = () => json({}, 500)
+    const r = render(<App />)
+    await waitFor(() => expect(r.container.querySelector('.topnav')).toBeTruthy())
+    fireEvent.click([...r.container.querySelectorAll('.topnav-item')].find((b) => b.textContent.includes('History')))
+    await waitFor(() => expect(r.container.querySelector('tr.clickable')).toBeTruthy())
+    fireEvent.click(r.container.querySelector('tr.clickable'))
+    await waitFor(() => expect(r.container.querySelector('.evidence-match')).toBeTruthy())
   })
 })

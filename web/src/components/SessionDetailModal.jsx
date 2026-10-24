@@ -325,20 +325,20 @@ export function SessionDetailModal({ session, onClose, onKill }) {
       fetchHistory()
     }
 
-    const pollLive = () => {
-      const d = ++seq
-      get('/control/sessions/' + id)
-        .then(res => {
-          if (controller.signal.aborted) return
-          if (res.status === 404) { toHistory(); return }
-          if (!res.ok) return
-          return res.json().then(data => newest('detail', d, () => {
-            setDetail(data)
-            if (data.state !== 'active') toHistory()
-          }))
-        })
-        .catch(() => {})
-
+    // The flagged evidence and the full turns are the expensive endpoints
+    // (deep clones of captured bodies, the whole conversation re-shipped), so
+    // they are fetched on the first tick and afterwards only when the cheap
+    // live detail shows a change: its counters, its state or the sizes of its
+    // evidence lists differ from the ones they were last fetched for.
+    let fetchedSig = null
+    const signal = (data) => JSON.stringify([
+      data.state, data.request_count, data.tool_calls, data.risk_score,
+      data.violations?.length ?? data.violation_count ?? 0,
+      data.semantic_decisions?.length ?? 0,
+      data.semantic_shadow?.length ?? 0,
+      data.correlation_shadow?.length ?? 0,
+    ])
+    const fetchHeavy = () => {
       const f = ++seq
       get('/control/flagged/' + id)
         .then(res => res.ok ? res.json() : null)
@@ -352,10 +352,32 @@ export function SessionDetailModal({ session, onClose, onKill }) {
         .catch(() => { newest('turns', t, () => setTurns(prev => prev || [])) })
     }
 
-    pollLive()
+    const pollLive = (first) => {
+      const d = ++seq
+      get('/control/sessions/' + id)
+        .then(res => {
+          if (controller.signal.aborted) return
+          if (res.status === 404) { toHistory(); return }
+          if (!res.ok) return
+          return res.json().then(data => newest('detail', d, () => {
+            setDetail(data)
+            const sig = signal(data)
+            // The first tick fetched eagerly, in parallel with this response;
+            // its detail only records the signal.
+            if (first && fetchedSig === null) fetchedSig = sig
+            else if (sig !== fetchedSig) { fetchedSig = sig; fetchHeavy() }
+            if (data.state !== 'active') toHistory()
+          }))
+        })
+        .catch(() => {})
+
+      if (first) fetchHeavy()
+    }
+
+    pollLive(true)
     timer = setInterval(() => {
       if (document.hidden) return
-      if (phase === 'live') pollLive()
+      if (phase === 'live') pollLive(false)
       else if (phase === 'history') fetchHistory()
     }, POLL_MS)
 
@@ -409,7 +431,10 @@ export function SessionDetailModal({ session, onClose, onKill }) {
   const anchored = anchoredViolations(violations, decisions)
   const markers = evidenceMarkers({ decisions, violations, semanticShadow, correlationShadow })
   const evidenceCount = decisions.length + violations.filter(v => v.correlation).length
-  const showEvidence = evidenceCount > 0 || semanticShadow.length > 0 || correlationShadow.length > 0 || historyStatus !== ''
+  // The pending and unavailable notices only matter when there is evidence
+  // to qualify; an evidence-free session shows no section at all.
+  const hasEvidence = evidenceCount > 0 || semanticShadow.length > 0 || correlationShadow.length > 0
+  const showEvidence = hasEvidence
   const riskScore = flagged?.risk_score || s.risk_score || 0
   const currentAction = flagged?.current_action || s.current_action || ''
 

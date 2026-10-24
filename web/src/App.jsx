@@ -304,14 +304,14 @@ function SessionDetails({ session, onClose }) {
             </>
           )}
 
-          {flaggedInfo && (flaggedInfo.semantic_decisions?.length || flaggedInfo.correlation_shadow?.length || flaggedInfo.semantic_shadow?.length || violations?.some(v => v.correlation)) ? (
+          {((flaggedInfo && (flaggedInfo.semantic_decisions?.length || flaggedInfo.correlation_shadow?.length || flaggedInfo.semantic_shadow?.length)) || violations?.some(v => v.correlation)) ? (
             <>
               <h3>Semantic evidence</h3>
               <SemanticEvidence
-                decisions={flaggedInfo.semantic_decisions}
+                decisions={flaggedInfo?.semantic_decisions}
                 violations={violations}
-                semanticShadow={flaggedInfo.semantic_shadow}
-                correlationShadow={flaggedInfo.correlation_shadow}
+                semanticShadow={flaggedInfo?.semantic_shadow}
+                correlationShadow={flaggedInfo?.correlation_shadow}
                 anchored={anchored}
               />
             </>
