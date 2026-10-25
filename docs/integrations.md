@@ -2,6 +2,16 @@
 
 ELIDA complements your existing AI infrastructure. It doesn't replace your gateway, or SIEM orchestrator — it adds the session governance layer between them.
 
+## Per-tool setup guides
+
+Step-by-step guides for the most common clients:
+
+- [Claude Code](integrations/claude-code.md) — route the Claude Code CLI through ELIDA
+- [OpenAI SDK](integrations/openai-sdk.md) — `base_url` override for any OpenAI-compatible tool
+- [Kubernetes Sidecar](integrations/kubernetes-sidecar.md) — run ELIDA in-pod alongside your agent
+
+The sections below cover ELIDA alongside gateways, identity layers, and SIEMs.
+
 ---
 
 ## LiteLLM
