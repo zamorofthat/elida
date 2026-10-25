@@ -242,6 +242,8 @@ policy:
       - "system-reminder"
     # Tool names that bypass request-side content scanning
     # Requests containing only these tools skip policy checks
+    # Regex policy only: semantic detection (decision.*) still assesses
+    # these tools' output, which is the untrusted content it exists to score.
     allowlisted_tools:
       - "Read"
       - "Glob"
@@ -416,3 +418,193 @@ websocket:
     #   - name: "my_bye"
     #     type: "bye"
     #     pattern: '"action":\s*"end_call"'
+
+# Semantic injection detection (disabled by default)
+#
+# Runs a local ONNX classifier over request-side user content and tool
+# results to catch paraphrased and encoded prompt injection that regex rules
+# miss. Decisions become ordinary policy violations and feed the existing
+# risk ladder; there is no second risk score.
+#
+# Enabling this loads ~90 MiB of model assets. With enabled: false nothing is
+# loaded and the request path is unchanged.
+#
+# Only mode and preprocessing.* change at runtime (dashboard or settings API;
+# enforce needs ?confirm=enforce). Every other key needs this file and a
+# restart. See docs/configuration.md, "Changing decision settings at runtime".
+decision:
+  # Load model assets and run assessments. Restart required.
+  enabled: false
+
+  # true: missing, invalid, or unsupported model assets fail startup.
+  # false: start in degraded mode and report an unhealthy capability.
+  # Governs model/capability availability only: an enforce threshold-set
+  # mismatch (see mode) fails startup either way. Restart required.
+  required: false
+
+  # true: fail startup unless semantic detection can run inline, meaning the
+  # model loaded and verified AND this build has accelerated inference
+  # kernels. Those are gated to linux/amd64 built with GOEXPERIMENT=simd, so
+  # every other target reports async_only and would fail this gate. An unmet
+  # require_inline fails startup whatever `required` says, including when the
+  # model fails to load: the operator explicitly demanded inline protection.
+  #
+  # false (default): async_only is permitted and reported at
+  # /control/decision. On an async_only build the inline lane is never tried:
+  # eligible windows go straight to the async lane (admission reason
+  # capability_async_only). Async results cannot protect the request that
+  # triggered them; under mode: enforce they raise session risk and affect
+  # later activity.
+  #
+  # Restart required.
+  require_inline: false
+
+  # disabled | shadow | audit | enforce
+  #   shadow  — decide and record for calibration; no violations, no risk
+  #   audit   — create evidence-only violations with diagnostic points only
+  #   enforce — calibrated violations drive the existing risk ladder
+  # policy.mode caps this: with policy.mode: audit, enforce behaves as audit.
+  # With the policy engine disabled nothing can be recorded, so audit and
+  # enforce run as shadow (/control/decision reports the reason).
+  # enforce requires threshold_set to match the loaded model's threshold set;
+  # a mismatch fails startup whatever `required` says.
+  mode: shadow
+
+  # embedded (in-process, air-gapped) or systemone (HTTP). Restart required —
+  # switching providers moves the data boundary.
+  provider: embedded
+
+  # Model directory: ONNX graph, tokenizer, config, manifest.json, model
+  # card, LICENSE. Restart required.
+  model_path: /etc/elida/models/injection
+
+  # systemone only. Setting this means request content leaves the deployment.
+  # endpoint: https://decide.internal/v1/score
+
+  # Versioned threshold artifact. Never a free-form number — thresholds are
+  # selected by version, not typed in. Must match the loaded model's
+  # threshold set for mode: enforce (startup fails otherwise).
+  threshold_set: v1
+
+  # Probability above which a sub-threshold injection score emits an
+  # injection_elevated evidence-only event. Contributes no risk.
+  elevated_threshold: 0.3
+
+  # Global inline deadline. Admission, preprocessing, tokenization and
+  # inference all draw from this one budget.
+  inline_timeout: 50ms
+
+  # Physical inference worker pool size, split into an inline lane and an
+  # async lane that never share slots (async = 0 at 1, else max(1, n/4)):
+  #
+  #   max_concurrency | inline | async
+  #   1               | 1      | 0 (async continuation disabled)
+  #   2               | 1      | 1
+  #   4               | 3      | 1
+  #   8               | 6      | 2
+  #   16              | 12     | 4
+  #
+  # A slot is not one CPU: one embedded inference runs over an intra-op
+  # worker pool and measured about 4.7 CPUs of work per wall-clock second on
+  # an 8-core machine.
+  max_concurrency: 4
+
+  # Must be 0ms: inline inference never waits for worker capacity. A message
+  # that cannot be admitted immediately falls back to the async path. A
+  # nonzero value is rejected at startup. Not editable at runtime in Phase 1;
+  # the value in force is shown read-only at /control/decision.
+  inline_queue_wait: 0ms
+
+  # Inline budget per request.
+  max_inline_tokens: 128
+  max_inline_windows: 1
+
+  # Bounded async continuation. Async results cannot block or recall a
+  # request that was already forwarded; they affect later activity. The cap
+  # is per request and is spent in priority order: windows denied the inline
+  # lane for capacity first, then user/tool windows that had no inline
+  # admission reason (not_eligible). What the cap leaves out is counted as
+  # the not_assessed coverage gap at /control/decision.
+  max_async_windows: 8
+  # Capacity of each of the two async queues: HIGH (windows with an
+  # admission reason that missed the inline lane) and LOW (not_eligible
+  # windows). Workers serve LOW only while HIGH is empty.
+  async_queue_size: 100
+
+  # Which messages may attempt the inline fast lane. Admission also requires
+  # an immediately free worker and enough remaining deadline. These decide
+  # the hot-path budget only, not what gets scored: user and tool content
+  # that is not admitted still takes the async lane at the lowest priority.
+  inline_admission:
+    untrusted_tool_results: true
+    encoded_or_obfuscated: true
+    weak_injection_signal: true
+    elevated_session_risk: true
+    broad_strict_mode: false
+
+  # Analysis-only preprocessing bounds. Derived representations are scored
+  # but never forwarded to the backend. Hitting a limit is a coverage gap,
+  # not a violation. Preprocessing runs on the request path and is not
+  # deadline-aware, so raising max_input_bytes above the default costs
+  # request latency: one 8 MiB message at the ceilings (8 MiB input / 32 MiB
+  # analysis) measured 410 ms and 258 MB allocated on darwin/arm64, against
+  # 68 ms and 29 MB at these defaults.
+  preprocessing:
+    max_input_bytes: 262144
+    max_analysis_bytes: 524288
+    max_representations: 8
+    max_decode_depth: 2
+    max_expansion_ratio: 4
+
+# Bounded temporal correlation over content-free policy event metadata.
+# Restart-only: it is not a settings.yaml key, and a settings save keeps the
+# engine and its state. Policy correlation requires policy.enabled; shadow
+# correlation of semantic decisions does not. Audit is the safe rule
+# default; set mode: enforce explicitly for matches that should contribute
+# to the existing risk ladder (policy.mode audit still caps them). A rules
+# list here replaces the default list. Shapes: repeated (count events of
+# one category) and sequence (ordered categories within the window).
+# In decision.mode shadow (the default) a separate shadow correlator with
+# the same rules correlates elevated-band shadow decisions and records
+# matches as correlation_shadow entries on the session (calibration data,
+# never violations or risk); in audit and enforce the policy engine
+# correlates the recorded injection_elevated evidence instead.
+# Env override: ELIDA_CORRELATION_ENABLED.
+correlation:
+  enabled: false
+  max_history_events: 64
+  max_sessions: 4096
+  # Shipped chain rules (credential or sensitive-file access followed by
+  # external transmission) and the tool categories they need. Audit-only,
+  # heuristic; the globs and patterns are listed in docs/configuration.md.
+  # A rule below with a built-in's name replaces it.
+  builtin_chains: false
+  rules:
+    # Three distinct messages with injection_elevated evidence within 15
+    # minutes. Audit-only: recorded as evidence, never adds risk.
+    - name: slow_burn_injection
+      shape: repeated
+      category: injection_elevated
+      count: 3
+      count_by: message
+      window: 15m
+      cooldown: 15m
+      severity: warning
+      mode: audit
+  # Tool-call taxonomy: maps tool calls returned by the backend to the
+  # categories rules count (for example a sequence rule
+  # credential_discovery -> external_transmission). None ships: tool calls
+  # are not correlated until categories are configured. Tools are
+  # case-insensitive globs over the whole name ('*' and '?' match any
+  # character); argument_patterns are case-insensitive RE2 regexes over the
+  # first max_argument_bytes of the call's arguments (default 16384, at most
+  # 65536). Arguments are scanned and dropped, never stored or logged.
+  # Categorization runs off the request path. A taxonomy over 1024 compiled
+  # instructions starts with a WARN that estimates its worst-case cost.
+  max_argument_bytes: 16384
+  # tool_categories:
+  #   - category: credential_discovery
+  #     tools: [read_file, bash]
+  #     argument_patterns: ['\.aws/credentials', 'id_rsa']
+  #   - category: external_transmission
+  #     tools: ['http_*', web_fetch]

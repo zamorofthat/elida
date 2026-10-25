@@ -11,7 +11,16 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 ### Health & Stats
 
 ```bash
-# Health check
+# Health check (unauthenticated). With semantic detection wired it also
+# reports "decision": {"capability", "reason", "effective_mode",
+# "threshold_set_matches", "breaker_open"}: the capability enum (inline,
+# async_only, degraded, disabled), a fixed reason, the effective mode
+# (disabled|shadow|audit|enforce) and two booleans; enums and booleans only.
+# Model identity and counters are only on the authenticated /control/decision.
+# These three facts are deliberately available without a key so health probes
+# can see detector state. An operator who does not want enforcement state
+# visible unauthenticated should keep the control listener on localhost (the
+# default control listen address is 127.0.0.1:9090).
 curl http://localhost:9090/control/health
 
 # Aggregate stats
@@ -27,8 +36,20 @@ curl http://localhost:9090/control/sessions?active=true
 # Get session details
 curl http://localhost:9090/control/sessions/{session-id}
 
+# Turns (live sessions): violation turns carry event_id, event_category,
+# source_role, evidence_only and, for a correlation match,
+# correlation: {match_id, event_count}
+curl http://localhost:9090/control/sessions/{session-id}/turns
+
+# Semantic detection status (authenticated): includes shadow_matches_dropped
+# and, when a shadow correlator runs, shadow_correlation (its counters)
+curl http://localhost:9090/control/decision
+
 # View session history (persisted)
 curl http://localhost:9090/control/history
+
+# Get one persisted session
+curl http://localhost:9090/control/history/{session-id}
 ```
 
 ### Session Lifecycle
@@ -46,7 +67,38 @@ curl -X POST http://localhost:9090/control/sessions/{session-id}/resume
 ```bash
 # View flagged sessions (policy violations)
 curl http://localhost:9090/control/flagged
+
+# Get one flagged session
+curl http://localhost:9090/control/flagged/{session-id}
 ```
+
+#### Semantic decision records
+
+Three detail responses explain each semantic violation and enforcement action:
+
+| Endpoint | Fields |
+|----------|--------|
+| `GET /control/sessions/{id}` | `semantic_decisions` |
+| `GET /control/flagged/{id}` | `semantic_decisions`, `semantic_decisions_dropped` |
+| `GET /control/history/{id}` | `semantic_decisions`, `semantic_decisions_dropped` |
+
+`semantic_decisions` holds one record per semantic decision recorded as a violation (bounded at 256 per session, evidence-only records evicted first); never request content. Records are oldest first. Each one has `event_id`, `rule_name`, `event_category`, `severity`, `effective_severity`, `source_role`, `message_index`, `evidence_only`, `would_contribute_points`, `timestamp` and `evidence`. `evidence` is the decision metadata: `signal`, `probability`, `aux_probability`, `vetoed`, `model`, `model_version`, `model_checksum`, `threshold_set`, `decision_id`, `transform`, `transform_depth`, `window_start_byte`, `window_end_byte`, `coverage_complete`, `execution_mode` and `protection_scope`. `semantic_decisions_dropped` counts the records the bound evicted or dropped. The list endpoints (`GET /control/sessions`, `GET /control/flagged`, `GET /control/history`) leave `semantic_decisions` out to keep their payloads small. `GET /control/flagged` still reports `semantic_decisions_dropped` when it is above 0; the other two list endpoints leave it out as well.
+
+A violation object (`violations[]` in the flagged and history responses) carries `semantic` for a semantic rule: the same metadata as `evidence`, from the rule's representative decision (the most consequential so far). Its `event_id` names that decision. That decision's record may have been evicted by the bound, so a lookup by `event_id` can miss.
+
+When a session ID is reused, history (`GET /control/history/{id}`) keeps the earlier sessions' records ahead of the current session's, with duplicate `event_id`s removed. Carried records are capped so the total stays at 256 or fewer, keeping the newest. The current session's own records are always kept. `semantic_decisions_dropped` also counts the carried records the cap removed.
+
+#### Correlation evidence
+
+A `correlation.<rule>` violation (in `violations[]` of the flagged, history and history-list responses) carries `correlation` (object): `match_id` (string), `rule` (string), `shape` (string, `repeated` or `sequence`), `mode` (string, `audit` or `enforce`), `event_ids` (string array: the contributing events in time order; semantic decisions' `event_id`s, tool event IDs `te_…`, or other violations' `event_id`s), `categories` (string array), `first_event` and `last_event` (RFC3339 timestamps). It is absent on every other violation and on rows written before it existed. The violation's own `event_id` is the match ID (`cm_…`). Only the retained match per rule is shown and persisted in full (one display entry per rule); a later firing of the rule replaces the earlier evidence. Earlier firings leave at most an in-memory event identity (`violation_events` on the live `GET /control/flagged/{id}`, not persisted) and the rule's violation count, never their correlation evidence; `violation_detected` rows are written at session end from the retained list. Neither surface promises a complete match ledger.
+
+Shadow-mode matches are `correlation_shadow` (array) on `GET /control/sessions/{id}` (live) and `GET /control/history/{id}` (persisted), omitted when empty. Each entry has `timestamp`, `match_id`, `rule`, `shape`, `severity`, `mode`, `event_ids` (shadow decision IDs), `categories`, `first_event` and `last_event`. Entries are newest first, at most 50; on reuse of a session ID the earlier sessions' entries are carried behind the current session's, deduplicated by `match_id`, 50 in total, and carrying does not recover entries already dropped. The list endpoints omit it.
+
+`GET /control/decision` reports `shadow_matches_dropped` (integer: shadow matches discarded because their session ended or its ID was reused while the match was computed) and `shadow_correlation` (object, present only when a shadow correlator runs): the shadow correlator's engine counters, the same engine fields policy correlation reports under `correlation` on `GET /control/flagged/stats` (`rules`, `shards`, `sessions`, `history_events`, `events_observed`, `events_ignored`, `duplicate_events`, `events_dropped`, `history_evicted`, `sessions_evicted`, `matches`, `cooldown_suppressed`, `duplicate_matches`).
+
+`GET /control/sessions/{id}/turns` violation turns carry `event_id` (string), `event_category` (string), `source_role` (string), `evidence_only` (bool) and, for a correlation match only, `correlation` (object: `match_id` string, `event_count` integer, the full count of contributing events), each omitted when empty. The full evidence is on the flagged and history responses. Message turns carry the message content and tool-call turns carry the raw tool arguments; the endpoint is authenticated but is not content-free (it is the conversation-stream API).
+
+`violation_detected` events (`GET /control/events`) carry `event_id`, `event_category` and `source_role` (strings, omitted when empty) beside the existing fields.
 
 ### Voice Sessions (WebSocket)
 
@@ -114,6 +166,17 @@ curl http://localhost:9090/control/settings
 curl -X PUT http://localhost:9090/control/settings \
   -H "Content-Type: application/json" \
   -d '{"policy":{"mode":"audit"}}'
+
+# Change semantic detection to enforce: needs explicit confirmation, and is
+# refused with 400 while policy.mode is audit. Only decision.mode and
+# decision.preprocessing.* change at runtime; a restart-only decision key set
+# to anything but its value in force is refused with 400 naming it, and
+# omitting one is never a change, so partial saves like these work even with
+# a stale value in settings.yaml (see configuration.md, "Changing decision
+# settings at runtime").
+curl -X PUT 'http://localhost:9090/control/settings?confirm=enforce' \
+  -H "Content-Type: application/json" \
+  -d '{"decision":{"mode":"enforce"}}'
 
 # Reset to defaults (removes UI overrides)
 curl -X DELETE http://localhost:9090/control/settings

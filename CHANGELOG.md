@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Semantic prompt-injection detection, disabled by default
+  (`decision.enabled: false`). An embedded, pure-Go MiniLM classifier scores
+  user content and tool results, including bounded decoded representations,
+  in sentence-aligned windows of at most 128 tokens. Unknown is never treated
+  as safe, and partial coverage is always reported as partial. See
+  `docs/semantic-detection.md` for the detector's limits.
+- `decision.*` configuration keys (all restart-only): `enabled`, `required`,
+  `require_inline`, `mode` (`disabled` | `shadow` | `audit` | `enforce`,
+  default `shadow`), `provider`, `model_path`, `threshold_set`,
+  `elevated_threshold`, `inline_timeout`, `max_concurrency` (default 4: 3
+  inline slots, 1 async worker), `inline_queue_wait` (pinned to 0),
+  `max_inline_tokens`, `max_inline_windows`, `max_async_windows`,
+  `async_queue_size`, `inline_admission.*` and `preprocessing.*`.
+- `decision.require_inline`: refuses to start unless the build can run
+  inference inline (linux/amd64 with `GOEXPERIMENT=simd`). Other builds
+  report `async_only`, and their results protect later activity only.
+- `decision.mode: enforce` drives the existing risk ladder. An inline finding
+  is checked against the ladder before its request is forwarded. Enforce is
+  refused at startup unless `threshold_set` matches the loaded model.
+  `audit` records evidence-only violations, which contribute no risk.
+- `GET /control/decision` (authenticated): capability and reason, model
+  identity and checksum, effective mode, lane sizes, admission reasons,
+  queue and drop counters, `coverage_gaps` (including `not_assessed` and
+  `messages_not_assessed`), and `async_dropped_no_session`.
+  `/control/health` adds only the capability enum and a fixed reason.
+- SQLite `sessions` columns `semantic_shadow` (bounded per-session shadow
+  decisions for calibration) and `prior_history` (violations and captures
+  carried across reuse of a session ID). Both are added by migration.
+- Evidence-only violations are marked in every export. OTEL spans and logs
+  carry `evidence_only`, OCSF findings carry `elida.evidence_only` at
+  Informational severity, and `violation_detected` rows carry
+  `evidence_only`. Exported max severity ignores evidence.
+- The injection model artifact (`models-injection-v5-fp32`, Apache-2.0,
+  built from the pinned StackOne Defender commit in
+  `scripts/models/pins.env`) ships in the Docker image at
+  `/etc/elida/models/injection` and in release archives. The model card is
+  `docs/model-card-injection.md`.
+- Behaviour change: at `max_concurrency: 1` async continuation is disabled.
+  Windows that miss the inline lane are coverage gaps recorded with their
+  capacity reason. They are no longer counted in `async_dropped` or
+  `async_queue_full`.
+- Temporal correlation, disabled by default (`correlation.enabled: false`,
+  env `ELIDA_CORRELATION_ENABLED`). Bounded, content-free correlation of a
+  session's policy events. It has two rule shapes: `repeated` (with
+  `count_by: message`) and `sequence` (ordered by event time). The shipped
+  audit-only rule, `slow_burn_injection`, matches `injection_elevated`
+  evidence from three distinct messages within 15 minutes.
+  - In `audit` and `enforce`, a match is a `correlation.<rule>` violation
+    that is evidence-only unless the rule is `mode: enforce` (capped by
+    `policy.mode: audit`).
+  - In the default `decision.mode: shadow`, a separate shadow correlator
+    records matches as `correlation_shadow` entries on
+    `GET /control/sessions/{id}`. These are calibration data, never
+    violations.
+  - `correlation.tool_categories` maps backend tool calls to categories by
+    name glob and argument pattern. Categorization runs off the request
+    path. `max_argument_bytes` and compiled-instruction caps bound it, and
+    a soft startup WARN reports its estimated cost.
+  - `correlation.builtin_chains: true` (default `false`) adds two
+    audit-only, warning-severity sequence rules,
+    `builtin_credential_exfiltration` and
+    `builtin_sensitive_exfiltration`, plus the tool categories they need
+    (`credential_discovery`, `sensitive_access`, `external_transmission`).
+    Built-in categories append after user categories; a user rule with
+    the same name replaces the built-in one. The preset is listed
+    verbatim in `docs/configuration.md`.
+  - The `correlation:` block is restart-only and is not part of Settings.
+    Startup logs a one-line summary.
+  - Limitations are in `docs/semantic-detection.md`.
+- Correlation evidence surfaces (Plan C).
+  - `violations[].correlation` (match ID, rule, shape, mode, contributing
+    event IDs, categories, first and last event) is persisted with the
+    session record and exported on the `policy.violation` span event, the
+    violation log and the OCSF finding behind a nine-field allowlist
+    (`event_ids` capped at 32, `categories` at 8). Only the retained match
+    per rule is kept in full. `violation_detected` rows carry `event_id`,
+    `event_category` and `source_role`.
+  - SQLite `sessions` gains a `correlation_shadow` column (shadow-mode
+    matches, newest first, at most 50, carried across session-ID reuse and
+    deduplicated by match ID), added by migration and served by
+    `GET /control/history/{id}`. Each entry of the ending session is
+    logged once at session end (`elida.correlation.*`,
+    `elida.correlation.shadow=true`); there is no OCSF finding for it.
+  - Releasing a session at its end and accepting a shadow match onto it
+    are synchronized, so a match in flight at session end is dropped and
+    counted in `shadow_matches_dropped` rather than lost silently.
+  - `GET /control/sessions/{id}/turns` violation turns carry `event_id`,
+    `event_category`, `source_role`, `evidence_only` and a `correlation`
+    summary; `GET /control/health` adds `effective_mode`,
+    `threshold_set_matches` and `breaker_open`; `GET /control/decision`
+    adds `shadow_correlation`.
+  - The dashboard's session detail and history views show a "Semantic
+    evidence" section with timeline markers, and the Settings and Policy
+    pages show the shadow and policy correlation counters.
+  - `docs/semantic-detection.md` gains a "Residual risk" section.
+
+### Changed
+- Release archives now carry the semantic-injection model under
+  `models/injection/` beside the binary. That adds about 86 MiB
+  uncompressed (about 47 MiB compressed) to every per-platform archive. The
+  same model is also attached once as `models-injection-v5-fp32.tar.gz`
+  with a `.sha256`, and the Docker image ships it at
+  `/etc/elida/models/injection`.
+
 ## [0.18.0] - 2026-08-02
 
 ### Fixed

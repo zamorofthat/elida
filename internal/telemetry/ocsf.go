@@ -100,6 +100,78 @@ type OCSFUnmapped struct {
 	SDREventHash  string  `json:"elida.sdr_event_hash,omitempty"`
 	SDREventIndex *int    `json:"elida.sdr_event_index,omitempty"`
 	SDRProof      any     `json:"elida.sdr_proof,omitempty"`
+	// EvidenceOnly marks a finding recorded as evidence for correlation
+	// that contributed no risk. Such a finding is exported at severity_id
+	// Informational whatever its rule severity.
+	EvidenceOnly bool `json:"elida.evidence_only,omitempty"`
+	// EventID is set for semantic and correlation findings only (the
+	// representative decision's event ID, or the match ID); Semantic is
+	// that decision's metadata, set for semantic findings only.
+	EventID  string        `json:"elida.event_id,omitempty"`
+	Semantic *OCSFSemantic `json:"elida.semantic,omitempty"`
+	// Correlation is set for correlation-match findings only.
+	Correlation *OCSFCorrelation `json:"elida.correlation,omitempty"`
+}
+
+// OCSFSemantic is semantic decision metadata in a Detection Finding's
+// unmapped block: scores, identifiers and offsets, never content.
+type OCSFSemantic struct {
+	Signal           string  `json:"signal"`
+	Probability      float64 `json:"probability"`
+	AuxProbability   float64 `json:"aux_probability"`
+	Vetoed           bool    `json:"vetoed"`
+	Model            string  `json:"model"`
+	ModelVersion     string  `json:"model_version"`
+	ModelChecksum    string  `json:"model_checksum"`
+	ThresholdSet     string  `json:"threshold_set"`
+	DecisionID       string  `json:"decision_id"`
+	Transform        string  `json:"transform"`
+	TransformDepth   int     `json:"transform_depth"`
+	WindowStartByte  int     `json:"window_start_byte"`
+	WindowEndByte    int     `json:"window_end_byte"`
+	CoverageComplete bool    `json:"coverage_complete"`
+	ExecutionMode    string  `json:"execution_mode"`
+	ProtectionScope  string  `json:"protection_scope"`
+}
+
+// ocsfSemantic converts m for the unmapped block, passing every string
+// through the safeToken redaction guard.
+func ocsfSemantic(m SemanticMetadata) *OCSFSemantic {
+	return &OCSFSemantic{
+		Signal: safeToken(m.Signal), Probability: m.Probability, AuxProbability: m.AuxProbability,
+		Vetoed: m.Vetoed, Model: safeToken(m.Model), ModelVersion: safeToken(m.ModelVersion),
+		ModelChecksum: safeToken(m.ModelChecksum), ThresholdSet: safeToken(m.ThresholdSet),
+		DecisionID: safeToken(m.DecisionID), Transform: safeToken(m.Transform),
+		TransformDepth: m.TransformDepth, WindowStartByte: m.WindowStartByte, WindowEndByte: m.WindowEndByte,
+		CoverageComplete: m.CoverageComplete, ExecutionMode: safeToken(m.ExecutionMode),
+		ProtectionScope: safeToken(m.ProtectionScope),
+	}
+}
+
+// OCSFCorrelation is correlation match evidence in a Detection Finding's
+// unmapped block. Field order and names are the correlation allowlist.
+type OCSFCorrelation struct {
+	MatchID    string   `json:"match_id"`
+	Rule       string   `json:"rule"`
+	Shape      string   `json:"shape"`
+	Mode       string   `json:"mode"`
+	EventCount int      `json:"event_count"`
+	Categories []string `json:"categories"`
+	FirstEvent string   `json:"first_event"`
+	LastEvent  string   `json:"last_event"`
+	EventIDs   []string `json:"event_ids"`
+}
+
+// ocsfCorrelation converts m for the unmapped block, applying safeToken,
+// safeTime and the export caps.
+func ocsfCorrelation(m CorrelationMetadata) *OCSFCorrelation {
+	return &OCSFCorrelation{
+		MatchID: safeToken(m.MatchID), Rule: safeToken(m.Rule), Shape: safeToken(m.Shape), Mode: safeToken(m.Mode),
+		EventCount: m.EventCount,
+		Categories: distinctTokens(m.Categories, MaxExportedCorrelationCategories),
+		FirstEvent: safeTime(m.FirstEvent), LastEvent: safeTime(m.LastEvent),
+		EventIDs: safeTokens(m.EventIDs, MaxExportedCorrelationEventIDs),
+	}
 }
 
 // OCSFDetectionFinding represents OCSF class 2004 — Detection Finding
@@ -155,7 +227,13 @@ func nowMillis() int64 {
 // BuildPolicyDetection builds a Detection Finding (class 2004) for session-end policy violations.
 // Replaces the former BuildSecurityFinding (class 2001, deprecated in OCSF 1.8).
 func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) OCSFDetectionFinding {
-	severityID := MapSeverityToOCSF(v.Severity)
+	// Evidence-only violations are exported as informational: they
+	// contributed no risk and must not read as a finding in a SIEM.
+	severityID := MapSeverityToOCSF(v.exportedSeverity())
+	message := "Policy violation: " + v.RuleName
+	if v.EvidenceOnly {
+		message = "Policy evidence (no risk contributed): " + v.RuleName
+	}
 
 	eventCategory := v.EventCategory
 	if eventCategory == "" {
@@ -169,7 +247,7 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 		ActivityID:  OCSFActivityCreate,
 		SeverityID:  severityID,
 		Time:        nowMillis(),
-		Message:     "Policy violation: " + v.RuleName,
+		Message:     message,
 		Metadata:    newMetadata(),
 		FindingInfo: OCSFFinding{
 			Title: v.RuleName,
@@ -185,13 +263,23 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 			Session: OCSFSession{UID: sessionID},
 		},
 		Unmapped: OCSFUnmapped{
-			Backend:     record.Backend,
-			Action:      v.Action,
-			MatchedText: v.MatchedText,
-			SourceRole:  v.SourceRole,
-			Model:       record.Model,
-			SDRRootHash: record.SDRRootHash,
+			Backend:      record.Backend,
+			Action:       v.Action,
+			MatchedText:  v.MatchedText,
+			SourceRole:   v.SourceRole,
+			Model:        record.Model,
+			SDRRootHash:  record.SDRRootHash,
+			EvidenceOnly: v.EvidenceOnly,
 		},
+	}
+	if v.Semantic != nil || v.Correlation != nil {
+		finding.Unmapped.EventID = safeToken(v.EventID)
+	}
+	if v.Semantic != nil {
+		finding.Unmapped.Semantic = ocsfSemantic(*v.Semantic)
+	}
+	if v.Correlation != nil {
+		finding.Unmapped.Correlation = ocsfCorrelation(*v.Correlation)
 	}
 
 	// Populate ai_model from record

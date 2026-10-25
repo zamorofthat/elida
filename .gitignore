@@ -8,6 +8,9 @@ bin/
 
 /bin/.*
 *.env
+# Not a secret: the public model pins (upstream commit and artifact sha256s),
+# tracked on purpose as their single source of truth.
+!/scripts/models/pins.env
 # Test binary, built with `go test -c`
 *.test
 
@@ -66,6 +69,11 @@ credentials/
 # ELIDA runtime
 .elida/
 /elida
+
+# Generated model artifacts (built by scripts/models/build.sh; ~90 MiB float32)
+/models/
+# Model build scratch (upstream downloads, the conversion virtualenv)
+/build/
 
 # Internal docs
 elida-internal/

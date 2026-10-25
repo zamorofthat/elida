@@ -1,4 +1,4 @@
-.PHONY: build run stop restart run-policy run-demo test clean docker
+.PHONY: build model test-model run stop restart run-policy run-demo test clean docker
 
 # Build variables
 BINARY_NAME=elida
@@ -9,6 +9,47 @@ LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.buildTime=${BUILD_TIME}"
 # Build the binary
 build:
 	go build ${LDFLAGS} -o bin/${BINARY_NAME} ./cmd/elida
+
+# Injection model artifact (see scripts/models/README.md).
+#
+# scripts/models/pins.env is the single source of the model pins.
+# DEFENDER_COMMIT defaults to its PINNED_DEFENDER_COMMIT, the only value
+# fetch.sh accepts, so it never floats. The Python versions are the ones
+# build.sh enforces: another version may serialize a different graph and
+# change the model.onnx digest.
+include scripts/models/pins.env
+DEFENDER_COMMIT ?= $(PINNED_DEFENDER_COMMIT)
+MODEL_DIR = models/injection
+MODEL_INT8_DIR = build/model-int8
+MODEL_VENV = build/model-venv
+MODEL_INPUTS = $(shell find scripts/models -type f -not -name '*.pyc') docs/model-card-injection.md
+
+# Build the float32 model artifact into models/injection/ (gitignored, ~90 MiB).
+# Idempotent: rebuilds only when scripts/models/ or the model card is newer
+# than the built manifest.
+model: $(MODEL_DIR)/manifest.json
+
+$(MODEL_DIR)/manifest.json: $(MODEL_INPUTS) | $(MODEL_VENV)/.installed
+	@test -n "$(DEFENDER_COMMIT)" || (echo "set DEFENDER_COMMIT=<upstream sha>; see scripts/models/README.md" && exit 1)
+	PYTHON="$(CURDIR)/$(MODEL_VENV)/bin/python3" DEFENDER_COMMIT=$(DEFENDER_COMMIT) scripts/models/build.sh
+
+$(MODEL_VENV)/.installed:
+	python3 -m venv $(MODEL_VENV)
+	$(MODEL_VENV)/bin/pip install --quiet 'onnx==1.23.1' 'numpy==2.5.3'
+	@touch $@
+
+# Run the model-backed tests, including the conversion parity gate, against
+# models/injection/ and the int8 parity directory build.sh leaves in
+# build/model-int8/. No -race: GoMLX aborts under checkptr, so plain -race
+# skips the real-model tests (add -race -gcflags=all=-d=checkptr=0 to run
+# them under the race detector, at several minutes of link time).
+test-model: model
+	ELIDA_TEST_MODEL_PATH="$(CURDIR)/$(MODEL_DIR)" \
+	ELIDA_TEST_INT8_MODEL_PATH="$(CURDIR)/$(MODEL_INT8_DIR)" \
+	  go test -count=1 ./internal/decision/...
+	ELIDA_TEST_MODEL_PATH="$(CURDIR)/$(MODEL_DIR)" \
+	ELIDA_TEST_INT8_MODEL_PATH="$(CURDIR)/$(MODEL_INT8_DIR)" \
+	  go test -count=1 -v ./test/unit/ -run 'TestRealModel|TestEmbedded|TestModelParity'
 
 # Run locally
 run: build
@@ -77,7 +118,7 @@ deps:
 
 # Build Docker image
 docker:
-	docker build -t elida:${VERSION} .
+	docker build --build-arg DEFENDER_COMMIT=$(DEFENDER_COMMIT) -t elida:${VERSION} .
 	docker tag elida:${VERSION} elida:latest
 
 # Push Docker image to Docker Hub

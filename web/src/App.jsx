@@ -10,9 +10,11 @@ import {
 } from './components/shared/Icons'
 import { TopNav } from './components/TopNav'
 import { SessionsPage } from './components/SessionsPage'
+import { DecisionSettings, settingsSaveUrl, saveErrorText, invalidBudgetKeys } from './components/DecisionSettings'
 import { DashboardPage } from './components/DashboardPage'
 import { ToolUsePage } from './components/ToolUsePage'
 import { PolicyPage } from './components/PolicyPage'
+import { SemanticEvidence, anchorId, anchoredViolations } from './components/SemanticEvidence'
 
 const API_BASE = ''
 
@@ -216,6 +218,10 @@ function SessionDetails({ session, onClose }) {
   // Merge violations/captured from session object (history inline) and flaggedInfo
   const violations = flaggedInfo?.violations || session.violations || null
   const capturedContent = flaggedInfo?.captured_content || session.captured_content || null
+  const decisions = flaggedInfo?.semantic_decisions || []
+  // Ordinary violation rows carry the anchor a correlation match links to;
+  // semantic and correlation rows are anchored inside SemanticEvidence.
+  const anchored = anchoredViolations(violations, decisions)
 
   return (
     <div class="modal-overlay" onClick={onClose}>
@@ -278,8 +284,12 @@ function SessionDetails({ session, onClose }) {
             <>
               <h3>Policy Violations</h3>
               <div class="violations-list">
+                {/* The key carries the anchor state: the list row's inline
+                    violations arrive before the record's decisions, and the
+                    anchor moves to the decision row once they do. A new key
+                    recreates the node instead of leaving an empty id behind. */}
                 {violations.map((v, i) => (
-                  <div key={i} class="violation-item">
+                  <div key={i + (anchored.has(v.event_id) ? ':anchored' : '')} class="violation-item" id={anchored.has(v.event_id) ? anchorId(v.event_id) : undefined}>
                     <div class="violation-header">
                       <SeverityBadge severity={v.severity} />
                       <strong>{v.rule_name}</strong>
@@ -293,6 +303,19 @@ function SessionDetails({ session, onClose }) {
               </div>
             </>
           )}
+
+          {((flaggedInfo && (flaggedInfo.semantic_decisions?.length || flaggedInfo.correlation_shadow?.length || flaggedInfo.semantic_shadow?.length)) || violations?.some(v => v.correlation)) ? (
+            <>
+              <h3>Semantic evidence</h3>
+              <SemanticEvidence
+                decisions={flaggedInfo?.semantic_decisions}
+                violations={violations}
+                semanticShadow={flaggedInfo?.semantic_shadow}
+                correlationShadow={flaggedInfo?.correlation_shadow}
+                anchored={anchored}
+              />
+            </>
+          ) : null}
 
           {capturedContent && capturedContent.length > 0 && (
             <>
@@ -704,18 +727,29 @@ function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
+  const [decisionStatus, setDecisionStatus] = useState(null)
+  // savedDecisionMode is the decision.mode the server last returned; a save
+  // that changes it to enforce needs confirmation (?confirm=enforce).
+  const [savedDecisionMode, setSavedDecisionMode] = useState(null)
 
   const fetchSettings = async () => {
     try {
-      const [settingsRes, defaultsRes, diffRes] = await Promise.all([
+      const [settingsRes, defaultsRes, diffRes, decisionRes] = await Promise.all([
         apiFetch(API_BASE + '/control/settings'),
         apiFetch(API_BASE + '/control/settings/defaults'),
         apiFetch(API_BASE + '/control/settings/diff'),
+        apiFetch(API_BASE + '/control/decision'),
       ])
 
-      if (settingsRes.ok) setSettings(await settingsRes.json())
+      if (settingsRes.ok) {
+        const loaded = await settingsRes.json()
+        setSettings(loaded)
+        setSavedDecisionMode(loaded?.decision?.mode ?? null)
+      }
+      if (decisionRes.ok) setDecisionStatus(await decisionRes.json())
       if (defaultsRes.ok) setDefaults(await defaultsRes.json())
-      if (diffRes.ok) setDiff(await diffRes.json())
+      // The diff endpoint wraps the paths: {modified_count, modifications}.
+      if (diffRes.ok) setDiff((await diffRes.json()).modifications || {})
     } catch (err) {
       console.error('Failed to fetch settings:', err)
       setMessage({ type: 'error', text: 'Failed to load settings' })
@@ -732,7 +766,18 @@ function SettingsPage() {
     setSaving(true)
     setMessage(null)
     try {
-      const res = await apiFetch(API_BASE + '/control/settings', {
+      const invalid = invalidBudgetKeys(settings.decision)
+      if (invalid.length > 0) {
+        setMessage({ type: 'error', text: 'Not saved: enter a whole number of 0 or more for ' +
+          invalid.map((k) => 'decision.preprocessing.' + k).join(', ') })
+        return
+      }
+      const nextMode = settings.decision?.mode
+      if (nextMode === 'enforce' && savedDecisionMode !== 'enforce' &&
+          !confirm('Switch semantic detection to enforce? Semantic findings will add risk and can throttle, block or terminate sessions.')) {
+        return
+      }
+      const res = await apiFetch(settingsSaveUrl(API_BASE, savedDecisionMode, nextMode), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
@@ -741,8 +786,8 @@ function SettingsPage() {
         setMessage({ type: 'success', text: 'Settings applied instantly (no restart required)' })
         fetchSettings() // Refresh diff
       } else {
-        const err = await res.text()
-        setMessage({ type: 'error', text: 'Failed to save: ' + err })
+        // The server's refusal, verbatim; the form keeps its edits.
+        setMessage({ type: 'error', text: 'Failed to save: ' + saveErrorText(await res.text()) })
       }
     } catch (err) {
       setMessage({ type: 'error', text: 'Failed to save settings' })
@@ -934,6 +979,15 @@ function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <DecisionSettings
+        decision={settings.decision}
+        policyMode={settings.policy?.mode || 'enforce'}
+        status={decisionStatus}
+        isModified={isModified}
+        onChange={(key, value) => updateSetting('decision', key, value)}
+        onPreprocessingChange={(key, value) => updateNestedSetting('decision', 'preprocessing', key, value)}
+      />
 
       <div class="panel">
         <div class="panel-header">

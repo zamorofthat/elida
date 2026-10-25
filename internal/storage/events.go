@@ -65,6 +65,17 @@ type ViolationDetectedData struct {
 	Severity    string `json:"severity"`
 	Action      string `json:"action"`
 	MatchedText string `json:"matched_text,omitempty"` // May be redacted
+	// EvidenceOnly marks evidence recorded for correlation that contributed
+	// no risk (semantic audit mode, injection_elevated). Absent on older
+	// rows and on ordinary violations.
+	EvidenceOnly bool `json:"evidence_only,omitempty"`
+	// EventID, EventCategory and SourceRole identify the occurrence: the
+	// policy engine's stable event ID (a correlation match's match ID), its
+	// category and the role it came from. Identifiers only; absent on rows
+	// written before Plan C.
+	EventID       string `json:"event_id,omitempty"`
+	EventCategory string `json:"event_category,omitempty"`
+	SourceRole    string `json:"source_role,omitempty"`
 }
 
 // PolicyActionData contains data for policy_action events

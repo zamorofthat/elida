@@ -19,11 +19,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"elida/internal/config"
 	"elida/internal/control"
+	"elida/internal/correlation"
+	"elida/internal/decision/embedded"
+	"elida/internal/decision/runner"
+	"elida/internal/decision/scheduler"
 	"elida/internal/fingerprint"
 	"elida/internal/instruction"
 	"elida/internal/instructionstore"
@@ -60,6 +65,33 @@ type app struct {
 	ocsfEmitter         *telemetry.OCSFEmitter
 	proxyCaptureBuf     *proxy.CaptureBuffer
 	redactor            *redaction.PatternRedactor
+
+	// Semantic injection detection (see decision.go). All nil when
+	// decision.enabled is false; the provider alone is set when it started
+	// degraded, so its status stays visible.
+	decisionProvider  *embedded.Provider
+	decisionScheduler *scheduler.Inline
+	decisionRunner    *runner.Runner
+	// decisionPipeline overrides the embedded provider's inference backend.
+	// Nil in production (the pure-Go Hugot backend); tests set a fake.
+	decisionPipeline embedded.PipelineFactory
+	// decisionArch and decisionSIMD override the architecture and SIMD
+	// facts the provider judges its capability on. Empty/nil in production
+	// (the running binary's own); tests set them to pin a capability
+	// independent of the host.
+	decisionArch string
+	decisionSIMD *bool
+	// decisionSchedulerCfg is the configuration decisionScheduler was built
+	// with, kept for inspection.
+	decisionSchedulerCfg scheduler.Config
+	// shadowCorr is the semantic runner's shadow correlator (Plan B D14),
+	// nil unless correlation is enabled and the runner was built. It needs
+	// no shutdown drain: Observe runs synchronously inside the runner (on
+	// the request or the async-delivery goroutine), it owns no goroutines
+	// or queues, and its in-memory state is meant to end with the process.
+	// The decision drain, which delivers the last async results, runs
+	// before the process exits, so nothing is left half-observed.
+	shadowCorr *correlation.Engine
 
 	proxyHandler   *proxy.Proxy
 	wsHandler      *websocket.Handler
@@ -146,6 +178,8 @@ func main() {
 	a.initTelemetry()
 	a.initPolicyEngine()
 	a.initInstructionIntegrity()
+	a.initDecision()
+	a.logCorrelationSummary()
 
 	// Start session manager (handles timeouts, cleanup)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -160,6 +194,13 @@ func main() {
 	a.initProxy()
 	a.initWebSocket()
 	a.initSettings()
+	// settings.yaml's decision section, through the same mapping a settings
+	// save uses (plan D9). Only an enforce refused for a threshold-set
+	// mismatch is fatal, as it is in elida.yaml (see initDecision).
+	if err := a.applyStartupDecisionSettings(); err != nil {
+		slog.Error("startup failed", "error", err)
+		os.Exit(1)
+	}
 	a.initControlAPI()
 
 	errChan := a.startServers()
@@ -328,11 +369,18 @@ func (a *app) initPanel() {
 }
 
 func (a *app) initSessionEndCallback() {
-	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil {
+	if !a.cfg.Storage.Enabled && !a.cfg.Telemetry.Enabled && !a.cfg.OCSF.Enabled && a.fingerprinter == nil && !a.cfg.Decision.Enabled {
 		return
 	}
 
 	a.manager.SetSessionEndCallback(func(sess *session.Session) {
+		// Release the session from the semantic runner first, so a late
+		// async result is dropped rather than recorded onto a session whose
+		// record is being built below.
+		if a.decisionRunner != nil {
+			a.decisionRunner.Unbind(sess)
+		}
+
 		snap := sess.Snapshot()
 		var endTime time.Time
 		if snap.EndTime != nil {
@@ -352,9 +400,15 @@ func (a *app) initSessionEndCallback() {
 			Backend:      snap.Backend,
 			ClientAddr:   snap.ClientAddr,
 			Metadata:     snap.Metadata,
+			// Shadow decisions carry no content, so redaction does not
+			// apply to them.
+			SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
+			// Shadow correlation matches carry no content. Unbind above ran
+			// before this snapshot, so no further match can land on sess.
+			CorrelationShadow: storage.CorrelationShadowFromSession(snap.CorrelationShadow),
 		}
 
-		a.enrichRecordFromPolicy(&record, snap.ID)
+		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
 		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
@@ -364,10 +418,31 @@ func (a *app) initSessionEndCallback() {
 		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
+
+		// The record is saved and exported, so the policy engine can let go
+		// of the session: its flagged entry, events and semantic dedup set
+		// would otherwise live for the whole process (alongside Unbind
+		// above, which releases the runner's side). A session at block or
+		// terminate is retained (bounded), so a client reusing its ID still
+		// meets that action; see policy.Engine.ReleaseFlaggedSession.
+		if a.policyEngine != nil {
+			a.policyEngine.ReleaseFlaggedSession(sess.ID)
+		}
 	})
 }
 
-func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string) {
+// enrichRecordFromPolicy adds the policy engine's captures, violations (with
+// their representative semantic metadata) and per-decision semantic records
+// for the ending session to its record.
+//
+// Only this session instance's violations and decision records are added.
+// A violation that last fired before start was carried over by a retained
+// block/terminate entry from an earlier session with the same ID; it is
+// skipped here, at the source, so neither SQLite events nor the OTEL/OCSF
+// export (which are built from this record) report it again for a session
+// whose requests were all refused. SQLite history still holds it:
+// SaveSession carries it from the stored row.
+func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID string, start time.Time) {
 	if a.policyEngine == nil {
 		return
 	}
@@ -387,6 +462,9 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 		})
 	}
 	for _, v := range flagged.Violations {
+		if !v.Timestamp.IsZero() && v.Timestamp.Before(start) {
+			continue
+		}
 		record.Violations = append(record.Violations, storage.Violation{
 			RuleName:      v.RuleName,
 			Description:   v.Description,
@@ -396,8 +474,19 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			Timestamp:     v.Timestamp,
+			// Decision metadata carries no content, so it needs no redaction.
+			Semantic: storage.SemanticEvidenceFromPolicy(v.Semantic),
+			// Match evidence carries no content either.
+			Correlation: storage.CorrelationEvidenceFromPolicy(v.Correlation),
 		})
 	}
+	// Same ending-instance rule as the violations above. The records carry
+	// no content, so they need no redaction.
+	record.SemanticDecisions = storage.SemanticDecisionsFromPolicy(flagged.SemanticDecisions, start)
+	record.SemanticDecisionsDropped = flagged.SemanticDecisionsDropped
 }
 
 func (a *app) enrichRecordFromCaptureBuffer(record *storage.SessionRecord, sessionID string) {
@@ -525,12 +614,23 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 	}
 
 	for _, v := range record.Violations {
+		// Defense in depth: enrichRecordFromPolicy already drops violations
+		// carried over by a retained policy entry (a reused block/terminate
+		// session ID); their violation_detected event was emitted by the
+		// session they belong to.
+		if !v.Timestamp.IsZero() && v.Timestamp.Before(snap.StartTime) {
+			continue
+		}
 		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
-			RuleName:    v.RuleName,
-			Description: v.Description,
-			Severity:    v.Severity,
-			MatchedText: v.MatchedText,
-			Action:      v.Action,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      v.Severity,
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			EventCategory: v.EventCategory,
+			SourceRole:    v.SourceRole,
 		}); eventErr != nil {
 			slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
 		}
@@ -601,7 +701,47 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	if !a.tp.Enabled() && a.ocsfEmitter == nil {
 		return
 	}
+	a.tp.ExportSessionRecord(context.Background(), telemetryRecordFrom(record, snap, endTime, integrity))
+}
 
+// telemetrySemantic converts stored semantic metadata for export. The fields
+// are listed explicitly rather than converted, so storage and telemetry can
+// evolve their mirror types independently.
+func telemetrySemantic(s *storage.SemanticEvidence) *telemetry.SemanticMetadata {
+	if s == nil {
+		return nil
+	}
+	m := telemetry.SemanticMetadata{
+		Signal: s.Signal, Probability: s.Probability, AuxProbability: s.AuxProbability, Vetoed: s.Vetoed,
+		Model: s.Model, ModelVersion: s.ModelVersion, ModelChecksum: s.ModelChecksum, ThresholdSet: s.ThresholdSet,
+		DecisionID: s.DecisionID, Transform: s.Transform, TransformDepth: s.TransformDepth,
+		WindowStartByte: s.WindowStartByte, WindowEndByte: s.WindowEndByte, CoverageComplete: s.CoverageComplete,
+		ExecutionMode: s.ExecutionMode, ProtectionScope: s.ProtectionScope,
+	}
+	return &m
+}
+
+// telemetryCorrelation converts stored match evidence for export. Fields
+// are listed explicitly, as in telemetrySemantic; EventCount is the full
+// list length before the exporter's cap.
+func telemetryCorrelation(c *storage.CorrelationEvidence) *telemetry.CorrelationMetadata {
+	if c == nil {
+		return nil
+	}
+	return &telemetry.CorrelationMetadata{
+		MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode,
+		EventCount: len(c.EventIDs),
+		Categories: append([]string(nil), c.Categories...),
+		FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+		EventIDs: append([]string(nil), c.EventIDs...),
+	}
+}
+
+// telemetryRecordFrom builds the telemetry export record from the stored
+// record. It is pure, so the content-free guarantee is testable without an
+// exporter. The record's violations are already limited to the ending
+// session instance (enrichRecordFromPolicy).
+func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, endTime time.Time, integrity *storage.SDRIntegrity) telemetry.SessionRecord {
 	telemRecord := telemetry.SessionRecord{
 		SessionID:    snap.ID,
 		State:        snap.State.String(),
@@ -631,6 +771,39 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			EventCategory: v.EventCategory,
 			FrameworkRef:  v.FrameworkRef,
 			SourceRole:    v.SourceRole,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			Semantic:      telemetrySemantic(v.Semantic),
+			Correlation:   telemetryCorrelation(v.Correlation),
+		})
+	}
+	for _, d := range record.SemanticDecisions {
+		// Defense in depth, repeating enrichRecordFromPolicy's filter: a
+		// decision stamped before this session instance started (for example,
+		// on an entry for a reused ID that was not released) belongs to an
+		// earlier session. A retained entry holds none; policy clears them.
+		if !d.Timestamp.IsZero() && d.Timestamp.Before(snap.StartTime) {
+			continue
+		}
+		var m telemetry.SemanticMetadata
+		if p := telemetrySemantic(&d.Evidence); p != nil {
+			m = *p
+		}
+		telemRecord.SemanticDecisions = append(telemRecord.SemanticDecisions, telemetry.SemanticDecision{
+			EventID: d.EventID, RuleName: d.RuleName, EventCategory: d.EventCategory, Severity: d.Severity,
+			SourceRole: d.SourceRole, MessageIndex: d.MessageIndex, EvidenceOnly: d.EvidenceOnly,
+			WouldContributePoints: d.WouldContributePoints, Timestamp: d.Timestamp, Metadata: m,
+		})
+	}
+	telemRecord.SemanticDecisionsDropped = record.SemanticDecisionsDropped
+	for _, c := range record.CorrelationShadow {
+		telemRecord.CorrelationShadow = append(telemRecord.CorrelationShadow, telemetry.CorrelationShadow{
+			Timestamp: c.Timestamp, Severity: c.Severity,
+			Metadata: telemetry.CorrelationMetadata{
+				MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode, EventCount: len(c.EventIDs),
+				Categories: append([]string(nil), c.Categories...), FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+				EventIDs: append([]string(nil), c.EventIDs...),
+			},
 		})
 	}
 	for _, c := range record.CapturedContent {
@@ -643,7 +816,7 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 			StatusCode:   c.StatusCode,
 		})
 	}
-	a.tp.ExportSessionRecord(context.Background(), telemRecord)
+	return telemRecord
 }
 
 func (a *app) initOCSF() {
@@ -709,8 +882,36 @@ func (a *app) initTelemetry() {
 }
 
 func (a *app) initPolicyEngine() {
+	if err := a.setupPolicyEngine(); err != nil {
+		slog.Error("policy engine failed to start", "error", err)
+		os.Exit(1)
+	}
+}
+
+// setupPolicyEngine builds the policy engine. An enabled correlation block
+// that cannot be built as configured is a startup error, like any other
+// invalid security configuration: correlation must never be silently off
+// while the operator believes it is running.
+func (a *app) setupPolicyEngine() error {
 	if !a.cfg.Policy.Enabled {
-		return
+		if a.cfg.Correlation.Enabled {
+			// Policy correlation reads the policy engine's violation and
+			// tool events, so without one it is inert (wiring review M-8).
+			// The semantic runner's shadow correlator does not depend on it
+			// (Task 9 review M-1): decision is capped to shadow exactly
+			// when policy is off.
+			slog.Warn("correlation is enabled but policy.enabled is false: policy correlation (violations and tool activity) is inactive; shadow correlation of semantic decisions is active when decision is enabled")
+		}
+		return nil
+	}
+	if err := a.cfg.Correlation.Validate(); err != nil {
+		return err
+	}
+	// The effective block: the configured rules and taxonomy plus the
+	// built-in chains when builtin_chains is set (Plan B Task 10).
+	cc := a.cfg.Correlation.Effective()
+	if cc.Enabled {
+		logTaxonomyWarnings(cc.TaxonomyConfig)
 	}
 	policyRules := make([]policy.Rule, len(a.cfg.Policy.Rules))
 	for i, r := range a.cfg.Policy.Rules {
@@ -748,6 +949,12 @@ func (a *app) initPolicyEngine() {
 			Enabled:    a.cfg.Policy.RiskLadder.Enabled,
 			Thresholds: riskThresholds,
 		},
+		Correlation: policy.CorrelationConfig{
+			Enabled:        cc.Enabled,
+			Rules:          cc.Rules,
+			Limits:         cc.Limits(),
+			TaxonomyConfig: cc.TaxonomyConfig,
+		},
 	})
 
 	// Wire anomaly callback for real-time OCSF 2004 emission
@@ -766,6 +973,140 @@ func (a *app) initPolicyEngine() {
 	})
 
 	slog.Info("policy engine enabled", "rules", len(policyRules))
+	return nil
+}
+
+// toolLaneDrainLimit caps how long shutdown waits for the tool lane
+// (policy.Engine.CloseToolLane). Like the semantic drain it also keeps
+// decisionDrainReserveFraction of the remaining budget for the steps after
+// it: a slow taxonomy loses the tail of its correlation events, never the
+// session drain or the telemetry flush.
+const toolLaneDrainLimit = 10 * time.Second
+
+// shutdownToolLane closes the policy engine's tool lane under its own
+// sub-deadline.
+func (a *app) shutdownToolLane(ctx context.Context) {
+	if a.policyEngine == nil {
+		return
+	}
+	drainCtx, cancel := drainContext(ctx, toolLaneDrainLimit)
+	defer cancel()
+	if err := a.policyEngine.CloseToolLane(drainCtx); err != nil {
+		slog.Warn("tool-call correlation not drained before shutdown; queued batches abandoned", "error", err)
+	}
+}
+
+// logTaxonomyWarnings logs, once at startup, each non-fatal finding about
+// the tool-call taxonomy (today: a compiled program over the soft limit),
+// with its instruction count and estimated worst-case cost per call. The
+// configuration has already been validated.
+func logTaxonomyWarnings(cfg correlation.TaxonomyConfig) {
+	tx, err := correlation.NewTaxonomy(cfg)
+	if err != nil || tx == nil {
+		return
+	}
+	for _, w := range tx.Warnings() {
+		slog.Warn("correlation tool taxonomy is expensive to evaluate",
+			"field", "correlation."+w.Field,
+			"instructions", tx.Instructions(),
+			"soft_limit", correlation.WarnTaxonomyInstructions,
+			"max_argument_bytes", tx.MaxArgumentBytes(),
+			"estimated_worst_case_per_call", correlation.EstimatedWorstCaseCost(tx.Instructions(), tx.MaxArgumentBytes()).Round(time.Millisecond).String(),
+			"message", w.Message,
+		)
+	}
+}
+
+// shadowCorrelator builds the semantic runner's shadow correlator (Plan B
+// D14): a correlation engine of its own, from the same correlation rules
+// and limits as the policy engine's correlator but never shared with it, so
+// shadow evidence can never complete a policy match or become a violation.
+// It returns nil only when correlation is disabled. It does not need the
+// policy engine: with policy.enabled false, decision is capped to shadow,
+// exactly the mode this correlator serves. An invalid correlation block
+// fails startup like any invalid security configuration (setupPolicyEngine
+// validates it when the policy engine runs; it is validated here when not).
+// It reads the effective block, so the built-in chains apply here too.
+func (a *app) shadowCorrelator() (*correlation.Engine, error) {
+	if !a.cfg.Correlation.Enabled {
+		return nil, nil
+	}
+	if a.policyEngine == nil {
+		if err := a.cfg.Correlation.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	cc := a.cfg.Correlation.Effective()
+	eng, err := correlation.New(cc.Rules, cc.Limits())
+	if err != nil {
+		return nil, fmt.Errorf("invalid correlation configuration for the shadow correlator: %w", err)
+	}
+	return eng, nil
+}
+
+// logCorrelationSummary logs one content-free line describing temporal
+// correlation as started: the rules (count, shapes, mode per rule), the
+// limits, whether policy correlation runs, whether the semantic runner has
+// a shadow correlator, the tool taxonomy and the tool-lane bounds. It
+// describes the engines already built (the policy engine's correlator and
+// taxonomy, else the shadow correlator) and builds nothing itself. Rule
+// names are operator configuration; no tool glob, argument pattern or
+// traffic content is logged. Per-rule enforce WARNs and taxonomy cost WARNs
+// are logged separately. The taxonomy count is the effective one (built-in
+// entries included when builtin_chains is set), and builtin_chains says
+// whether the preset is on.
+func (a *app) logCorrelationSummary() {
+	cc := a.cfg.Correlation.Effective()
+	if !cc.Enabled {
+		slog.Info("temporal correlation disabled")
+		return
+	}
+	var rules []correlation.Rule
+	var tx *correlation.Taxonomy
+	if a.policyEngine != nil {
+		rules, tx = a.policyEngine.CorrelationSetup()
+	} else if a.shadowCorr != nil {
+		rules = a.shadowCorr.Rules()
+	} else {
+		return // neither correlator runs; setupPolicyEngine already warned
+	}
+	var repeated, sequence int
+	modes := make([]string, 0, len(rules))
+	for _, r := range rules {
+		switch r.Shape {
+		case correlation.ShapeRepeated:
+			repeated++
+		case correlation.ShapeSequence:
+			sequence++
+		}
+		modes = append(modes, r.Name+":"+string(r.Mode))
+	}
+	instructions, maxArgs, warnings := 0, correlation.DefaultMaxArgumentBytes, 0
+	if tx != nil {
+		instructions, maxArgs, warnings = tx.Instructions(), tx.MaxArgumentBytes(), len(tx.Warnings())
+	}
+	slog.Info("temporal correlation enabled",
+		"rules", len(modes),
+		"repeated_rules", repeated,
+		"sequence_rules", sequence,
+		"rule_modes", strings.Join(modes, ","),
+		"policy_correlation", a.policyEngine != nil,
+		"policy_mode", a.cfg.Policy.Mode,
+		"max_history_events", cc.MaxHistoryEvents,
+		"max_sessions", cc.MaxSessions,
+		"shadow_correlator", a.shadowCorr != nil,
+		"builtin_chains", cc.BuiltinChains,
+		"tool_categories", len(cc.ToolCategories),
+		"taxonomy_instructions", instructions,
+		"max_argument_bytes", maxArgs,
+		"taxonomy_warnings", warnings,
+		"tool_lane_workers", policy.ToolLaneWorkers,
+		"tool_queue_per_worker", policy.ToolQueuePerWorker,
+		"tool_batches_per_session", policy.MaxToolBatchesPerSession,
+		"tool_queue_bytes", policy.MaxToolQueueBytes,
+		"tool_calls_per_batch", policy.MaxToolCallsPerBatch,
+		"tool_call_ids_per_session", policy.MaxToolCallIDsPerSession,
+	)
 }
 
 func (a *app) initInstructionIntegrity() {
@@ -821,6 +1162,10 @@ func (a *app) initProxy() {
 	}
 	if a.redactor != nil {
 		proxyOpts = append(proxyOpts, proxy.WithRedactor(a.redactor))
+	}
+	if a.decisionRunner != nil {
+		proxyOpts = append(proxyOpts, proxy.WithSemanticAssessor(
+			semanticAssessorFunc(a.decisionRunner.AssessPolicyMessages)))
 	}
 	a.proxyHandler, err = proxy.New(a.cfg, a.store, a.manager, proxyOpts...)
 	if err != nil {
@@ -968,6 +1313,13 @@ func (a *app) initControlAPI() {
 	if a.panel != nil {
 		a.controlHandler.SetPanel(a.panel)
 	}
+	// Always wired, so the status reports the configured mode and why the
+	// feature is or is not running (disabled, degraded, mode-disabled).
+	a.controlHandler.SetDecisionProvider(a)
+	// Always wired, so a settings save applies decision.mode and
+	// decision.preprocessing.* and re-caps the runner on a policy.mode
+	// change; with no runner it refuses decision changes as not running.
+	a.controlHandler.SetDecisionConfigurer(a)
 
 	if a.cfg.Control.Auth.Enabled {
 		slog.Info("control API authentication enabled")
@@ -1049,6 +1401,18 @@ func (a *app) shutdown(cancel context.CancelFunc) {
 			slog.Error("control server shutdown error", "error", err)
 		}
 	}
+
+	// Step 1b: No request can start semantic work any more. Drain queued
+	// semantic analysis, then close the provider. This runs before the
+	// session drain below, so async results still land on their sessions
+	// before those sessions are persisted.
+	a.shutdownDecision(shutdownCtx)
+
+	// Step 1c: Close the tool lane: refuse new tool batches (a detached
+	// async scan can still finish after step 1), let the queued ones land
+	// their correlation matches before sessions are persisted below, and
+	// stop the workers, all within the lane's own sub-deadline.
+	a.shutdownToolLane(shutdownCtx)
 
 	// Step 2: Stop the session manager background loop
 	cancel()

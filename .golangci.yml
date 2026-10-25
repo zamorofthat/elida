@@ -39,6 +39,11 @@ linters:
         text: "Error return value of .*(Close|Remove)"
         linters:
           - errcheck
+      # Context-less httptest.NewRequest is normal in tests; production
+      # code stays fully covered by noctx.
+      - path: '_test\.go$'
+        linters:
+          - noctx
       # TODO: Add context to storage layer DB calls
       - path: internal/storage/
         linters:

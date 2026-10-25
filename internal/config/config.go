@@ -7,11 +7,14 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"elida/internal/correlation"
 )
 
 // envRefPattern matches ${IDENTIFIER} references in config values.
@@ -71,7 +74,235 @@ type Config struct {
 	Fingerprint     FingerprintConfig        `yaml:"fingerprint"`      // Behavioral fingerprint configuration
 	Panel           PanelConfig              `yaml:"panel"`            // Behavioral panel configuration
 	Failover        FailoverConfig           `yaml:"failover"`         // Failover configuration
+	Decision        DecisionConfig           `yaml:"decision"`         // Semantic decision (injection detection) configuration
+	Correlation     CorrelationConfig        `yaml:"correlation"`      // Bounded temporal correlation configuration
 	ShutdownTimeout time.Duration            `yaml:"shutdown_timeout"` // Graceful shutdown timeout (default 30s)
+}
+
+// CorrelationConfig configures bounded, per-session temporal correlation.
+// Rules default to audit mode in the correlation package; an operator must
+// explicitly select enforce before a match can contribute to the risk ladder.
+//
+// The tool-call taxonomy (tool_categories, max_argument_bytes) is inlined
+// into the same block: it maps tool calls to the categories rules count.
+// No taxonomy ships by default, so tool calls are not correlated until an
+// operator configures one.
+type CorrelationConfig struct {
+	Enabled          bool               `yaml:"enabled"`
+	MaxHistoryEvents int                `yaml:"max_history_events"`
+	MaxSessions      int                `yaml:"max_sessions"`
+	Rules            []correlation.Rule `yaml:"rules"`
+	// BuiltinChains adds the shipped, audit-only chain rules and the tool
+	// taxonomy they need (BuiltinCorrelationRules, BuiltinToolCategories)
+	// to the effective block (Effective). Off by default: tool names and
+	// argument patterns vary by agent framework, and the preset is a
+	// heuristic. A user rule with a built-in's name replaces it.
+	BuiltinChains bool `yaml:"builtin_chains"`
+
+	correlation.TaxonomyConfig `yaml:",inline"`
+}
+
+// DefaultCorrelationRules is the shipped rule set (Plan B D8): one
+// audit-only rule, slow_burn_injection, that matches three distinct
+// messages carrying injection_elevated evidence within 15 minutes. Audit
+// mode means a match is evidence-only and never moves the risk ladder.
+// Correlation itself stays disabled by default.
+func DefaultCorrelationRules() []correlation.Rule {
+	return []correlation.Rule{{
+		Name:     "slow_burn_injection",
+		Shape:    correlation.ShapeRepeated,
+		Category: "injection_elevated",
+		Count:    3,
+		CountBy:  correlation.CountByMessage,
+		Window:   15 * time.Minute,
+		Cooldown: 15 * time.Minute,
+		Severity: "warning",
+		Mode:     correlation.ModeAudit,
+	}}
+}
+
+// BuiltinCorrelationRules are the shipped chain rules behind
+// builtin_chains: true (Plan B Task 10, D12): credential or sensitive-file
+// access followed by external transmission within 15 minutes. Audit-only;
+// promoting one is a reserved decision, done by redefining the rule under
+// its name with mode: enforce.
+func BuiltinCorrelationRules() []correlation.Rule {
+	return []correlation.Rule{
+		{
+			Name:     "builtin_credential_exfiltration",
+			Shape:    correlation.ShapeSequence,
+			Sequence: []string{"credential_discovery", "external_transmission"},
+			Window:   15 * time.Minute,
+			Severity: "warning",
+			Mode:     correlation.ModeAudit,
+		},
+		{
+			Name:     "builtin_sensitive_exfiltration",
+			Shape:    correlation.ShapeSequence,
+			Sequence: []string{"sensitive_access", "external_transmission"},
+			Window:   15 * time.Minute,
+			Severity: "warning",
+			Mode:     correlation.ModeAudit,
+		},
+	}
+}
+
+// BuiltinToolCategories is the taxonomy the built-in chains need.
+// Credential and sensitive-file categories match on argument paths from
+// any tool; transmission matches network-named tools, or shell tools whose
+// arguments run a network command. The globs and patterns are listed in
+// docs/configuration.md so operators can see the detection policy.
+func BuiltinToolCategories() []correlation.ToolCategoryRule {
+	shells := []string{"bash", "sh", "shell", "terminal", "run_command", "*exec*"}
+	return []correlation.ToolCategoryRule{
+		{
+			Category: "credential_discovery",
+			Tools:    []string{"*"},
+			ArgumentPatterns: []string{
+				`\.aws/credentials`, `\.ssh/id_[a-z0-9]+`, `\.netrc\b`, `\.git-credentials`,
+				`\.kube/config`, `\.docker/config\.json`, `(^|[/\\"' ])\.env\b`,
+			},
+		},
+		{
+			Category:         "sensitive_access",
+			Tools:            []string{"*"},
+			ArgumentPatterns: []string{`/etc/shadow`, `/etc/sudoers`, `/proc/self/environ`, `\.(bash|zsh)_history`},
+		},
+		{
+			Category: "external_transmission",
+			Tools:    []string{"*fetch*", "*http*", "*request*", "*upload*", "*webhook*", "send_*", "post_*"},
+		},
+		{
+			Category:         "external_transmission",
+			Tools:            shells,
+			ArgumentPatterns: []string{`\b(curl|wget)\b[^\n]*https?://`, `\bnc\b\s+\S+\s+\d+`, `\bscp\b\s+\S+\s+\S+@`},
+		},
+	}
+}
+
+// Effective returns the block as it is built and validated: a deep copy
+// in which, when BuiltinChains is set, the built-in taxonomy entries
+// follow the configured tool_categories and each built-in rule follows the
+// configured rules unless a configured rule has its name (the user's
+// definition wins, keeping its position and so its rules[i] field index).
+// Every consumer of the block (validation, the policy engine's correlator
+// and taxonomy, the shadow correlator, the startup summary) reads this,
+// never the raw fields. With BuiltinChains false it is a plain deep copy.
+// It is idempotent: a rule or entry already present is not added again.
+func (c CorrelationConfig) Effective() CorrelationConfig {
+	out := c
+	out.Rules = cloneCorrelationRules(c.Rules)
+	out.ToolCategories = cloneToolCategories(c.ToolCategories)
+	if !c.BuiltinChains {
+		return out
+	}
+	named := make(map[string]bool, len(out.Rules))
+	for _, r := range out.Rules {
+		named[r.Name] = true
+	}
+	for _, b := range BuiltinCorrelationRules() {
+		if !named[b.Name] {
+			out.Rules = append(out.Rules, b)
+		}
+	}
+	for _, b := range BuiltinToolCategories() {
+		if !containsToolCategory(out.ToolCategories, b) {
+			out.ToolCategories = append(out.ToolCategories, b)
+		}
+	}
+	return out
+}
+
+// cloneCorrelationRules deep-copies rules, keeping nil as nil.
+func cloneCorrelationRules(rules []correlation.Rule) []correlation.Rule {
+	if rules == nil {
+		return nil
+	}
+	out := make([]correlation.Rule, len(rules))
+	for i, r := range rules {
+		r.Sequence = cloneStringSlice(r.Sequence)
+		out[i] = r
+	}
+	return out
+}
+
+// cloneToolCategories deep-copies taxonomy entries, keeping nil as nil.
+func cloneToolCategories(cats []correlation.ToolCategoryRule) []correlation.ToolCategoryRule {
+	if cats == nil {
+		return nil
+	}
+	out := make([]correlation.ToolCategoryRule, len(cats))
+	for i, r := range cats {
+		r.Tools = cloneStringSlice(r.Tools)
+		r.ArgumentPatterns = cloneStringSlice(r.ArgumentPatterns)
+		out[i] = r
+	}
+	return out
+}
+
+func cloneStringSlice(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string{}, s...)
+}
+
+func containsToolCategory(cats []correlation.ToolCategoryRule, want correlation.ToolCategoryRule) bool {
+	for _, c := range cats {
+		if c.Category == want.Category && slices.Equal(c.Tools, want.Tools) && slices.Equal(c.ArgumentPatterns, want.ArgumentPatterns) {
+			return true
+		}
+	}
+	return false
+}
+
+// Limits returns the engine limits exactly as configured. Validation checks
+// these same values, so what validates is what is built.
+// An omitted key keeps its default (DefaultConfig); an explicit 0 is
+// invalid, not "use the default".
+func (c CorrelationConfig) Limits() correlation.Limits {
+	return correlation.Limits{MaxHistoryEvents: c.MaxHistoryEvents, MaxSessions: c.MaxSessions}
+}
+
+// validationErrors checks the effective block (Effective: the configured
+// rules and taxonomy plus the built-ins when builtin_chains is set) against
+// correlation.Validate and correlation.ValidateTaxonomy, exactly as
+// correlation.New and correlation.NewTaxonomy will check it. The
+// instruction caps therefore apply to the merged taxonomy.
+func (c CorrelationConfig) validationErrors() []ValidationError {
+	eff := c.Effective()
+	var errs []ValidationError
+	for _, err := range correlation.Validate(eff.Rules, eff.Limits()) {
+		errs = append(errs, ValidationError{
+			Field:   "correlation." + err.Field,
+			Message: err.Message,
+		})
+	}
+	for _, err := range correlation.ValidateTaxonomy(eff.TaxonomyConfig) {
+		errs = append(errs, ValidationError{
+			Field:   "correlation." + err.Field,
+			Message: err.Message,
+		})
+	}
+	return errs
+}
+
+// Validate reports whether the block can be built as configured. It is
+// what startup checks (an invalid enabled block refuses to start); a
+// disabled block is not checked.
+func (c CorrelationConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	errs := c.validationErrors()
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, len(errs))
+	for i, e := range errs {
+		msgs[i] = e.Field + ": " + e.Message
+	}
+	return fmt.Errorf("invalid correlation configuration: %s", strings.Join(msgs, "; "))
 }
 
 // ProxyConfig holds proxy-level configuration
@@ -194,6 +425,11 @@ type TrustConfig struct {
 
 	// AllowlistedTools - tool names that bypass content scanning on request side
 	// Example: ["Bash", "Read", "Glob"] — requests invoking these tools skip request-side rules
+	//
+	// This is a control for the regex policy engine only. Semantic injection
+	// detection (decision.*) ignores it: tool output is the untrusted content
+	// that detection exists to score, so an allowlisted Read result is still
+	// assessed.
 	AllowlistedTools []string `yaml:"allowlisted_tools"`
 }
 
@@ -425,6 +661,113 @@ type FailoverConfig struct {
 	PreserveModel bool          `yaml:"preserve_model"` // Preserve model ID across failovers
 }
 
+// Decision operating modes. policy.mode caps decision.mode: with
+// policy.mode: audit, DecisionModeEnforce behaves as DecisionModeAudit.
+const (
+	DecisionModeDisabled = "disabled" // Do not load the provider or preprocess
+	DecisionModeShadow   = "shadow"   // Decide and record; no violations, no risk
+	DecisionModeAudit    = "audit"    // Evidence-only violations; no risk contribution
+	DecisionModeEnforce  = "enforce"  // Calibrated violations drive the existing ladder
+)
+
+// Ceilings on the runtime-editable decision settings. Validation refuses a
+// value that loosens a bound past its ceiling, so a dashboard edit cannot
+// turn a bounded resource into an unbounded one.
+//
+// The spec names two of these (max_decode_depth above 4, async_queue_size
+// above 10,000) and asks for "and similar" on the rest; the remaining
+// ceilings are chosen here and are not spec values.
+const (
+	MaxDecodeDepthCeiling     = 4
+	AsyncQueueSizeCeiling     = 10000
+	MaxConcurrencyCeiling     = 64
+	MaxInlineWindowsCeiling   = 64
+	MaxInlineTokensCeiling    = 8192
+	MaxAsyncWindowsCeiling    = 1024
+	MaxRepresentationsCeiling = 64
+	MaxExpansionRatioCeiling  = 64
+	MaxInputBytesCeiling      = 8 * 1024 * 1024
+	MaxAnalysisBytesCeiling   = 32 * 1024 * 1024
+)
+
+// DecisionConfig holds semantic injection-detection configuration.
+//
+// Restart-required keys (enabled, required, require_inline, provider,
+// model_path, endpoint) load model assets, gate startup or move the network
+// boundary, and live only here and in ELIDA_DECISION_* env vars. Every other key is runtime-editable through
+// Settings (see settings.go: DecisionSettings).
+type DecisionConfig struct {
+	Enabled  bool `yaml:"enabled"`  // Load model assets (default: false)
+	Required bool `yaml:"required"` // true: bad assets fail startup; false: degraded mode (availability only, never a calibration mismatch)
+	// RequireInline fails startup unless the computed capability is
+	// "inline": the model loaded and verified, and this build has GoMLX's
+	// accelerated kernels (amd64 with GOEXPERIMENT=simd). Set it when a
+	// deployment needs inline protection and must not silently fall back to
+	// async-only on an architecture that cannot meet an inline budget.
+	//
+	// Stronger than Required: an unmet require_inline fails startup
+	// whatever Required says, including when the model fails to load,
+	// because the operator explicitly demanded inline protection. Inert
+	// when Enabled is false or Mode is disabled (nothing is loaded).
+	//
+	// Restart-required: the capability is computed once, at load.
+	RequireInline bool   `yaml:"require_inline"` // default: false
+	Mode          string `yaml:"mode"`           // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
+	Provider      string `yaml:"provider"`       // embedded or systemone (default: embedded)
+	ModelPath     string `yaml:"model_path"`     // Model directory (default: /etc/elida/models/injection)
+	Endpoint      string `yaml:"endpoint"`       // systemone only; content leaves the deployment
+
+	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
+	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
+	InlineTimeout     time.Duration `yaml:"inline_timeout"`     // Global inline deadline: admission, preprocessing, tokenization and inference (default: 50ms)
+	// MaxConcurrency is the physical inference worker pool size (default: 4).
+	// It is split into an inline lane and an async lane that never share
+	// slots (async = 0 at 1, else max(1, n/4); inline = the rest):
+	//
+	//	max_concurrency | inline | async
+	//	1               | 1      | 0 (async continuation disabled)
+	//	2               | 1      | 1
+	//	4               | 3      | 1
+	//	8               | 6      | 2
+	//	16              | 12     | 4
+	//
+	// A worker slot is not one CPU: the embedded pure-Go backend runs each
+	// inference over an intra-op worker pool, measured at about 4.7 CPUs of
+	// work per wall-clock second on an 8-core M1 Pro, so even two busy slots
+	// can occupy most of such a machine. Capping intra-op parallelism is a
+	// follow-up pending Hugot support.
+	MaxConcurrency   int           `yaml:"max_concurrency"`
+	InlineQueueWait  time.Duration `yaml:"inline_queue_wait"`  // Must be 0 in Phase 1 (zero-queue inline)
+	MaxInlineTokens  int           `yaml:"max_inline_tokens"`  // Inline token budget per request (default: 128)
+	MaxInlineWindows int           `yaml:"max_inline_windows"` // Windows scored inline per request (default: 1)
+	MaxAsyncWindows  int           `yaml:"max_async_windows"`  // Windows queued per request (default: 8)
+	AsyncQueueSize   int           `yaml:"async_queue_size"`   // Bounded queue; overflow is a metric (default: 100)
+
+	InlineAdmission DecisionAdmissionConfig     `yaml:"inline_admission"`
+	Preprocessing   DecisionPreprocessingConfig `yaml:"preprocessing"`
+}
+
+// DecisionAdmissionConfig selects which messages may attempt the inline fast
+// lane. Admission also requires an immediately available worker and enough
+// remaining deadline; these flags only decide eligibility.
+type DecisionAdmissionConfig struct {
+	UntrustedToolResults bool `yaml:"untrusted_tool_results"` // default: true
+	EncodedOrObfuscated  bool `yaml:"encoded_or_obfuscated"`  // default: true
+	WeakInjectionSignal  bool `yaml:"weak_injection_signal"`  // default: true
+	ElevatedSessionRisk  bool `yaml:"elevated_session_risk"`  // default: true
+	BroadStrictMode      bool `yaml:"broad_strict_mode"`      // default: false
+}
+
+// DecisionPreprocessingConfig bounds analysis-only preprocessing. Hitting a
+// limit is a coverage gap, never a violation.
+type DecisionPreprocessingConfig struct {
+	MaxInputBytes      int `yaml:"max_input_bytes"`     // default: 262144
+	MaxAnalysisBytes   int `yaml:"max_analysis_bytes"`  // Aggregate across representations; default: 524288
+	MaxRepresentations int `yaml:"max_representations"` // Original plus derived; default: 8
+	MaxDecodeDepth     int `yaml:"max_decode_depth"`    // Nested decode recursion; default: 2
+	MaxExpansionRatio  int `yaml:"max_expansion_ratio"` // Decoded size relative to encoded; default: 4
+}
+
 // Load reads and parses the configuration file
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- config path from trusted CLI flag
@@ -591,6 +934,46 @@ func defaults() *Config {
 		},
 		Panel: PanelConfig{
 			ToolChainArtifact: "", // not seated by default (unchanged behavior)
+		},
+		Decision: DecisionConfig{
+			Enabled:           false, // loads ~90 MiB of model assets; opt-in only
+			Required:          false, // degraded mode rather than fail-startup
+			RequireInline:     false, // async_only is permitted unless an operator says otherwise
+			Mode:              DecisionModeShadow,
+			Provider:          "embedded",
+			ModelPath:         "/etc/elida/models/injection",
+			ThresholdSet:      "v1",
+			ElevatedThreshold: 0.3,
+			InlineTimeout:     50 * time.Millisecond,
+			MaxConcurrency:    4,
+			InlineQueueWait:   0, // Phase 1: inline never waits for a worker
+			MaxInlineTokens:   128,
+			MaxInlineWindows:  1,
+			MaxAsyncWindows:   8,
+			AsyncQueueSize:    100,
+			InlineAdmission: DecisionAdmissionConfig{
+				UntrustedToolResults: true,
+				EncodedOrObfuscated:  true,
+				WeakInjectionSignal:  true,
+				ElevatedSessionRisk:  true,
+				BroadStrictMode:      false,
+			},
+			Preprocessing: DecisionPreprocessingConfig{
+				MaxInputBytes:      262144,
+				MaxAnalysisBytes:   524288,
+				MaxRepresentations: 8,
+				MaxDecodeDepth:     2,
+				MaxExpansionRatio:  4,
+			},
+		},
+		Correlation: CorrelationConfig{
+			Enabled:          false,
+			MaxHistoryEvents: correlation.DefaultMaxHistoryEvents,
+			MaxSessions:      correlation.DefaultMaxSessions,
+			Rules:            DefaultCorrelationRules(),
+			TaxonomyConfig: correlation.TaxonomyConfig{
+				MaxArgumentBytes: correlation.DefaultMaxArgumentBytes,
+			},
 		},
 		TLS: TLSConfig{
 			Enabled:  false,
@@ -805,6 +1188,35 @@ func (c *Config) applyEnvOverrides() {
 		c.OCSF.Syslog.TLS.InsecureSkipVerify = true
 	}
 
+	// Decision overrides — restart-required keys only. Runtime-editable keys
+	// (mode, thresholds, budgets) come from settings.yaml and the dashboard.
+	if os.Getenv("ELIDA_DECISION_ENABLED") == "true" {
+		c.Decision.Enabled = true
+	}
+	if os.Getenv("ELIDA_DECISION_REQUIRED") == "true" {
+		c.Decision.Required = true
+	}
+	if os.Getenv("ELIDA_DECISION_REQUIRE_INLINE") == "true" {
+		c.Decision.RequireInline = true
+	}
+	if v := os.Getenv("ELIDA_DECISION_PROVIDER"); v != "" {
+		c.Decision.Provider = v
+	}
+	if v := os.Getenv("ELIDA_DECISION_MODEL_PATH"); v != "" {
+		c.Decision.ModelPath = v
+	}
+	if v := os.Getenv("ELIDA_DECISION_ENDPOINT"); v != "" {
+		c.Decision.Endpoint = v
+	}
+
+	// Temporal correlation (restart-only; not a settings.yaml key).
+	switch os.Getenv("ELIDA_CORRELATION_ENABLED") {
+	case "true":
+		c.Correlation.Enabled = true
+	case "false":
+		c.Correlation.Enabled = false
+	}
+
 	// Storage overrides
 	if os.Getenv("ELIDA_STORAGE_ENABLED") == "true" {
 		c.Storage.Enabled = true
@@ -940,6 +1352,15 @@ func (r *ValidationResult) Error() error {
 		msgs = append(msgs, e.String())
 	}
 	return fmt.Errorf("configuration invalid:\n  - %s", strings.Join(msgs, "\n  - "))
+}
+
+// reservedSemanticRuleNames are the rule names the semantic decision runner
+// records violations under (runner.RuleSemanticInjection and
+// runner.RuleInjectionElevated; config does not import decision, so a test
+// keeps the two lists in step). No policy rule may use them.
+var reservedSemanticRuleNames = map[string]bool{
+	"semantic_injection": true,
+	"injection_elevated": true,
 }
 
 // validate checks that the configuration is valid
@@ -1085,6 +1506,30 @@ func (c *Config) Validate() *ValidationResult {
 		})
 	}
 
+	// Rule names the semantic decision runner records under are reserved: a
+	// config rule sharing one would merge into the same per-rule display
+	// entry as semantic decisions.
+	for i, r := range c.Policy.Rules {
+		if reservedSemanticRuleNames[r.Name] {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("policy.rules[%d].name", i),
+				Message: fmt.Sprintf("%q is reserved for semantic decisions", r.Name),
+				Hint:    "rename the rule",
+			})
+		}
+		if strings.HasPrefix(r.Name, correlation.RuleNamePrefix) {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("policy.rules[%d].name", i),
+				Message: fmt.Sprintf("%q uses the reserved correlation rule prefix", r.Name),
+				Hint:    "rename the rule",
+			})
+		}
+	}
+
+	if c.Correlation.Enabled || c.Correlation.BuiltinChains || len(c.Correlation.Rules) > 0 || len(c.Correlation.ToolCategories) > 0 {
+		errors = append(errors, c.Correlation.validationErrors()...)
+	}
+
 	// Control API auth
 	if c.Control.Auth.Enabled && c.Control.Auth.APIKey == "" {
 		errors = append(errors, ValidationError{
@@ -1158,6 +1603,12 @@ func (c *Config) Validate() *ValidationResult {
 		}
 	}
 
+	// Semantic decision configuration
+	if de, dw := validateDecision(c); len(de) > 0 || len(dw) > 0 {
+		errors = append(errors, de...)
+		warnings = append(warnings, dw...)
+	}
+
 	// Build result
 	result.Errors = errors
 	result.Warnings = warnings
@@ -1185,6 +1636,184 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	return result
+}
+
+// validateDecision checks the semantic decision configuration. It returns
+// errors and warnings to append to the ValidationResult. A disabled feature
+// is not validated: nothing is loaded and nothing runs, so its settings are
+// inert and must not be able to fail startup.
+// requireInlineInertWarning is the decision.require_inline advisory when
+// semantic detection is off: no model is loaded, so the startup gate never
+// runs and startup succeeds.
+var requireInlineInertWarning = ValidationError{
+	Field:   "decision.require_inline",
+	Message: "require_inline has no effect while decision is disabled (decision.enabled false or decision.mode disabled): no model is loaded and startup does not check the capability",
+	Hint:    "enable decision with mode shadow, audit or enforce for the gate to apply, or set require_inline: false",
+}
+
+func validateDecision(c *Config) (errs, warns []ValidationError) {
+	d := c.Decision
+	if !d.Enabled {
+		if d.RequireInline {
+			return nil, []ValidationError{requireInlineInertWarning}
+		}
+		return nil, nil
+	}
+
+	switch d.Mode {
+	case DecisionModeDisabled, DecisionModeShadow, DecisionModeAudit, DecisionModeEnforce:
+	default:
+		errs = append(errs, ValidationError{
+			Field:   "decision.mode",
+			Message: fmt.Sprintf("unknown mode %q", d.Mode),
+			Hint:    "one of: disabled, shadow, audit, enforce",
+		})
+	}
+
+	switch d.Provider {
+	case "embedded":
+		if d.ModelPath == "" {
+			errs = append(errs, ValidationError{
+				Field:   "decision.model_path",
+				Message: "required for the embedded provider",
+				Hint:    "e.g., /etc/elida/models/injection",
+			})
+		}
+	case "systemone":
+		if d.Endpoint == "" {
+			errs = append(errs, ValidationError{
+				Field:   "decision.endpoint",
+				Message: "required for the systemone provider",
+				Hint:    "e.g., https://decide.internal/v1/score",
+			})
+		} else {
+			warns = append(warns, ValidationError{
+				Field:   "decision.endpoint",
+				Message: "a network provider is configured: request content leaves the deployment boundary",
+				Hint:    "document the provider's retention and data-use terms before enabling",
+			})
+		}
+	default:
+		errs = append(errs, ValidationError{
+			Field:   "decision.provider",
+			Message: fmt.Sprintf("unknown provider %q", d.Provider),
+			Hint:    "one of: embedded, systemone",
+		})
+	}
+
+	if d.RequireInline && d.Mode == DecisionModeDisabled {
+		warns = append(warns, requireInlineInertWarning)
+	} else if d.RequireInline {
+		// Not an error: the same elida.yaml is deployed to every
+		// architecture, and whether a build has accelerated kernels is not
+		// knowable from the config (config deliberately does not import the
+		// embedded provider and its inference backend). The hard failure
+		// happens at startup, in embedded.New, where it is known.
+		warns = append(warns, ValidationError{
+			Field:   "decision.require_inline",
+			Message: "startup will fail unless the computed capability is inline (a verified model plus GoMLX accelerated kernels, which are gated to amd64 with GOEXPERIMENT=simd), whatever decision.required says",
+			Hint:    "set false to permit async-only operation on architectures without accelerated kernels",
+		})
+	}
+
+	if d.ThresholdSet == "" {
+		errs = append(errs, ValidationError{
+			Field:   "decision.threshold_set",
+			Message: "required: thresholds are a versioned artifact, never a free-form number",
+			Hint:    `e.g., "v1"`,
+		})
+	}
+	if d.ElevatedThreshold < 0 || d.ElevatedThreshold > 1 {
+		errs = append(errs, ValidationError{
+			Field:   "decision.elevated_threshold",
+			Message: fmt.Sprintf("%v is outside 0..1", d.ElevatedThreshold),
+		})
+	}
+	if d.InlineTimeout <= 0 {
+		errs = append(errs, ValidationError{
+			Field:   "decision.inline_timeout",
+			Message: fmt.Sprintf("%v must be greater than zero", d.InlineTimeout),
+			Hint:    "the global inline deadline covers admission, preprocessing and inference; e.g., 50ms",
+		})
+	}
+	if d.InlineQueueWait != 0 {
+		errs = append(errs, ValidationError{
+			Field:   "decision.inline_queue_wait",
+			Message: fmt.Sprintf("%v is invalid: inline inference must never wait for worker capacity in Phase 1", d.InlineQueueWait),
+			Hint:    "set 0ms; a message that cannot be admitted immediately falls back to the bounded async path",
+		})
+	}
+
+	// Bounded integers: every one has a floor of 1 and a ceiling, so no
+	// setting can be driven negative or made effectively unbounded.
+	type bound struct {
+		field   string
+		value   int
+		min     int
+		ceiling int
+	}
+	for _, b := range []bound{
+		{"decision.max_concurrency", d.MaxConcurrency, 1, MaxConcurrencyCeiling},
+		{"decision.max_inline_tokens", d.MaxInlineTokens, 1, MaxInlineTokensCeiling},
+		{"decision.max_inline_windows", d.MaxInlineWindows, 1, MaxInlineWindowsCeiling},
+		{"decision.max_async_windows", d.MaxAsyncWindows, 0, MaxAsyncWindowsCeiling},
+		{"decision.async_queue_size", d.AsyncQueueSize, 1, AsyncQueueSizeCeiling},
+		{"decision.preprocessing.max_input_bytes", d.Preprocessing.MaxInputBytes, 1, MaxInputBytesCeiling},
+		{"decision.preprocessing.max_analysis_bytes", d.Preprocessing.MaxAnalysisBytes, 1, MaxAnalysisBytesCeiling},
+		{"decision.preprocessing.max_representations", d.Preprocessing.MaxRepresentations, 1, MaxRepresentationsCeiling},
+		{"decision.preprocessing.max_decode_depth", d.Preprocessing.MaxDecodeDepth, 0, MaxDecodeDepthCeiling},
+		{"decision.preprocessing.max_expansion_ratio", d.Preprocessing.MaxExpansionRatio, 1, MaxExpansionRatioCeiling},
+	} {
+		if b.value < b.min {
+			errs = append(errs, ValidationError{
+				Field:   b.field,
+				Message: fmt.Sprintf("%d is below the minimum of %d", b.value, b.min),
+			})
+			continue
+		}
+		if b.value > b.ceiling {
+			errs = append(errs, ValidationError{
+				Field:   b.field,
+				Message: fmt.Sprintf("%d exceeds the ceiling of %d", b.value, b.ceiling),
+				Hint:    "bounds may be tightened but never loosened past their ceiling",
+			})
+		}
+	}
+
+	// Internal consistency.
+	if d.Preprocessing.MaxAnalysisBytes < d.Preprocessing.MaxInputBytes {
+		errs = append(errs, ValidationError{
+			Field:   "decision.preprocessing.max_analysis_bytes",
+			Message: fmt.Sprintf("%d is below max_input_bytes (%d): the original representation alone would exceed the aggregate budget", d.Preprocessing.MaxAnalysisBytes, d.Preprocessing.MaxInputBytes),
+		})
+	}
+
+	// Without a policy engine nothing can be recorded, so audit and
+	// enforce run as shadow.
+	if (d.Mode == DecisionModeAudit || d.Mode == DecisionModeEnforce) && !c.Policy.Enabled {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: fmt.Sprintf("%s is capped to shadow because the policy engine is disabled (policy.enabled: false): semantic violations have nowhere to be recorded", d.Mode),
+			Hint:    "set policy.enabled: true, or set decision.mode: shadow",
+		})
+	}
+
+	// policy.mode caps decision.mode.
+	if d.Mode == DecisionModeEnforce && c.Policy.Enabled && c.Policy.Mode == "audit" {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: "enforce is capped to audit because policy.mode is audit",
+			Hint:    "set policy.mode: enforce to let semantic violations drive the ladder",
+		})
+	}
+	if d.Mode == DecisionModeEnforce {
+		warns = append(warns, ValidationError{
+			Field:   "decision.mode",
+			Message: "enforce requires recorded calibration evidence for the loaded model and threshold set",
+			Hint:    "run shadow, then audit, and have the threshold artifact reviewed before enforcing",
+		})
+	}
+	return errs, warns
 }
 
 // HasMultiBackend returns true if multi-backend configuration is present

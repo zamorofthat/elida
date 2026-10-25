@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"elida/internal/config"
+	"elida/internal/correlation"
 	"elida/internal/dashboard"
 	"elida/internal/fingerprint"
 	"elida/internal/panel"
@@ -34,6 +36,133 @@ type PanelProvider interface {
 	Members() []panel.MemberInfo
 }
 
+// DecisionProvider exposes semantic decision status for the control API.
+type DecisionProvider interface {
+	DecisionStatus() DecisionStatus
+}
+
+// DecisionStatus is the read-only operational view of semantic detection.
+//
+// This is deliberately on an authenticated route and not on
+// /control/health: model identity, checksums and threshold-set versions are
+// deployment detail, and /control/health is reachable without credentials so
+// liveness probes can use it.
+type DecisionStatus struct {
+	Enabled       bool   `json:"enabled"`
+	Mode          string `json:"mode"`
+	EffectiveMode string `json:"effective_mode"`
+	// Capability is inline, async_only, degraded or disabled.
+	Capability string `json:"capability"`
+	// RequireInline echoes decision.require_inline, so a dashboard can
+	// distinguish "async_only and that is fine" from a deployment that
+	// demanded inline protection (which would not have started without it).
+	RequireInline bool   `json:"require_inline"`
+	Reason        string `json:"reason,omitempty"`
+	Arch          string `json:"arch"`
+	SIMD          bool   `json:"simd"`
+
+	// InlineQueueWaitMs is reported read-only. Phase 1 requires it to be
+	// zero, so it is not in the editable settings surface; an operator sees
+	// the value in force here instead.
+	InlineQueueWaitMs int `json:"inline_queue_wait_ms"`
+
+	Model         string   `json:"model,omitempty"`
+	ModelVersion  string   `json:"model_version,omitempty"`
+	ModelChecksum string   `json:"model_checksum,omitempty"`
+	Signals       []string `json:"signals,omitempty"`
+
+	ThresholdSet        string `json:"threshold_set,omitempty"`
+	ThresholdSetMatches bool   `json:"threshold_set_matches"`
+
+	BreakerOpen bool `json:"breaker_open"`
+
+	// Capacity signals. These, not a fixed requests-per-second figure, are
+	// what tell an operator to add replicas or lower concurrency.
+	InlineCompletionRatio float64 `json:"inline_completion_ratio"`
+	InlineAdmissionRatio  float64 `json:"inline_admission_ratio"`
+	AsyncFallbackRatio    float64 `json:"async_fallback_ratio"`
+	AsyncQueueDepth       int     `json:"async_queue_depth"`
+	AsyncDropped          int64   `json:"async_dropped"`
+	// AsyncLowDepth and AsyncLowDropped are the LOW async queue's depth and
+	// refusals: not-eligible windows, served only while the HIGH queue
+	// (async_queue_depth, async_dropped) is empty.
+	AsyncLowDepth    int              `json:"async_low_depth"`
+	AsyncLowDropped  int64            `json:"async_low_dropped"`
+	MaxInFlight      int64            `json:"max_in_flight"`
+	AdmissionReasons map[string]int64 `json:"admission_reasons,omitempty"`
+
+	// InlineSlots and AsyncWorkers are the two lanes of max_concurrency;
+	// AsyncWorkers 0 means async continuation is disabled.
+	InlineSlots  int `json:"inline_slots"`
+	AsyncWorkers int `json:"async_workers"`
+	// InlinePanics counts provider panics recovered on the inline lane.
+	InlinePanics int64 `json:"inline_panics"`
+	// AsyncCanceled counts queued jobs whose async timeout or shutdown ended
+	// them before an answer: budget outcomes, not provider failures.
+	AsyncCanceled int64 `json:"async_canceled"`
+	// InputRejected counts windows the model had nothing to score in.
+	InputRejected int64 `json:"input_rejected"`
+
+	// CoverageGaps counts preprocessing budget exhaustions and messages not
+	// assessed, by reason. A gap is never a finding and adds no risk; it is
+	// reported so partial analysis is visible instead of being mistaken for a
+	// clean full scan. The key is always present; messages_not_assessed is
+	// present whenever semantic assessment is running.
+	CoverageGaps map[string]int64 `json:"coverage_gaps"`
+	// AlreadyAssessed counts messages skipped because their session already
+	// had them scored. It is not a gap: the content was analyzed earlier.
+	AlreadyAssessed int64 `json:"already_assessed"`
+	// AsyncDroppedNoSession counts async results that arrived for a session
+	// the runner no longer (or never) had bound: ended sessions, and
+	// sessions refused because the live-binding safety limit was reached.
+	AsyncDroppedNoSession int64 `json:"async_dropped_no_session"`
+	// AsyncDroppedDisabled counts async results delivered while decision.mode
+	// was disabled at runtime: dropped unrecorded and settled as unanswered
+	// (also in coverage_gaps as async_dropped_disabled).
+	AsyncDroppedDisabled int64 `json:"async_dropped_disabled"`
+	// ShadowMatchesDropped counts shadow correlation matches discarded
+	// because their session instance ended (or its ID was reused) while
+	// the match was being computed. A content-free integer; 0 when no
+	// shadow correlator runs.
+	ShadowMatchesDropped int64 `json:"shadow_matches_dropped"`
+	// ShadowCorrelation is the semantic runner's shadow correlator's
+	// counters (content-free sizes and counts). Nil when no shadow
+	// correlator runs (correlation disabled, or semantic detection off).
+	// Policy correlation's counters are on /control/flagged/stats.
+	ShadowCorrelation *correlation.Stats `json:"shadow_correlation,omitempty"`
+
+	// Limits are the restart-only values in force; the Settings page shows
+	// them read-only. Changing one needs elida.yaml and a restart.
+	Limits DecisionLimits `json:"limits"`
+}
+
+// DecisionLimits are the restart-only decision settings in force (plan D5,
+// D6, D11).
+type DecisionLimits struct {
+	ThresholdSet      string  `json:"threshold_set"`
+	ElevatedThreshold float64 `json:"elevated_threshold"`
+	InlineTimeoutMs   int     `json:"inline_timeout_ms"`
+	MaxConcurrency    int     `json:"max_concurrency"`
+	MaxInlineTokens   int     `json:"max_inline_tokens"`
+	MaxInlineWindows  int     `json:"max_inline_windows"`
+	MaxAsyncWindows   int     `json:"max_async_windows"`
+	AsyncQueueSize    int     `json:"async_queue_size"`
+}
+
+// DecisionConfigurer applies runtime decision settings (decision.mode and
+// decision.preprocessing.*) to the running semantic detection.
+//
+// ValidateDecisionSettings returns why next cannot be applied (empty when
+// it can) without changing anything: runtime facts such as whether
+// semantic detection is running and whether enforce has a matching
+// threshold set. ApplyDecisionSettings applies next and re-derives the
+// effective mode from policyMode; it is called after every settings save or
+// reset, so a policy.mode change re-caps the runner (plan D8).
+type DecisionConfigurer interface {
+	ValidateDecisionSettings(next config.DecisionSettings, policyMode string) []string
+	ApplyDecisionSettings(next config.DecisionSettings, policyMode string) error
+}
+
 // Handler handles control API requests
 type Handler struct {
 	store         session.Store
@@ -45,7 +174,19 @@ type Handler struct {
 	settingsStore *config.SettingsStore
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
-	mux           *http.ServeMux
+	// decisionProvider reports semantic detection status; nil means the
+	// feature is off.
+	decisionProvider DecisionProvider
+	// decisionConfigurer applies runtime decision settings; nil means
+	// decision changes are validated only by config rules and never applied.
+	decisionConfigurer DecisionConfigurer
+	// settingsMu serializes settings writes (validate, save, apply) so two
+	// concurrent PUTs cannot each validate against the same previous state,
+	// and so applies reach the policy engine and the runner in save order.
+	// No SettingsStore lock is held while it is, and the configurer never
+	// calls back into the handler.
+	settingsMu sync.Mutex
+	mux        *http.ServeMux
 
 	// Authentication
 	authEnabled bool
@@ -149,6 +290,10 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 	// Behavioral panel roster (read-only)
 	h.mux.HandleFunc("/control/panel", h.handlePanel)
 
+	// Semantic decision status (read-only, authenticated like every
+	// /control/* route except /control/health)
+	h.mux.HandleFunc("/control/decision", h.handleDecision)
+
 	return h
 }
 
@@ -177,9 +322,22 @@ func (h *Handler) SetPanel(p PanelProvider) {
 	h.panelProvider = p
 }
 
-// reloadPolicyEngine applies current settings to the policy engine without restart
+// SetDecisionProvider sets the provider used to report semantic decision
+// status. Call it before serving starts.
+func (h *Handler) SetDecisionProvider(p DecisionProvider) {
+	h.decisionProvider = p
+}
+
+// SetDecisionConfigurer sets the configurer that applies runtime decision
+// settings on every settings save. Call it before serving starts.
+func (h *Handler) SetDecisionConfigurer(c DecisionConfigurer) {
+	h.decisionConfigurer = c
+}
+
+// reloadPolicyEngine applies current settings to the policy engine and the
+// decision configurer without restart.
 func (h *Handler) reloadPolicyEngine() {
-	if h.policyEngine == nil || h.settingsStore == nil {
+	if h.settingsStore == nil {
 		return
 	}
 
@@ -191,10 +349,27 @@ func (h *Handler) reloadPolicyEngine() {
 		mode = *merged.Policy.Mode
 	}
 
+	if h.decisionConfigurer != nil {
+		// The runner re-derives its effective mode from policy.mode here
+		// (plan D8), so there is no stale cap to warn about. Applied even
+		// without a policy engine: the runner then caps to shadow itself.
+		if err := h.decisionConfigurer.ApplyDecisionSettings(merged.Decision, mode); err != nil {
+			slog.Error("decision settings not applied", "error", err)
+		}
+	}
+	if h.policyEngine == nil {
+		return
+	}
+
 	cfg := policy.Config{
 		Enabled:        merged.Policy.Enabled != nil && *merged.Policy.Enabled,
 		Mode:           mode,
 		CaptureContent: true,
+		// Temporal correlation is restart-only and not a Settings field
+		// (Plan B D4): carry the block in force, which is elida.yaml's,
+		// unchanged. The engine then keeps its correlator and every
+		// session's correlation state across the reload.
+		Correlation: h.policyEngine.GetConfig().Correlation,
 	}
 
 	if merged.Capture.MaxCaptureSize != nil {
@@ -234,6 +409,14 @@ func (h *Handler) reloadPolicyEngine() {
 
 	// Convert custom rules from Settings to policy Rules
 	for _, cr := range merged.Policy.CustomRules {
+		if config.ReservedRuleName(cr.Name) {
+			// saveSettings refuses new ones; one saved earlier (an older
+			// release, or a hand edit) is kept in settings.yaml. Skipped so
+			// a regex rule never records under the semantic runner's name
+			// or a correlation match's "correlation." name.
+			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
+			continue
+		}
 		rule := policy.Rule{
 			Name:           cr.Name,
 			Type:           policy.RuleType(cr.Type),
@@ -250,6 +433,38 @@ func (h *Handler) reloadPolicyEngine() {
 	}
 
 	h.policyEngine.ReloadConfig(cfg)
+	if h.decisionConfigurer == nil {
+		h.warnStaleDecisionCap(mode)
+	}
+}
+
+// warnStaleDecisionCap logs a WARN when a runtime policy.mode change no
+// longer matches semantic detection's effective mode. It runs only when no
+// DecisionConfigurer is wired (tests and embedders): main wires one, which
+// re-caps the runner on every save instead. Without a configurer the cap
+// computed at startup stays in force, so the effective mode reported at
+// /control/decision is stale until restart. The policy engine's own mode
+// still governs whether its ladder acts.
+func (h *Handler) warnStaleDecisionCap(policyMode string) {
+	if h.decisionProvider == nil {
+		return
+	}
+	st := h.decisionProvider.DecisionStatus()
+	if st.Mode != "enforce" || (st.EffectiveMode != "enforce" && st.EffectiveMode != "audit") {
+		return
+	}
+	want := "enforce"
+	if policyMode == "audit" {
+		want = "audit"
+	}
+	if want != st.EffectiveMode {
+		slog.Warn("policy.mode changed at runtime; semantic detection keeps the effective mode computed at startup until restart",
+			"policy_mode", policyMode,
+			"decision_mode", st.Mode,
+			"decision_effective_mode", st.EffectiveMode,
+			"effective_mode_after_restart", want,
+		)
+	}
 }
 
 // ServeHTTP implements http.Handler
@@ -325,6 +540,12 @@ func secureCompare(a, b string) bool {
 // handleHealth handles GET /control/health
 // Returns minimal payload (status + timestamp) for liveness probes.
 // Version/CaptureMode available only via authenticated endpoints (/control/stats, /control/settings).
+//
+// When semantic detection is wired, it adds "decision": the capability enum
+// and a fixed, content-free reason for it, so an orchestrator can see a
+// degraded or async-only deployment. Model identity, checksums, the
+// architecture detail and every counter stay on the authenticated
+// /control/decision.
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -335,8 +556,38 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now(),
 	}
+	if h.decisionProvider != nil {
+		st := h.decisionProvider.DecisionStatus()
+		// Enums and booleans only: no model identity, checksum, threshold
+		// set, path or provider reason on the unauthenticated route.
+		response["decision"] = map[string]any{
+			"capability":            st.Capability,
+			"reason":                healthCapabilityReason(st.Capability),
+			"effective_mode":        st.EffectiveMode,
+			"threshold_set_matches": st.ThresholdSetMatches,
+			"breaker_open":          st.BreakerOpen,
+		}
+	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+// healthCapabilityReason is the unauthenticated, content-free reason for a
+// capability. It never carries the provider's own reason, which can name
+// file paths or load errors; /control/decision has that.
+func healthCapabilityReason(capability string) string {
+	switch capability {
+	case "inline":
+		return "accelerated inference is available; inline results can protect the current request"
+	case "async_only":
+		return "this build cannot meet an inline budget; results protect later activity only"
+	case "degraded":
+		return "semantic detection was enabled but the model could not be loaded or verified; no detection is active"
+	case "disabled":
+		return "semantic detection is off"
+	default:
+		return "unknown capability"
+	}
 }
 
 // handleStats handles GET /control/stats
@@ -435,6 +686,16 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 
 	snap := sess.Snapshot()
 	info := h.buildSessionInfo(&snap, sess)
+	// Detail path only: the snapshot already holds a deep copy taken under
+	// the session lock.
+	info.SemanticShadow = snap.SemanticShadow
+	info.CorrelationShadow = snap.CorrelationShadow
+	// GetFlaggedSession returns a deep copy, so the list is the caller's.
+	if h.policyEngine != nil {
+		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
+			info.SemanticDecisions = fs.SemanticDecisions
+		}
+	}
 
 	writeJSON(w, http.StatusOK, info)
 }
@@ -529,6 +790,20 @@ type SessionInfo struct {
 	FailedBackends []string       `json:"failed_backends,omitempty"`
 	Terminated     bool           `json:"terminated,omitempty"`
 	MessageCount   int            `json:"message_count"`
+
+	// SemanticShadow is populated only on the single-session detail path.
+	// Fifty entries per session would bloat every list response, and
+	// calibration review happens one session at a time.
+	SemanticShadow []session.SemanticShadow `json:"semantic_shadow,omitempty"`
+	// CorrelationShadow is populated only on the single-session detail
+	// path, for the same reason as SemanticShadow: shadow-mode correlation
+	// matches, calibration data that is never a violation.
+	CorrelationShadow []session.CorrelationShadow `json:"correlation_shadow,omitempty"`
+
+	// SemanticDecisions is the policy engine's per-decision record list
+	// (detail path only, like SemanticShadow): what explains each semantic
+	// violation and enforcement action on this session.
+	SemanticDecisions []policy.SemanticDecision `json:"semantic_decisions,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
@@ -559,11 +834,12 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 		info.EndTime = snap.EndTime
 	}
 
-	// Enrich with policy engine data
+	// Enrich with policy engine data. Only two fields are needed, so read
+	// them directly rather than deep-copying the flagged session per row.
 	if h.policyEngine != nil {
-		if flagged := h.policyEngine.GetFlaggedSession(snap.ID); flagged != nil {
-			info.RiskScore = flagged.RiskScore
-			info.CurrentAction = flagged.CurrentAction
+		if score, action, ok := h.policyEngine.GetFlaggedSessionRisk(snap.ID); ok {
+			info.RiskScore = score
+			info.CurrentAction = action
 		}
 	}
 
@@ -584,6 +860,21 @@ type TurnEntry struct {
 	Severity  string         `json:"severity,omitempty"`
 	Action    string         `json:"action,omitempty"`
 	Backend   string         `json:"backend,omitempty"`
+	// Violation turns only: the occurrence's identity, so the dashboard can
+	// join a turn to the per-decision records and correlation evidence it
+	// fetches from the flagged and session detail endpoints.
+	EventID       string           `json:"event_id,omitempty"`
+	EventCategory string           `json:"event_category,omitempty"`
+	SourceRole    string           `json:"source_role,omitempty"`
+	EvidenceOnly  bool             `json:"evidence_only,omitempty"`
+	Correlation   *TurnCorrelation `json:"correlation,omitempty"`
+}
+
+// TurnCorrelation summarizes a correlation match on a violation turn: the
+// full evidence is on GET /control/flagged/{id} and the history record.
+type TurnCorrelation struct {
+	MatchID    string `json:"match_id"`
+	EventCount int    `json:"event_count"`
 }
 
 // TurnsResponse is the response for GET /control/sessions/{id}/turns.
@@ -634,14 +925,15 @@ func (h *Handler) getSessionTurns(w http.ResponseWriter, r *http.Request, id str
 	if h.policyEngine != nil {
 		if flagged := h.policyEngine.GetFlaggedSession(id); flagged != nil {
 			for _, v := range flagged.Violations {
-				turns = append(turns, TurnEntry{
-					Timestamp: v.Timestamp,
-					Type:      "violation",
-					RuleName:  v.RuleName,
-					Content:   v.Description,
-					Severity:  string(v.Severity),
-					Action:    v.Action,
-				})
+				turn := TurnEntry{
+					Timestamp: v.Timestamp, Type: "violation", RuleName: v.RuleName, Content: v.Description,
+					Severity: string(v.Severity), Action: v.Action,
+					EventID: v.EventID, EventCategory: v.EventCategory, SourceRole: v.SourceRole, EvidenceOnly: v.EvidenceOnly,
+				}
+				if v.Correlation != nil {
+					turn.Correlation = &TurnCorrelation{MatchID: v.Correlation.MatchID, EventCount: len(v.Correlation.EventIDs)}
+				}
+				turns = append(turns, turn)
 			}
 		}
 	}
@@ -733,6 +1025,27 @@ type panelMemberOut struct {
 	Version string  `json:"version"`
 	Shadow  bool    `json:"shadow"`
 	Weight  float64 `json:"weight"`
+}
+
+// handleDecision handles GET /control/decision
+func (h *Handler) handleDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.decisionProvider == nil {
+		// Not wired means the feature is off. Report that, rather than 404:
+		// a dashboard needs to distinguish "disabled" from "missing route".
+		// The configured mode is unknown here; main always wires a provider
+		// that reports it.
+		writeJSON(w, http.StatusOK, DecisionStatus{
+			Capability:    "disabled",
+			EffectiveMode: "disabled",
+			CoverageGaps:  map[string]int64{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.decisionProvider.DecisionStatus())
 }
 
 // handlePanel handles GET /control/panel
@@ -995,6 +1308,12 @@ func (h *Handler) handlePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFlagged handles GET /control/flagged
+//
+// It lists the policy engine's flagged sessions: live sessions, plus ended
+// sessions retained because their ladder action was block or terminate
+// (policy.Engine.ReleaseFlaggedSession, bounded by
+// policy.MaxRetainedFlaggedSessions). Other ended sessions are released at
+// session end; their history is in SQLite when storage is enabled.
 func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1014,6 +1333,14 @@ func (h *Handler) handleFlagged(w http.ResponseWriter, r *http.Request) {
 		flagged = h.policyEngine.GetFlaggedSessionsBySeverity(policy.Severity(minSeverity))
 	} else {
 		flagged = h.policyEngine.GetFlaggedSessions()
+	}
+
+	// The list stays small: per-decision records are served by
+	// /control/flagged/{id} and the session detail path only. The dropped
+	// count is kept (it is one small number). Each entry is a deep copy, so
+	// this changes nothing in the engine.
+	for _, fs := range flagged {
+		fs.SemanticDecisions = nil
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -1667,20 +1994,12 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.settingsStore.SaveLocal(settings); err != nil {
-			slog.Error("failed to save settings", "error", err)
-			http.Error(w, "Failed to save settings", http.StatusInternalServerError)
-			return
-		}
-
-		h.reloadPolicyEngine()
-		slog.Info("settings saved and applied")
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":  "saved",
-			"message": "Settings applied instantly (no restart required)",
-		})
+		h.saveSettings(w, r, settings, "settings saved and applied", "Settings applied instantly (no restart required)")
 
 	case http.MethodDelete:
+		h.settingsMu.Lock()
+		defer h.settingsMu.Unlock()
+		prevDecision := h.settingsStore.GetMerged().Decision
 		if err := h.settingsStore.ResetToDefault(); err != nil {
 			slog.Error("failed to reset settings", "error", err)
 			http.Error(w, "Failed to reset settings", http.StatusInternalServerError)
@@ -1688,6 +2007,7 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.reloadPolicyEngine()
+		h.logDecisionChanges(r, config.DecisionSettingsChanges(prevDecision, h.settingsStore.GetMerged().Decision))
 		slog.Info("settings reset to defaults")
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"status":  "reset",
@@ -1696,6 +2016,107 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// saveSettings validates a settings PUT, saves it and applies it; both PUT
+// routes use it. A custom rule new in this save may not take a name
+// reserved for semantic detection or temporal correlation (one already
+// saved is kept, with a WARN).
+// A change to decision.* is checked first against config rules
+// (restart-only keys, plan D11; enforce under policy.mode audit, D8), then
+// the ?confirm=enforce confirmation (D7), then the configurer's runtime
+// checks. Any problem refuses the whole save with 400 and saves nothing.
+// On success every changed decision key is logged once (D10). Decision keys
+// equal to their elida.yaml value are not stored (DecisionOverridesOnly).
+func (h *Handler) saveSettings(w http.ResponseWriter, r *http.Request, settings config.Settings, logMessage, okMessage string) {
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+
+	prev := h.settingsStore.GetMerged()
+	next := h.settingsStore.PreviewMerged(settings)
+	nextMode := "enforce"
+	if next.Policy.Mode != nil {
+		nextMode = *next.Policy.Mode
+	}
+
+	var problems []string
+	if nextMode != "enforce" && nextMode != "audit" && (prev.Policy.Mode == nil || *prev.Policy.Mode != nextMode) {
+		// The policy mode also caps the semantic runner, which refuses
+		// anything else; refuse it here rather than half-apply the save.
+		problems = append(problems, "policy.mode: "+strconv.Quote(nextMode)+" must be enforce or audit")
+	}
+	// A reserved name new in this save is refused. One already saved (by an
+	// earlier release, or by hand) is kept as written, with a WARN: the
+	// reload path skips it, and refusing it would block every unrelated
+	// save, emergency toggles included, until it is renamed.
+	saved := make(map[string]bool, len(prev.Policy.CustomRules))
+	for _, cr := range prev.Policy.CustomRules {
+		saved[cr.Name] = true
+	}
+	var keptReserved []string
+	for _, cr := range next.Policy.CustomRules {
+		if !config.ReservedRuleName(cr.Name) {
+			continue
+		}
+		if saved[cr.Name] {
+			keptReserved = append(keptReserved, cr.Name)
+			continue
+		}
+		problems = append(problems, "policy.custom_rules: the rule name "+strconv.Quote(cr.Name)+" is reserved for semantic detection or temporal correlation; choose another name")
+	}
+	changes := config.DecisionSettingsChanges(prev.Decision, next.Decision)
+	if len(changes) > 0 {
+		problems = append(problems, config.ValidateDecisionEdit(prev.Decision, next.Decision, h.settingsStore.GetDefaults().Decision, nextMode)...)
+		for _, c := range changes {
+			if c.Key == "decision.mode" && c.New == config.DecisionModeEnforce && r.URL.Query().Get("confirm") != "enforce" {
+				problems = append(problems, "decision.mode: changing to enforce lets semantic findings drive the risk ladder; resend with ?confirm=enforce to confirm")
+			}
+		}
+		// Runtime checks only for an edit that passed the config rules:
+		// their messages would otherwise repeat or contradict them.
+		if len(problems) == 0 && h.decisionConfigurer != nil {
+			problems = h.decisionConfigurer.ValidateDecisionSettings(next.Decision, nextMode)
+		}
+	}
+	if len(problems) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "settings refused", "problems": problems})
+		return
+	}
+
+	// settings.yaml keeps only real decision overrides: a key equal to its
+	// elida.yaml value is dropped (the merged value is the same), so a
+	// dashboard round trip cannot pin elida.yaml's values and override a
+	// later elida.yaml edit at startup.
+	settings.Decision = config.DecisionOverridesOnly(settings.Decision, h.settingsStore.GetDefaults().Decision)
+	if err := h.settingsStore.SaveLocal(settings); err != nil {
+		slog.Error("failed to save settings", "error", err)
+		http.Error(w, "Failed to save settings", http.StatusInternalServerError)
+		return
+	}
+	for _, name := range keptReserved {
+		slog.Warn("saved custom rule uses a name reserved for semantic detection or temporal correlation; it is kept but skipped at runtime, rename it", "rule", name)
+	}
+	h.reloadPolicyEngine()
+	h.logDecisionChanges(r, changes)
+	slog.Info(logMessage)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "saved", "message": okMessage})
+}
+
+// logDecisionChanges writes one audit line per changed decision key (plan
+// D10): key, previous and new values (configuration only, never content),
+// the caller's address, and whether the request passed API-key
+// authentication (with auth enabled, a request reaches a handler only after
+// passing it). No credential is ever logged.
+func (h *Handler) logDecisionChanges(r *http.Request, changes []config.DecisionSettingChange) {
+	for _, c := range changes {
+		slog.Info("decision setting changed",
+			"key", c.Key,
+			"previous", c.Previous,
+			"new", c.New,
+			"remote_addr", r.RemoteAddr,
+			"authenticated", h.authEnabled,
+		)
 	}
 }
 
@@ -1743,23 +2164,13 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.settingsStore.SaveLocal(settings); err != nil {
-			slog.Error("failed to save settings", "error", err)
-			http.Error(w, "Failed to save settings", http.StatusInternalServerError)
-			return
-		}
-
-		// Dynamically reload policy engine with new settings
-		h.reloadPolicyEngine()
-
-		slog.Info("local settings saved and applied")
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"status":  "saved",
-			"message": "Settings saved and applied (no restart required)",
-		})
+		h.saveSettings(w, r, settings, "local settings saved and applied", "Settings saved and applied (no restart required)")
 
 	case http.MethodDelete:
 		// Reset to defaults (remove local customizations)
+		h.settingsMu.Lock()
+		defer h.settingsMu.Unlock()
+		prevDecision := h.settingsStore.GetMerged().Decision
 		if err := h.settingsStore.ResetToDefault(); err != nil {
 			slog.Error("failed to reset settings", "error", err)
 			http.Error(w, "Failed to reset settings", http.StatusInternalServerError)
@@ -1768,6 +2179,7 @@ func (h *Handler) handleSettingsLocal(w http.ResponseWriter, r *http.Request) {
 
 		// Dynamically reload policy engine with default settings
 		h.reloadPolicyEngine()
+		h.logDecisionChanges(r, config.DecisionSettingsChanges(prevDecision, h.settingsStore.GetMerged().Decision))
 
 		slog.Info("settings reset to defaults and applied")
 		writeJSON(w, http.StatusOK, map[string]interface{}{

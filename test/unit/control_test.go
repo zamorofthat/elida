@@ -961,6 +961,57 @@ func TestHandler_Policy_NoPolicyEngine(t *testing.T) {
 	}
 }
 
+func TestHandler_ListSessions_RiskFieldsMatchFlaggedSession(t *testing.T) {
+	handler, manager, engine := newTestHandlerWithPolicy()
+
+	flagged := manager.GetOrCreate("sess-flagged", "http://backend", "127.0.0.1")
+	plain := manager.GetOrCreate("sess-plain", "http://backend", "127.0.0.1")
+	engine.AddExternalRiskPoints(flagged.ID, 10, "test_risk")
+	want := engine.GetFlaggedSession(flagged.ID)
+	if want == nil || want.RiskScore <= 0 {
+		t.Fatalf("fixture: the session must be flagged with a score: %+v", want)
+	}
+
+	req := httptest.NewRequest("GET", "/control/sessions", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	rows := map[string]map[string]any{}
+	for _, row := range resp.Sessions {
+		id, _ := row["id"].(string)
+		rows[id] = row
+	}
+	f, ok := rows[flagged.ID]
+	if !ok {
+		t.Fatalf("flagged session missing from listing: %v", resp.Sessions)
+	}
+	// current_action is omitempty: absent decodes as "", which must equal
+	// the flagged session's action exactly as before.
+	gotAction, _ := f["current_action"].(string)
+	if f["risk_score"] != want.RiskScore || gotAction != want.CurrentAction {
+		t.Fatalf("flagged row risk_score/current_action = %v/%v, want %v/%v",
+			f["risk_score"], f["current_action"], want.RiskScore, want.CurrentAction)
+	}
+	p, ok := rows[plain.ID]
+	if !ok {
+		t.Fatalf("plain session missing from listing: %v", resp.Sessions)
+	}
+	if _, has := p["risk_score"]; has {
+		t.Fatalf("an unflagged session must omit risk_score, got %v", p["risk_score"])
+	}
+	if _, has := p["current_action"]; has {
+		t.Fatalf("an unflagged session must omit current_action, got %v", p["current_action"])
+	}
+}
+
 func TestHandler_BuildSessionInfo_WithPolicy(t *testing.T) {
 	handler, manager, engine := newTestHandlerWithPolicy()
 

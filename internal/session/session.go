@@ -79,6 +79,15 @@ type Session struct {
 	// Tool call history (who called what)
 	ToolCallHistory []ToolCallRecord `json:"tool_call_history,omitempty"`
 
+	// Shadow-mode semantic decisions, newest first, capped at
+	// MaxSemanticShadow. Never contributes to risk.
+	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+
+	// Shadow-mode correlation matches, newest first, capped at
+	// MaxCorrelationShadow. Calibration data only: never a violation,
+	// never risk.
+	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+
 	// Conversation history for failover/replay
 	Messages     []Message `json:"messages,omitempty"`
 	SystemPrompt string    `json:"system_prompt,omitempty"`
@@ -95,6 +104,75 @@ type ToolCallRecord struct {
 	RequestID string         `json:"request_id,omitempty"`
 	Arguments map[string]any `json:"arguments,omitempty"`
 	Result    string         `json:"result,omitempty"`
+}
+
+// MaxSemanticShadow caps the per-session shadow-decision list.
+//
+// Shadow mode exists to gather calibration data, not to keep a complete
+// history: fifty newest entries is enough to see how a session scored
+// without letting a long-running session grow without bound.
+const MaxSemanticShadow = 50
+
+// SemanticShadow is one shadow-mode semantic decision, retained for
+// calibration review.
+//
+// It carries probabilities, locations and model identity, never the window
+// text. Raw content is persisted only under the existing capture and
+// redaction policy, and threshold selection does not need it.
+type SemanticShadow struct {
+	Timestamp        time.Time `json:"timestamp"`
+	DecisionID       string    `json:"decision_id"`
+	Signal           string    `json:"signal"`
+	Probability      float64   `json:"probability"`
+	AuxProbability   float64   `json:"aux_probability,omitempty"`
+	Vetoed           bool      `json:"vetoed,omitempty"`
+	SourceRole       string    `json:"source_role"`
+	MessageIndex     int       `json:"message_index"`
+	Transform        string    `json:"transform,omitempty"`
+	TransformDepth   int       `json:"transform_depth,omitempty"`
+	WindowStartByte  int       `json:"window_start_byte"`
+	WindowEndByte    int       `json:"window_end_byte"`
+	Model            string    `json:"model"`
+	ModelVersion     string    `json:"model_version"`
+	ModelChecksum    string    `json:"model_checksum,omitempty"`
+	ThresholdSet     string    `json:"threshold_set"`
+	ExecutionMode    string    `json:"execution_mode"`   // "inline" or "async"
+	ProtectionScope  string    `json:"protection_scope"` // see decision.ProtectionScope
+	CoverageComplete bool      `json:"coverage_complete"`
+	LatencyMs        int64     `json:"latency_ms"`
+}
+
+// MaxCorrelationShadow caps the per-session shadow correlation list, as
+// MaxSemanticShadow caps the shadow decision list.
+const MaxCorrelationShadow = 50
+
+// CorrelationShadow is one temporal-correlation match over shadow-mode
+// semantic decisions. It is calibration data: it records what a correlation
+// rule would have matched had the decisions been recorded as violations,
+// and it is never a violation. EventIDs are the contributing DecisionIDs
+// (see SemanticShadow) recorded under this session ID while this session
+// instance was bound to the semantic runner: a session that reuses an
+// ended session's ID starts with empty shadow correlation state. It carries
+// identifiers, categories and times, never content.
+type CorrelationShadow struct {
+	Timestamp time.Time `json:"timestamp"`
+	MatchID   string    `json:"match_id"`
+	Rule      string    `json:"rule"`
+	Shape     string    `json:"shape"`
+	Severity  string    `json:"severity"`
+	// Mode is the matched rule's configured mode (audit or enforce). In
+	// shadow it is informational: a shadow match never moves risk.
+	Mode       string    `json:"mode"`
+	EventIDs   []string  `json:"event_ids"`
+	Categories []string  `json:"categories"`
+	FirstEvent time.Time `json:"first_event"`
+	LastEvent  time.Time `json:"last_event"`
+}
+
+func (c CorrelationShadow) clone() CorrelationShadow {
+	c.EventIDs = append([]string(nil), c.EventIDs...)
+	c.Categories = append([]string(nil), c.Categories...)
+	return c
 }
 
 // Message represents a single message in the conversation history
@@ -275,6 +353,72 @@ func (s *Session) GetToolCallHistory() []ToolCallRecord {
 	result := make([]ToolCallRecord, len(s.ToolCallHistory))
 	copy(result, s.ToolCallHistory)
 	return result
+}
+
+// RecordSemanticShadow prepends a shadow decision, newest first, and drops
+// the oldest beyond MaxSemanticShadow.
+func (s *Session) RecordSemanticShadow(sh SemanticShadow) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := len(s.SemanticShadow) + 1
+	if n > MaxSemanticShadow {
+		n = MaxSemanticShadow
+	}
+	out := make([]SemanticShadow, n)
+	out[0] = sh
+	copy(out[1:], s.SemanticShadow)
+	s.SemanticShadow = out
+}
+
+// GetSemanticShadow returns a copy of the shadow list, newest first.
+func (s *Session) GetSemanticShadow() []SemanticShadow {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.SemanticShadow == nil {
+		return nil
+	}
+	out := make([]SemanticShadow, len(s.SemanticShadow))
+	copy(out, s.SemanticShadow)
+	return out
+}
+
+// RecordCorrelationShadow prepends a shadow correlation match, newest
+// first, and drops the oldest beyond MaxCorrelationShadow. The entry is
+// deep-copied, so the caller keeps its slices.
+func (s *Session) RecordCorrelationShadow(cs CorrelationShadow) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := len(s.CorrelationShadow) + 1
+	if n > MaxCorrelationShadow {
+		n = MaxCorrelationShadow
+	}
+	out := make([]CorrelationShadow, n)
+	out[0] = cs.clone()
+	copy(out[1:], s.CorrelationShadow)
+	s.CorrelationShadow = out
+}
+
+// GetCorrelationShadow returns a deep copy of the shadow correlation list,
+// newest first.
+func (s *Session) GetCorrelationShadow() []CorrelationShadow {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneCorrelationShadow(s.CorrelationShadow)
+}
+
+// cloneCorrelationShadow deep-copies a correlation_shadow list. The caller
+// holds the session lock.
+func cloneCorrelationShadow(in []CorrelationShadow) []CorrelationShadow {
+	if in == nil {
+		return nil
+	}
+	out := make([]CorrelationShadow, len(in))
+	for i, c := range in {
+		out[i] = c.clone()
+	}
+	return out
 }
 
 // GetSystemPromptHash returns the cached system prompt hash
@@ -614,6 +758,11 @@ func (s *Session) Snapshot() Session {
 		snap.ToolCallHistory = make([]ToolCallRecord, len(s.ToolCallHistory))
 		copy(snap.ToolCallHistory, s.ToolCallHistory)
 	}
+	if s.SemanticShadow != nil {
+		snap.SemanticShadow = make([]SemanticShadow, len(s.SemanticShadow))
+		copy(snap.SemanticShadow, s.SemanticShadow)
+	}
+	snap.CorrelationShadow = cloneCorrelationShadow(s.CorrelationShadow)
 	if s.Messages != nil {
 		snap.Messages = make([]Message, len(s.Messages))
 		copy(snap.Messages, s.Messages)

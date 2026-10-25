@@ -2,8 +2,11 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -333,8 +336,12 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 
 	var rec otellog.Record
 	rec.SetTimestamp(time.Now())
-	rec.SetSeverity(otelSeverity(v.Severity))
-	rec.SetBody(attribute.StringValue("policy violation: " + v.RuleName))
+	rec.SetSeverity(otelSeverity(v.exportedSeverity()))
+	body := "policy violation: " + v.RuleName
+	if v.EvidenceOnly {
+		body = "policy evidence (no risk contributed): " + v.RuleName
+	}
+	rec.SetBody(attribute.StringValue(body))
 	rec.AddAttributes(
 		// GenAI semconv
 		attribute.String("gen_ai.conversation.id", sessionID),
@@ -347,9 +354,106 @@ func (p *Provider) EmitViolationLog(ctx context.Context, sessionID string, v Vio
 		attribute.String("elida.violation.matched_text", truncateBody(p.redact(v.MatchedText), 200)),
 		attribute.String("elida.violation.action", v.Action),
 		attribute.String("elida.violation.description", v.Description),
+		attribute.Bool("elida.violation.evidence_only", v.EvidenceOnly),
 	)
+	// Only a semantic or correlation violation carries an event ID and its
+	// metadata, so a plain violation keeps exactly its key set.
+	if v.Semantic != nil || v.Correlation != nil {
+		// A blanked event ID is left out, as in the OCSF finding.
+		if id := safeToken(v.EventID); id != "" {
+			rec.AddAttributes(attribute.String("elida.violation.event_id", id))
+		}
+	}
+	if v.Semantic != nil {
+		rec.AddAttributes(semanticAttributes("elida.semantic.", *v.Semantic)...)
+	}
+	if v.Correlation != nil {
+		rec.AddAttributes(correlationAttributes("elida.correlation.", *v.Correlation)...)
+	}
 
 	// Trace correlation
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitSemanticDecisionLog emits one OTEL log record for one stored semantic
+// decision. Strings pass safeToken; there is no content to redact. An
+// evidence-only decision is logged at Info, as evidence-only violations are.
+func (p *Provider) EmitSemanticDecisionLog(ctx context.Context, sessionID string, d SemanticDecision, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+	rule := safeToken(d.RuleName)
+	var rec otellog.Record
+	ts := d.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	rec.SetTimestamp(ts)
+	sev := d.Severity
+	body := "semantic decision: " + rule
+	if d.EvidenceOnly {
+		sev = "info"
+		body += " (evidence only, no risk contributed)"
+	}
+	rec.SetSeverity(otelSeverity(sev))
+	rec.SetBody(attribute.StringValue(body))
+	rec.AddAttributes(
+		attribute.String("gen_ai.conversation.id", sessionID),
+		attribute.String("gen_ai.provider.name", providerName),
+		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.String("elida.semantic.rule", rule),
+		attribute.String("elida.semantic.event_category", safeToken(d.EventCategory)),
+		attribute.String("elida.semantic.severity", safeToken(d.Severity)),
+		attribute.String("elida.semantic.source_role", safeToken(d.SourceRole)),
+		attribute.Int("elida.semantic.message_index", d.MessageIndex),
+		attribute.Bool("elida.semantic.evidence_only", d.EvidenceOnly),
+		attribute.Float64("elida.semantic.would_contribute_points", d.WouldContributePoints),
+	)
+	// A blanked event ID is left out, as on the violation exports.
+	if id := safeToken(d.EventID); id != "" {
+		rec.AddAttributes(attribute.String("elida.semantic.event_id", id))
+	}
+	rec.AddAttributes(semanticAttributes("elida.semantic.", d.Metadata)...)
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
+const correlationShadowConversationIDDomain = "elida.correlation_shadow.session.v1\x00"
+
+// correlationShadowConversationID derives a stable, content-free identifier
+// for the request-controlled session ID used only by the shadow-log path.
+// The domain prevents this digest from being confused with an identifier
+// derived for another purpose.
+func correlationShadowConversationID(sessionID string) string {
+	digest := sha256.Sum256([]byte(correlationShadowConversationIDDomain + sessionID))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// EmitCorrelationShadowLog emits one Info log record for one shadow-mode
+// correlation match. The request-controlled session ID is represented by a
+// domain-separated digest; every other string passes safeToken and lists use
+// the export caps.
+func (p *Provider) EmitCorrelationShadowLog(ctx context.Context, sessionID string, s CorrelationShadow, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+	var rec otellog.Record
+	ts := s.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	rec.SetTimestamp(ts)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetBody(attribute.StringValue("shadow correlation match: " + safeToken(s.Metadata.Rule) + " (calibration only, never a violation)"))
+	rec.AddAttributes(
+		attribute.String("gen_ai.conversation.id", safeToken(correlationShadowConversationID(sessionID))),
+		attribute.String("gen_ai.provider.name", safeToken(providerName)),
+		attribute.String("gen_ai.request.model", safeToken(modelOrUnknown(model))),
+		attribute.Bool("elida.correlation.shadow", true),
+		attribute.String("elida.correlation.severity", safeToken(s.Severity)),
+	)
+	rec.AddAttributes(correlationAttributes("elida.correlation.", s.Metadata)...)
 	setTraceContext(&rec, ctx)
 	p.logger.Emit(ctx, rec)
 }
@@ -607,6 +711,16 @@ const (
 	AttrSDRAlgorithm               = "elida.sdr.algorithm"
 	AttrSDRCanonicalizationVersion = "elida.sdr.canonicalization_version"
 	AttrSDREventCount              = "elida.sdr.event_count"
+
+	// Semantic decision attributes: how many stored semantic decisions the
+	// session exported as logs (set only when OTEL logs are on), and how many
+	// the policy engine dropped past its per-session cap.
+	AttrSemanticDecisionCount   = "elida.semantic.decisions.count"
+	AttrSemanticDecisionDropped = "elida.semantic.decisions.dropped"
+
+	// AttrCorrelationShadowCount is how many shadow correlation matches the
+	// session exported as logs (set only when OTEL logs are on).
+	AttrCorrelationShadowCount = "elida.correlation.shadow.count"
 )
 
 // Violation represents a policy violation for telemetry export
@@ -619,6 +733,214 @@ type Violation struct {
 	EventCategory string
 	FrameworkRef  string
 	SourceRole    string
+	// EvidenceOnly marks a violation recorded as evidence for correlation
+	// that contributed no risk (semantic detection in audit mode, and every
+	// injection_elevated event). Exports carry the flag, report it at
+	// informational severity, and leave it out of the session's max
+	// severity, so a SIEM never reads audit evidence as a finding.
+	EvidenceOnly bool
+	// EventID is the policy engine's stable ID for the occurrence behind
+	// this violation. It is exported for semantic and correlation
+	// violations only (for a correlation match it is the match ID).
+	EventID string
+	// Semantic is the representative decision's metadata for a semantic
+	// rule: scores, identifiers and offsets, never content. Every string in
+	// it is exported through safeToken.
+	Semantic *SemanticMetadata
+	// Correlation is a temporal-correlation match's evidence: IDs, enums,
+	// counts and times, never content. Every string is exported through
+	// safeToken and every list through the MaxExportedCorrelation* caps.
+	Correlation *CorrelationMetadata
+}
+
+// SemanticMetadata is a semantic decision's metadata for export, the
+// telemetry mirror of storage.SemanticEvidence: scores, identifiers and
+// offsets, never request content.
+type SemanticMetadata struct {
+	Signal           string
+	Probability      float64
+	AuxProbability   float64
+	Vetoed           bool
+	Model            string
+	ModelVersion     string
+	ModelChecksum    string
+	ThresholdSet     string
+	DecisionID       string
+	Transform        string
+	TransformDepth   int
+	WindowStartByte  int
+	WindowEndByte    int
+	CoverageComplete bool
+	ExecutionMode    string
+	ProtectionScope  string
+}
+
+// semanticTokenRE matches the identifier-shaped values semantic metadata
+// legitimately holds: decision IDs, model names and versions, checksums,
+// transform chains ("base64_decode>url_decode"), threshold sets, modes and
+// scopes. Free text (anything with a space, newline, quote or non-ASCII
+// letter) does not match.
+var semanticTokenRE = regexp.MustCompile(`^[A-Za-z0-9._:>+/=-]{1,128}$`)
+
+// safeToken returns s if it is identifier-shaped, else "". It is a shape
+// backstop for semantic metadata, not a proof that content cannot leave: it
+// rejects free text (spaces, newlines and other control characters, quotes,
+// non-ASCII) and anything over 128 bytes, but an identifier-shaped string
+// passes whatever it encodes. The privacy argument is the sources: every
+// exported field comes from the model manifest, config, hex IDs or the
+// fixed preprocess transform names (the longest chain is 87 bytes), so the
+// fields must keep being populated only from those.
+func safeToken(s string) string {
+	if semanticTokenRE.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+// semanticAttrNames is the export allowlist, in export order. Span events
+// prefix it with "semantic.", logs with "elida.semantic."; OCSF uses the
+// bare names inside unmapped."elida.semantic".
+var semanticAttrNames = []string{"signal", "probability", "aux_probability", "vetoed", "model", "model_version",
+	"model_checksum", "threshold_set", "decision_id", "transform", "transform_depth", "window_start_byte",
+	"window_end_byte", "coverage_complete", "execution_mode", "protection_scope"}
+
+// semanticAttributes renders m as attributes named prefix+semanticAttrNames.
+func semanticAttributes(prefix string, m SemanticMetadata) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(prefix+"signal", safeToken(m.Signal)),
+		attribute.Float64(prefix+"probability", m.Probability),
+		attribute.Float64(prefix+"aux_probability", m.AuxProbability),
+		attribute.Bool(prefix+"vetoed", m.Vetoed),
+		attribute.String(prefix+"model", safeToken(m.Model)),
+		attribute.String(prefix+"model_version", safeToken(m.ModelVersion)),
+		attribute.String(prefix+"model_checksum", safeToken(m.ModelChecksum)),
+		attribute.String(prefix+"threshold_set", safeToken(m.ThresholdSet)),
+		attribute.String(prefix+"decision_id", safeToken(m.DecisionID)),
+		attribute.String(prefix+"transform", safeToken(m.Transform)),
+		attribute.Int(prefix+"transform_depth", m.TransformDepth),
+		attribute.Int(prefix+"window_start_byte", m.WindowStartByte),
+		attribute.Int(prefix+"window_end_byte", m.WindowEndByte),
+		attribute.Bool(prefix+"coverage_complete", m.CoverageComplete),
+		attribute.String(prefix+"execution_mode", safeToken(m.ExecutionMode)),
+		attribute.String(prefix+"protection_scope", safeToken(m.ProtectionScope)),
+	}
+}
+
+// MaxExportedCorrelationEventIDs and MaxExportedCorrelationCategories cap
+// the list attributes of a correlation export (Plan C D10). The engine's
+// own ceilings (32 repeated events, 8 sequence steps) make them exact today;
+// they are hard caps in their own right so a future engine change cannot
+// grow an attribute past them. event_count always reports the full count.
+const (
+	MaxExportedCorrelationEventIDs   = 32
+	MaxExportedCorrelationCategories = 8
+)
+
+// correlationAttrNames is the correlation export allowlist, in export
+// order. Span events prefix it with "correlation.", logs with
+// "elida.correlation."; OCSF uses the bare names inside
+// unmapped."elida.correlation".
+var correlationAttrNames = []string{"match_id", "rule", "shape", "mode", "event_count", "categories", "first_event", "last_event", "event_ids"}
+
+// safeTokens applies safeToken to each entry, drops the blanked ones and
+// keeps the first limit survivors.
+func safeTokens(in []string, limit int) []string {
+	out := make([]string, 0, min(len(in), limit))
+	for _, s := range in {
+		if len(out) == limit {
+			break
+		}
+		if t := safeToken(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// distinctTokens keeps the first appearance of each entry, then applies
+// safeTokens with limit.
+func distinctTokens(in []string, limit int) []string {
+	seen := make(map[string]bool, len(in))
+	uniq := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			uniq = append(uniq, s)
+		}
+	}
+	return safeTokens(uniq, limit)
+}
+
+// safeTime renders t as RFC3339Nano in UTC, a shape safeToken accepts, or
+// "" for the zero time.
+func safeTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// CorrelationMetadata is a correlation match's evidence for export, the
+// telemetry mirror of storage.CorrelationEvidence plus the full event
+// count: identifiers, enums, counts and times, never content. Lists are
+// capped on export (MaxExportedCorrelation*), strings pass safeToken.
+type CorrelationMetadata struct {
+	MatchID    string
+	Rule       string
+	Shape      string
+	Mode       string
+	EventCount int
+	Categories []string
+	FirstEvent time.Time
+	LastEvent  time.Time
+	EventIDs   []string
+}
+
+// correlationAttributes renders m as attributes named prefix+correlationAttrNames.
+func correlationAttributes(prefix string, m CorrelationMetadata) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String(prefix+"match_id", safeToken(m.MatchID)),
+		attribute.String(prefix+"rule", safeToken(m.Rule)),
+		attribute.String(prefix+"shape", safeToken(m.Shape)),
+		attribute.String(prefix+"mode", safeToken(m.Mode)),
+		attribute.Int(prefix+"event_count", m.EventCount),
+		attribute.StringSlice(prefix+"categories", distinctTokens(m.Categories, MaxExportedCorrelationCategories)),
+		attribute.String(prefix+"first_event", safeTime(m.FirstEvent)),
+		attribute.String(prefix+"last_event", safeTime(m.LastEvent)),
+		attribute.StringSlice(prefix+"event_ids", safeTokens(m.EventIDs, MaxExportedCorrelationEventIDs)),
+	}
+}
+
+// SemanticDecision is one stored semantic decision for export: identifiers,
+// scores and offsets, never content.
+type SemanticDecision struct {
+	EventID               string
+	RuleName              string
+	EventCategory         string
+	Severity              string
+	SourceRole            string
+	MessageIndex          int
+	EvidenceOnly          bool
+	WouldContributePoints float64
+	Timestamp             time.Time
+	Metadata              SemanticMetadata
+}
+
+// CorrelationShadow is one shadow-mode correlation match for export:
+// calibration data, never a finding. Identifiers and times only.
+type CorrelationShadow struct {
+	Timestamp time.Time
+	Severity  string
+	Metadata  CorrelationMetadata
+}
+
+// exportedSeverity is the severity a violation is exported at: its own,
+// except that evidence-only violations are informational.
+func (v Violation) exportedSeverity() string {
+	if v.EvidenceOnly {
+		return "info"
+	}
+	return v.Severity
 }
 
 // CapturedRequest represents a captured request/response for telemetry export
@@ -642,9 +964,19 @@ type SessionRecord struct {
 	BytesIn      int64
 	BytesOut     int64
 	Violations   []Violation
-	Captures     []CapturedRequest
-	CaptureCount int
-	Model        string // For GenAI semconv
+	// SemanticDecisions holds every stored semantic decision of the ending
+	// session instance (bounded by the policy engine's per-session cap);
+	// each is exported as one OTEL log. SemanticDecisionsDropped counts the
+	// decisions dropped past that cap.
+	SemanticDecisions        []SemanticDecision
+	SemanticDecisionsDropped int
+	// CorrelationShadow holds the ending session instance's shadow
+	// correlation matches (at most 50); each is exported as one OTEL log,
+	// never as an OCSF finding.
+	CorrelationShadow []CorrelationShadow
+	Captures          []CapturedRequest
+	CaptureCount      int
+	Model             string // For GenAI semconv
 
 	// WebSocket fields
 	IsWebSocket  bool
@@ -744,8 +1076,11 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	for _, v := range record.Violations {
 		ruleNames = append(ruleNames, v.RuleName)
 		actions = append(actions, v.Action)
-		if severityOrder[v.Severity] > severityOrder[maxSeverity] {
-			maxSeverity = v.Severity
+		// Evidence-only violations contributed no risk, so they never raise
+		// the exported max severity (the policy engine's own MaxSeverity
+		// excludes them the same way).
+		if sev := v.exportedSeverity(); severityOrder[sev] > severityOrder[maxSeverity] {
+			maxSeverity = sev
 		}
 	}
 
@@ -773,6 +1108,18 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 			attribute.Int(AttrSDREventCount, record.SDREventCount),
 		)
 	}
+	// Counts only: a session without semantic decisions keeps its key set.
+	// The count is of decision logs, so it is left out when OTEL logs are
+	// off (nothing is exported then); the dropped count is kept.
+	if len(record.SemanticDecisions) > 0 || record.SemanticDecisionsDropped > 0 {
+		if p.logger != nil {
+			attrs = append(attrs, attribute.Int(AttrSemanticDecisionCount, len(record.SemanticDecisions)))
+		}
+		attrs = append(attrs, attribute.Int(AttrSemanticDecisionDropped, record.SemanticDecisionsDropped))
+	}
+	if len(record.CorrelationShadow) > 0 && p.logger != nil {
+		attrs = append(attrs, attribute.Int(AttrCorrelationShadowCount, len(record.CorrelationShadow)))
+	}
 
 	// Add WebSocket attributes if this is a WebSocket session
 	if record.IsWebSocket {
@@ -792,15 +1139,29 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 
 	// Add individual violation events for detailed tracking
 	for _, v := range record.Violations {
-		span.AddEvent("policy.violation",
-			trace.WithAttributes(
-				attribute.String("rule_name", v.RuleName),
-				attribute.String("description", v.Description),
-				attribute.String("severity", v.Severity),
-				attribute.String("matched_text", p.redact(v.MatchedText)),
-				attribute.String("action", v.Action),
-			),
-		)
+		attrs := []attribute.KeyValue{
+			attribute.String("rule_name", v.RuleName),
+			attribute.String("description", v.Description),
+			attribute.String("severity", v.Severity),
+			attribute.String("matched_text", p.redact(v.MatchedText)),
+			attribute.String("action", v.Action),
+			attribute.Bool("evidence_only", v.EvidenceOnly),
+		}
+		// Only a semantic or correlation violation carries an event ID and
+		// its metadata, so a plain violation keeps exactly its key set.
+		if v.Semantic != nil || v.Correlation != nil {
+			// A blanked event ID is left out, as in the OCSF finding.
+			if id := safeToken(v.EventID); id != "" {
+				attrs = append(attrs, attribute.String("event_id", id))
+			}
+		}
+		if v.Semantic != nil {
+			attrs = append(attrs, semanticAttributes("semantic.", *v.Semantic)...)
+		}
+		if v.Correlation != nil {
+			attrs = append(attrs, correlationAttributes("correlation.", *v.Correlation)...)
+		}
+		span.AddEvent("policy.violation", trace.WithAttributes(attrs...))
 	}
 
 	// Add captured request/response events
@@ -823,6 +1184,19 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	// Emit OTEL logs for each violation
 	for _, v := range record.Violations {
 		p.EmitViolationLog(ctx, record.SessionID, v, record.Model, record.Backend)
+	}
+
+	// One log per stored semantic decision (bounded by the policy engine's
+	// per-session cap). No OCSF finding per decision: findings stay one per
+	// rule, carrying the representative decision.
+	for _, d := range record.SemanticDecisions {
+		p.EmitSemanticDecisionLog(ctx, record.SessionID, d, record.Model, record.Backend)
+	}
+
+	// One log per shadow correlation match (at most 50 per session). No
+	// OCSF finding: a shadow match is calibration data.
+	for _, s := range record.CorrelationShadow {
+		p.EmitCorrelationShadowLog(ctx, record.SessionID, s, record.Model, record.Backend)
 	}
 
 	// Emit OCSF Detection Finding events for policy violations
