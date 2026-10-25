@@ -1,0 +1,68 @@
+{
+  "id": "sess-fixture-corr",
+  "state": "completed",
+  "start_time": "2026-10-20T09:00:00Z",
+  "end_time": "2026-10-20T09:05:00Z",
+  "duration_ms": 300000,
+  "request_count": 3,
+  "bytes_in": 1200,
+  "bytes_out": 900,
+  "backend": "anthropic",
+  "client_addr": "127.0.0.1:1",
+  "violations": [
+    {
+      "rule_name": "injection_elevated",
+      "description": "semantic injection signal 0.398 in original content: above the elevated threshold 0.30 but below the violation threshold 0.50 (evidence only, contributes no risk)",
+      "severity": "info",
+      "action": "flag",
+      "event_category": "injection_elevated",
+      "source_role": "tool",
+      "evidence_only": true,
+      "event_id": "ev_0000000000000000000000000000000c",
+      "timestamp": "2026-10-20T09:04:00Z",
+      "semantic": {
+        "signal": "injection", "probability": 0.398, "aux_probability": 0.01, "model": "minilm-multihead",
+        "model_version": "v5-fp32", "model_checksum": "0f3a9c", "threshold_set": "v1",
+        "decision_id": "dec_0000000000000000000000000000000c", "window_start_byte": 0, "window_end_byte": 64,
+        "coverage_complete": true, "execution_mode": "inline", "protection_scope": "current_request"
+      }
+    },
+    {
+      "rule_name": "correlation.slow_burn_injection",
+      "description": "Temporal correlation rule slow_burn_injection matched 3 events",
+      "severity": "warning",
+      "action": "flag",
+      "event_category": "correlation_match",
+      "source_role": "correlation",
+      "evidence_only": true,
+      "event_id": "cm_0123456789abcdef0123456789abcdef",
+      "timestamp": "2026-10-20T09:04:00Z",
+      "correlation": {
+        "match_id": "cm_0123456789abcdef0123456789abcdef",
+        "rule": "slow_burn_injection",
+        "shape": "repeated",
+        "mode": "audit",
+        "event_ids": ["ev_0000000000000000000000000000000a", "ev_0000000000000000000000000000000b", "ev_0000000000000000000000000000000c"],
+        "categories": ["injection_elevated", "injection_elevated", "injection_elevated"],
+        "first_event": "2026-10-20T09:01:00Z",
+        "last_event": "2026-10-20T09:04:00Z"
+      }
+    }
+  ],
+  "semantic_decisions": [
+    { "event_id": "ev_0000000000000000000000000000000a", "rule_name": "injection_elevated", "event_category": "injection_elevated", "severity": "info", "effective_severity": "info", "source_role": "tool", "message_index": 2, "evidence_only": true, "would_contribute_points": 1, "timestamp": "2026-10-20T09:01:00Z",
+      "evidence": { "signal": "injection", "probability": 0.398, "aux_probability": 0.01, "model": "minilm-multihead", "model_version": "v5-fp32", "model_checksum": "0f3a9c", "threshold_set": "v1", "decision_id": "dec_0000000000000000000000000000000a", "window_start_byte": 0, "window_end_byte": 64, "coverage_complete": true, "execution_mode": "inline", "protection_scope": "current_request" } },
+    { "event_id": "ev_0000000000000000000000000000000b", "rule_name": "injection_elevated", "event_category": "injection_elevated", "severity": "info", "effective_severity": "info", "source_role": "tool", "message_index": 4, "evidence_only": true, "would_contribute_points": 1, "timestamp": "2026-10-20T09:02:30Z",
+      "evidence": { "signal": "injection", "probability": 0.41, "aux_probability": 0.02, "model": "minilm-multihead", "model_version": "v5-fp32", "model_checksum": "0f3a9c", "threshold_set": "v1", "decision_id": "dec_0000000000000000000000000000000b", "window_start_byte": 0, "window_end_byte": 70, "coverage_complete": true, "execution_mode": "inline", "protection_scope": "current_request" } },
+    { "event_id": "ev_0000000000000000000000000000000c", "rule_name": "injection_elevated", "event_category": "injection_elevated", "severity": "info", "effective_severity": "info", "source_role": "tool", "message_index": 6, "evidence_only": true, "would_contribute_points": 1, "timestamp": "2026-10-20T09:04:00Z",
+      "evidence": { "signal": "injection", "probability": 0.398, "aux_probability": 0.01, "model": "minilm-multihead", "model_version": "v5-fp32", "model_checksum": "0f3a9c", "threshold_set": "v1", "decision_id": "dec_0000000000000000000000000000000c", "window_start_byte": 0, "window_end_byte": 64, "coverage_complete": true, "execution_mode": "inline", "protection_scope": "current_request" } }
+  ],
+  "semantic_shadow": [
+    { "timestamp": "2026-10-20T09:00:30Z", "decision_id": "dec_000000000000000000000000000000ff", "signal": "injection", "probability": 0.12, "aux_probability": 0.01, "source_role": "user", "message_index": 0, "window_start_byte": 0, "window_end_byte": 30, "model": "minilm-multihead", "model_version": "v5-fp32", "model_checksum": "0f3a9c", "threshold_set": "v1", "execution_mode": "inline", "protection_scope": "current_request", "coverage_complete": true, "latency_ms": 7 }
+  ],
+  "correlation_shadow": [
+    { "timestamp": "2026-10-20T09:04:30Z", "match_id": "cm_fedcba9876543210fedcba9876543210", "rule": "slow_burn_injection", "shape": "repeated", "severity": "warning", "mode": "audit",
+      "event_ids": ["dec_000000000000000000000000000000f1", "dec_000000000000000000000000000000f2", "dec_000000000000000000000000000000f3"],
+      "categories": ["injection_elevated", "injection_elevated", "injection_elevated"], "first_event": "2026-10-20T09:01:30Z", "last_event": "2026-10-20T09:04:30Z" }
+  ]
+}

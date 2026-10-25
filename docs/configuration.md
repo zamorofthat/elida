@@ -889,7 +889,9 @@ A `rules:` list in `elida.yaml` replaces the default list; it is not merged
 recorded only when semantic detection runs in `audit` or `enforce`. In the
 default `shadow` mode a separate shadow correlator, built from the same
 rules and limits, correlates the elevated-band shadow decisions instead,
-and records matches as `correlation_shadow` entries on the session (see
+and records matches as `correlation_shadow` entries on the session
+(persisted with the session record and served by
+`GET /control/history/{id}`; see
 [semantic detection](semantic-detection.md#temporal-correlation)), never as
 violations.
 

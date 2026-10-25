@@ -104,10 +104,13 @@ type OCSFUnmapped struct {
 	// that contributed no risk. Such a finding is exported at severity_id
 	// Informational whatever its rule severity.
 	EvidenceOnly bool `json:"elida.evidence_only,omitempty"`
-	// EventID and Semantic are set for semantic findings only: the
-	// representative decision's event ID and metadata.
+	// EventID is set for semantic and correlation findings only (the
+	// representative decision's event ID, or the match ID); Semantic is
+	// that decision's metadata, set for semantic findings only.
 	EventID  string        `json:"elida.event_id,omitempty"`
 	Semantic *OCSFSemantic `json:"elida.semantic,omitempty"`
+	// Correlation is set for correlation-match findings only.
+	Correlation *OCSFCorrelation `json:"elida.correlation,omitempty"`
 }
 
 // OCSFSemantic is semantic decision metadata in a Detection Finding's
@@ -142,6 +145,32 @@ func ocsfSemantic(m SemanticMetadata) *OCSFSemantic {
 		TransformDepth: m.TransformDepth, WindowStartByte: m.WindowStartByte, WindowEndByte: m.WindowEndByte,
 		CoverageComplete: m.CoverageComplete, ExecutionMode: safeToken(m.ExecutionMode),
 		ProtectionScope: safeToken(m.ProtectionScope),
+	}
+}
+
+// OCSFCorrelation is correlation match evidence in a Detection Finding's
+// unmapped block. Field order and names are the correlation allowlist.
+type OCSFCorrelation struct {
+	MatchID    string   `json:"match_id"`
+	Rule       string   `json:"rule"`
+	Shape      string   `json:"shape"`
+	Mode       string   `json:"mode"`
+	EventCount int      `json:"event_count"`
+	Categories []string `json:"categories"`
+	FirstEvent string   `json:"first_event"`
+	LastEvent  string   `json:"last_event"`
+	EventIDs   []string `json:"event_ids"`
+}
+
+// ocsfCorrelation converts m for the unmapped block, applying safeToken,
+// safeTime and the export caps.
+func ocsfCorrelation(m CorrelationMetadata) *OCSFCorrelation {
+	return &OCSFCorrelation{
+		MatchID: safeToken(m.MatchID), Rule: safeToken(m.Rule), Shape: safeToken(m.Shape), Mode: safeToken(m.Mode),
+		EventCount: m.EventCount,
+		Categories: distinctTokens(m.Categories, MaxExportedCorrelationCategories),
+		FirstEvent: safeTime(m.FirstEvent), LastEvent: safeTime(m.LastEvent),
+		EventIDs: safeTokens(m.EventIDs, MaxExportedCorrelationEventIDs),
 	}
 }
 
@@ -243,9 +272,14 @@ func BuildPolicyDetection(sessionID string, v Violation, record SessionRecord) O
 			EvidenceOnly: v.EvidenceOnly,
 		},
 	}
-	if v.Semantic != nil {
+	if v.Semantic != nil || v.Correlation != nil {
 		finding.Unmapped.EventID = safeToken(v.EventID)
+	}
+	if v.Semantic != nil {
 		finding.Unmapped.Semantic = ocsfSemantic(*v.Semantic)
+	}
+	if v.Correlation != nil {
+		finding.Unmapped.Correlation = ocsfCorrelation(*v.Correlation)
 	}
 
 	// Populate ai_model from record

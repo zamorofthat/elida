@@ -403,6 +403,9 @@ func (a *app) initSessionEndCallback() {
 			// Shadow decisions carry no content, so redaction does not
 			// apply to them.
 			SemanticShadow: storage.SemanticShadowFromSession(snap.SemanticShadow),
+			// Shadow correlation matches carry no content. Unbind above ran
+			// before this snapshot, so no further match can land on sess.
+			CorrelationShadow: storage.CorrelationShadowFromSession(snap.CorrelationShadow),
 		}
 
 		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)
@@ -476,6 +479,8 @@ func (a *app) enrichRecordFromPolicy(record *storage.SessionRecord, sessionID st
 			Timestamp:     v.Timestamp,
 			// Decision metadata carries no content, so it needs no redaction.
 			Semantic: storage.SemanticEvidenceFromPolicy(v.Semantic),
+			// Match evidence carries no content either.
+			Correlation: storage.CorrelationEvidenceFromPolicy(v.Correlation),
 		})
 	}
 	// Same ending-instance rule as the violations above. The records carry
@@ -617,12 +622,15 @@ func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Sessi
 			continue
 		}
 		if eventErr := a.sqliteStore.RecordEvent(eventCtx, storage.EventViolationDetected, snap.ID, v.Severity, storage.ViolationDetectedData{
-			RuleName:     v.RuleName,
-			Description:  v.Description,
-			Severity:     v.Severity,
-			MatchedText:  v.MatchedText,
-			Action:       v.Action,
-			EvidenceOnly: v.EvidenceOnly,
+			RuleName:      v.RuleName,
+			Description:   v.Description,
+			Severity:      v.Severity,
+			MatchedText:   v.MatchedText,
+			Action:        v.Action,
+			EvidenceOnly:  v.EvidenceOnly,
+			EventID:       v.EventID,
+			EventCategory: v.EventCategory,
+			SourceRole:    v.SourceRole,
 		}); eventErr != nil {
 			slog.Error("failed to record violation event", "session_id", snap.ID, "error", eventErr)
 		}
@@ -713,6 +721,22 @@ func telemetrySemantic(s *storage.SemanticEvidence) *telemetry.SemanticMetadata 
 	return &m
 }
 
+// telemetryCorrelation converts stored match evidence for export. Fields
+// are listed explicitly, as in telemetrySemantic; EventCount is the full
+// list length before the exporter's cap.
+func telemetryCorrelation(c *storage.CorrelationEvidence) *telemetry.CorrelationMetadata {
+	if c == nil {
+		return nil
+	}
+	return &telemetry.CorrelationMetadata{
+		MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode,
+		EventCount: len(c.EventIDs),
+		Categories: append([]string(nil), c.Categories...),
+		FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+		EventIDs: append([]string(nil), c.EventIDs...),
+	}
+}
+
 // telemetryRecordFrom builds the telemetry export record from the stored
 // record. It is pure, so the content-free guarantee is testable without an
 // exporter. The record's violations are already limited to the ending
@@ -750,6 +774,7 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 			EvidenceOnly:  v.EvidenceOnly,
 			EventID:       v.EventID,
 			Semantic:      telemetrySemantic(v.Semantic),
+			Correlation:   telemetryCorrelation(v.Correlation),
 		})
 	}
 	for _, d := range record.SemanticDecisions {
@@ -771,6 +796,16 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 		})
 	}
 	telemRecord.SemanticDecisionsDropped = record.SemanticDecisionsDropped
+	for _, c := range record.CorrelationShadow {
+		telemRecord.CorrelationShadow = append(telemRecord.CorrelationShadow, telemetry.CorrelationShadow{
+			Timestamp: c.Timestamp, Severity: c.Severity,
+			Metadata: telemetry.CorrelationMetadata{
+				MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode, EventCount: len(c.EventIDs),
+				Categories: append([]string(nil), c.Categories...), FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
+				EventIDs: append([]string(nil), c.EventIDs...),
+			},
+		})
+	}
 	for _, c := range record.CapturedContent {
 		telemRecord.Captures = append(telemRecord.Captures, telemetry.CapturedRequest{
 			Timestamp:    c.Timestamp.Format(time.RFC3339),

@@ -616,6 +616,10 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 		st.AsyncDroppedNoSession = a.decisionRunner.AsyncDroppedNoSession()
 		st.AsyncDroppedDisabled = a.decisionRunner.AsyncDroppedDisabled()
 		st.ShadowMatchesDropped = a.decisionRunner.ShadowMatchesDropped()
+		if a.shadowCorr != nil {
+			stats := a.shadowCorr.Stats()
+			st.ShadowCorrelation = &stats
+		}
 	}
 	if a.decisionScheduler != nil {
 		m := a.decisionScheduler.Metrics()
