@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"os"
 	"regexp"
@@ -417,9 +419,21 @@ func (p *Provider) EmitSemanticDecisionLog(ctx context.Context, sessionID string
 	p.logger.Emit(ctx, rec)
 }
 
+const correlationShadowConversationIDDomain = "elida.correlation_shadow.session.v1\x00"
+
+// correlationShadowConversationID derives a stable, content-free identifier
+// for the request-controlled session ID used only by the shadow-log path.
+// The domain prevents this digest from being confused with an identifier
+// derived for another purpose.
+func correlationShadowConversationID(sessionID string) string {
+	digest := sha256.Sum256([]byte(correlationShadowConversationIDDomain + sessionID))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
 // EmitCorrelationShadowLog emits one Info log record for one shadow-mode
-// correlation match. Strings pass safeToken and lists the export caps; no
-// content exists to redact.
+// correlation match. The request-controlled session ID is represented by a
+// domain-separated digest; every other string passes safeToken and lists use
+// the export caps.
 func (p *Provider) EmitCorrelationShadowLog(ctx context.Context, sessionID string, s CorrelationShadow, model, providerName string) {
 	if p.logger == nil {
 		return
@@ -433,9 +447,9 @@ func (p *Provider) EmitCorrelationShadowLog(ctx context.Context, sessionID strin
 	rec.SetSeverity(otellog.SeverityInfo)
 	rec.SetBody(attribute.StringValue("shadow correlation match: " + safeToken(s.Metadata.Rule) + " (calibration only, never a violation)"))
 	rec.AddAttributes(
-		attribute.String("gen_ai.conversation.id", sessionID),
-		attribute.String("gen_ai.provider.name", providerName),
-		attribute.String("gen_ai.request.model", modelOrUnknown(model)),
+		attribute.String("gen_ai.conversation.id", safeToken(correlationShadowConversationID(sessionID))),
+		attribute.String("gen_ai.provider.name", safeToken(providerName)),
+		attribute.String("gen_ai.request.model", safeToken(modelOrUnknown(model))),
 		attribute.Bool("elida.correlation.shadow", true),
 		attribute.String("elida.correlation.severity", safeToken(s.Severity)),
 	)
