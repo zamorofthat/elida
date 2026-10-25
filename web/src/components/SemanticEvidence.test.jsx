@@ -89,4 +89,17 @@ describe('SemanticEvidence', () => {
     const { container } = render(<SemanticEvidence decisions={[]} violations={[]} />)
     expect(container.textContent).toBe('')
   })
+
+  it('emits no anchor id for records without an event_id, so ids never collide', () => {
+    const mk = (n) => ({ ...fixture.semantic_decisions[0], event_id: undefined, evidence: { ...fixture.semantic_decisions[0].evidence, decision_id: 'dec_' + n } })
+    const match = { ...fixture.violations[1], event_id: undefined, correlation: { ...fixture.violations[1].correlation, event_ids: [''] } }
+    const { container } = render(<SemanticEvidence decisions={[mk(1), mk(2)]} violations={[match]} />)
+    expect(container.querySelectorAll('.evidence-decision').length).toBe(2)
+    const ids = [...container.querySelectorAll('[id]')].map((e) => e.id)
+    expect(ids.length).toBe(new Set(ids).size)
+    expect(ids.some((x) => x.includes('undefined'))).toBe(false)
+    // A link to a record with no ID renders as unresolved, not as an href.
+    expect(container.querySelector('a.evidence-link')).toBeNull()
+    expect(container.querySelector('.evidence-unresolved')).toBeTruthy()
+  })
 })

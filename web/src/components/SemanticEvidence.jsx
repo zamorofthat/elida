@@ -10,8 +10,11 @@ export function correlationMatches(violations) {
   return (violations || []).filter((v) => v && v.correlation)
 }
 
+// anchorId derives the DOM id for a record from its event ID. A record with
+// no event ID gets no id at all (undefined), never a shared 'evidence-undefined'
+// that several records would collide on.
 export function anchorId(eventId) {
-  return 'evidence-' + eventId
+  return eventId ? 'evidence-' + eventId : undefined
 }
 
 // anchoredViolations returns the event IDs a host must put on its ordinary
@@ -36,7 +39,7 @@ export function anchoredViolations(violations, decisions) {
 // anchored is the set of ordinary violation IDs the host actually renders
 // as anchors; it defaults to anchoredViolations(violations, decisions).
 export function linkedEvents(match, decisions, violations, anchored) {
-  const byDecision = new Map((decisions || []).map((d) => [d.event_id, d]))
+  const byDecision = new Map((decisions || []).filter((d) => d && d.event_id).map((d) => [d.event_id, d]))
   const rendered = anchored || anchoredViolations(violations, decisions)
   const byViolation = new Map()
   for (const v of violations || []) {
@@ -44,6 +47,7 @@ export function linkedEvents(match, decisions, violations, anchored) {
     if (v.correlation || rendered.has(v.event_id)) byViolation.set(v.event_id, v)
   }
   return (match.correlation.event_ids || []).map((id) => {
+    if (!id) return { id, kind: 'unresolved', ref: null }
     if (byDecision.has(id)) return { id, kind: 'decision', ref: byDecision.get(id) }
     if (byViolation.has(id)) return { id, kind: 'violation', ref: byViolation.get(id) }
     return { id, kind: 'unresolved', ref: null }

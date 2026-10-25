@@ -330,26 +330,62 @@ export function SessionDetailModal({ session, onClose, onKill }) {
     // they are fetched on the first tick and afterwards only when the cheap
     // live detail shows a change: its counters, its state or the sizes of its
     // evidence lists differ from the ones they were last fetched for.
-    let fetchedSig = null
+    //
+    // The signal a half was fetched for is committed only when that fetch
+    // applied data, so a dropped or error response leaves it behind and the
+    // next tick retries, once per tick. Each half tracks its own signal, so
+    // a failing turns endpoint does not re-ship the flagged evidence every
+    // tick. The newest() guard keeps a slow earlier response from applying
+    // over, or committing past, a newer one.
+    const EAGER = 'eager' // fetched on the first tick, before any signal exists
+    // A 404 is a definitive answer (the session is not flagged, or is gone),
+    // so it settles the signal; a network error, 5xx or other non-OK does not.
+    const NOT_FOUND = { notFound: true }
+    let latestSig = null
     const signal = (data) => JSON.stringify([
       data.state, data.request_count, data.tool_calls, data.risk_score,
-      data.violations?.length ?? data.violation_count ?? 0,
+      data.message_count ?? 0,
       data.semantic_decisions?.length ?? 0,
       data.semantic_shadow?.length ?? 0,
       data.correlation_shadow?.length ?? 0,
     ])
-    const fetchHeavy = () => {
+    const heavy = {
+      flagged: { sig: null, eager: false },
+      turns: { sig: null, eager: false },
+    }
+    const commit = (h, attempt) => { h.sig = attempt === EAGER ? (latestSig ?? EAGER) : attempt }
+    const fetchFlagged = (attempt) => {
+      const h = heavy.flagged
       const f = ++seq
+      if (attempt === EAGER) h.eager = true
       get('/control/flagged/' + id)
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data) newest('flagged', f, () => setFlagged(data)) })
+        .then(res => res.ok ? res.json() : (res.status === 404 ? NOT_FOUND : null))
+        .then(data => {
+          if (data === NOT_FOUND) newest('flagged', f, () => commit(h, attempt))
+          else if (data) newest('flagged', f, () => { setFlagged(data); commit(h, attempt) })
+        })
         .catch(() => {})
-
+        .then(() => { if (attempt === EAGER) h.eager = false })
+    }
+    const fetchTurns = (attempt) => {
+      const h = heavy.turns
       const t = ++seq
+      if (attempt === EAGER) h.eager = true
       get('/control/sessions/' + id + '/turns?full=true')
-        .then(res => res.ok ? res.json() : null)
-        .then(data => newest('turns', t, () => setTurns(prev => data ? (data.turns || []) : (prev || []))))
+        .then(res => res.ok ? res.json() : (res.status === 404 ? NOT_FOUND : null))
+        .then(data => newest('turns', t, () => {
+          const ok = data && data !== NOT_FOUND
+          setTurns(prev => ok ? (data.turns || []) : (prev || []))
+          if (data) commit(h, attempt)
+        }))
         .catch(() => { newest('turns', t, () => setTurns(prev => prev || [])) })
+        .then(() => { if (attempt === EAGER) h.eager = false })
+    }
+    const refreshHeavy = (sig, first) => {
+      for (const [h, fetch] of [[heavy.flagged, fetchFlagged], [heavy.turns, fetchTurns]]) {
+        if (h.sig === EAGER) h.sig = sig // adopt the first detail's signal
+        else if (h.sig !== sig && !(first && h.eager)) fetch(sig) // the eager fetch in flight commits the first signal
+      }
     }
 
     const pollLive = (first) => {
@@ -362,16 +398,16 @@ export function SessionDetailModal({ session, onClose, onKill }) {
           return res.json().then(data => newest('detail', d, () => {
             setDetail(data)
             const sig = signal(data)
+            latestSig = sig
             // The first tick fetched eagerly, in parallel with this response;
-            // its detail only records the signal.
-            if (first && fetchedSig === null) fetchedSig = sig
-            else if (sig !== fetchedSig) { fetchedSig = sig; fetchHeavy() }
+            // its detail only supplies the signal those fetches count as.
+            refreshHeavy(sig, first)
             if (data.state !== 'active') toHistory()
           }))
         })
         .catch(() => {})
 
-      if (first) fetchHeavy()
+      if (first) { fetchFlagged(EAGER); fetchTurns(EAGER) }
     }
 
     pollLive(true)

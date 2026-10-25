@@ -359,10 +359,59 @@ describe('SessionDetailModal evidence lifecycle', () => {
     routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 9, request_count: 4 })
     await tick()
     expect(count('/control/flagged/' + SID)).toBe(4)
-    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 9, request_count: 4, violations: [matchRow] })
+    routes['/control/sessions/' + SID] = () => live(SID, { tool_calls: 2, risk_score: 9, request_count: 4, message_count: 6 })
     await tick()
     expect(count('/control/flagged/' + SID)).toBe(5)
     expect(count(TURNS)).toBe(5)
+  })
+
+  it('retries the evidence on the next tick when the refresh it was triggered for failed', async () => {
+    routes['/control/sessions/' + SID] = () => live(SID, { message_count: 1 })
+    const r = open()
+    await flush()
+    expect(count('/control/flagged/' + SID)).toBe(1)
+
+    // The counter moves, but the flagged fetch errors: nothing is applied.
+    routes['/control/sessions/' + SID] = () => live(SID, { message_count: 2 })
+    routes['/control/flagged/' + SID] = () => json({}, 500)
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(2)
+    expect(r.container.querySelector('.evidence')).toBeNull()
+
+    // Nothing else changes, yet the failed refresh is retried and renders.
+    routes['/control/flagged/' + SID] = () => json({ violations: [matchRow], semantic_decisions: [decisionA] })
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(3)
+    expect(r.container.querySelectorAll('.evidence-decision').length).toBe(1)
+
+    // Applied: no further refetch while the signal holds.
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(3)
+  })
+
+  it('retries a rejected evidence fetch, and a persistently failing endpoint at most once per tick', async () => {
+    routes['/control/sessions/' + SID] = () => live(SID, { message_count: 1 })
+    open()
+    await flush()
+    routes['/control/sessions/' + SID] = () => live(SID, { message_count: 2 })
+    routes['/control/flagged/' + SID] = () => Promise.reject(new Error('dropped'))
+    await tick()
+    await tick()
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(4)
+    // The healthy turns endpoint is fetched once for the change, not per retry.
+    expect(count(TURNS)).toBe(2)
+  })
+
+  it('refreshes the evidence when only message_count moves', async () => {
+    routes['/control/sessions/' + SID] = () => live(SID, { message_count: 1 })
+    open()
+    await flush()
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(1)
+    routes['/control/sessions/' + SID] = () => live(SID, { message_count: 2 })
+    await tick()
+    expect(count('/control/flagged/' + SID)).toBe(2)
   })
 
   it('shows no evidence section for a completed session with no evidence', async () => {
