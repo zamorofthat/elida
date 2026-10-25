@@ -62,12 +62,19 @@ CREATE TABLE sessions (
     metadata TEXT,                    -- JSON: custom key-value pairs
     captured_content TEXT,            -- JSON: array of requests/responses
     violations TEXT,                  -- JSON: array of policy violations
+    fingerprint_distance REAL DEFAULT 0, -- behavioral fingerprint distance
+    fingerprint_bucket TEXT DEFAULT '',  -- fingerprint distance bucket
+    fingerprint_class TEXT DEFAULT '',   -- fingerprint classification
     semantic_shadow TEXT,             -- JSON: shadow semantic decisions (newest first, max 50)
     semantic_decisions TEXT,          -- JSON: {decisions, dropped}
     correlation_shadow TEXT,          -- JSON: shadow correlation matches (newest first, max 50)
     created_at DATETIME
 );
 ```
+
+The three `fingerprint_*` columns are in the `CREATE TABLE` and are also added
+to databases created before them by idempotent `ALTER TABLE sessions ADD COLUMN`
+statements.
 
 `prior_history TEXT` (JSON: entries carried from earlier sessions with the
 same ID) is not part of `CREATE TABLE`: it is added to existing and new
