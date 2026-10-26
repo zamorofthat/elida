@@ -60,36 +60,17 @@ func TestPlanCControl_ViolationTurnsCarryIdentity(t *testing.T) {
 	}
 }
 
-// D4: the unauthenticated health block gains only an enum and two booleans.
-func TestPlanCControl_HealthCarriesThreeContentFreeFacts(t *testing.T) {
-	h, _ := newTestHandler()
-	h.SetDecisionProvider(fixedDecision{control.DecisionStatus{
-		Capability: "inline", EffectiveMode: "audit", ThresholdSetMatches: true, BreakerOpen: false,
-		Model: "minilm-multihead", ModelChecksum: "deadbeef", Reason: "/etc/elida/models path", ThresholdSet: "v1",
-	}})
-	w := doJSON(t, h, http.MethodGet, "/control/health", nil)
-	var body struct {
-		Decision map[string]any `json:"decision"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if len(body.Decision) != 5 {
-		t.Fatalf("decision keys = %v, want capability, reason, effective_mode, threshold_set_matches, breaker_open", body.Decision)
-	}
-	if body.Decision["effective_mode"] != "audit" || body.Decision["threshold_set_matches"] != true || body.Decision["breaker_open"] != false {
-		t.Fatalf("facts: %v", body.Decision)
-	}
-	if s := w.Body.String(); contains(s, "minilm") || contains(s, "deadbeef") || contains(s, "/etc/elida") || contains(s, `"v1"`) {
-		t.Fatalf("health leaked model identity or the provider reason: %s", s)
-	}
-	// Without a provider the block is absent, as today.
-	h2, _ := newTestHandler()
-	w2 := doJSON(t, h2, http.MethodGet, "/control/health", nil)
-	if jsonKeys(t, w2.Body.Bytes())["decision"] {
-		t.Fatal("no provider, no decision block")
-	}
-}
+// D4(a) originally put the capability enum, a fixed reason, the effective
+// mode, the threshold-set match and the breaker state on the unauthenticated
+// /control/health. That shipped in v0.30.0 and was then withdrawn: together
+// those five facts answer "is anything enforcing, and is it working right
+// now" to any caller who can reach the control port.
+//
+// The contract that replaced it is pinned in health_posture_test.go — health
+// carries no decision block, /control/ready carries readiness as a status
+// code, and /control/decision keeps every fact behind the credential. This
+// test is not re-pointed here, so that the D4 key-set assertion cannot be
+// revived by accident.
 
 // D4: shadow_correlation is a correlation.Stats object when set and absent
 // when nil.

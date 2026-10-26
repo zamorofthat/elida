@@ -67,9 +67,15 @@ spec:
               port: control
             initialDelaySeconds: 5
             periodSeconds: 15
+          # Readiness is not liveness here: /control/ready answers 503 when
+          # semantic detection was enabled but the model could not be loaded,
+          # so a pod that cannot inspect traffic leaves the Service instead of
+          # quietly forwarding it. Liveness stays on /control/health, which
+          # answers 200 while the process serves — pointing liveness at
+          # /control/ready would restart the container on a loop.
           readinessProbe:
             httpGet:
-              path: /control/health
+              path: /control/ready
               port: control
             initialDelaySeconds: 3
             periodSeconds: 10

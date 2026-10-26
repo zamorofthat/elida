@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity and checksum, effective mode, lane sizes, admission reasons,
   queue and drop counters, `coverage_gaps` (including `not_assessed` and
   `messages_not_assessed`), and `async_dropped_no_session`.
-  `/control/health` adds only the capability enum and a fixed reason.
+  `/control/health` carries none of it: it is liveness only.
 - SQLite `sessions` columns `semantic_shadow` (bounded per-session shadow
   decisions for calibration) and `prior_history` (violations and captures
   carried across reuse of a session ID). Both are added by migration.
@@ -96,15 +96,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     counted in `shadow_matches_dropped` rather than lost silently.
   - `GET /control/sessions/{id}/turns` violation turns carry `event_id`,
     `event_category`, `source_role`, `evidence_only` and a `correlation`
-    summary; `GET /control/health` adds `effective_mode`,
-    `threshold_set_matches` and `breaker_open`; `GET /control/decision`
-    adds `shadow_correlation`.
+    summary; `GET /control/decision` adds `shadow_correlation`. (The
+    matching `/control/health` fields shipped in v0.30.0 and were then
+    withdrawn; see Changed.)
   - The dashboard's session detail and history views show a "Semantic
     evidence" section with timeline markers, and the Settings and Policy
     pages show the shadow and policy correlation counters.
   - `docs/semantic-detection.md` gains a "Residual risk" section.
 
+- `GET /control/ready` (unauthenticated, like `/control/health`): a readiness
+  probe that is a status code with no body. 200 normally; **503 when
+  `decision.enabled` is set but the capability is `degraded`** — detection was
+  asked for, the process is serving, and nothing is inspecting traffic, so an
+  orchestrator should take the instance out of service. The Helm chart's
+  `readinessProbe` now points here; `livenessProbe` stays on
+  `/control/health`, which still answers 200 while the process serves.
+  Pointing liveness at `/control/ready` would restart the container on a loop.
+
 ### Changed
+- **Breaking, for anyone scraping `/control/health` without a credential:**
+  the unauthenticated health payload is `{"status", "timestamp"}` again. The
+  `decision` block — `capability`, `reason`, `effective_mode`,
+  `threshold_set_matches` and `breaker_open` — is gone from it. Those five
+  facts shipped there in v0.30.0 and together answer "is anything enforcing,
+  and is it working right now" to any caller who can reach the control port,
+  which is reconnaissance an attacker would otherwise have to pay for. Every
+  one of them is still on the authenticated `GET /control/decision`, where
+  they also were before. Liveness and readiness probes are unaffected: both
+  read a status code, and `status` is unchanged.
 - Release archives now carry the semantic-injection model under
   `models/injection/` beside the binary. That adds about 86 MiB
   uncompressed (about 47 MiB compressed) to every per-platform archive. The
