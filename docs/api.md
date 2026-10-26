@@ -11,17 +11,21 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 ### Health & Stats
 
 ```bash
-# Health check (unauthenticated). With semantic detection wired it also
-# reports "decision": {"capability", "reason", "effective_mode",
-# "threshold_set_matches", "breaker_open"}: the capability enum (inline,
-# async_only, degraded, disabled), a fixed reason, the effective mode
-# (disabled|shadow|audit|enforce) and two booleans; enums and booleans only.
-# Model identity and counters are only on the authenticated /control/decision.
-# These three facts are deliberately available without a key so health probes
-# can see detector state. An operator who does not want enforcement state
-# visible unauthenticated should keep the control listener on localhost (the
-# default control listen address is 127.0.0.1:9090).
+# Liveness (unauthenticated): {"status": "ok", "timestamp": ...} and nothing
+# else. It reports no detector state — not the capability, the effective mode,
+# the threshold-set match or the breaker. Those five facts together answer
+# "is anything enforcing, and is it working right now", which is free
+# reconnaissance for anyone who can reach this port, so they live on the
+# authenticated /control/decision. Until v0.31.0 they were also here.
 curl http://localhost:9090/control/health
+
+# Readiness (unauthenticated): a status code with no body. 200 normally; 503
+# when semantic detection is enabled but the model could not be loaded or
+# verified, so an orchestrator takes the instance out of service rather than
+# forwarding traffic nothing is inspecting. Use this for a readinessProbe and
+# /control/health for a livenessProbe — a 503 on the liveness path would
+# restart the container on a loop.
+curl -i http://localhost:9090/control/ready
 
 # Aggregate stats
 curl http://localhost:9090/control/stats

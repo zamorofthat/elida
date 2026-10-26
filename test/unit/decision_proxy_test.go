@@ -391,7 +391,7 @@ func TestDecisionControl_HealthStaysMinimal(t *testing.T) {
 	}
 }
 
-func TestDecisionControl_HealthReportsOnlyContentFreeDecisionFacts(t *testing.T) {
+func TestDecisionControl_HealthReportsNoDecisionFacts(t *testing.T) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 	h := control.New(store, manager)
@@ -411,26 +411,16 @@ func TestDecisionControl_HealthReportsOnlyContentFreeDecisionFacts(t *testing.T)
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// D4: exactly three strings (capability, reason, effective_mode) and
-	// two booleans (threshold_set_matches, breaker_open).
-	if len(resp.Decision) != 5 {
-		t.Fatalf("decision = %v, want exactly capability, reason, effective_mode, threshold_set_matches, breaker_open", resp.Decision)
-	}
-	for _, k := range []string{"capability", "reason", "effective_mode"} {
-		if _, ok := resp.Decision[k].(string); !ok {
-			t.Fatalf("decision[%q] = %#v, want a string", k, resp.Decision[k])
-		}
-	}
-	for _, k := range []string{"threshold_set_matches", "breaker_open"} {
-		if _, ok := resp.Decision[k].(bool); !ok {
-			t.Fatalf("decision[%q] = %#v, want a bool", k, resp.Decision[k])
-		}
-	}
-	if resp.Decision["capability"] != "degraded" || resp.Decision["reason"] == "" {
-		t.Fatalf("decision = %v, want capability degraded and a reason", resp.Decision)
+	// The unauthenticated route reports no detector state at all, not even
+	// the capability enum. A degraded provider is the case that matters: it
+	// means nothing is inspecting traffic, which is the single most useful
+	// fact an attacker can learn for free. /control/ready carries it as a
+	// status code instead, and /control/decision has the detail.
+	if len(resp.Decision) != 0 {
+		t.Fatalf("decision = %v, want no decision block on the unauthenticated route", resp.Decision)
 	}
 	body := w.Body.String()
-	for _, leak := range []string{"/etc/elida", "manifest.json", "minilm", "abc123", "arm64"} {
+	for _, leak := range []string{"/etc/elida", "manifest.json", "minilm", "abc123", "arm64", "degraded", "capability"} {
 		if strings.Contains(body, leak) {
 			t.Fatalf("/control/health leaks %q: %s", leak, body)
 		}

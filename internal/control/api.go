@@ -236,6 +236,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 
 	// Control API endpoints
 	h.mux.HandleFunc("/control/health", h.handleHealth)
+	h.mux.HandleFunc("/control/ready", h.handleReady)
 	h.mux.HandleFunc("/control/stats", h.handleStats)
 	h.mux.HandleFunc("/control/sessions", h.handleSessions)
 	h.mux.HandleFunc("/control/sessions/{id}", h.handleSession)
@@ -490,9 +491,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check authentication for /control/* endpoints
-	// Feedback #5: /control/health is exempt (liveness/readiness probes can't carry credentials)
-	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") && r.URL.Path != "/control/health" {
+	// Check authentication for /control/* endpoints.
+	//
+	// Two probe routes are exempt, because a liveness or readiness probe
+	// cannot carry credentials (Feedback #5). Both are deliberately
+	// information-free: /control/health answers 200 and a timestamp,
+	// /control/ready answers a status code with no body. Nothing else may
+	// join them — an exempt route that reports state is an oracle for
+	// anyone who can reach the port.
+	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") && !probeRoute(r.URL.Path) {
 		if !h.checkAuth(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ELIDA Control API"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
@@ -552,42 +559,53 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := map[string]interface{}{
+	// Liveness only. Detector state is deliberately absent: capability, the
+	// effective mode, the threshold-set match and the breaker state together
+	// answer "is anything enforcing, and is it working right now" to any
+	// caller who can reach this port, which is reconnaissance an attacker
+	// would otherwise have to pay for. All of it is on /control/decision,
+	// behind the credential. /control/ready carries the one bit an operator
+	// needs without a credential, as a status code.
+	writeJSON(w, http.StatusOK, map[string]any{
 		"status":    "ok",
 		"timestamp": time.Now(),
+	})
+}
+
+// handleReady handles GET /control/ready: the readiness probe.
+//
+// It is a status code with no body, and no body is the design — a body is
+// where facts accumulate, and this route is unauthenticated for the same
+// reason health is: probes cannot carry credentials.
+//
+// Not ready means detection was switched on and is not working: the operator
+// asked for inspection, the process is serving traffic, and nothing is
+// inspecting it. Kubernetes then takes the pod out of the Service rather than
+// quietly forwarding unexamined traffic. A deployment that never enabled
+// detection is ready, because nothing was promised.
+//
+// Liveness stays on /control/health, which always answers 200 while the
+// process serves. Returning 503 there would fail the liveness probe too and
+// restart the container on a loop.
+func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 	if h.decisionProvider != nil {
 		st := h.decisionProvider.DecisionStatus()
-		// Enums and booleans only: no model identity, checksum, threshold
-		// set, path or provider reason on the unauthenticated route.
-		response["decision"] = map[string]any{
-			"capability":            st.Capability,
-			"reason":                healthCapabilityReason(st.Capability),
-			"effective_mode":        st.EffectiveMode,
-			"threshold_set_matches": st.ThresholdSetMatches,
-			"breaker_open":          st.BreakerOpen,
+		if st.Enabled && st.Capability == "degraded" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
 	}
-
-	writeJSON(w, http.StatusOK, response)
+	w.WriteHeader(http.StatusOK)
 }
 
-// healthCapabilityReason is the unauthenticated, content-free reason for a
-// capability. It never carries the provider's own reason, which can name
-// file paths or load errors; /control/decision has that.
-func healthCapabilityReason(capability string) string {
-	switch capability {
-	case "inline":
-		return "accelerated inference is available; inline results can protect the current request"
-	case "async_only":
-		return "this build cannot meet an inline budget; results protect later activity only"
-	case "degraded":
-		return "semantic detection was enabled but the model could not be loaded or verified; no detection is active"
-	case "disabled":
-		return "semantic detection is off"
-	default:
-		return "unknown capability"
-	}
+// probeRoute reports whether a path is one of the two unauthenticated probe
+// routes. It is the only exemption from control-API authentication.
+func probeRoute(path string) bool {
+	return path == "/control/health" || path == "/control/ready"
 }
 
 // handleStats handles GET /control/stats
