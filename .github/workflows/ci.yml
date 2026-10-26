@@ -356,6 +356,18 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19090/control/decision)
           test "$code" = "401"
 
+          # The unauthenticated routes report no detector state: health is
+          # liveness, ready is a status code. Asserted against the running
+          # container, not just the handler, because this is the boundary an
+          # unauthenticated caller actually reaches.
+          health=$(curl -fsS http://127.0.0.1:19090/control/health)
+          echo "$health"
+          echo "$health" | jq -e '.status == "ok" and .decision == null'
+          echo "$health" | jq -e 'keys == ["status", "timestamp"]'
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19090/control/ready)
+          test "$code" = "200"
+          test -z "$(curl -s http://127.0.0.1:19090/control/ready)"
+
           status=$(curl -fsS -H "Authorization: Bearer $key" http://127.0.0.1:19090/control/decision)
           echo "$status" | jq '{capability, require_inline, arch, simd, effective_mode, model, model_version, model_checksum, threshold_set_matches}'
           echo "$status" | jq -e '.capability == "inline" and .require_inline == true and .arch == "amd64" and .simd == true and .effective_mode == "shadow" and .threshold_set_matches == true'
