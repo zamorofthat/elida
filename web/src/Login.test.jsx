@@ -52,8 +52,32 @@ describe('Login', () => {
     expect(storage[AUTH_KEY]).toBe('good-key')
   })
 
+  // The route has to be one that can answer 401. /control/health is exempt
+  // from auth so liveness probes can reach it, so validating against it
+  // accepts every key.
+  it('validates the key against an authenticated route', async () => {
+    mockFetch.mockResolvedValue({ status: 200, ok: true })
+
+    const { getByPlaceholderText, getByText } = render(<Login onLogin={() => {}} />)
+    fireEvent.input(getByPlaceholderText('API key'), { target: { value: 'good-key' } })
+    fireEvent.submit(getByText('Sign In').closest('form'))
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalled()
+    })
+    const [url, opts] = mockFetch.mock.calls[0]
+    expect(url).toBe('/control/decision')
+    expect(opts.headers.Authorization).toBe('Bearer good-key')
+  })
+
   it('shows error on invalid key (401)', async () => {
-    mockFetch.mockResolvedValue({ status: 401, ok: false })
+    // Route-aware, mirroring the server: health answers 200 to anyone, the
+    // authenticated route rejects a wrong key.
+    mockFetch.mockImplementation((url) =>
+      Promise.resolve(
+        url === '/control/health' ? { status: 200, ok: true } : { status: 401, ok: false }
+      )
+    )
 
     const { getByPlaceholderText, getByText, findByText } = render(<Login onLogin={() => {}} />)
     fireEvent.input(getByPlaceholderText('API key'), { target: { value: 'bad-key' } })

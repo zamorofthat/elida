@@ -8,6 +8,19 @@ describe('App auth gating', () => {
   let mockFetch
   let storage
 
+  const ok = (body = {}) => ({ status: 200, ok: true, json: () => Promise.resolve(body) })
+  const unauthorized = () => ({ status: 401, ok: false, json: () => Promise.resolve({}) })
+  // Mirrors the server: /control/health is auth-exempt so liveness probes can
+  // reach it and answers 200 to anyone, while an authenticated route answers
+  // 401 without the right credential. A gate that asks health therefore
+  // cannot tell a wrong key from a right one.
+  const keyed = (accepted) => (url, opts) => {
+    if (url === '/control/health') return Promise.resolve(ok({ status: 'ok' }))
+    return Promise.resolve(
+      opts?.headers?.Authorization === 'Bearer ' + accepted ? ok() : unauthorized()
+    )
+  }
+
   beforeEach(() => {
     storage = {}
     vi.stubGlobal('localStorage', {
@@ -24,8 +37,20 @@ describe('App auth gating', () => {
     vi.unstubAllGlobals()
   })
 
-  it('skips login when server has no auth configured (health 200)', async () => {
-    mockFetch.mockResolvedValue({ status: 200, ok: true, json: () => Promise.resolve({}) })
+  // The gate has to ask a route that answers 401. /control/health cannot:
+  // it is exempt from auth so liveness probes can reach it, so probing it
+  // admits every visitor and validates every key, including a wrong one.
+  it('probes an authenticated route, not the unauthenticated health route', async () => {
+    mockFetch.mockResolvedValue(ok())
+
+    render(<App />)
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled())
+    expect(mockFetch.mock.calls[0][0]).toBe('/control/decision')
+  })
+
+  it('skips login when the server has no auth configured (probe 200)', async () => {
+    mockFetch.mockResolvedValue(ok())
 
     const { container } = render(<App />)
 
@@ -35,8 +60,8 @@ describe('App auth gating', () => {
     expect(container.querySelector('.login-container')).toBeNull()
   })
 
-  it('shows login when server requires auth (health 401)', async () => {
-    mockFetch.mockResolvedValue({ status: 401, ok: false })
+  it('shows login when the server requires auth (probe 401)', async () => {
+    mockFetch.mockImplementation(keyed('right'))
 
     const { container } = render(<App />)
 
@@ -46,21 +71,57 @@ describe('App auth gating', () => {
     expect(container.querySelector('.topnav')).toBeNull()
   })
 
-  it('skips probe and renders dashboard when key exists in localStorage', async () => {
+  it('makes no unauthenticated request when a key is already stored', async () => {
     storage[AUTH_KEY] = 'existing-key'
-    mockFetch.mockResolvedValue({ status: 200, ok: true, json: () => Promise.resolve({}) })
+    mockFetch.mockResolvedValue(ok())
 
     const { container } = render(<App />)
 
     await waitFor(() => {
       expect(container.querySelector('.topnav')).toBeTruthy()
     })
-    // Should not have probed health without credentials
-    const healthCalls = mockFetch.mock.calls.filter(
-      ([url]) => url === '/control/health' && !mockFetch.mock.calls[0]?.[1]?.headers?.Authorization
-    )
-    // The first fetch should be an authed call (stats etc.), not an unauthed health probe
     expect(container.querySelector('.login-container')).toBeNull()
+    const unauthed = mockFetch.mock.calls.filter(([, opts]) => !opts?.headers?.Authorization)
+    expect(unauthed).toEqual([])
+  })
+
+  it('rejects a wrong key instead of accepting any string', async () => {
+    mockFetch.mockImplementation(keyed('right'))
+
+    const { container } = render(<App />)
+    await waitFor(() => {
+      expect(container.querySelector('.login-input')).toBeTruthy()
+    })
+
+    fireEvent.input(container.querySelector('.login-input'), { target: { value: 'wrong' } })
+    fireEvent.submit(container.querySelector('.login-card form'))
+
+    await waitFor(() => {
+      expect(container.querySelector('.login-error')).toBeTruthy()
+    })
+    expect(container.querySelector('.login-error').textContent).toBe('Invalid API key')
+    expect(storage[AUTH_KEY]).toBeUndefined()
+    expect(container.querySelector('.topnav')).toBeNull()
+  })
+
+  it('stores an accepted key and enters the dashboard', async () => {
+    mockFetch.mockImplementation(keyed('right'))
+
+    const { container } = render(<App />)
+    await waitFor(() => {
+      expect(container.querySelector('.login-input')).toBeTruthy()
+    })
+
+    fireEvent.input(container.querySelector('.login-input'), { target: { value: 'right' } })
+    fireEvent.submit(container.querySelector('.login-card form'))
+
+    await waitFor(() => {
+      expect(storage[AUTH_KEY]).toBe('right')
+    })
+    await waitFor(() => {
+      expect(container.querySelector('.topnav')).toBeTruthy()
+    })
+    expect(container.querySelector('.login-error')).toBeNull()
   })
 })
 
