@@ -33,7 +33,10 @@ export function Login({ onLogin }) {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(API_BASE + '/control/health', {
+      // Validated against an authenticated route, not /control/health:
+      // health is exempt from auth so liveness probes can reach it, so it
+      // answers 200 to every key, including a wrong one.
+      const res = await fetch(API_BASE + '/control/decision', {
         headers: { 'Authorization': 'Bearer ' + key.trim() },
       })
       if (res.status === 401) {
@@ -1296,7 +1299,11 @@ export function App() {
   useEffect(() => {
     setLogoutHandler(() => setAuthed(false))
     if (!authed) {
-      fetch(API_BASE + '/control/health')
+      // Does this server want a credential? /control/decision answers 401
+      // when control auth is on and 200 when it is off, so a server with no
+      // auth configured skips the login screen. /control/health cannot answer
+      // this — it is unauthenticated by design, so it would admit everyone.
+      fetch(API_BASE + '/control/decision')
         .then((res) => {
           if (res.ok) {
             setAuthed(true)
