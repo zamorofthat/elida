@@ -112,6 +112,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a `.sha256`, and the Docker image ships it at
   `/etc/elida/models/injection`.
 
+### Fixed
+- The dashboard decided whether it was authenticated by calling
+  `/control/health`, which is exempt from control auth so liveness probes can
+  reach it. With no stored key the probe returned 200 and unlocked the UI for
+  any visitor, and the login form validated a typed key against the same
+  route, which answers 200 to a wrong credential — so any string was accepted
+  and stored. Both now use `/control/decision`, which answers 401 without a
+  valid credential and 200 when control auth is off, so a server with no auth
+  configured still skips the login screen. No data was reachable either way:
+  every data call clears the key and returns to the login screen on a 401.
+
 ## [0.18.0] - 2026-08-02
 
 ### Fixed
