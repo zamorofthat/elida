@@ -17,7 +17,10 @@ spec:
       name: proxy
   selector:
     {{- include "elida.selectorLabels" . | nindent 4 }}
+{{- if or .Values.controlService.enabled .Values.controlIngress.enabled }}
 ---
+# Probes dial the pod directly, so this Service exists only for the dashboard
+# and for controlIngress, which needs it as a backend.
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,3 +40,4 @@ spec:
       name: control
   selector:
     {{- include "elida.selectorLabels" . | nindent 4 }}
+{{- end }}
