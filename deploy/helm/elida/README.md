@@ -35,6 +35,12 @@ helm install elida ./elida -f my-values.yaml
 | `image.tag` | Image tag | `latest` |
 | `elida.listenPort` | Proxy listen port | `8080` |
 | `elida.controlPort` | Control API port | `9090` |
+| `elida.controlAuth.enabled` | Require a credential on `/control/*` | `true` |
+| `elida.controlAuth.existingSecret` | Secret holding the key (recommended) | `""` |
+| `elida.controlAuth.existingSecretKey` | Key within that Secret | `api-key` |
+| `elida.controlAuth.apiKey` | Explicit key; stored in a chart-managed Secret | `""` |
+| `elida.controlAuth.allowInsecure` | Acknowledge an unauthenticated control API | `false` |
+| `controlService.enabled` | Create the control Service | `false` |
 | `elida.session.store` | Session store (`memory` or `redis`) | `redis` |
 | `elida.session.timeout` | Session timeout | `5m` |
 | `elida.tls.enabled` | Enable TLS | `false` |
@@ -65,6 +71,73 @@ elida:
       url: "https://api.mistral.ai"
       type: mistral
       models: ["mistral-*", "codestral-*"]
+```
+
+### Control API Authentication
+
+The control API is authenticated by default. It serves session content and raw
+tool arguments, and `PUT /control/settings` changes running configuration, while
+`elida.controlListen` has to be pod-reachable for Kubernetes to probe it — so an
+unauthenticated control API is reachable by anything in the cluster.
+
+`/control/health` stays unauthenticated, so Kubernetes probes and uptime
+checks need no credential.
+
+**Default install.** The chart generates a key into a Secret and re-uses the
+stored value on upgrade, so the credential is stable:
+
+```bash
+export ELIDA_CONTROL_KEY=$(kubectl get secret elida-control-auth \
+  -o jsonpath='{.data.api-key}' | base64 -d)
+curl -H "Authorization: Bearer $ELIDA_CONTROL_KEY" http://localhost:9090/control/stats
+```
+
+**Bring your own Secret** — recommended for production, and **required for
+GitOps**: generation reads the existing Secret from the cluster, which
+`helm template` cannot do, so a flow that renders manifests and applies them
+would mint a new key on every apply.
+
+```yaml
+elida:
+  controlAuth:
+    existingSecret: elida-control-key
+    existingSecretKey: api-key
+```
+
+The key is never written to the ConfigMap; it arrives as
+`ELIDA_CONTROL_API_KEY` from the Secret.
+
+**Turning auth off.** The binary refuses to start on a pod-reachable control
+bind with neither authentication nor an explicit acknowledgement, so the chart
+refuses to render it rather than shipping a crash loop. To run without auth
+anyway:
+
+```yaml
+elida:
+  controlAuth:
+    enabled: false
+    allowInsecure: true   # anything in the cluster can read and change state
+```
+
+or bind the control API to loopback (`elida.controlListen: "127.0.0.1:9090"`),
+which disables Kubernetes probes and the dashboard Service.
+
+### Control Service
+
+No control Service is created by default. Kubernetes probes dial the pod
+directly, so the Service existed only for the dashboard and for
+`controlIngress`, where it is still created automatically. Reach the dashboard
+without it:
+
+```bash
+kubectl port-forward deploy/elida 9090:9090
+```
+
+Or create it explicitly:
+
+```yaml
+controlService:
+  enabled: true
 ```
 
 ### Session Store Options
@@ -305,8 +378,8 @@ helm install elida ./elida -f prod-values.yaml -n elida --create-namespace
 # Proxy
 kubectl port-forward svc/elida 8080:8080
 
-# Dashboard
-kubectl port-forward svc/elida-control 9090:9090
+# Dashboard — no control Service exists by default, so forward to the pod
+kubectl port-forward deploy/elida 9090:9090
 ```
 
 ### Configure AI Tools
@@ -370,6 +443,7 @@ elida/
     ├── NOTES.txt        # Post-install notes
     ├── pdb.yaml         # Pod Disruption Budget
     ├── pvc.yaml         # Persistent Volume Claim
-    ├── service.yaml     # Services (proxy + control)
+    ├── secret.yaml      # Control API key (when the chart manages it)
+    ├── service.yaml     # Services (proxy, and control when enabled)
     └── serviceaccount.yaml
 ```

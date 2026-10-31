@@ -53,7 +53,10 @@ spec:
               value: {{ .Values.elida.controlListen | quote }}
             {{- if .Values.elida.controlAuth.enabled }}
             - name: ELIDA_CONTROL_API_KEY
-              value: {{ .Values.elida.controlAuth.apiKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "elida.controlAuthSecretName" . }}
+                  key: {{ include "elida.controlAuthSecretKey" . }}
             {{- end }}
             {{- if .Values.redis.enabled }}
             - name: ELIDA_SESSION_STORE

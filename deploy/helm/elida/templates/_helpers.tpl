@@ -80,3 +80,58 @@ Redis port
 {{- .Values.externalRedis.port | default "6379" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Name of the Secret holding the control API key.
+*/}}
+{{- define "elida.controlAuthSecretName" -}}
+{{- if .Values.elida.controlAuth.existingSecret -}}
+{{- .Values.elida.controlAuth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-control-auth" (include "elida.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Key within that Secret.
+*/}}
+{{- define "elida.controlAuthSecretKey" -}}
+{{- default "api-key" .Values.elida.controlAuth.existingSecretKey -}}
+{{- end }}
+
+{{/*
+The control API key for a chart-managed Secret, in this order: an explicit
+apiKey value, the key already stored in the cluster (so `helm upgrade` does not
+rotate it), otherwise a freshly generated one. Only called when the chart owns
+the Secret.
+*/}}
+{{- define "elida.controlAuthKey" -}}
+{{- if .Values.elida.controlAuth.apiKey -}}
+{{- .Values.elida.controlAuth.apiKey -}}
+{{- else -}}
+{{- $name := printf "%s-control-auth" (include "elida.fullname" .) -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
+{{- $stored := "" -}}
+{{- if $existing -}}
+{{- $stored = index (default dict $existing.data) (include "elida.controlAuthSecretKey" .) | default "" -}}
+{{- end -}}
+{{- if $stored -}}
+{{- $stored | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Refuse to render a configuration the binary will refuse to start:
+internal/config/security.go rejects a non-loopback control bind with neither
+authentication nor an explicit allow_insecure acknowledgement.
+*/}}
+{{- define "elida.validateControlAuth" -}}
+{{- $listen := .Values.elida.controlListen -}}
+{{- $loopback := or (hasPrefix "127." $listen) (hasPrefix "localhost:" $listen) (hasPrefix "[::1]" $listen) -}}
+{{- if and (not .Values.elida.controlAuth.enabled) (not .Values.elida.controlAuth.allowInsecure) (not $loopback) -}}
+{{- fail (printf "elida.controlAuth.enabled is false and controlListen is %q, which the control API refuses to start on without authentication. Set elida.controlAuth.enabled=true (recommended), or bind elida.controlListen to 127.0.0.1, or set elida.controlAuth.allowInsecure=true to accept an unauthenticated control API reachable from the whole cluster." $listen) -}}
+{{- end -}}
+{{- end }}

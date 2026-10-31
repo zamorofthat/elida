@@ -1,10 +1,26 @@
 ELIDA has been deployed successfully!
 
-{{- if not .Values.elida.controlAuth.enabled }}
+{{- if .Values.elida.controlAuth.enabled }}
+
+The control API requires a credential. The probe route /control/health stays
+unauthenticated so Kubernetes probes and uptime checks keep working.
+{{- if .Values.elida.controlAuth.existingSecret }}
+The key comes from the Secret you supplied: {{ .Values.elida.controlAuth.existingSecret }} (key {{ include "elida.controlAuthSecretKey" . }}).
+{{- else }}
+Read the generated key:
+
+  export ELIDA_CONTROL_KEY=$(kubectl get secret --namespace {{ .Release.Namespace }} {{ include "elida.controlAuthSecretName" . }} -o jsonpath="{.data.{{ include "elida.controlAuthSecretKey" . }}}" | base64 -d)
+
+`helm upgrade` re-uses the stored key, so it stays stable. For production, set
+elida.controlAuth.existingSecret to a Secret you manage.
+{{- end }}
+{{- else }}
 
 CONTROL API AUTH IS DISABLED for this release.
 The control listener is {{ .Values.elida.controlListen | quote }} and allow_insecure is {{ .Values.elida.controlAuth.allowInsecure }}.
-This is intended for in-cluster or port-forward-only access. Enable elida.controlAuth.enabled before exposing controlIngress.
+Anything that can reach that address can read session content and raw tool arguments,
+and can change running settings through PUT /control/settings. Set
+elida.controlAuth.enabled=true unless this listener is genuinely unreachable.
 Pod annotations also record the control auth mode for kubectl describe/inspection.
 {{- end }}
 
@@ -29,7 +45,12 @@ Pod annotations also record the control auth mode for kubectl describe/inspectio
 {{- if .Values.controlIngress.enabled }}
   http{{ if $.Values.controlIngress.tls }}s{{ end }}://{{ (index .Values.controlIngress.hosts 0).host }}
 {{- else }}
+{{- if .Values.controlService.enabled }}
   kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "elida.fullname" . }}-control 9090:{{ .Values.controlService.port }}
+{{- else }}
+  # No control Service is created by default — forward to the deployment.
+  kubectl port-forward --namespace {{ .Release.Namespace }} deploy/{{ include "elida.fullname" . }} 9090:{{ .Values.elida.controlPort }}
+{{- end }}
   echo "Dashboard URL: http://localhost:9090"
 {{- end }}
 
@@ -45,15 +66,15 @@ Pod annotations also record the control auth mode for kubectl describe/inspectio
    export MISTRAL_API_BASE="<proxy-url>"
 
 4. View active sessions:
-   curl http://localhost:9090/control/sessions
+   curl {{ if .Values.elida.controlAuth.enabled }}-H "Authorization: Bearer $ELIDA_CONTROL_KEY" {{ end }}http://localhost:9090/control/sessions
 
 5. View session statistics:
-   curl http://localhost:9090/control/stats
+   curl {{ if .Values.elida.controlAuth.enabled }}-H "Authorization: Bearer $ELIDA_CONTROL_KEY" {{ end }}http://localhost:9090/control/stats
 
 {{- if .Values.elida.policy.enabled }}
 
 Policy engine is ENABLED. Flagged sessions can be viewed at:
-   curl http://localhost:9090/control/flagged
+   curl {{ if .Values.elida.controlAuth.enabled }}-H "Authorization: Bearer $ELIDA_CONTROL_KEY" {{ end }}http://localhost:9090/control/flagged
 {{- end }}
 
 {{- if .Values.elida.telemetry.enabled }}

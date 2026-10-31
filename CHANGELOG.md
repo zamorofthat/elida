@@ -105,6 +105,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docs/semantic-detection.md` gains a "Residual risk" section.
 
 ### Changed
+- **Breaking (Helm chart).** The control API is now authenticated by default:
+  `elida.controlAuth.enabled` defaults to `true` and
+  `elida.controlAuth.allowInsecure` to `false`. The control API serves session
+  content and raw tool arguments and exposes `PUT /control/settings`, which
+  mutates running configuration, while `elida.controlListen` is pod-reachable
+  — so the previous defaults left all of that open to anything in the cluster.
+  The probe route `/control/health` stays unauthenticated so Kubernetes probes
+  and uptime checks keep working. With no key supplied the chart generates one into a Secret and
+  re-uses the stored value on upgrade; set
+  `elida.controlAuth.existingSecret` to manage it yourself, which is also what
+  GitOps flows that run `helm template` should do. To keep the old behavior,
+  set `elida.controlAuth.enabled=false` *and*
+  `elida.controlAuth.allowInsecure=true`, or bind `elida.controlListen` to
+  loopback; the chart now refuses to render the unacknowledged combination the
+  binary would refuse to start on.
+- **Breaking (Helm chart).** The control API key is no longer templated into
+  the ConfigMap, where anyone with `get configmaps` could read it. It is
+  delivered as `ELIDA_CONTROL_API_KEY` from a Secret.
+- **Breaking (Helm chart).** The control Service is no longer created by
+  default (`controlService.enabled: false`). Kubernetes probes dial the pod
+  directly and never needed it, so it only added a stable in-cluster name for
+  the control API. It is still created automatically when `controlIngress` is
+  enabled, and `kubectl port-forward deploy/<release>` reaches the dashboard
+  without it.
+- CI now lints the Helm chart and asserts what the rendered manifests say
+  about control auth (`scripts/helm-render-check.sh`), and runs the dashboard
+  test suite. Neither the chart nor those tests were verified by CI before.
 - Release archives now carry the semantic-injection model under
   `models/injection/` beside the binary. That adds about 86 MiB
   uncompressed (about 47 MiB compressed) to every per-platform archive. The

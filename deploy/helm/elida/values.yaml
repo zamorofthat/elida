@@ -20,12 +20,26 @@ elida:
   # Control API listen address. Kubernetes Services require a pod-reachable bind.
   controlListen: ":9090"
 
-  # Control API authentication. Enable auth before exposing controlIngress.
-  # allowInsecure acknowledges unauthenticated in-cluster access for the default ClusterIP service.
+  # Control API authentication. On by default: the control API serves session
+  # content, raw tool arguments and a settings endpoint that mutates running
+  # config, and controlListen is pod-reachable, so anything in the cluster can
+  # reach it. The probe route /control/health stays unauthenticated so
+  # Kubernetes probes and uptime checks keep working.
   controlAuth:
-    enabled: false
+    enabled: true
+    # The key is delivered as a Secret, never templated into the ConfigMap.
+    # Leave existingSecret and apiKey empty and the chart generates a key and
+    # keeps it across upgrades. For production, point existingSecret at a
+    # Secret you manage.
+    existingSecret: ""
+    existingSecretKey: "api-key"
+    # An explicit key. Stored in a chart-managed Secret; prefer existingSecret
+    # so the value never passes through values.yaml or `helm get values`.
     apiKey: ""
-    allowInsecure: true
+    # Only meaningful when enabled is false: acknowledges an unauthenticated
+    # control API on a pod-reachable address. The binary refuses to start
+    # without this acknowledgement, so the chart refuses to render instead.
+    allowInsecure: false
 
   # TLS configuration
   tls:
@@ -144,8 +158,12 @@ service:
   port: 8080
   annotations: {}
 
-# Control service (for dashboard/API)
+# Control service (for dashboard/API). Off by default: Kubernetes probes dial
+# the pod directly and do not need it, so creating it only adds a stable
+# in-cluster name for the control API. It is created automatically when
+# controlIngress is enabled, which needs it as a backend.
 controlService:
+  enabled: false
   type: ClusterIP
   port: 9090
   annotations: {}
