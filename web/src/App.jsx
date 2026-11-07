@@ -1298,7 +1298,9 @@ export function App() {
   useEffect(() => {
     setLogoutHandler(() => setAuthed(false))
     if (!authed) {
-      fetch(API_BASE + '/control/health')
+      // Health is always 200 (liveness), so it cannot tell whether auth is
+      // required; an unauthenticated /control/decision answers 401 if it is.
+      fetch(API_BASE + '/control/decision')
         .then((res) => {
           if (res.ok) {
             setAuthed(true)
