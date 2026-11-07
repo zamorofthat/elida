@@ -21,6 +21,18 @@ function ExpandableSnippet({ text }) {
 // Policy Page
 // ---------------------------------------------------------------------------
 
+// correlationSummary picks the policy correlation counters shown on the
+// card; null when policy correlation is off (the key is absent).
+export function correlationSummary(flaggedStats) {
+  const c = flaggedStats && flaggedStats.correlation
+  if (!c) return null
+  return {
+    sessions: c.sessions || 0, matches_recorded: c.matches_recorded || 0, events_queued: c.events_queued || 0,
+    events_observed: c.events_observed || 0, sessions_evicted: c.sessions_evicted || 0, history_evicted: c.history_evicted || 0,
+    tool_batches_dropped: c.tool_batches_dropped || 0,
+  }
+}
+
 export function PolicyPage() {
   const [config, setConfig] = useState(null)
   const [flaggedStats, setFlaggedStats] = useState({})
@@ -104,6 +116,18 @@ export function PolicyPage() {
             )}
           </div>
         </div>
+        {correlationSummary(flaggedStats) && (() => {
+          const c = correlationSummary(flaggedStats)
+          return (
+            <div class="policy-preset-card policy-correlation-card">
+              <div class="policy-preset-label">Correlation</div>
+              <div class="policy-preset-value">{c.matches_recorded}</div>
+              <div class="policy-rule-desc">
+                {c.sessions} sessions · {c.events_queued} events queued · {c.events_observed} observed · {c.sessions_evicted + c.history_evicted} evicted · {c.tool_batches_dropped} tool batch{c.tool_batches_dropped === 1 ? '' : 'es'} dropped
+              </div>
+            </div>
+          )
+        })()}
       </div>
 
       {/* Rules table */}

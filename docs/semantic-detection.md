@@ -1,7 +1,8 @@
 # Semantic injection detection: behaviour, configuration and limits
 
-> The limitations list below will be folded into the root
-> `SECURITY_LIMITATIONS.md` once PR #181 merges.
+> Residual risk (what this detector cannot see, and how it fails) is under
+> [Residual risk](#residual-risk) below; the per-feature limitations follow
+> it.
 
 Semantic prompt-injection detection (`decision.*`) runs a packaged MiniLM
 classifier over request content and its decoded representations. Its
@@ -33,10 +34,38 @@ the metadata is exported whenever OTEL or OCSF export is on.
   `gen_ai.conversation.id`, `gen_ai.provider.name` and
   `gen_ai.request.model`. An evidence-only decision is logged at Info severity.
   There is no OCSF finding per decision: findings stay one per rule.
+- **Per correlation match** (a `correlation.<rule>` violation), the match ID
+  as the event ID and nine evidence fields (`match_id`, `rule`, `shape`,
+  `mode`, `event_count`, `categories`, `first_event`, `last_event`,
+  `event_ids`):
+  - on the span event as `event_id` and `correlation.*`;
+  - on the violation log as `elida.violation.event_id` and
+    `elida.correlation.*`;
+  - in the OCSF finding as `unmapped."elida.event_id"` and
+    `unmapped."elida.correlation"` (bare field names).
+
+  `event_ids` carries up to 32 contributing IDs and `categories` up to 8
+  distinct categories, in order of first appearance (both hard caps, equal to
+  the engine's own ceilings today). Each entry passes the export's token
+  safety check first and an entry that fails it is dropped, so a later one
+  takes its slot: the caps count surviving entries, not leading ones; `event_count` is the full
+  count. Times are RFC3339Nano in UTC. Only the match retained on the
+  session at its end is exported, one per rule (see
+  [Residual risk](#residual-risk)).
+- **Per shadow correlation match**, one OTEL log at Info severity (body
+  `shadow correlation match: <rule> (calibration only, never a violation)`)
+  carrying the same nine `elida.correlation.*` fields plus
+  `elida.correlation.shadow=true` and `elida.correlation.severity`, and the
+  three `gen_ai.*` session attributes; at most 50 per session end, one per
+  `correlation_shadow` entry of the ending session instance. There is no
+  OCSF finding: a shadow match is calibration data. `semantic_shadow`
+  decisions are not exported.
 - **On the session span**, `elida.semantic.decisions.count` (decisions
   exported as logs; set only when OTEL logs are on) and
   `elida.semantic.decisions.dropped` (decisions dropped past the per-session
-  cap), set when the session has stored or dropped semantic decisions.
+  cap), set when the session has stored or dropped semantic decisions; and
+  `elida.correlation.shadow.count` (shadow correlation matches exported as
+  logs; set only when OTEL logs are on and the session has any).
 
 Decisions never raise `elida.violations.max_severity`; only violations feed
 it, and evidence-only violations are excluded from it. Decisions stamped
@@ -54,7 +83,12 @@ encoding. The session ID (`gen_ai.conversation.id`) and model name
 (`gen_ai.request.model`) are not length-capped, so the estimate assumes they
 are short.
 Decisions past the cap are counted in `elida.semantic.decisions.dropped`, not
-logged.
+logged. A correlation violation adds at most nine `elida.correlation.*`
+attributes plus `elida.violation.event_id` (ten over a plain violation):
+about 1.3 KB with
+32 event IDs at their usual 35-byte width, about 6 KB with every string at
+the 128-byte cap. A session end emits at most 50 shadow correlation logs of
+14 attributes each.
 
 **What is never exported**
 
@@ -154,8 +188,17 @@ shadow correlator takes its place:
   `decision.elevated_threshold`, below the main threshold, not vetoed.
 - A match is recorded as a `correlation_shadow` entry on the session,
   returned by `GET /control/sessions/{id}` next to `semantic_shadow`
-  (newest first, at most 50). The entry has the rule, match ID, shape,
-  severity, mode, the contributing DecisionIDs, categories and times.
+  (newest first, at most 50; past 50 the oldest entry is dropped). The
+  entry has the rule, match ID, shape, severity, mode, the contributing
+  DecisionIDs, categories and times.
+- At session end the entries are persisted (with `storage.enabled`) in
+  the `correlation_shadow` column of the stored session and served by
+  `GET /control/history/{id}` (the history list leaves them out), and,
+  when OTEL logs are on, each is exported as one OTEL log (see
+  [Telemetry](#telemetry)). Across reuse of a session ID the earlier
+  sessions' entries are carried behind the current session's, deduplicated
+  by match ID, 50 in total. Carrying does not recover entries an earlier
+  session had already dropped past its own 50.
 - It is calibration data: never a violation, never risk, and the traffic
   stays byte-identical.
 
@@ -164,7 +207,7 @@ to the shadow correlator; in `audit` and `enforce` it goes to the policy
 correlator as a violation event. Shadow state belongs to one session
 instance:
 
-- It is forgotten when the session ends.
+- It is forgotten when the session ends (the persisted entries remain).
 - A session that reuses an ended session's ID starts empty.
 - A request that arrives on a session that has already ended is not
   correlated.
@@ -175,10 +218,14 @@ state ends with the process. It runs outside the semantic runner's
 session-registry lock, so a slow correlation on one session never delays
 another session's assessment. A match computed while its session ended (or
 its ID was reused) is dropped, counted in `shadow_matches_dropped` at
-`GET /control/decision`, and that instance's state is forgotten. A
-match accepted just before the session ends can still be written to the
-ended session's in-memory record after its end callback ran; that is
-harmless while `correlation_shadow` is not persisted.
+`GET /control/decision`, and that instance's state is forgotten. Accepting
+a match onto its session and releasing the session at its end are
+synchronized on the runner's session-registry lock (the correlation itself
+still runs outside it), so once the session-end path has released a
+session, no further shadow match can be written to it: the record persisted
+at session end holds the matches accepted before the release (the newest
+50 of them), and an in-flight match rejected at session end or shutdown is
+counted in `shadow_matches_dropped` and absent from the persisted `correlation_shadow`.
 
 **Tool activity (`tool_categories`).** `correlation.tool_categories` maps
 tool calls returned by the backend to categories, so rules can use them.
@@ -220,6 +267,68 @@ coarse, and character-class repeats dominate it: adding one base64-blob
 detector, `[a-z0-9+/]{200,}={1,2}` (about 210 instructions, under the soft
 limit, so no WARN), raises the realistic taxonomy to about 37 ms per call
 at the default 16 KiB. Prefer literal-led patterns.
+
+## Residual risk
+
+ELIDA's semantic and temporal detection raises the cost of prompt injection;
+it does not close it. Each item names what the detector cannot see and how
+the failure shows up, so an operator can decide what else must stand behind
+the proxy.
+
+- **Paraphrase and distribution shift.** The classifier scores a fixed
+  training distribution. A rewritten injection, an unsupported language, or
+  a payload style absent from the training corpora can score below every
+  threshold and leave no decision, no evidence and no correlation input.
+  Nothing in telemetry distinguishes "scored clean" from "not recognized".
+  The [model card](model-card-injection.md) records the corpora and the
+  calibration provenance.
+- **Encoded content past the decode budget.** Decoding is bounded
+  (`decision.preprocessing.max_decode_depth` default 2,
+  `max_representations` default 8, four base64/hex candidate runs,
+  printable-text checks). A payload behind a third decode, glued to a word,
+  in short or odd-length hex, or built from `\xHH` escapes of multi-byte
+  UTF-8 is scored only in its encoded form. Budget exhaustion is visible as
+  a `coverage_gaps` key, never as a finding.
+- **Windows and coverage.** Content is scored in sentence-aligned windows of
+  at most 128 tokens; inline capacity is scarce and the rest is queued.
+  Meaning that exists only across windows, or only after fragments are
+  joined, is not reconstructed. `coverage_complete: false` on a decision and
+  the `not_assessed` and `messages_not_assessed` gaps say what was not
+  scored; a request can be forwarded before any window answered.
+- **Shadow and audit protect nothing.** In `shadow`, decisions never touch
+  the risk score; in `audit`, evidence-only violations never do. Only
+  `decision.mode: enforce`, with a matching threshold set and
+  `policy.mode: enforce`, moves the ladder, and inline protection of the current request exists only on
+  `inline` builds. A deployment reading shadow calibration data is
+  observing, not blocking.
+- **Correlation evasion.** The correlator keeps at most `max_history_events`
+  (default 64) events per session and `max_sessions` (default 4096)
+  sessions in per-shard LRUs. A flood of wanted events or of sessions
+  evicts history (counted in `history_evicted` and `sessions_evicted`), and
+  a slow burn spread wider than the budget or the rule window is not
+  matched. Ending and reusing a session ID resets its history; a
+  block-retained ID is inert for correlation. Fragments that all score
+  below `decision.elevated_threshold` produce no events at all.
+- **Retained evidence, not a complete ledger.** Ordinary correlation
+  evidence is the retained display match per rule: a later firing of a rule
+  in a session replaces the earlier match's evidence, and only the retained
+  match reaches full persistence, a `violation_detected` row and
+  session-end export. Earlier firings leave at most an event identity in
+  the policy engine's in-memory risk events, which does not reconstruct
+  the overwritten evidence and is not persisted. Shadow history
+  keeps at most 50 entries, and carrying it across session-ID reuse does
+  not recover matches already overwritten or evicted.
+- **Shadow matches at session end.** A shadow match whose evaluation is
+  still running when the session ends is dropped and counted in
+  `shadow_matches_dropped`; the persisted `correlation_shadow` can
+  therefore be short by the matches in flight at that instant.
+- **Debug logging.** At logging level `debug` the proxy's pre-existing
+  `response` line logs up to the first 1000 bytes of a non-streaming
+  response body (tool-call arguments included), and `streaming response
+  complete` logs a content preview. No semantic, correlation or evidence
+  export carries content, but debug logs do.
+- **Bypass.** Traffic that does not pass through the proxy is not analyzed.
+  Model assets are verified at startup, not continuously.
 
 ## Limitations
 
@@ -355,16 +464,19 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   the default `max_argument_bytes` without triggering the startup WARN.
 - **The violation list shows the latest match per rule.** Every match is
   its own violation event, but the flagged-session violation list keeps one
-  entry per rule name, and only that entry's contributing IDs are shown.
+  entry per rule name, and only that entry's contributing IDs are shown,
+  persisted and exported. Earlier matches of the rule leave only an
+  in-memory event identity and the rule's violation count.
 - **Changing `decision.mode` at runtime splits a session's evidence.** In
   shadow, elevated decisions feed the shadow correlator; in `audit` and
   `enforce`, they feed the policy correlator. A session that crosses a mode
   change can have its slow burn split across the two and go unmatched. A
   decision is never counted twice.
-- **Shadow correlation sees only semantic evidence, and only in memory.**
-  The shadow correlator receives only elevated-band semantic decisions. A
-  rule that also needs other categories (regex rule categories, tool
-  categories) matches only in `audit` or `enforce`. `correlation_shadow`
-  records live on the in-memory session and are not yet persisted to SQLite
-  or exported. A session not bound to the semantic runner (refused at the
-  65,536-binding safety limit) is not shadow-correlated.
+- **Shadow correlation sees only semantic evidence.** The shadow
+  correlator receives only elevated-band semantic decisions. A rule that
+  also needs other categories (regex rule categories, tool categories)
+  matches only in `audit` or `enforce`. A session not bound to the semantic
+  runner (refused at the 65,536-binding safety limit) is not
+  shadow-correlated. Its correlator state is in memory and bounded like the
+  policy correlator's; the persisted `correlation_shadow` list keeps at
+  most 50 entries per session ID.

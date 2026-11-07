@@ -152,4 +152,26 @@ describe('guardrail helpers', () => {
     expect(saveErrorText(JSON.stringify({ error: 'settings refused' }))).toBe('settings refused')
     expect(saveErrorText('Failed to save settings\n')).toBe('Failed to save settings')
   })
+
+  it('shows shadow_matches_dropped and the shadow correlator counters when present', () => {
+    const { container } = renderIt({ status: { ...status, shadow_matches_dropped: 2,
+      shadow_correlation: { rules: 1, shards: 4, sessions: 3, history_events: 9, events_observed: 12, events_ignored: 0,
+        duplicate_events: 1, events_dropped: 0, history_evicted: 0, sessions_evicted: 1, matches: 4, cooldown_suppressed: 2, duplicate_matches: 0 } } })
+    const text = container.querySelector('.decision-status').textContent
+    expect(text).toContain('Shadow correlation')
+    expect(text).toContain('4 matches')
+    expect(text).toContain('3 sessions')
+    expect(text).toContain('12 events')
+    expect(text).toContain('2 suppressed')
+    expect(text).toContain('1 evicted')
+    expect(text).toContain('2 dropped')
+  })
+
+  it('shows only the dropped count when no shadow correlator runs', () => {
+    const { container } = renderIt({ status: { ...status, shadow_matches_dropped: 0 } })
+    const text = container.querySelector('.decision-status').textContent
+    expect(text).toContain('Shadow correlation')
+    expect(text).toContain('not running')
+    expect(text).toContain('0 dropped')
+  })
 })

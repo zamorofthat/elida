@@ -106,6 +106,10 @@ Scoring request-side user content and untrusted tool results for prompt-injectio
 - **Encoded content.** Decoding is bounded (depth, representation count, byte budget) and deliberately conservative. A payload behind three decodes, or one whose decoded form fails the printable-text check, is not analyzed.
 - **The 128-token cut lives in code, not in the artifact.** The pure-Go backend does not truncate or pad, and it runs the graph at exactly the input's token count, so cost scales with the real length of each window. ELIDA's `maxSequenceLength` is what keeps every inference at or under 128 tokens; the tokenizer configuration in the artifact does not. A different runtime that honors `tokenizer_config.json` would see the same 128, but ELIDA does not rely on that.
 
+### Residual risk
+
+This model is one signal feeding ELIDA's session risk score. What it cannot see, it cannot report: a paraphrased, out-of-distribution or non-English injection, meaning that exists only across windows or decodes, and anything that bypasses the proxy leave no decision and no evidence. Threshold-set `v1` is upstream's int8 calibration applied to a float32 path; until recalibration on ELIDA traffic, probabilities near 0.5 and 0.64 are not trustworthy decision boundaries. The deployment-level view, including correlation and shadow limits, is in [semantic-detection.md](semantic-detection.md#residual-risk).
+
 ## Evaluation
 
 Upstream reports an expected calibration error of 0.09, fitted on labeled plugin events from 2026-05-13, over 23 named public and internal corpora: `qualifire`, `jayavibhav`, `agentdojo`, `jasperls`, `jailbreakbench`, `toxic-chat`, `chatgpt-jailbreaks`, `email-hardneg`, `email-hardneg-gen`, `multilingual-hardneg`, `jailbreakbench-neg`, `toxic-chat-neg`, `fujitsu-injecagent`, `fujitsu-rag`, `enron-ham`, `connector-hardneg-v2`, `dev-tooling-hardneg-curated`, `dev-tooling-attacks`, `agentshield-shape-attacks`, `system-prompt-extraction-attacks`, `emoji-ci-benign`, `benign-user-queries`, `code-docs-benign`. That list is also the corpus set the fallback-training path would use.

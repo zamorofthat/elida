@@ -61,6 +61,18 @@ function label(key) {
   return key.replaceAll('_', ' ')
 }
 
+// shadowCorrelationSummary picks the shadow correlator counters an operator
+// reads at a glance; null when no shadow correlator runs (the key is absent).
+export function shadowCorrelationSummary(status) {
+  const s = status && status.shadow_correlation
+  if (!s) return null
+  return {
+    sessions: s.sessions || 0, matches: s.matches || 0, events_observed: s.events_observed || 0,
+    cooldown_suppressed: s.cooldown_suppressed || 0, sessions_evicted: s.sessions_evicted || 0,
+    history_evicted: s.history_evicted || 0, dropped: (status.shadow_matches_dropped) || 0,
+  }
+}
+
 export function DecisionSettings({ decision, policyMode, status, isModified, onChange, onPreprocessingChange }) {
   const running = !!(status && status.enabled && status.capability !== 'disabled')
   const blocked = enforceBlockedReason(policyMode, status)
@@ -106,6 +118,14 @@ export function DecisionSettings({ decision, policyMode, status, isModified, onC
             <dd>{gaps}</dd>
             <dt>Breaker</dt>
             <dd>{status.breaker_open ? 'open' : 'closed'}</dd>
+            <dt>Shadow correlation</dt>
+            <dd>
+              {(() => {
+                const sc = shadowCorrelationSummary(status)
+                if (!sc) return `not running · ${status.shadow_matches_dropped || 0} dropped`
+                return `${sc.matches} matches · ${sc.sessions} sessions · ${sc.events_observed} events · ${sc.cooldown_suppressed} suppressed · ${sc.sessions_evicted + sc.history_evicted} evicted · ${sc.dropped} dropped`
+              })()}
+            </dd>
           </dl>
         )}
         <div class="settings-grid">

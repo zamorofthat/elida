@@ -391,7 +391,7 @@ func TestDecisionControl_HealthStaysMinimal(t *testing.T) {
 	}
 }
 
-func TestDecisionControl_HealthReportsCapabilityAndReasonOnly(t *testing.T) {
+func TestDecisionControl_HealthReportsOnlyContentFreeDecisionFacts(t *testing.T) {
 	store := session.NewMemoryStore()
 	manager := session.NewManager(store, 5*time.Minute)
 	h := control.New(store, manager)
@@ -406,13 +406,28 @@ func TestDecisionControl_HealthReportsCapabilityAndReasonOnly(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	var resp struct {
-		Decision map[string]string `json:"decision"`
+		Decision map[string]any `json:"decision"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if resp.Decision["capability"] != "degraded" || resp.Decision["reason"] == "" || len(resp.Decision) != 2 {
-		t.Fatalf("decision = %v, want exactly capability and reason", resp.Decision)
+	// D4: exactly three strings (capability, reason, effective_mode) and
+	// two booleans (threshold_set_matches, breaker_open).
+	if len(resp.Decision) != 5 {
+		t.Fatalf("decision = %v, want exactly capability, reason, effective_mode, threshold_set_matches, breaker_open", resp.Decision)
+	}
+	for _, k := range []string{"capability", "reason", "effective_mode"} {
+		if _, ok := resp.Decision[k].(string); !ok {
+			t.Fatalf("decision[%q] = %#v, want a string", k, resp.Decision[k])
+		}
+	}
+	for _, k := range []string{"threshold_set_matches", "breaker_open"} {
+		if _, ok := resp.Decision[k].(bool); !ok {
+			t.Fatalf("decision[%q] = %#v, want a bool", k, resp.Decision[k])
+		}
+	}
+	if resp.Decision["capability"] != "degraded" || resp.Decision["reason"] == "" {
+		t.Fatalf("decision = %v, want capability degraded and a reason", resp.Decision)
 	}
 	body := w.Body.String()
 	for _, leak := range []string{"/etc/elida", "manifest.json", "minilm", "abc123", "arm64"} {

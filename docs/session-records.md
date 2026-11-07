@@ -62,9 +62,23 @@ CREATE TABLE sessions (
     metadata TEXT,                    -- JSON: custom key-value pairs
     captured_content TEXT,            -- JSON: array of requests/responses
     violations TEXT,                  -- JSON: array of policy violations
+    fingerprint_distance REAL DEFAULT 0, -- behavioral fingerprint distance
+    fingerprint_bucket TEXT DEFAULT '',  -- fingerprint distance bucket
+    fingerprint_class TEXT DEFAULT '',   -- fingerprint classification
+    semantic_shadow TEXT,             -- JSON: shadow semantic decisions (newest first, max 50)
+    semantic_decisions TEXT,          -- JSON: {decisions, dropped}
+    correlation_shadow TEXT,          -- JSON: shadow correlation matches (newest first, max 50)
     created_at DATETIME
 );
 ```
+
+The three `fingerprint_*` columns are in the `CREATE TABLE` and are also added
+to databases created before them by idempotent `ALTER TABLE sessions ADD COLUMN`
+statements.
+
+`prior_history TEXT` (JSON: entries carried from earlier sessions with the
+same ID) is not part of `CREATE TABLE`: it is added to existing and new
+databases by an idempotent `ALTER TABLE sessions ADD COLUMN prior_history TEXT`.
 
 ## Data Structures
 
@@ -115,6 +129,33 @@ Each policy violation includes source attribution and SIEM classification:
 | `source_content` | string | Full message content, truncated to `max_capture_size` |
 | `event_category` | string | SIEM category: `prompt_injection`, `data_exfil`, `rate_limit`, `dangerous_command`, `sensitive_data`, `resource_abuse`, `data_volume`, `denial_of_service`, `model_abuse` |
 | `framework_ref` | string | Framework reference: `OWASP-LLM01` through `OWASP-LLM10`, `ELIDA-FIREWALL` |
+| `event_id` | string | Stable occurrence ID; for a correlation match, the match ID. Absent on older rows |
+| `evidence_only` | bool | Recorded as evidence that contributed no risk |
+| `semantic` | object | Semantic rules only: the representative decision's metadata (see [api.md](api.md#semantic-decision-records)) |
+| `correlation` | object | Correlation matches only: `match_id`, `rule`, `shape`, `mode`, `event_ids`, `categories`, `first_event`, `last_event` (see [api.md](api.md#correlation-evidence)) |
+
+`correlation` holds the retained match per rule: a later firing of the rule in the session replaces the earlier evidence, so the column is not a ledger of every match.
+
+### Correlation shadow
+
+`correlation_shadow` holds the session's shadow-mode correlation matches (calibration data, never violations), newest first. Each entry has `timestamp`, `match_id`, `rule`, `shape`, `severity`, `mode`, `event_ids`, `categories`, `first_event` and `last_event`: identifiers, enums and times, never content.
+
+```json
+{
+    "timestamp": "2026-03-14T20:46:08Z",
+    "match_id": "cm_0123456789abcdef0123456789abcdef",
+    "rule": "slow_burn_injection",
+    "shape": "repeated",
+    "severity": "warning",
+    "mode": "audit",
+    "event_ids": ["<decision-id>", "<decision-id>", "<decision-id>"],
+    "categories": ["injection_elevated"],
+    "first_event": "2026-03-14T20:40:01Z",
+    "last_event": "2026-03-14T20:46:07Z"
+}
+```
+
+A session keeps at most 50 entries, dropping the oldest. When a session ID is reused, saving the new session carries the stored entries of the earlier sessions behind its own, drops carried entries whose `match_id` the new session already holds, and keeps the newest carried entries up to 50 in total; the carried part is also stored in `prior_history`. Entries an earlier session had already dropped are not recovered. The column is added by an idempotent migration (default empty) and is loaded only by `GET /control/history/{id}`; the history list leaves it out.
 
 ## Redaction of Captured Content
 

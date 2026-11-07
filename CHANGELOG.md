@@ -77,6 +77,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `correlation:` block is restart-only and is not part of Settings.
     Startup logs a one-line summary.
   - Limitations are in `docs/semantic-detection.md`.
+- Correlation evidence surfaces (Plan C).
+  - `violations[].correlation` (match ID, rule, shape, mode, contributing
+    event IDs, categories, first and last event) is persisted with the
+    session record and exported on the `policy.violation` span event, the
+    violation log and the OCSF finding behind a nine-field allowlist
+    (`event_ids` capped at 32, `categories` at 8). Only the retained match
+    per rule is kept in full. `violation_detected` rows carry `event_id`,
+    `event_category` and `source_role`.
+  - SQLite `sessions` gains a `correlation_shadow` column (shadow-mode
+    matches, newest first, at most 50, carried across session-ID reuse and
+    deduplicated by match ID), added by migration and served by
+    `GET /control/history/{id}`. Each entry of the ending session is
+    logged once at session end (`elida.correlation.*`,
+    `elida.correlation.shadow=true`); there is no OCSF finding for it.
+  - Releasing a session at its end and accepting a shadow match onto it
+    are synchronized, so a match in flight at session end is dropped and
+    counted in `shadow_matches_dropped` rather than lost silently.
+  - `GET /control/sessions/{id}/turns` violation turns carry `event_id`,
+    `event_category`, `source_role`, `evidence_only` and a `correlation`
+    summary; `GET /control/health` adds `effective_mode`,
+    `threshold_set_matches` and `breaker_open`; `GET /control/decision`
+    adds `shadow_correlation`.
+  - The dashboard's session detail and history views show a "Semantic
+    evidence" section with timeline markers, and the Settings and Policy
+    pages show the shadow and policy correlation counters.
+  - `docs/semantic-detection.md` gains a "Residual risk" section.
 
 ### Changed
 - Release archives now carry the semantic-injection model under
