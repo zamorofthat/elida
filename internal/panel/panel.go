@@ -4,6 +4,10 @@
 package panel
 
 import (
+	"log/slog"
+	"math"
+	"sync"
+
 	"elida/internal/fingerprint"
 	"elida/internal/session"
 )
@@ -63,7 +67,9 @@ func BuildFeatures(snap *session.Session) SessionFeatures {
 }
 
 // MemberOpinion is one detector's judgement. A member emits an anomaly score,
-// a class, or both. Veto floors the panel RiskScore to 1.0.
+// a class, or both. Veto floors the panel RiskScore to 1.0 (order-independent).
+// Anomaly is clamped to [0,1] by Panel.Assess. Shadow and Weight are set by
+// Panel.Assess from the member's seat, not by the member itself.
 type MemberOpinion struct {
 	Member     string
 	Anomaly    float64
@@ -71,6 +77,8 @@ type MemberOpinion struct {
 	Confidence float64
 	Veto       bool
 	Detail     map[string]any
+	Shadow     bool    // set by Panel.Assess from the seat
+	Weight     float64 // set by Panel.Assess from the seat
 }
 
 // Verdict is the structured output the panel produces.
@@ -79,6 +87,9 @@ type Verdict struct {
 	Class      string
 	Confidence float64
 	Members    []MemberOpinion
+	// Driver is the member whose weight*Anomaly set RiskScore, "veto:<member>"
+	// when a veto set it, and "" when RiskScore is 0.
+	Driver string
 }
 
 // Member is one detector on the panel.
@@ -102,39 +113,67 @@ type seat struct {
 	weight float64
 }
 
-// Panel holds seated members and aggregates their opinions.
+// Panel holds seated members and aggregates their opinions. Seat weights are
+// clamped to [0,1] and member anomalies to [0,1], so RiskScore stays in [0,1].
 type Panel struct {
-	seats []seat
+	seats  []seat
+	warned sync.Map // member name -> struct{}; out-of-range anomaly warned once
 }
 
 func NewPanel() *Panel { return &Panel{} }
 
 // Seat adds a member. shadow members are assessed and reported but excluded
-// from the aggregated RiskScore/Class.
+// from the aggregated RiskScore/Class. weight is clamped to [0,1].
 func (p *Panel) Seat(m Member, shadow bool, weight float64) {
-	p.seats = append(p.seats, seat{m: m, shadow: shadow, weight: weight})
+	p.seats = append(p.seats, seat{m: m, shadow: shadow, weight: clamp01(weight)})
 }
 
-// Assess runs every member and aggregates: weighted-max-with-veto.
+func clamp01(x float64) float64 {
+	if math.IsNaN(x) || x < 0 {
+		return 0
+	}
+	if x > 1 {
+		return 1
+	}
+	return x
+}
+
+// Assess runs every member and aggregates: weighted-max with an
+// order-independent veto floor. Out-of-range anomalies are clamped to [0,1]
+// (NaN becomes 0) with one warning per member name.
 func (p *Panel) Assess(f SessionFeatures) Verdict {
 	v := Verdict{Members: make([]MemberOpinion, 0, len(p.seats))}
 	var bestClassConf float64
+	var vetoBy string
 	for _, s := range p.seats {
 		op := s.m.Assess(f)
+		if c := clamp01(op.Anomaly); c != op.Anomaly { // NaN != NaN, so NaN is caught too
+			if _, seen := p.warned.LoadOrStore(op.Member, struct{}{}); !seen {
+				slog.Warn("panel member emitted out-of-range anomaly; clamped to [0,1]", "member", op.Member, "anomaly", op.Anomaly)
+			}
+			op.Anomaly = c
+		}
+		op.Shadow, op.Weight = s.shadow, s.weight
 		v.Members = append(v.Members, op)
 		if s.shadow {
 			continue
 		}
-		if op.Veto {
-			v.RiskScore = 1.0
-		} else if w := s.weight * op.Anomaly; w > v.RiskScore {
+		if op.Veto && vetoBy == "" {
+			vetoBy = op.Member
+		}
+		if w := s.weight * op.Anomaly; w > v.RiskScore {
 			v.RiskScore = w
+			v.Driver = op.Member
 		}
 		if op.Class != "" && op.Confidence >= bestClassConf {
 			bestClassConf = op.Confidence
 			v.Class = op.Class
 			v.Confidence = op.Confidence
 		}
+	}
+	if vetoBy != "" {
+		v.RiskScore = 1.0 // order-independent floor: RiskScore is already <= 1
+		v.Driver = "veto:" + vetoBy
 	}
 	return v
 }
