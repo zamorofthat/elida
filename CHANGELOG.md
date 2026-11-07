@@ -105,6 +105,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docs/semantic-detection.md` gains a "Residual risk" section.
 
 ### Changed
+- `/control/health` returns its `decision` block (capability, reason,
+  `effective_mode`, `threshold_set_matches`, `breaker_open`) only to a caller
+  presenting a valid control key, or when control auth is disabled. Liveness
+  (`status`, `timestamp`) stays unauthenticated, and a missing or wrong key
+  still gets a 200, so Kubernetes and Docker probes are unaffected. The
+  dashboard sign-in now validates the key against `/control/decision`.
 - Release archives now carry the semantic-injection model under
   `models/injection/` beside the binary. That adds about 86 MiB
   uncompressed (about 47 MiB compressed) to every per-platform archive. The

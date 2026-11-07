@@ -73,6 +73,71 @@ func TestHealthExemptFromControlAuth(t *testing.T) {
 	}
 }
 
+type stubHealthDecision struct{ st DecisionStatus }
+
+func (s stubHealthDecision) DecisionStatus() DecisionStatus { return s.st }
+
+// The decision block on /control/health is enforcement-state information:
+// it must appear only for a caller holding the control key (or when auth is
+// disabled), and a wrong key must never turn liveness into a 401.
+func TestHealthDecisionBlockRequiresControlKey(t *testing.T) {
+	status := DecisionStatus{Capability: "degraded", EffectiveMode: "enforce", BreakerOpen: true}
+
+	get := func(h *Handler, hdr map[string]string) (int, map[string]any, string) {
+		req := httptest.NewRequest("GET", "/control/health", nil)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return rec.Code, body, rec.Body.String()
+	}
+
+	authed := newTestAPIWithAuth(t)
+	authed.SetDecisionProvider(stubHealthDecision{status})
+
+	cases := []struct {
+		name      string
+		hdr       map[string]string
+		wantBlock bool
+	}{
+		{"no credentials", nil, false},
+		{"wrong bearer key", map[string]string{"Authorization": "Bearer nope"}, false},
+		{"wrong x-api-key", map[string]string{"X-API-Key": "nope"}, false},
+		{"valid bearer key", map[string]string{"Authorization": "Bearer " + testControlAPIKey}, true},
+		{"valid raw authorization", map[string]string{"Authorization": testControlAPIKey}, true},
+		{"valid x-api-key", map[string]string{"X-API-Key": testControlAPIKey}, true},
+	}
+	for _, tc := range cases {
+		code, body, raw := get(authed, tc.hdr)
+		if code != http.StatusOK || body["status"] != "ok" {
+			t.Errorf("%s: code=%d body=%s, want 200 liveness", tc.name, code, raw)
+		}
+		_, has := body["decision"]
+		if has != tc.wantBlock {
+			t.Errorf("%s: decision block present=%v, want %v (%s)", tc.name, has, tc.wantBlock, raw)
+		}
+		if !tc.wantBlock {
+			for _, leak := range []string{"no detection is active", "enforce", "breaker", "degraded"} {
+				if strings.Contains(raw, leak) {
+					t.Errorf("%s: unauthenticated health leaks %q: %s", tc.name, leak, raw)
+				}
+			}
+		}
+	}
+
+	// Auth disabled: there is no key to gate on, so the block is present.
+	open := New(session.NewMemoryStore(), session.NewManager(session.NewMemoryStore(), 30*time.Second))
+	open.SetDecisionProvider(stubHealthDecision{status})
+	if _, body, raw := get(open, nil); body["decision"] == nil {
+		t.Errorf("auth disabled: decision block missing: %s", raw)
+	}
+}
+
 // stubPanel is a minimal PanelProvider for testing handlePanel.
 type stubPanel struct{ members []panel.MemberInfo }
 

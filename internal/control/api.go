@@ -491,7 +491,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check authentication for /control/* endpoints
-	// Feedback #5: /control/health is exempt (liveness/readiness probes can't carry credentials)
+	// Feedback #5: /control/health is exempt (liveness/readiness probes can't carry credentials);
+	// handleHealth withholds the decision block unless the caller holds the key.
 	if h.authEnabled && strings.HasPrefix(r.URL.Path, "/control/") && r.URL.Path != "/control/health" {
 		if !h.checkAuth(r) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ELIDA Control API"`)
@@ -541,11 +542,13 @@ func secureCompare(a, b string) bool {
 // Returns minimal payload (status + timestamp) for liveness probes.
 // Version/CaptureMode available only via authenticated endpoints (/control/stats, /control/settings).
 //
-// When semantic detection is wired, it adds "decision": the capability enum
-// and a fixed, content-free reason for it, so an orchestrator can see a
-// degraded or async-only deployment. Model identity, checksums, the
-// architecture detail and every counter stay on the authenticated
-// /control/decision.
+// When semantic detection is wired AND the caller presents a valid control
+// key (or auth is disabled), it adds "decision": the capability enum, a
+// fixed content-free reason, and the enforcement-state facts. Those are
+// timing information for an adversary, so an unauthenticated or wrong-key
+// request gets liveness only, and never a 401, so a mis-set secret cannot
+// fail a probe. Model identity, checksums, the architecture detail and every
+// counter stay on /control/decision.
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -556,10 +559,10 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now(),
 	}
-	if h.decisionProvider != nil {
+	if h.decisionProvider != nil && (!h.authEnabled || h.checkAuth(r)) {
 		st := h.decisionProvider.DecisionStatus()
 		// Enums and booleans only: no model identity, checksum, threshold
-		// set, path or provider reason on the unauthenticated route.
+		// set, path or provider reason, even for an authenticated caller.
 		response["decision"] = map[string]any{
 			"capability":            st.Capability,
 			"reason":                healthCapabilityReason(st.Capability),

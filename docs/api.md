@@ -11,16 +11,19 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 ### Health & Stats
 
 ```bash
-# Health check (unauthenticated). With semantic detection wired it also
-# reports "decision": {"capability", "reason", "effective_mode",
+# Health check. Liveness ({"status","timestamp"}) is unauthenticated, so
+# probes that cannot carry credentials keep working. With semantic detection
+# wired, a request carrying a valid control key (Bearer, raw Authorization or
+# X-API-Key) also gets "decision": {"capability", "reason", "effective_mode",
 # "threshold_set_matches", "breaker_open"}: the capability enum (inline,
 # async_only, degraded, disabled), a fixed reason, the effective mode
 # (disabled|shadow|audit|enforce) and two booleans; enums and booleans only.
-# Model identity and counters are only on the authenticated /control/decision.
-# These three facts are deliberately available without a key so health probes
-# can see detector state. An operator who does not want enforcement state
-# visible unauthenticated should keep the control listener on localhost (the
-# default control listen address is 127.0.0.1:9090).
+# These are enforcement-state facts, so they are withheld otherwise: a missing
+# or wrong key still gets a 200 with liveness only (never a 401, so a mis-set
+# secret cannot fail a probe). With control.auth disabled there is no key to
+# gate on and the block is always present; a non-loopback listener in that
+# state requires control.auth.allow_insecure. Model identity and counters are
+# only on the authenticated /control/decision.
 curl http://localhost:9090/control/health
 
 # Aggregate stats
