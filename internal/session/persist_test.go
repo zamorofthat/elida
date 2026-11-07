@@ -151,12 +151,27 @@ func TestManagerPersist_StoredNonActiveStateDoesNotFlipTheLiveSession(t *testing
 	}
 }
 
+// putCountingMemoryStore counts Put calls on a MemoryStore.
+type putCountingMemoryStore struct {
+	*MemoryStore
+	puts int
+}
+
+func (s *putCountingMemoryStore) Put(sess *Session) {
+	s.puts++
+	s.MemoryStore.Put(sess)
+}
+
 func TestManagerPersist_IsANoOpForMemoryStore(t *testing.T) {
-	store := NewMemoryStore()
+	store := &putCountingMemoryStore{MemoryStore: NewMemoryStore()}
 	m := NewManager(store, time.Minute)
 	sess := m.GetOrCreate("p-mem", "http://b", "127.0.0.1")
 	sess.AddTokens(2, 2)
+	puts := store.puts
 	m.Persist(sess)
+	if store.puts != puts {
+		t.Fatalf("Persist wrote to a MemoryStore: puts %d->%d", puts, store.puts)
+	}
 	got, _ := store.Get("p-mem")
 	if got != sess {
 		t.Fatal("memory store must keep handing out the shared live pointer")
@@ -197,5 +212,59 @@ func TestCheckTimeouts_MemoryStoreUnchanged(t *testing.T) {
 	m.checkTimeouts()
 	if sess.GetState() != TimedOut {
 		t.Fatalf("state = %v", sess.GetState())
+	}
+}
+
+// staleListStore hands checkTimeouts a List snapshot that predates a request's
+// write-back: after taking the snapshot it persists fresh activity, so only the
+// re-read before the timeout write can see it.
+type staleListStore struct {
+	*CopyStore
+	beforeReturn func()
+}
+
+func (s *staleListStore) List(filter func(*Session) bool) []*Session {
+	out := s.CopyStore.List(filter)
+	if s.beforeReturn != nil {
+		s.beforeReturn()
+	}
+	return out
+}
+
+func TestCheckTimeouts_ReReadGuardKeepsASessionTouchedAfterTheList(t *testing.T) {
+	store := &staleListStore{CopyStore: NewCopyStore()}
+	m := NewManager(store, 50*time.Millisecond)
+	m.GetOrCreate("p-fresh", "http://b", "127.0.0.1")
+	time.Sleep(80 * time.Millisecond) // idle past the timeout in the snapshot
+
+	store.beforeReturn = func() {
+		store.beforeReturn = nil
+		cur, _ := store.Get("p-fresh")
+		cur.Touch() // a request lands right after the snapshot was taken
+		store.Put(cur)
+	}
+	m.checkTimeouts()
+
+	got, _ := store.Get("p-fresh")
+	if got.GetState() != Active || got.EndTime != nil {
+		t.Fatalf("a session touched after the List snapshot was timed out from stale data: state=%v end=%v", got.GetState(), got.EndTime)
+	}
+}
+
+func TestCheckTimeouts_ReReadGuardKeepsASessionKilledAfterTheList(t *testing.T) {
+	store := &staleListStore{CopyStore: NewCopyStore()}
+	m := NewManager(store, 50*time.Millisecond)
+	m.GetOrCreate("p-killed", "http://b", "127.0.0.1")
+	time.Sleep(80 * time.Millisecond)
+
+	store.beforeReturn = func() {
+		store.beforeReturn = nil
+		m.Kill("p-killed")
+	}
+	m.checkTimeouts()
+
+	got, _ := store.Get("p-killed")
+	if got.GetState() != Killed {
+		t.Fatalf("a kill landing after the List snapshot was overwritten with TimedOut: state=%v", got.GetState())
 	}
 }

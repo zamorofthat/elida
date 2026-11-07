@@ -308,14 +308,19 @@ type dataPutter interface {
 // on the live session: a stored non-Active state must not flip a request
 // that is still running (Runner.Bind refuses non-Active sessions, Kill and
 // Terminate gate on IsActive). It writes nothing if the stored session is
-// gone (never resurrecting a deleted or expired one) or is a different
-// instance under a reused ID, and does nothing for a store that shares live
-// pointers (MemoryStore).
+// already gone or is a different instance under a reused ID, and does nothing
+// for a store that shares live pointers (MemoryStore).
 //
-// Concurrent requests for one session each hold their own copy under Redis,
-// so their counters are last-writer-wins at write-back. A kill landing
-// between the read and the write below is not guarded either (no
-// WATCH/MULTI); the window is one round trip.
+// Residual race: the guarantees above (not resurrecting a deleted or expired
+// session, keeping a concurrent kill or terminate) hold only outside the
+// GET->SET window below, which is one round trip and is not atomic. A delete
+// or expiry landing in it can be undone by the write, and a kill or terminate
+// landing in it can revert the stored lifecycle to Active. LastActivity and
+// RequestCount can also regress, because the write carries this request's
+// older copy. Concurrent requests for one session each hold their own copy
+// under Redis, so their counters are last-writer-wins as well. Closing the
+// window needs a compare-and-set (a Lua script or WATCH/MULTI) in the store;
+// that is the follow-up.
 func (m *Manager) Persist(sess *Session) {
 	if sess == nil {
 		return

@@ -11,6 +11,12 @@ import (
 // outside the wire format survives. It exists so unit tests can reproduce the
 // Redis-only bug class without Redis or a new dependency. Production code
 // never constructs it.
+//
+// One deliberate exception to the parity: the kill channel. CopyStore mints a
+// fresh channel on every Get (closed if the stored state is Killed), and does
+// not reproduce RedisStore's killChans reuse, where one channel per session ID
+// survives across Gets. Tests that depend on a Kill waking a goroutine blocked
+// on an earlier Get's KillChan need RedisStore itself.
 type CopyStore struct {
 	mu    sync.RWMutex
 	blobs map[string][]byte
