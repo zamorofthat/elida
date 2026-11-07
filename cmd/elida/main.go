@@ -412,10 +412,15 @@ func (a *app) initSessionEndCallback() {
 		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
-		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
-			record.FingerprintDistance = distance
-			record.FingerprintBucket = bucket
-			record.FingerprintClass = class
+		res := a.scoreFingerprint(&snap)
+		// The opinions are content-free (panelOpinions) and are recorded
+		// whether or not the session was scored, so a warm-up session still
+		// shows which members were seated and how they judged it.
+		record.PanelOpinions = res.Opinions
+		if res.Scored {
+			record.FingerprintDistance = res.Distance
+			record.FingerprintBucket = res.Bucket
+			record.FingerprintClass = res.Class
 		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
@@ -526,15 +531,35 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 	}
 }
 
+// fingerprintResult is what one scoreFingerprint call produced.
+//
+// Distance, Bucket and Class are the M3-lite outputs the session record has
+// always carried, and are meaningful only when Scored is true (the caller
+// leaves the record's fields untouched otherwise, as before). Opinions is the
+// eval surface: one entry per seated member, computed on every call — also
+// during warm-up and for a shadow member, where there is no score to persist
+// but the seating and each member's own judgement are still worth recording.
+type fingerprintResult struct {
+	Distance float64
+	Bucket   string
+	Class    string
+	Scored   bool
+	Opinions []storage.PanelOpinion
+}
+
 // scoreFingerprint routes session scoring through the behavioral panel.
-// Phase 1 seats only the M3-lite member, so this reconstructs exactly the
-// outputs the pre-panel implementation computed directly from
-// a.fingerprinter: same warm-up no-op, same shadow persist-without-enforce,
-// same risk points (source label = the driving member, "m3-lite" here), same
-// OCSF emit condition.
-func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket, class string, scored bool) {
+// M3-lite is the only live member, so this reconstructs exactly the outputs
+// the pre-panel implementation computed directly from a.fingerprinter: same
+// warm-up no-op, same shadow persist-without-enforce, same risk points
+// (source label = the driving member), same OCSF emit condition, and the same
+// single "fingerprint score" line — never one for a warm-up session.
+//
+// The per-member opinions it returns alongside them are content-free by
+// construction (see panelOpinions), both in the record they are persisted on
+// and in the attributes of that one log line.
+func (a *app) scoreFingerprint(snap *session.Session) fingerprintResult {
 	if a.panel == nil {
-		return 0, "", "", false
+		return fingerprintResult{}
 	}
 
 	// Always ingest to update baselines (unchanged).
@@ -543,8 +568,9 @@ func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket,
 	}
 
 	v := a.panel.Assess(panel.BuildFeatures(snap))
+	res := fingerprintResult{Opinions: panelOpinions(v)}
 
-	// Find the M3-lite member's opinion (panel-of-one today).
+	// Find the M3-lite member's opinion (the only live member today).
 	var op *panel.MemberOpinion
 	for i := range v.Members {
 		if v.Members[i].Member == "m3-lite" {
@@ -552,28 +578,32 @@ func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket,
 		}
 	}
 	if op == nil || op.Detail == nil {
-		return 0, "", "", false // warm-up: not enough data yet (unchanged)
+		return res // warm-up: not enough data yet (unchanged, and unlogged)
 	}
 
-	bucket, _ = op.Detail["bucket"].(string)
-	distance, _ = op.Detail["distance"].(float64)
+	res.Bucket, _ = op.Detail["bucket"].(string)
+	res.Distance, _ = op.Detail["distance"].(float64)
 	shadow, _ := op.Detail["shadow"].(bool)
 
-	class = v.Class // "" today; M3-lite doesn't set Class, so this falls through
-	if class == "" {
-		class = fingerprint.SessionClass(snap)
+	res.Class = v.Class // "" today; M3-lite doesn't set Class, so this falls through
+	if res.Class == "" {
+		res.Class = fingerprint.SessionClass(snap)
 	}
+	res.Scored = true
 
 	slog.Info("fingerprint score",
 		"session_id", snap.ID,
-		"class", class,
-		"distance", distance,
-		"bucket", bucket,
+		"class", res.Class,
+		"distance", res.Distance,
+		"bucket", res.Bucket,
 		"shadow", shadow,
+		"panel_driver", v.Driver,
+		"panel_risk", v.RiskScore,
+		"members", res.Opinions,
 	)
 
 	if shadow {
-		return distance, bucket, class, true // shadow: score is persisted but never enforced
+		return res // shadow: score is persisted but never enforced
 	}
 
 	// Add risk points for notable+ scores
@@ -583,13 +613,13 @@ func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket,
 	}
 
 	// Emit OCSF 2004 for notable+ scores
-	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor && a.ocsfEmitter != nil {
-		finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
+	if res.Bucket != fingerprint.BucketNormal && res.Bucket != fingerprint.BucketMinor && a.ocsfEmitter != nil {
+		finding := telemetry.BuildAnomalyDetection(snap.ID, res.Distance, res.Bucket, res.Class)
 		finding.Unmapped.Backend = snap.Backend
 		a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
 	}
 
-	return distance, bucket, class, true
+	return res
 }
 
 func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) *storage.SDRIntegrity {
