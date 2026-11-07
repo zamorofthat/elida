@@ -201,7 +201,8 @@ type Panel struct {
 func NewPanel() *Panel { return &Panel{} }
 
 // Seat adds a member. shadow members are assessed and reported but excluded
-// from the aggregated RiskScore/Class. weight is clamped to [0,1].
+// from the aggregated RiskScore/Class. weight is clamped to [0,1]. Call during
+// setup only: Seat is not safe concurrently with Assess or Members.
 func (p *Panel) Seat(m Member, shadow bool, weight float64) {
 	p.seats = append(p.seats, seat{m: m, shadow: shadow, weight: clamp01(weight)})
 }

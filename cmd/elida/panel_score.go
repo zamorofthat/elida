@@ -62,8 +62,9 @@ func seatToolChain(p *panel.Panel, cfg config.PanelConfig, art *panel.ToolChainA
 // BucketRiskPoints(bucket)/RiskSevere — 0, 0.10, 0.25, 0.50, 1.00 for
 // normal/minor/notable/anomalous/severe — so weight*Anomaly >= 0.25 holds
 // for exactly the notable, anomalous and severe buckets: the same set as
-// `bucket != normal && bucket != minor`. Every value is a ratio of small
-// powers of two, so the comparison is exact, not approximate.
+// `bucket != normal && bucket != minor`. The rung and every anomaly at or
+// above it are exact in binary (0.25, 0.50, 1.00), and minor's 0.10 sits well
+// below it, so the comparison has no rounding ambiguity.
 const anomalyFindingRung = float64(fingerprint.RiskNotable) / float64(panel.MaxRiskPoints)
 
 // anomalyFindingMembers names the members that earn an OCSF anomaly finding
