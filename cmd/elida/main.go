@@ -342,9 +342,11 @@ func (a *app) initFingerprint() {
 	)
 }
 
-// initPanel seats the M3-lite scorer as the (currently sole) live member of
-// the behavioral panel. Phase 1: panel-of-one, weight 1.0, not shadowed —
-// this reproduces today's fingerprint scoring exactly (see scoreFingerprint).
+// initPanel seats the M3-lite scorer as the live member of the behavioral
+// panel (weight 1.0, not shadowed — reproducing today's fingerprint scoring,
+// see scoreFingerprint) and, when an artifact is configured, the tool-chain
+// member C. C's posture is config-driven (panel.tool_chain_shadow /
+// panel.tool_chain_weight) and defaults to shadow (observe only).
 func (a *app) initPanel() {
 	if a.fingerprinter == nil {
 		return
@@ -352,17 +354,17 @@ func (a *app) initPanel() {
 	a.panel = panel.NewPanel()
 	a.panel.Seat(panel.NewM3LiteMember(a.fingerprinter), false, 1.0)
 
-	// Phase 2a: shadow-seat the tool-chain member C, if configured. Shadow
-	// members are assessed and reported but never affect RiskScore/Class, so
-	// this is behavior-preserving. Log-and-skip on a bad/missing artifact —
+	// Seat the tool-chain member C, if configured. Shadow members are
+	// assessed and reported but never affect RiskScore/Class, so the default
+	// is behavior-preserving. Log-and-skip on a bad/missing artifact —
 	// panel seating must never hard-fail startup (spec §8).
 	if p := a.cfg.Panel.ToolChainArtifact; p != "" {
 		art, err := panel.LoadToolChainArtifact(p)
 		if err != nil {
 			slog.Warn("tool-chain artifact not loaded; member not seated", "path", p, "error", err)
 		} else {
-			a.panel.Seat(panel.NewToolChainMember(art), true, 0)
-			slog.Info("panel: tool-chain member seated (shadow)", "version", art.GeneratedBy)
+			seatToolChain(a.panel, a.cfg.Panel, art)
+			slog.Info("panel: tool-chain member seated", "version", art.GeneratedBy, "shadow", a.cfg.Panel.ToolChainShadow, "weight", a.cfg.Panel.ToolChainWeight)
 		}
 	}
 }
