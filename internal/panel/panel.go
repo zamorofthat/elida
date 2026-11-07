@@ -147,27 +147,39 @@ func (st *seatStats) record(anomaly float64, veto bool) {
 	st.next = (st.next + 1) % statsRingSize
 }
 
-// summary computes the exported stats. Caller holds Panel.mu.
-func (st *seatStats) summary() MemberStats {
-	out := MemberStats{SessionsScored: st.count, VetoCount: st.vetos}
-	n := len(st.ring)
+// snapshot copies the accumulator state. Caller holds Panel.mu; the returned
+// ring copy can be sorted and reduced after the lock is released.
+func (st *seatStats) snapshot() statsSnapshot {
+	ring := make([]float64, len(st.ring))
+	copy(ring, st.ring)
+	return statsSnapshot{count: st.count, vetos: st.vetos, ring: ring}
+}
+
+type statsSnapshot struct {
+	count, vetos int
+	ring         []float64
+}
+
+// summary computes the exported stats; it sorts its own ring copy in place
+// and needs no lock.
+func (sn statsSnapshot) summary() MemberStats {
+	out := MemberStats{SessionsScored: sn.count, VetoCount: sn.vetos}
+	n := len(sn.ring)
 	if n == 0 {
 		return out
 	}
-	sorted := make([]float64, n)
-	copy(sorted, st.ring)
-	sort.Float64s(sorted)
+	sort.Float64s(sn.ring)
 	var sum float64
-	for _, v := range sorted {
+	for _, v := range sn.ring {
 		sum += v
 	}
 	out.MeanAnomaly = sum / float64(n)
-	// nearest-rank p95: ceil(0.95*n)-th smallest value (1-based).
-	rank := int(math.Ceil(0.95 * float64(n)))
+	// nearest-rank p95: ceil(95n/100)-th smallest (1-based), integer arithmetic.
+	rank := (95*n + 99) / 100
 	if rank < 1 {
 		rank = 1
 	}
-	out.P95Anomaly = sorted[rank-1]
+	out.P95Anomaly = sn.ring[rank-1]
 	return out
 }
 
@@ -217,8 +229,10 @@ func (p *Panel) Assess(f SessionFeatures) Verdict {
 		anomaly float64
 		veto    bool
 	}
-	scores := make([]scored, len(p.seats))
+	scores := make([]scored, 0, len(p.seats))
 	defer func() {
+		// Only seats whose opinion was collected are recorded, so a panicking
+		// member leaves no phantom zero entries for itself or later seats.
 		p.mu.Lock()
 		for i, sc := range scores {
 			p.seats[i].stats.record(sc.anomaly, sc.veto)
@@ -235,7 +249,7 @@ func (p *Panel) Assess(f SessionFeatures) Verdict {
 			}
 			op.Anomaly = c
 		}
-		scores[i] = scored{anomaly: op.Anomaly, veto: op.Veto}
+		scores = append(scores, scored{anomaly: op.Anomaly, veto: op.Veto})
 		op.Shadow, op.Weight = s.shadow, s.weight
 		v.Members = append(v.Members, op)
 		if s.shadow {
@@ -263,12 +277,18 @@ func (p *Panel) Assess(f SessionFeatures) Verdict {
 
 // Members returns a read-only view of the seats, for the control API.
 func (p *Panel) Members() []MemberInfo {
-	out := make([]MemberInfo, 0, len(p.seats))
+	snaps := make([]statsSnapshot, len(p.seats))
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	for i := range p.seats {
+		snaps[i] = p.seats[i].stats.snapshot()
+	}
+	p.mu.Unlock()
+	// Sorting and reduction happen outside the lock so polling the control API
+	// never blocks Assess.
+	out := make([]MemberInfo, 0, len(p.seats))
 	for i := range p.seats {
 		s := &p.seats[i]
-		out = append(out, MemberInfo{Name: s.m.Name(), Version: s.m.Version(), Shadow: s.shadow, Weight: s.weight, Stats: s.stats.summary()})
+		out = append(out, MemberInfo{Name: s.m.Name(), Version: s.m.Version(), Shadow: s.shadow, Weight: s.weight, Stats: snaps[i].summary()})
 	}
 	return out
 }

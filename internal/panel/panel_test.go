@@ -341,3 +341,74 @@ func TestPanel_ConcurrentAssessAndMembersRace(t *testing.T) {
 		t.Errorf("SessionsScored = %d, want 2500", got)
 	}
 }
+
+func p95Of(t *testing.T, vals []float64) float64 {
+	t.Helper()
+	ops := make([]MemberOpinion, len(vals))
+	for i, v := range vals {
+		ops[i].Anomaly = v
+	}
+	p := NewPanel()
+	p.Seat(&seqMember{name: "m", ops: ops}, false, 1)
+	for range vals {
+		p.Assess(SessionFeatures{})
+	}
+	return p.Members()[0].Stats.P95Anomaly
+}
+
+func TestPanel_P95IsNearestRankNotMax(t *testing.T) {
+	// n=20: nearest-rank p95 is ceil(0.95*20)=19th smallest = 0.95, not the max 1.0.
+	vals := make([]float64, 20)
+	for i := range vals {
+		vals[i] = float64(i+1) * 0.05
+	}
+	if got := p95Of(t, vals); math.Abs(got-0.95) > 1e-9 {
+		t.Errorf("p95 of 0.05..1.00 (n=20) = %v, want 0.95", got)
+	}
+}
+
+func TestPanel_P95RankOffByOne(t *testing.T) {
+	// n=100: rank 95 -> 0.95. A floor/off-by-one rank would give 0.94 or 0.96.
+	vals := make([]float64, 100)
+	for i := range vals {
+		vals[i] = float64(i+1) / 100
+	}
+	if got := p95Of(t, vals); math.Abs(got-0.95) > 1e-9 {
+		t.Errorf("p95 of 0.01..1.00 (n=100) = %v, want 0.95", got)
+	}
+	// n=21: ceil(0.95*21)=20 -> 20th smallest (floor would give 19th).
+	vals = make([]float64, 21)
+	for i := range vals {
+		vals[i] = float64(i+1) / 100
+	}
+	if got := p95Of(t, vals); math.Abs(got-0.20) > 1e-9 {
+		t.Errorf("p95 of 0.01..0.21 (n=21) = %v, want 0.20", got)
+	}
+}
+
+// panicMember panics on every Assess call.
+type panicMember struct{ name string }
+
+func (p panicMember) Name() string                         { return p.name }
+func (p panicMember) Version() string                      { return "test" }
+func (p panicMember) Assess(SessionFeatures) MemberOpinion { panic("boom") }
+
+func TestPanel_PanickingMemberDoesNotRecordPhantomStats(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "ok", ops: []MemberOpinion{{Anomaly: 0.8}}}, false, 1)
+	p.Seat(panicMember{name: "bad"}, false, 1)
+	p.Seat(&seqMember{name: "never-reached", ops: []MemberOpinion{{Anomaly: 0.1}}}, false, 1)
+	func() {
+		defer func() { _ = recover() }()
+		p.Assess(SessionFeatures{})
+	}()
+	ms := p.Members()
+	if ms[0].Stats.SessionsScored != 1 {
+		t.Errorf("completed seat SessionsScored = %d, want 1", ms[0].Stats.SessionsScored)
+	}
+	for _, i := range []int{1, 2} {
+		if st := ms[i].Stats; st != (MemberStats{}) {
+			t.Errorf("seat %q stats = %+v, want zero (did not complete)", ms[i].Name, st)
+		}
+	}
+}
