@@ -279,6 +279,16 @@ type Config struct {
 	// here, violation events in the policy engine's). That can miss a
 	// match; it never counts one decision twice.
 	ShadowCorrelator ShadowCorrelator
+	// SessionPersister, when set, is called with the bound session after an
+	// async delivery was handled. Under a store that serves copies (Redis) the
+	// shadow entries and matches an async result records land on the live
+	// struct only; this is how they reach the store without the runner
+	// knowing what a store is. It runs outside every runner lock, once per
+	// delivery that recorded at least one shadow entry, and never for a
+	// delivery that recorded nothing (unanswered, already claimed, disabled,
+	// or dropped for want of a bound session): at most one write per recorded
+	// shadow decision. Startup field, not part of Live.
+	SessionPersister func(*session.Session)
 	// ThresholdSetMatches reports whether the configured threshold set
 	// matches the loaded model's own. Enforce mode is refused when it does
 	// not: strict enforcement requires calibration evidence for the exact
@@ -1527,7 +1537,7 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 		}
 	}
 
-	contributed = r.handle(sess, requestID, in, a, st)
+	contributed, _ = r.handle(sess, requestID, in, a, st)
 	return answeredAny(a), a.Coverage.QueuedAsync, contributed
 }
 
@@ -1571,7 +1581,10 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 		return
 	}
 	a.Scope = decision.ScopeFutureActivity
-	_ = r.handle(sess, req.RequestID, in, a, st)
+	_, recorded := r.handle(sess, req.RequestID, in, a, st)
+	if recorded && r.cfg.SessionPersister != nil {
+		r.cfg.SessionPersister(sess)
+	}
 }
 
 // handle records verdicts according to the effective mode.
@@ -1605,7 +1618,10 @@ func (r *Runner) OnAsync(req scheduler.Request, in decision.Input, a decision.As
 // recorded for a verdict whose scope is current_request (an inline result in
 // effective enforce mode): the request being assessed can still be stopped
 // by the ladder.
-func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment, st liveState) (contributed bool) {
+//
+// recorded reports whether at least one shadow entry was recorded (a verdict
+// whose DecisionID was claimed); the async lane persists the session only then.
+func (r *Runner) handle(sess *session.Session, requestID string, in decision.Input, a decision.Assessment, st liveState) (contributed, recorded bool) {
 	for _, v := range r.Verdicts(sess.ID, requestID, in, a) {
 		if !r.claimDecision(v.DecisionID) {
 			continue
@@ -1614,6 +1630,7 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 		// mode and whatever the score: calibration needs the whole
 		// distribution, including the vetoes and the quiet scores.
 		r.recordShadow(sess, in, v)
+		recorded = true
 
 		if st.effective == config.DecisionModeShadow || r.cfg.Policy == nil {
 			// Effective shadow (the live mode this call snapshotted): no
@@ -1648,7 +1665,7 @@ func (r *Runner) handle(sess *session.Session, requestID string, in decision.Inp
 			r.recordViolation(sess.ID, in, v, RuleInjectionElevated, CategoryInjectionElevated, true, st.effective)
 		}
 	}
-	return contributed
+	return contributed, recorded
 }
 
 // recordViolation builds the policy violation for one verdict and records it
