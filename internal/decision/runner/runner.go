@@ -1542,7 +1542,9 @@ func (r *Runner) assessMessage(ctx context.Context, sess *session.Session, reque
 }
 
 // OnAsync handles an async completion. It is the scheduler's OnAsync
-// callback and does not block.
+// callback. It does not wait on any other work, but with a SessionPersister
+// wired it performs store I/O inline, so it may block for the duration of the
+// persister's write.
 //
 // An async result arrives after the request was forwarded, so it is always
 // recorded with ScopeFutureActivity and never claims to have protected the

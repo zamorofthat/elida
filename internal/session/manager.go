@@ -171,7 +171,10 @@ func (m *Manager) TrackRequest(sess *Session) (end func()) {
 }
 
 // persistInflight writes back every tracked in-flight session. It persists
-// outside inflightMu: Persist does store I/O.
+// outside inflightMu: Persist does store I/O. A tick can snapshot a session,
+// then the request's end() runs, then the tick issues one more write for it:
+// benign, but the request-end persist is not strictly guaranteed to be the
+// last write.
 func (m *Manager) persistInflight() {
 	m.inflightMu.Lock()
 	live := make([]*Session, 0, len(m.inflight))
