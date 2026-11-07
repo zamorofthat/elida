@@ -112,33 +112,39 @@ func (s *RedisStore) Get(id string) (*Session, bool) {
 
 // Put stores a session
 func (s *RedisStore) Put(session *Session) {
+	s.putData(sessionToData(session))
+}
+
+// putData stores already-converted wire data (see Manager.Persist).
+func (s *RedisStore) putData(sd *sessionData) {
 	ctx := context.Background()
 
-	sd := sessionToData(session)
 	data, err := json.Marshal(sd)
 	if err != nil {
-		slog.Error("Failed to marshal session", "session_id", session.ID, "error", err)
+		slog.Error("Failed to marshal session", "session_id", sd.ID, "error", err)
 		return
 	}
 
 	// Store session with TTL
-	if err := s.client.Set(ctx, s.sessionKey(session.ID), data, s.ttl).Err(); err != nil {
-		slog.Error("Redis Set error", "session_id", session.ID, "error", err)
+	if err := s.client.Set(ctx, s.sessionKey(sd.ID), data, s.ttl).Err(); err != nil {
+		slog.Error("Redis Set error", "session_id", sd.ID, "error", err)
 		return
 	}
 
 	// Add to index
-	if err := s.client.SAdd(ctx, s.indexKey(), session.ID).Err(); err != nil {
-		slog.Error("Redis SAdd error", "session_id", session.ID, "error", err)
+	if err := s.client.SAdd(ctx, s.indexKey(), sd.ID).Err(); err != nil {
+		slog.Error("Redis SAdd error", "session_id", sd.ID, "error", err)
 	}
 
 	// Ensure we have a local kill channel
 	s.mu.Lock()
-	if _, ok := s.killChans[session.ID]; !ok {
-		s.killChans[session.ID] = make(chan struct{})
+	if _, ok := s.killChans[sd.ID]; !ok {
+		s.killChans[sd.ID] = make(chan struct{})
 	}
 	s.mu.Unlock()
 }
+
+var _ dataPutter = (*RedisStore)(nil)
 
 // Delete removes a session
 func (s *RedisStore) Delete(id string) {

@@ -287,6 +287,53 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return m.store.Get(id)
 }
 
+// dataPutter is the package-internal write seam for stores that hand out
+// copies (RedisStore, CopyStore): it stores already-converted wire data, so
+// Persist can adjust the lifecycle on the data without touching the live
+// session. MemoryStore does not implement it and does not need to.
+type dataPutter interface {
+	putData(*sessionData)
+}
+
+// Persist writes a session's request-scoped state (accounting, tool history,
+// shadow lists, WebSocket counters) back to the store. Under a store that
+// hands out copies (Redis) nothing else does: a Get returns the last
+// written state, not the live struct a request has been mutating.
+//
+// It is a read-modify-write, not a bare Put, because the lifecycle methods
+// (Kill, Terminate, Resume, Complete, timeout) each re-read and write the
+// stored session: a bare Put of a request's older copy would overwrite a
+// concurrent kill with Active. Persist overwrites the lifecycle keys (State,
+// EndTime, Terminated) on the wire data with the stored session's, and never
+// on the live session: a stored non-Active state must not flip a request
+// that is still running (Runner.Bind refuses non-Active sessions, Kill and
+// Terminate gate on IsActive). It writes nothing if the stored session is
+// gone (never resurrecting a deleted or expired one) or is a different
+// instance under a reused ID, and does nothing for a store that shares live
+// pointers (MemoryStore).
+//
+// Concurrent requests for one session each hold their own copy under Redis,
+// so their counters are last-writer-wins at write-back. A kill landing
+// between the read and the write below is not guarded either (no
+// WATCH/MULTI); the window is one round trip.
+func (m *Manager) Persist(sess *Session) {
+	if sess == nil {
+		return
+	}
+	dp, ok := m.store.(dataPutter)
+	if !ok {
+		return
+	}
+	cur, ok := m.store.Get(sess.ID)
+	if !ok || cur == sess || !cur.StartTime.Equal(sess.StartTime) {
+		return
+	}
+	sd := sessionToData(sess)
+	l := cur.lifecycleState()
+	sd.State, sd.EndTime, sd.Terminated = l.State, l.EndTime, l.Terminated
+	dp.putData(sd)
+}
+
 // Kill terminates a session
 func (m *Manager) Kill(id string) bool {
 	sess, ok := m.store.Get(id)
@@ -453,15 +500,24 @@ func (m *Manager) checkTimeouts() {
 	// Check active sessions for idle timeout
 	sessions := m.store.List(ActiveFilter)
 	for _, sess := range sessions {
-		if sess.IdleTime() > m.timeout {
-			sess.SetState(TimedOut)
-
-			slog.Warn("session timed out",
-				"session_id", sess.ID,
-				"idle_time", sess.IdleTime(),
-				"timeout", m.timeout,
-			)
+		if sess.IdleTime() <= m.timeout {
+			continue
 		}
+		// Re-read before writing: under a copying store the listed copy can
+		// predate a request's write-back, and the state must be written back
+		// for the timeout to exist outside this process at all.
+		cur, ok := m.store.Get(sess.ID)
+		if !ok || !cur.IsActive() || cur.IdleTime() <= m.timeout {
+			continue
+		}
+		cur.SetState(TimedOut)
+		m.store.Put(cur)
+
+		slog.Warn("session timed out",
+			"session_id", cur.ID,
+			"idle_time", cur.IdleTime(),
+			"timeout", m.timeout,
+		)
 	}
 
 	// Check killed sessions for auto-termination

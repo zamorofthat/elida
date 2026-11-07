@@ -1,0 +1,201 @@
+package session
+
+import (
+	"testing"
+	"time"
+)
+
+func TestCopyStore_GetReturnsIndependentCopies(t *testing.T) {
+	store := NewCopyStore()
+	s := NewSession("cs-1", "http://b", "127.0.0.1")
+	s.AddTokens(3, 4)
+	store.Put(s)
+
+	a, ok := store.Get("cs-1")
+	if !ok {
+		t.Fatal("want the session")
+	}
+	b, _ := store.Get("cs-1")
+	if a == s || a == b {
+		t.Fatal("CopyStore.Get must return a fresh object each call, like RedisStore")
+	}
+	a.AddTokens(100, 100)
+	if in, _ := b.GetTokens(); in != 3 {
+		t.Fatalf("mutating one copy leaked into another: %d", in)
+	}
+	s.Kill()
+	store.Put(s)
+	k, _ := store.Get("cs-1")
+	select {
+	case <-k.KillChan():
+	default:
+		t.Fatal("a killed session's copy must carry a closed kill channel")
+	}
+}
+
+// The bug class this spec fixes: request-scoped state mutated on a Get copy
+// is invisible to the next Get unless something writes it back.
+func TestManagerPersist_WritesRequestScopedStateBack(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	sess := m.GetOrCreate("p-1", "http://b", "127.0.0.1")
+	sess.AddTokens(10, 20)
+	sess.RecordToolCall("bash", "function", "req-1", `{}`)
+	sess.RecordSemanticShadow(SemanticShadow{DecisionID: "d1"})
+	sess.RecordCorrelationShadow(CorrelationShadow{MatchID: "m1", EventIDs: []string{"d1"}})
+
+	if got, _ := store.Get("p-1"); got.TokensIn != 0 || len(got.SemanticShadow) != 0 {
+		t.Fatal("fixture: the copying store must lose state that was never written back")
+	}
+
+	m.Persist(sess)
+	m.Complete("p-1")
+
+	got, _ := store.Get("p-1")
+	if in, out := got.GetTokens(); in != 10 || out != 20 {
+		t.Fatalf("tokens = %d/%d", in, out)
+	}
+	if len(got.SemanticShadow) != 1 || len(got.CorrelationShadow) != 1 || len(got.ToolCallHistory) != 1 || got.ToolCalls != 1 {
+		t.Fatalf("shadows/tool calls not persisted: %+v", got)
+	}
+	if got.GetState() != Completed {
+		t.Fatalf("state = %v, want Completed (Complete re-reads the persisted state and keeps it)", got.GetState())
+	}
+}
+
+func TestManagerPersist_KeepsAConcurrentKillAndTerminate(t *testing.T) {
+	for _, terminate := range []bool{false, true} {
+		store := NewCopyStore()
+		m := NewManager(store, time.Minute)
+		sess := m.GetOrCreate("p-kill", "http://b", "127.0.0.1")
+		if terminate {
+			m.Terminate("p-kill")
+		} else {
+			m.Kill("p-kill")
+		}
+		sess.AddTokens(1, 1) // the in-flight request finishes after the kill
+		m.Persist(sess)
+
+		// The live session of the still-running request is never touched.
+		if !sess.IsActive() || sess.EndTime != nil || sess.IsTerminated() {
+			t.Fatalf("terminate=%v: Persist mutated the live session: state=%v end=%v terminated=%v", terminate, sess.GetState(), sess.EndTime, sess.IsTerminated())
+		}
+
+		got, _ := store.Get("p-kill")
+		if got.GetState() != Killed || got.EndTime == nil {
+			t.Fatalf("terminate=%v: Persist clobbered the kill: state=%v end=%v", terminate, got.GetState(), got.EndTime)
+		}
+		if got.IsTerminated() != terminate {
+			t.Fatalf("terminate=%v: Terminated = %v", terminate, got.IsTerminated())
+		}
+		if in, _ := got.GetTokens(); in != 1 {
+			t.Fatalf("terminate=%v: the request's accounting must still be written: %d", terminate, in)
+		}
+	}
+}
+
+func TestManagerPersist_DoesNotResurrectADeletedSession(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	sess := m.GetOrCreate("p-del", "http://b", "127.0.0.1")
+	store.Delete("p-del")
+	m.Persist(sess)
+	if _, ok := store.Get("p-del"); ok {
+		t.Fatal("Persist must not recreate a deleted or expired session")
+	}
+}
+
+func TestManagerPersist_SkipsAReusedID(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	old := m.GetOrCreate("p-reuse", "http://b", "127.0.0.1")
+	m.Complete("p-reuse")
+	time.Sleep(2 * time.Millisecond) // distinct start times
+	fresh := m.GetOrCreate("p-reuse", "http://b", "127.0.0.1")
+	if fresh.StartTime.Equal(old.StartTime) {
+		t.Fatal("fixture: want two instances")
+	}
+	old.AddTokens(9, 9)
+	m.Persist(old)
+	got, _ := store.Get("p-reuse")
+	if !got.StartTime.Equal(fresh.StartTime) {
+		t.Fatal("the new instance must stay stored")
+	}
+	if in, _ := got.GetTokens(); in != 0 {
+		t.Fatalf("the old instance's late write leaked into the new one: %d", in)
+	}
+}
+
+// A stored lifecycle that moved on (another replica completed or timed the
+// session out) must reach the stored copy as-is and must never flip the
+// session a request is still using: Runner.Bind refuses non-Active sessions
+// and Kill/Terminate gate on IsActive.
+func TestManagerPersist_StoredNonActiveStateDoesNotFlipTheLiveSession(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	sess := m.GetOrCreate("p-live", "http://b", "127.0.0.1")
+	m.Complete("p-live") // stored lifecycle is now Completed
+
+	sess.AddTokens(3, 3)
+	m.Persist(sess)
+
+	if !sess.IsActive() || sess.EndTime != nil {
+		t.Fatalf("the running request's session was flipped: state=%v end=%v", sess.GetState(), sess.EndTime)
+	}
+	got, _ := store.Get("p-live")
+	if got.GetState() != Completed || got.EndTime == nil {
+		t.Fatalf("stored lifecycle must survive the write-back: state=%v end=%v", got.GetState(), got.EndTime)
+	}
+	if in, _ := got.GetTokens(); in != 3 {
+		t.Fatalf("the accounting must still be written: %d", in)
+	}
+}
+
+func TestManagerPersist_IsANoOpForMemoryStore(t *testing.T) {
+	store := NewMemoryStore()
+	m := NewManager(store, time.Minute)
+	sess := m.GetOrCreate("p-mem", "http://b", "127.0.0.1")
+	sess.AddTokens(2, 2)
+	m.Persist(sess)
+	got, _ := store.Get("p-mem")
+	if got != sess {
+		t.Fatal("memory store must keep handing out the shared live pointer")
+	}
+	if in, _ := got.GetTokens(); in != 2 {
+		t.Fatalf("tokens = %d", in)
+	}
+}
+
+func TestManagerPersist_NilSessionIsANoOp(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	m.GetOrCreate("p-nil", "http://b", "127.0.0.1")
+	puts, count := store.Puts(), store.Count(nil)
+	m.Persist(nil)
+	if store.Puts() != puts || store.Count(nil) != count {
+		t.Fatalf("Persist(nil) wrote: puts %d->%d, count %d->%d", puts, store.Puts(), count, store.Count(nil))
+	}
+}
+
+func TestCheckTimeouts_PersistsTimedOutState(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Millisecond)
+	m.GetOrCreate("p-to", "http://b", "127.0.0.1")
+	time.Sleep(10 * time.Millisecond)
+	m.checkTimeouts()
+	got, _ := store.Get("p-to")
+	if got.GetState() != TimedOut || got.EndTime == nil {
+		t.Fatalf("a timed-out session must be written back: state=%v end=%v", got.GetState(), got.EndTime)
+	}
+}
+
+func TestCheckTimeouts_MemoryStoreUnchanged(t *testing.T) {
+	store := NewMemoryStore()
+	m := NewManager(store, time.Millisecond)
+	sess := m.GetOrCreate("p-to-mem", "http://b", "127.0.0.1")
+	time.Sleep(10 * time.Millisecond)
+	m.checkTimeouts()
+	if sess.GetState() != TimedOut {
+		t.Fatalf("state = %v", sess.GetState())
+	}
+}
