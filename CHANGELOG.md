@@ -103,6 +103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     evidence" section with timeline markers, and the Settings and Policy
     pages show the shadow and policy correlation counters.
   - `docs/semantic-detection.md` gains a "Residual risk" section.
+- `telemetry.semantic_shadow_logs` (default `false`, restart-only): opt-in OTEL
+  export of shadow-mode semantic decisions, one content-free Info log per
+  stored `semantic_shadow` entry (at most 50 per session), plus the session
+  span attribute `elida.semantic.shadow.count`. The session ID is exported as
+  a domain-separated SHA-256 digest. No OCSF finding, no risk contribution.
+  With the default the export is unchanged.
 
 ### Changed
 - Release archives now carry the semantic-injection model under

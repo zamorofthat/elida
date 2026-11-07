@@ -157,6 +157,8 @@ Each policy violation includes source attribution and SIEM classification:
 
 A session keeps at most 50 entries, dropping the oldest. When a session ID is reused, saving the new session carries the stored entries of the earlier sessions behind its own, drops carried entries whose `match_id` the new session already holds, and keeps the newest carried entries up to 50 in total; the carried part is also stored in `prior_history`. Entries an earlier session had already dropped are not recovered. The column is added by an idempotent migration (default empty) and is loaded only by `GET /control/history/{id}`; the history list leaves it out.
 
+`semantic_shadow` entries are exported to OTEL as one log each only when `telemetry.semantic_shadow_logs` is true (default false); see `docs/semantic-detection.md`.
+
 ## Redaction of Captured Content
 
 When `storage.redaction.enabled` is true (the default), `request_body` and
