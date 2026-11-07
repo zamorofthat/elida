@@ -153,6 +153,31 @@ type SessionRecord struct {
 	// session ended. Loaded by GetSession only, like SemanticShadow.
 	SemanticDecisions        []SemanticDecision `json:"semantic_decisions,omitempty"`
 	SemanticDecisionsDropped int                `json:"semantic_decisions_dropped,omitempty"`
+
+	// PanelOpinions holds one entry per seated behavioral-panel member, in
+	// seat order: the eval surface for promoting a shadow member. They are
+	// this session instance's assessment, so on session-ID reuse the latest
+	// instance's opinions replace the earlier instance's rather than being
+	// carried the way violations and shadow matches are (see SaveSession).
+	// Loaded by GetSession only, like SemanticShadow.
+	PanelOpinions []PanelOpinion `json:"panel_opinions,omitempty"`
+}
+
+// PanelOpinion is one panel member's assessment of a session, persisted for
+// promotion evaluation. Fixed fields only: numbers, enums and short keys.
+// There is deliberately no map or free-text field, so content cannot ride.
+type PanelOpinion struct {
+	Member     string  `json:"member"`
+	Shadow     bool    `json:"shadow"`
+	Weight     float64 `json:"weight"`
+	Anomaly    float64 `json:"anomaly"`
+	Veto       bool    `json:"veto,omitempty"`
+	Bucket     string  `json:"bucket,omitempty"`     // m3-lite
+	Distance   float64 `json:"distance,omitempty"`   // m3-lite
+	Perplexity float64 `json:"perplexity,omitempty"` // tool-chain
+	Percentile float64 `json:"percentile,omitempty"` // tool-chain
+	ClassUsed  string  `json:"class_used,omitempty"` // tool-chain
+	Reason     string  `json:"reason,omitempty"`     // tool-chain: insufficient-trajectory | no-chain
 }
 
 // SemanticShadow mirrors session.SemanticShadow for persistence. The storage
@@ -410,6 +435,7 @@ func (s *SQLiteStore) migrate() error {
 		semantic_shadow TEXT DEFAULT '',
 		semantic_decisions TEXT DEFAULT '',
 		correlation_shadow TEXT DEFAULT '',
+		panel_opinions TEXT DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -543,6 +569,9 @@ func (s *SQLiteStore) migrate() error {
 	// Shadow-mode correlation matches (idempotent — ignore "duplicate column" errors)
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN correlation_shadow TEXT DEFAULT ''")
 
+	// Per-member behavioral-panel opinions (idempotent — ignore "duplicate column" errors)
+	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN panel_opinions TEXT DEFAULT ''")
+
 	// History carried from earlier sessions with the same ID (see
 	// SaveSession). Idempotent — ignore "duplicate column" errors.
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN prior_history TEXT DEFAULT ''")
@@ -563,6 +592,10 @@ func (s *SQLiteStore) migrate() error {
 // by the session-end save) keeps the prior history already carried. The written lists are the
 // record's own entries merged with the prior history; mergeHistory documents
 // the deduplication and the caps.
+//
+// Panel opinions are deliberately not part of that history: they describe
+// one session instance's behavior, so the latest instance's opinions replace
+// the stored ones outright (and an instance with none clears them).
 //
 // The Redis session store (session.RedisStore) holds live session state
 // only, never this history (no violations, captures, shadow decisions or
@@ -614,10 +647,22 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		correlationShadow = []byte("[]")
 	}
 
+	// A session with no opinions stores the empty string rather than "null",
+	// keeping rows written before the panel existed indistinguishable from
+	// rows whose panel seated nothing (see unmarshalJSON).
+	panelOpinions := ""
+	if len(record.PanelOpinions) > 0 {
+		raw, merr := json.Marshal(record.PanelOpinions)
+		if merr != nil {
+			raw = []byte("[]")
+		}
+		panelOpinions = string(raw)
+	}
+
 	_, err = tx.Exec(`
 		INSERT OR REPLACE INTO sessions
-		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, correlation_shadow, prior_history)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, correlation_shadow, panel_opinions, prior_history)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.ID,
 		record.State,
 		record.StartTime,
@@ -637,6 +682,7 @@ func (s *SQLiteStore) SaveSession(record SessionRecord) error {
 		string(semanticShadow),
 		string(semanticDecisions),
 		string(correlationShadow),
+		panelOpinions,
 		string(priorJSON),
 	)
 	if err != nil {
@@ -663,14 +709,14 @@ func (s *SQLiteStore) GetSession(id string) (*SessionRecord, error) {
 // GetSessionCtx retrieves a session by ID using the provided context.
 func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRecord, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, correlation_shadow
+		SELECT id, state, start_time, end_time, duration_ms, request_count, bytes_in, bytes_out, backend, client_addr, metadata, captured_content, violations, fingerprint_distance, fingerprint_bucket, fingerprint_class, semantic_shadow, semantic_decisions, correlation_shadow, panel_opinions
 		FROM sessions WHERE id = ?`, id)
 
 	var record SessionRecord
 	var metadataStr, capturedStr, violationsStr sql.NullString
 	var fingerprintDistance sql.NullFloat64
 	var fingerprintBucket, fingerprintClass sql.NullString
-	var semanticShadowStr, semanticDecisionsStr, correlationShadowStr sql.NullString
+	var semanticShadowStr, semanticDecisionsStr, correlationShadowStr, panelOpinionsStr sql.NullString
 	err := row.Scan(
 		&record.ID,
 		&record.State,
@@ -691,6 +737,7 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 		&semanticShadowStr,
 		&semanticDecisionsStr,
 		&correlationShadowStr,
+		&panelOpinionsStr,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -719,6 +766,9 @@ func (s *SQLiteStore) GetSessionCtx(ctx context.Context, id string) (*SessionRec
 	record.SemanticDecisions = sd.Decisions
 	record.SemanticDecisionsDropped = sd.Dropped
 	unmarshalJSON(correlationShadowStr, &record.CorrelationShadow, "correlation_shadow", record.ID)
+	// NULL or '' (rows written before the column existed, and sessions whose
+	// panel seated nothing) loads as no opinions; see unmarshalJSON.
+	unmarshalJSON(panelOpinionsStr, &record.PanelOpinions, "panel_opinions", record.ID)
 
 	integrity, integrityErr := s.GetSDRIntegrity(ctx, record.ID)
 	if integrityErr != nil {

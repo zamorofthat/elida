@@ -1615,3 +1615,101 @@ func TestCompoundAnomalyDetectionSeverity(t *testing.T) {
 		t.Errorf("score 0.60: expected severity 5 (critical), got %d", f.SeverityID)
 	}
 }
+
+// The tool-chain finding is the M3-lite finding's twin: same Detection
+// Finding envelope and the same behavioral_anomaly type, with the Markov
+// analytic and the perplexity/percentile numbers in the unmapped block.
+func TestBuildToolChainAnomalyDetection(t *testing.T) {
+	ref := telemetry.BuildAnomalyDetection("sess-tc", 5.5, "anomalous", "code_edit")
+	df := telemetry.BuildToolChainAnomalyDetection("sess-tc", 0.97, 12.5, "global", "code_edit")
+
+	if df.ClassUID != ref.ClassUID || df.CategoryUID != ref.CategoryUID || df.TypeUID != ref.TypeUID || df.ActivityID != ref.ActivityID {
+		t.Fatalf("envelope = %d/%d/%d/%d, want the M3-lite finding's %d/%d/%d/%d",
+			df.ClassUID, df.CategoryUID, df.TypeUID, df.ActivityID, ref.ClassUID, ref.CategoryUID, ref.TypeUID, ref.ActivityID)
+	}
+	if len(df.FindingInfo.Types) != 1 || df.FindingInfo.Types[0] != "behavioral_anomaly" {
+		t.Fatalf("finding types = %v, want [behavioral_anomaly]", df.FindingInfo.Types)
+	}
+	if df.FindingInfo.Title != "code_edit" {
+		t.Fatalf("finding title = %q, want the session class", df.FindingInfo.Title)
+	}
+	if df.Analytic.Name != "tool-chain Markov" {
+		t.Fatalf("analytic name = %q, want \"tool-chain Markov\"", df.Analytic.Name)
+	}
+	if df.Analytic.Type != ref.Analytic.Type {
+		t.Fatalf("analytic type = %q, want the M3-lite finding's %q", df.Analytic.Type, ref.Analytic.Type)
+	}
+	if df.Actor.Session.UID != "sess-tc" {
+		t.Fatalf("actor session = %q, want sess-tc", df.Actor.Session.UID)
+	}
+	if df.AIModel != nil || df.MessageContext != nil {
+		t.Fatalf("no ai_operation overlay belongs on an anomaly finding: %+v %+v", df.AIModel, df.MessageContext)
+	}
+	tc := df.Unmapped.ToolChain
+	if tc == nil {
+		t.Fatal("unmapped.elida.tool_chain not populated")
+	}
+	if tc.Percentile != 0.97 || tc.Perplexity != 12.5 || tc.ClassUsed != "global" {
+		t.Fatalf("tool_chain = %+v, want percentile 0.97 / perplexity 12.5 / class_used global", *tc)
+	}
+
+	data, err := telemetry.MarshalOCSFEvent(df)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	un, ok := m["unmapped"].(map[string]any)
+	if !ok {
+		t.Fatalf("no unmapped block: %s", data)
+	}
+	block, ok := un["elida.tool_chain"].(map[string]any)
+	if !ok {
+		t.Fatalf("JSON lost elida.tool_chain: %s", data)
+	}
+	for k, want := range map[string]float64{"percentile": 0.97, "perplexity": 12.5} {
+		if got, ok := block[k].(float64); !ok || got != want {
+			t.Fatalf("elida.tool_chain.%s = %v, want %v", k, block[k], want)
+		}
+	}
+	if block["class_used"] != "global" {
+		t.Fatalf("elida.tool_chain.class_used = %v, want global", block["class_used"])
+	}
+}
+
+// The class names are operator-controlled (config and artifact), but the
+// finding sanitizes them anyway: free text never reaches a nozzle.
+func TestBuildToolChainAnomalyDetectionSanitizesClassNames(t *testing.T) {
+	const sentinel = `leak "me" now`
+	df := telemetry.BuildToolChainAnomalyDetection("s", 0.5, 1.0, sentinel, sentinel)
+	data, err := telemetry.MarshalOCSFEvent(df)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "leak") {
+		t.Fatalf("free-text class names reached the finding: %s", data)
+	}
+	if df.FindingInfo.Title != "" || df.Unmapped.ToolChain.ClassUsed != "" {
+		t.Fatalf("free text survived sanitization: title=%q class_used=%q", df.FindingInfo.Title, df.Unmapped.ToolChain.ClassUsed)
+	}
+	// An identifier-shaped name passes through intact.
+	ok := telemetry.BuildToolChainAnomalyDetection("s", 0.5, 1.0, "global", "code_edit")
+	if ok.FindingInfo.Title != "code_edit" || ok.Unmapped.ToolChain.ClassUsed != "global" {
+		t.Fatalf("identifier-shaped names must survive: %+v", ok.FindingInfo)
+	}
+}
+
+func TestToolChainAnomalySeverityThresholds(t *testing.T) {
+	for _, c := range []struct {
+		percentile float64
+		want       int
+	}{
+		{0.0, 1}, {0.74, 1}, {0.75, 3}, {0.94, 3}, {0.95, 5}, {1.0, 5},
+	} {
+		if got := telemetry.BuildToolChainAnomalyDetection("s", c.percentile, 1.0, "global", "c").SeverityID; got != c.want {
+			t.Errorf("percentile %.2f: severity = %d, want %d", c.percentile, got, c.want)
+		}
+	}
+}

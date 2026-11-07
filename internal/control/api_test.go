@@ -161,3 +161,47 @@ func TestHandlePanel_MethodNotAllowed(t *testing.T) {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }
+
+// TestHandlePanel_EmitsRollingStats verifies the four stats keys are emitted
+// per roster entry, including zeros (no omitempty).
+func TestHandlePanel_EmitsRollingStats(t *testing.T) {
+	h := newTestAPIWithAuth(t)
+	h.SetPanel(stubPanel{members: []panel.MemberInfo{
+		{Name: "busy", Version: "1", Weight: 1, Stats: panel.MemberStats{SessionsScored: 7, MeanAnomaly: 0.25, P95Anomaly: 0.9, VetoCount: 2}},
+		{Name: "idle", Version: "1", Weight: 1},
+	}})
+
+	req := httptest.NewRequest(http.MethodGet, "/control/panel", nil)
+	req.Header.Set("Authorization", "Bearer control-key")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var body struct {
+		Members []map[string]any `json:"members"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if len(body.Members) != 2 {
+		t.Fatalf("members = %+v, want 2", body.Members)
+	}
+	want := []map[string]float64{
+		{"sessions_scored": 7, "mean_anomaly": 0.25, "p95_anomaly": 0.9, "veto_count": 2},
+		{"sessions_scored": 0, "mean_anomaly": 0, "p95_anomaly": 0, "veto_count": 0},
+	}
+	for i, w := range want {
+		for k, v := range w {
+			got, ok := body.Members[i][k]
+			if !ok {
+				t.Errorf("member %d: key %q missing (zeros must not be omitted)", i, k)
+				continue
+			}
+			if f, isNum := got.(float64); !isNum || f != v {
+				t.Errorf("member %d: %s = %v, want %v", i, k, got, v)
+			}
+		}
+	}
+}
