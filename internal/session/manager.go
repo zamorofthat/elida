@@ -64,6 +64,10 @@ type Manager struct {
 	persistInterval time.Duration
 	inflightMu      sync.Mutex
 	inflight        map[*Session]struct{}
+	// inflightIDs counts tracked in-flight requests per session ID so the
+	// idle-timeout check can skip a session this process is serving: under a
+	// copying store the stored LastActivity lags the live copy's.
+	inflightIDs map[string]int
 }
 
 // NewManager creates a new session manager with default kill block settings
@@ -157,13 +161,22 @@ func (m *Manager) TrackRequest(sess *Session) (end func()) {
 			m.inflight = make(map[*Session]struct{})
 		}
 		m.inflight[sess] = struct{}{}
+		if m.inflightIDs == nil {
+			m.inflightIDs = make(map[string]int)
+		}
+		m.inflightIDs[sess.ID]++
 		m.inflightMu.Unlock()
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			m.inflightMu.Lock()
-			delete(m.inflight, sess)
+			if _, tracked := m.inflight[sess]; tracked {
+				delete(m.inflight, sess)
+				if m.inflightIDs[sess.ID]--; m.inflightIDs[sess.ID] <= 0 {
+					delete(m.inflightIDs, sess.ID)
+				}
+			}
 			m.inflightMu.Unlock()
 			m.Persist(sess)
 		})
@@ -573,12 +586,27 @@ func (m *Manager) Stats() Stats {
 	return stats
 }
 
+// isInflight reports whether a request in this process is currently working
+// on the session ID. It is always false when no persist interval is set (the
+// memory store, whose listed sessions are the live ones).
+func (m *Manager) isInflight(id string) bool {
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+	return m.inflightIDs[id] > 0
+}
+
 // checkTimeouts checks for and handles timed out sessions
 func (m *Manager) checkTimeouts() {
 	// Check active sessions for idle timeout
 	sessions := m.store.List(ActiveFilter)
 	for _, sess := range sessions {
 		if sess.IdleTime() <= m.timeout {
+			continue
+		}
+		// A request this process is serving keeps its session alive even
+		// though the stored LastActivity (refreshed only at write-back) may
+		// be older than the timeout.
+		if m.isInflight(sess.ID) {
 			continue
 		}
 		// Re-read before writing: under a copying store the listed copy can

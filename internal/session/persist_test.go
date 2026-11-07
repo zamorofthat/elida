@@ -270,6 +270,51 @@ func TestCheckTimeouts_ReReadGuardKeepsASessionKilledAfterTheList(t *testing.T) 
 	}
 }
 
+func TestCheckTimeouts_SkipsASessionWithARequestInFlightInThisProcess(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, 50*time.Millisecond)
+	m.SetPersistInterval(time.Hour)
+	sess := m.GetOrCreate("t-inflight", "http://b", "127.0.0.1")
+	time.Sleep(80 * time.Millisecond) // the stored LastActivity is now stale
+	sess.Touch()                      // the live copy is fresh; the store has not seen it
+	end := m.TrackRequest(sess)
+
+	m.checkTimeouts()
+	got, _ := store.Get("t-inflight")
+	if got.GetState() != Active {
+		t.Fatalf("a session with a live request was timed out from its stale stored copy: %v", got.GetState())
+	}
+
+	end()
+	if m.isInflight("t-inflight") {
+		t.Fatal("end must release the in-flight mark")
+	}
+	end() // idempotent: must not underflow another request's count
+	time.Sleep(80 * time.Millisecond)
+	m.checkTimeouts()
+	got, _ = store.Get("t-inflight")
+	if got.GetState() != TimedOut {
+		t.Fatalf("the in-flight skip leaked past the request end: %v", got.GetState())
+	}
+}
+
+func TestTrackRequest_InflightCountSurvivesAnotherRequestEnding(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	m.SetPersistInterval(time.Hour)
+	a := m.GetOrCreate("t-two", "http://b", "127.0.0.1")
+	b, _ := store.Get("t-two") // a second request's own copy of the same session
+	endA, endB := m.TrackRequest(a), m.TrackRequest(b)
+	endA()
+	if !m.isInflight("t-two") {
+		t.Fatal("one request ending must not release the other's in-flight mark")
+	}
+	endB()
+	if m.isInflight("t-two") {
+		t.Fatal("both ended: the mark must be released")
+	}
+}
+
 func TestTrackRequest_PersistsInflightSessionsUntilTheyEnd(t *testing.T) {
 	store := NewCopyStore()
 	m := NewManager(store, time.Minute)

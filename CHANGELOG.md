@@ -118,7 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`
   were empty in every end-of-session record (SQLite, OTEL, OCSF, fingerprint
   features) under `session.store: redis`. The Redis session now carries the
-  durable content-free state (at most about 46 KB per session), written back
+  durable content-free state (typically a few KB, worst case roughly
+  70 KB per session), written back
   at request end, before a policy terminate, after async semantic deliveries
   that recorded a shadow entry, and every 5 minutes for in-flight requests.
   Conversation content, tool arguments and results, the system prompt and its

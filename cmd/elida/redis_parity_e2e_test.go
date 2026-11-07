@@ -52,7 +52,11 @@ func TestRedisParity_SessionEndRecordMatchesTheMemoryStoreRecord(t *testing.T) {
 	if !ok {
 		t.Fatalf("store = %T", a.store)
 	}
-	if blob, found := cs.Blob("sess-cs-e2e"); found && strings.Contains(string(blob), slowBurnMarker) {
+	blob, found := cs.Blob("sess-cs-e2e")
+	if !found {
+		t.Fatal("no session blob to check: the content assertion would be vacuous")
+	}
+	if strings.Contains(string(blob), slowBurnMarker) {
 		t.Fatalf("request content reached the session blob: %s", blob)
 	}
 }

@@ -294,9 +294,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Mark session as WebSocket
 	sess.SetWebSocket()
 	sess.Touch()
-	// WebSocket frame counters accumulate on this live struct for the whole
-	// connection; write them back when it ends (Redis returns copies).
-	// TrackRequest also lets the manager write them periodically meanwhile.
+	// LastActivity, IsWebSocket and the other state recorded on this live
+	// struct for the whole connection are written back when it ends (Redis
+	// returns copies). TrackRequest also lets the manager write them
+	// periodically meanwhile and keeps the idle-timeout check off the session.
+	// (The frame-counter fields exist on Session but nothing increments them.)
 	defer h.manager.TrackRequest(sess)()
 
 	// Check if session was killed
