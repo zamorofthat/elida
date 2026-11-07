@@ -12,6 +12,10 @@ import (
 	"elida/internal/session"
 )
 
+// MaxRiskPoints is the risk-ladder value a Verdict.RiskScore of 1.0 maps to
+// (fingerprint.RiskSevere). Risk points = round(RiskScore * MaxRiskPoints).
+const MaxRiskPoints = fingerprint.RiskSevere
+
 // TurnFeature is one per-turn record; Trajectory is populated by
 // BuildFeatures from the session's tool-call history.
 type TurnFeature struct {

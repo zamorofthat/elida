@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -529,7 +528,7 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 // Phase 1 seats only the M3-lite member, so this reconstructs exactly the
 // outputs the pre-panel implementation computed directly from
 // a.fingerprinter: same warm-up no-op, same shadow persist-without-enforce,
-// same risk points ("m3-lite" source label, unchanged for Phase 1), same
+// same risk points (source label = the driving member, "m3-lite" here), same
 // OCSF emit condition.
 func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket, class string, scored bool) {
 	if a.panel == nil {
@@ -576,9 +575,9 @@ func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket,
 	}
 
 	// Add risk points for notable+ scores
-	points := int(math.Round(v.RiskScore * float64(fingerprint.RiskNotable)))
+	points, source := riskPointsFromVerdict(v)
 	if points > 0 && a.policyEngine != nil {
-		a.policyEngine.AddExternalRiskPoints(snap.ID, points, "m3-lite")
+		a.policyEngine.AddExternalRiskPoints(snap.ID, points, source)
 	}
 
 	// Emit OCSF 2004 for notable+ scores
