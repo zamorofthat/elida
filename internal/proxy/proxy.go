@@ -385,6 +385,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Write the request's accumulated state back when the request ends, on
+	// every return path. Under Redis a later Get returns the last written
+	// state, not this live struct; see Manager.Persist.
+	defer p.manager.Persist(sess)
 	sess.TouchAndRecord(int64(len(requestBody)), backend.Name)
 
 	// Check if session was killed
@@ -465,7 +469,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			if result.ShouldTerminate {
 				// Terminate the session for serious violations
-				p.manager.Terminate(sess.ID)
+				p.terminateSession(sess)
 				slog.Warn("request blocked and session terminated by policy",
 					"session_id", sess.ID,
 					"violations", len(result.Violations),
@@ -640,6 +644,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"path", r.URL.Path,
 		"backend", backend.Name,
 	)
+}
+
+// terminateSession terminates a session from inside a request. The request's
+// state is written first because Manager.Terminate re-reads the stored
+// session to build the end-of-session record, and the stored copy predates
+// this request.
+func (p *Proxy) terminateSession(sess *session.Session) {
+	p.manager.Persist(sess)
+	p.manager.Terminate(sess.ID)
 }
 
 // evaluatePolicy checks the session against policy rules
@@ -821,7 +834,7 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 	if p.policy != nil && len(responseBody) > 0 {
 		if result := p.policy.EvaluateResponseContent(sess.ID, string(responseBody)); result != nil {
 			if result.ShouldTerminate {
-				p.manager.Terminate(sess.ID)
+				p.terminateSession(sess)
 				slog.Warn("response blocked and session terminated by policy",
 					"session_id", sess.ID,
 					"violations", len(result.Violations),
@@ -861,7 +874,7 @@ func (p *Proxy) handleStandard(w http.ResponseWriter, req *http.Request, sess *s
 			policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
 			if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
 				if result.ShouldTerminate {
-					p.manager.Terminate(sess.ID)
+					p.terminateSession(sess)
 					return p.writeBlockedResponse(w, "Tool call violates security policy - session terminated", true)
 				}
 				if result.ShouldBlock {
@@ -970,7 +983,7 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 	if p.policy != nil && len(responseBody) > 0 {
 		if result := p.policy.EvaluateResponseContent(sess.ID, responseBody); result != nil {
 			if result.ShouldTerminate {
-				p.manager.Terminate(sess.ID)
+				p.terminateSession(sess)
 				slog.Warn("streaming response blocked and session terminated",
 					"session_id", sess.ID,
 					"violations", len(result.Violations),
@@ -1002,7 +1015,7 @@ func (p *Proxy) handleStreamingWithBuffer(w http.ResponseWriter, resp *http.Resp
 			policyToolCalls := proxyToolCallsToPolicyToolCalls(toolCalls)
 			if result := p.policy.EvaluateToolCalls(sess.ID, policyToolCalls); result != nil {
 				if result.ShouldTerminate {
-					p.manager.Terminate(sess.ID)
+					p.terminateSession(sess)
 					return p.writeBlockedResponse(w, "Tool call violates security policy - session terminated", true)
 				}
 				if result.ShouldBlock {
@@ -1092,7 +1105,7 @@ func (p *Proxy) handleStreamingChunked(w http.ResponseWriter, resp *http.Respons
 			if result := scanner.ScanChunk(chunk); result != nil {
 				if result.ShouldTerminate {
 					// Terminate immediately - send error and close
-					p.manager.Terminate(sess.ID)
+					p.terminateSession(sess)
 					slog.Warn("streaming terminated mid-stream by policy",
 						"session_id", sess.ID,
 						"violations", len(result.Violations),
