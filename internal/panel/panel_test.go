@@ -228,3 +228,116 @@ func TestPanel_SeatClampsWeightAndOpinionsCarrySeatPosture(t *testing.T) {
 		t.Fatalf("opinions lost seat posture: %+v", v.Members)
 	}
 }
+
+// seqMember emits a fixed sequence of opinions, one per Assess call (looping).
+type seqMember struct {
+	name string
+	mu   sync.Mutex
+	ops  []MemberOpinion
+	i    int
+}
+
+func (s *seqMember) Name() string    { return s.name }
+func (s *seqMember) Version() string { return "test" }
+func (s *seqMember) Assess(SessionFeatures) MemberOpinion {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	op := s.ops[s.i%len(s.ops)]
+	s.i++
+	op.Member = s.name
+	return op
+}
+
+func TestPanel_RollingStatsMeanP95AndVetoCount(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "live", ops: []MemberOpinion{{Anomaly: 0.2}, {Anomaly: 0.4}, {Anomaly: 1.0, Veto: true}}}, false, 1)
+	p.Seat(&seqMember{name: "shadowy", ops: []MemberOpinion{{Anomaly: 0.5, Veto: false}}}, true, 1)
+	for i := 0; i < 3; i++ {
+		p.Assess(SessionFeatures{})
+	}
+	ms := p.Members()
+	live := ms[0].Stats
+	if live.SessionsScored != 3 {
+		t.Errorf("SessionsScored = %d, want 3", live.SessionsScored)
+	}
+	if math.Abs(live.MeanAnomaly-0.5333333) > 1e-4 {
+		t.Errorf("MeanAnomaly = %v, want ~0.5333", live.MeanAnomaly)
+	}
+	if live.P95Anomaly != 1.0 {
+		t.Errorf("P95Anomaly = %v, want 1.0", live.P95Anomaly)
+	}
+	if live.VetoCount != 1 {
+		t.Errorf("VetoCount = %d, want 1", live.VetoCount)
+	}
+	sh := ms[1].Stats
+	if sh.SessionsScored != 3 || math.Abs(sh.MeanAnomaly-0.5) > 1e-9 || sh.P95Anomaly != 0.5 || sh.VetoCount != 0 {
+		t.Errorf("shadow seat stats = %+v, want tracked (3, 0.5, 0.5, 0)", sh)
+	}
+}
+
+func TestPanel_StatsUseClampedAnomaly(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "wild", ops: []MemberOpinion{{Anomaly: 7}, {Anomaly: math.NaN()}}}, false, 1)
+	p.Assess(SessionFeatures{})
+	p.Assess(SessionFeatures{})
+	st := p.Members()[0].Stats
+	if math.Abs(st.MeanAnomaly-0.5) > 1e-9 || st.P95Anomaly != 1.0 {
+		t.Errorf("stats = %+v, want mean 0.5 p95 1.0 from clamped values", st)
+	}
+}
+
+func TestPanel_StatsRingIsBounded(t *testing.T) {
+	p := NewPanel()
+	// First 4000 assessments emit 1.0, the last 1000 emit 0.0: the mean over
+	// the ring must reflect only the last 1000, while the count is since boot.
+	m := &seqMember{name: "m", ops: make([]MemberOpinion, 5000)}
+	for i := 0; i < 4000; i++ {
+		m.ops[i].Anomaly = 1.0
+	}
+	p.Seat(m, false, 1)
+	for i := 0; i < 5000; i++ {
+		p.Assess(SessionFeatures{})
+	}
+	st := p.Members()[0].Stats
+	if st.SessionsScored != 5000 {
+		t.Errorf("SessionsScored = %d, want 5000 (since boot, uncapped)", st.SessionsScored)
+	}
+	if st.MeanAnomaly != 0 || st.P95Anomaly != 0 {
+		t.Errorf("mean/p95 = %v/%v, want 0/0 (ring holds only the last 1000)", st.MeanAnomaly, st.P95Anomaly)
+	}
+	p.mu.Lock()
+	n := len(p.seats[0].stats.ring)
+	p.mu.Unlock()
+	if n > statsRingSize {
+		t.Errorf("ring len = %d, want <= %d", n, statsRingSize)
+	}
+}
+
+func TestPanel_StatsZeroBeforeAnyAssessment(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "m", ops: []MemberOpinion{{}}}, false, 1)
+	if st := p.Members()[0].Stats; st != (MemberStats{}) {
+		t.Errorf("stats = %+v, want zero value", st)
+	}
+}
+
+func TestPanel_ConcurrentAssessAndMembersRace(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "a", ops: []MemberOpinion{{Anomaly: 0.3}, {Anomaly: 0.9, Veto: true}}}, false, 1)
+	p.Seat(&seqMember{name: "b", ops: []MemberOpinion{{Anomaly: 0.6}}}, true, 0.5)
+	var wg sync.WaitGroup
+	for g := 0; g < 50; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				p.Assess(SessionFeatures{})
+				_ = p.Members()
+			}
+		}()
+	}
+	wg.Wait()
+	if got := p.Members()[0].Stats.SessionsScored; got != 2500 {
+		t.Errorf("SessionsScored = %d, want 2500", got)
+	}
+}

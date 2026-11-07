@@ -6,6 +6,7 @@ package panel
 import (
 	"log/slog"
 	"math"
+	"sort"
 	"sync"
 
 	"elida/internal/fingerprint"
@@ -109,19 +110,80 @@ type MemberInfo struct {
 	Version string
 	Shadow  bool
 	Weight  float64
+	Stats   MemberStats
+}
+
+// MemberStats is a content-free rolling summary of one seat's output since
+// boot. SessionsScored and VetoCount count every assessment since boot; the
+// mean and p95 are over the last statsRingSize clamped anomalies only.
+type MemberStats struct {
+	SessionsScored int
+	MeanAnomaly    float64
+	P95Anomaly     float64
+	VetoCount      int
+}
+
+// statsRingSize bounds the per-seat anomaly history kept for mean/p95.
+const statsRingSize = 1000
+
+// seatStats is the mutable per-seat accumulator, guarded by Panel.mu.
+type seatStats struct {
+	count int
+	vetos int
+	ring  []float64 // last statsRingSize clamped anomalies (circular once full)
+	next  int       // next write index once the ring is full
+}
+
+func (st *seatStats) record(anomaly float64, veto bool) {
+	st.count++
+	if veto {
+		st.vetos++
+	}
+	if len(st.ring) < statsRingSize {
+		st.ring = append(st.ring, anomaly)
+		return
+	}
+	st.ring[st.next] = anomaly
+	st.next = (st.next + 1) % statsRingSize
+}
+
+// summary computes the exported stats. Caller holds Panel.mu.
+func (st *seatStats) summary() MemberStats {
+	out := MemberStats{SessionsScored: st.count, VetoCount: st.vetos}
+	n := len(st.ring)
+	if n == 0 {
+		return out
+	}
+	sorted := make([]float64, n)
+	copy(sorted, st.ring)
+	sort.Float64s(sorted)
+	var sum float64
+	for _, v := range sorted {
+		sum += v
+	}
+	out.MeanAnomaly = sum / float64(n)
+	// nearest-rank p95: ceil(0.95*n)-th smallest value (1-based).
+	rank := int(math.Ceil(0.95 * float64(n)))
+	if rank < 1 {
+		rank = 1
+	}
+	out.P95Anomaly = sorted[rank-1]
+	return out
 }
 
 type seat struct {
 	m      Member
 	shadow bool
 	weight float64
+	stats  seatStats // guarded by Panel.mu
 }
 
 // Panel holds seated members and aggregates their opinions. Seat weights are
 // clamped to [0,1] and member anomalies to [0,1], so RiskScore stays in [0,1].
 type Panel struct {
 	seats  []seat
-	warned sync.Map // member name -> struct{}; out-of-range anomaly warned once
+	mu     sync.Mutex // guards seats[i].stats
+	warned sync.Map   // member name -> struct{}; out-of-range anomaly warned once
 }
 
 func NewPanel() *Panel { return &Panel{} }
@@ -149,7 +211,23 @@ func (p *Panel) Assess(f SessionFeatures) Verdict {
 	v := Verdict{Members: make([]MemberOpinion, 0, len(p.seats))}
 	var bestClassConf float64
 	var vetoBy string
-	for _, s := range p.seats {
+	// Stats are gathered locally and flushed under one lock acquisition after
+	// all members ran, so the (possibly slow) member.Assess calls never hold mu.
+	type scored struct {
+		anomaly float64
+		veto    bool
+	}
+	scores := make([]scored, len(p.seats))
+	defer func() {
+		p.mu.Lock()
+		for i, sc := range scores {
+			p.seats[i].stats.record(sc.anomaly, sc.veto)
+		}
+		p.mu.Unlock()
+	}()
+	for i := range p.seats {
+		// Index, don't copy: a struct copy would read seat.stats unlocked.
+		s := &p.seats[i]
 		op := s.m.Assess(f)
 		if c := clamp01(op.Anomaly); c != op.Anomaly { // NaN != NaN, so NaN is caught too
 			if _, seen := p.warned.LoadOrStore(op.Member, struct{}{}); !seen {
@@ -157,6 +235,7 @@ func (p *Panel) Assess(f SessionFeatures) Verdict {
 			}
 			op.Anomaly = c
 		}
+		scores[i] = scored{anomaly: op.Anomaly, veto: op.Veto}
 		op.Shadow, op.Weight = s.shadow, s.weight
 		v.Members = append(v.Members, op)
 		if s.shadow {
@@ -185,8 +264,11 @@ func (p *Panel) Assess(f SessionFeatures) Verdict {
 // Members returns a read-only view of the seats, for the control API.
 func (p *Panel) Members() []MemberInfo {
 	out := make([]MemberInfo, 0, len(p.seats))
-	for _, s := range p.seats {
-		out = append(out, MemberInfo{Name: s.m.Name(), Version: s.m.Version(), Shadow: s.shadow, Weight: s.weight})
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.seats {
+		s := &p.seats[i]
+		out = append(out, MemberInfo{Name: s.m.Name(), Version: s.m.Version(), Shadow: s.shadow, Weight: s.weight, Stats: s.stats.summary()})
 	}
 	return out
 }
