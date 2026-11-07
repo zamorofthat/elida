@@ -13,7 +13,7 @@ import (
 func storedSemanticShadow(i int) storage.SemanticShadow {
 	return storage.SemanticShadow{
 		Timestamp: time.Date(2026, 11, 7, 9, 0, i, 0, time.UTC), DecisionID: "dec_abc", Signal: "injection",
-		Probability: 0.91, AuxProbability: 0.02, Vetoed: true, SourceRole: "tool", MessageIndex: 4 + i,
+		Probability: 0.91, AuxProbability: 0.02, Vetoed: false, SourceRole: "tool", MessageIndex: 4 + i,
 		Transform: "base64_decode", TransformDepth: 1, WindowStartByte: 10, WindowEndByte: 210,
 		Model: "minilm-multihead", ModelVersion: "v5-fp32", ModelChecksum: "sha256:0f3a9c", ThresholdSet: "v1",
 		ExecutionMode: "async", ProtectionScope: "later_requests", CoverageComplete: true, LatencyMs: 37,
