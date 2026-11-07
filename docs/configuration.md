@@ -723,6 +723,33 @@ meets the same action. At most 4096 ended sessions are retained, oldest evicted
 first; an evicted ID no longer meets its old action. The full session record
 has already been persisted at session end.
 
+## Behavioral Panel (`panel.*`)
+
+The panel combines session-level behavioral detectors: M3-lite (the
+`fingerprint` block, live) and an optional tool-chain member. The `panel`
+block configures only the tool-chain member. All three keys are read at
+startup, so changing them needs a restart. How the scores combine, how to
+observe them and when a shadow member may be promoted are in
+[Behavioral Panel](panel.md).
+
+```yaml
+panel:
+  tool_chain_artifact: ""   # path to a tool-chain artifact JSON; empty = not seated (default)
+  tool_chain_shadow: true   # true = observe only (default); false = counts toward the verdict
+  tool_chain_weight: 1.0    # [0, 1] (default 1.0); only matters when tool_chain_shadow is false
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `panel.tool_chain_artifact` | `""` | Filesystem path to the artifact. A missing or invalid artifact logs a warning and the member is not seated; startup continues. |
+| `panel.tool_chain_shadow` | `true` | `true`: the member is assessed, persisted in `panel_opinions` and counted on `/control/panel`, but never changes risk points or OCSF findings. |
+| `panel.tool_chain_weight` | `1.0` | Validated to `[0, 1]`. A live member adds `round(weight * percentile * 20)` risk points, so a weight of 0.5 adds at most 10. |
+
+The panel only runs when `fingerprint.enabled` is `true` and storage is
+enabled. A promoted member also needs `fingerprint.shadow: false`; while
+M3-lite is in shadow no panel member adds points or findings. Roll a
+promoted member back with `tool_chain_shadow: true`.
+
 ## Session ID Behavior
 
 ELIDA resolves a session ID per request, in order of precedence:

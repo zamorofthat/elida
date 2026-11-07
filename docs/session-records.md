@@ -68,6 +68,7 @@ CREATE TABLE sessions (
     semantic_shadow TEXT,             -- JSON: shadow semantic decisions (newest first, max 50)
     semantic_decisions TEXT,          -- JSON: {decisions, dropped}
     correlation_shadow TEXT,          -- JSON: shadow correlation matches (newest first, max 50)
+    panel_opinions TEXT,              -- JSON: one behavioral-panel opinion per seated member
     created_at DATETIME
 );
 ```
@@ -156,6 +157,33 @@ Each policy violation includes source attribution and SIEM classification:
 ```
 
 A session keeps at most 50 entries, dropping the oldest. When a session ID is reused, saving the new session carries the stored entries of the earlier sessions behind its own, drops carried entries whose `match_id` the new session already holds, and keeps the newest carried entries up to 50 in total; the carried part is also stored in `prior_history`. Entries an earlier session had already dropped are not recovered. The column is added by an idempotent migration (default empty) and is loaded only by `GET /control/history/{id}`; the history list leaves it out.
+
+### Panel opinions
+
+`panel_opinions` holds one entry per behavioral-panel member that was seated when the session ended, in seat order (see [Behavioral Panel](panel.md)). It is the evidence for promoting a shadow member. Every field is a number, a boolean or a short token, never content.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `member` | string | Member name: `m3-lite` or `tool-chain` |
+| `shadow` | bool | The member was seated in shadow: assessed and reported, never counted toward risk |
+| `weight` | number | The member's seat weight, 0..1 |
+| `anomaly` | number | The member's anomaly score, 0..1 |
+| `veto` | bool | The member asked to floor the panel's risk to 1.0. Omitted when false |
+| `bucket` | string | m3-lite: fingerprint bucket. Omitted when empty |
+| `distance` | number | m3-lite: fingerprint distance. Omitted when 0 |
+| `perplexity` | number | tool-chain: perplexity of the tool-call sequence. Omitted when 0 |
+| `percentile` | number | tool-chain: calibrated percentile of the perplexity, 0..1. Omitted when 0 |
+| `class_used` | string | tool-chain: the artifact chain used, a session class or `global`. Omitted when empty |
+| `reason` | string | tool-chain: why it reported no score, `insufficient-trajectory` or `no-chain`. Omitted when empty |
+
+```json
+[
+    {"member": "m3-lite", "shadow": false, "weight": 1, "anomaly": 0.25, "bucket": "notable", "distance": 4.3},
+    {"member": "tool-chain", "shadow": true, "weight": 1, "anomaly": 0.82, "perplexity": 7.9, "percentile": 0.82, "class_used": "global"}
+]
+```
+
+A session that ends during M3-lite warm-up still records its opinions: m3-lite has anomaly 0 and no `bucket`. A session recorded without a panel (behavioral fingerprinting off) and rows written before the column existed have an empty column, and `panel_opinions` is then left out of the response. When a session ID is reused, the latest session's opinions replace the earlier ones; they are not carried the way violations and shadow matches are. The column is added by an idempotent migration (default empty) and is loaded only by `GET /control/history/{id}`; the history list leaves it out.
 
 ## Redaction of Captured Content
 
