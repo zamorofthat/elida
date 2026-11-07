@@ -18,6 +18,7 @@ import (
 	"elida/internal/panel"
 	"elida/internal/session"
 	"elida/internal/storage"
+	"elida/internal/telemetry"
 )
 
 func TestRiskPointsFromVerdict_ReproducesM3LiteLadder(t *testing.T) {
@@ -346,5 +347,210 @@ func TestScoreFingerprint_OpinionsAndLogAreContentFree(t *testing.T) {
 	loaded, err := a.sqliteStore.GetSession(snap.ID)
 	if err != nil || loaded == nil || len(loaded.PanelOpinions) != 2 {
 		t.Fatalf("GetSession: %+v %v", loaded, err)
+	}
+}
+
+// notableAnomaly is the weighted anomaly at which a member earns a finding:
+// the risk-notable rung of the ladder, expressed on the 0..1 scale.
+const notableAnomaly = float64(fingerprint.RiskNotable) / float64(panel.MaxRiskPoints)
+
+// liveM3Lite is the opinion a live M3-lite member emits for bucket b.
+func liveM3Lite(b string) panel.MemberOpinion {
+	return panel.MemberOpinion{
+		Member:  "m3-lite",
+		Weight:  1.0,
+		Anomaly: float64(fingerprint.BucketRiskPoints(b)) / float64(fingerprint.RiskSevere),
+		Detail:  map[string]any{"bucket": b, "distance": 4.5, "shadow": false},
+	}
+}
+
+func hasMember(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
+// The exact-equivalence proof: for a live M3-lite seat at weight 1.0 the
+// per-member finding threshold selects precisely the buckets today's
+// `bucket != normal && bucket != minor` condition emits for.
+func TestAnomalyFindingMembers_M3LiteMatchesTodaysBucketCondition(t *testing.T) {
+	for _, b := range []string{fingerprint.BucketNormal, fingerprint.BucketMinor, fingerprint.BucketNotable, fingerprint.BucketAnomalous, fingerprint.BucketSevere} {
+		want := b != fingerprint.BucketNormal && b != fingerprint.BucketMinor
+		got := anomalyFindingMembers(panel.Verdict{Members: []panel.MemberOpinion{liveM3Lite(b)}})
+		if hasMember(got, "m3-lite") != want {
+			t.Fatalf("bucket %s: members = %v, want m3-lite present = %v", b, got, want)
+		}
+		if len(got) > 1 {
+			t.Fatalf("bucket %s: unexpected extra members: %v", b, got)
+		}
+	}
+}
+
+// Shadow seats are observed, never reported: a shadow member at the top of
+// the scale earns no finding.
+func TestAnomalyFindingMembers_ShadowMembersNeverAppear(t *testing.T) {
+	v := panel.Verdict{Members: []panel.MemberOpinion{
+		{Member: "m3-lite", Shadow: true, Weight: 1.0, Anomaly: 1.0, Detail: map[string]any{"bucket": fingerprint.BucketSevere, "shadow": true}},
+		{Member: "tool-chain", Shadow: true, Weight: 1.0, Anomaly: 0.99, Detail: map[string]any{"percentile": 0.99}},
+	}}
+	if got := anomalyFindingMembers(v); len(got) != 0 {
+		t.Fatalf("shadow members produced findings: %v", got)
+	}
+}
+
+// A live member's seat weight gates its finding exactly as it gates its
+// contribution to RiskScore.
+func TestAnomalyFindingMembers_WeightGatesToolChain(t *testing.T) {
+	for _, c := range []struct {
+		weight float64
+		want   bool
+	}{
+		{0.5, true},  // 0.5 * 0.99 = 0.495 >= 0.25
+		{0.2, false}, // 0.2 * 0.99 = 0.198 <  0.25
+	} {
+		v := panel.Verdict{Members: []panel.MemberOpinion{
+			{Member: "tool-chain", Weight: c.weight, Anomaly: 0.99, Detail: map[string]any{"percentile": 0.99}},
+		}}
+		got := anomalyFindingMembers(v)
+		if hasMember(got, "tool-chain") != c.want {
+			t.Fatalf("weight %.1f: members = %v, want tool-chain present = %v", c.weight, got, c.want)
+		}
+	}
+	// Exactly at the rung, a member is reported.
+	v := panel.Verdict{Members: []panel.MemberOpinion{{Member: "tool-chain", Weight: 1.0, Anomaly: notableAnomaly}}}
+	if got := anomalyFindingMembers(v); !hasMember(got, "tool-chain") {
+		t.Fatalf("a member exactly at the notable rung must be reported: %v", got)
+	}
+}
+
+// R4: each live member that clears the rung earns its own finding, in seat
+// order — the panel reports every member, not just the driver.
+func TestAnomalyFindingMembers_LiveToolChainAndNotableM3Lite(t *testing.T) {
+	v := panel.Verdict{Members: []panel.MemberOpinion{
+		liveM3Lite(fingerprint.BucketNotable),
+		{Member: "tool-chain", Weight: 1.0, Anomaly: 0.99, Detail: map[string]any{"percentile": 0.99}},
+	}}
+	got := anomalyFindingMembers(v)
+	if len(got) != 2 || got[0] != "m3-lite" || got[1] != "tool-chain" {
+		t.Fatalf("members = %v, want [m3-lite tool-chain] in seat order", got)
+	}
+	if n := anomalyFindingMembers(panel.Verdict{}); len(n) != 0 {
+		t.Fatalf("an empty verdict must produce no findings: %v", n)
+	}
+}
+
+func TestOpinionFor_FoundAndMissing(t *testing.T) {
+	v := panel.Verdict{Members: []panel.MemberOpinion{liveM3Lite(fingerprint.BucketNotable)}}
+	if op := opinionFor(v, "m3-lite"); op.Member != "m3-lite" || op.Detail["bucket"] != fingerprint.BucketNotable {
+		t.Fatalf("opinionFor(m3-lite) = %+v", op)
+	}
+	if op := opinionFor(v, "tool-chain"); op.Member != "" || op.Detail != nil {
+		t.Fatalf("a member that did not sit must yield the zero opinion: %+v", op)
+	}
+}
+
+// stubMember is a seatable member with a fixed opinion, so the OCSF path can
+// be driven without depending on a real scorer's numbers.
+type stubMember struct {
+	name    string
+	anomaly float64
+	detail  map[string]any
+}
+
+func (m stubMember) Name() string    { return m.name }
+func (m stubMember) Version() string { return "stub" }
+func (m stubMember) Assess(panel.SessionFeatures) panel.MemberOpinion {
+	return panel.MemberOpinion{Member: m.name, Anomaly: m.anomaly, Detail: m.detail}
+}
+
+// A live member above the rung gets its own OCSF finding, with its own
+// analytic and numbers; a live member the OCSF path does not know about gets
+// none; and the M3-lite finding is still emitted exactly when today's bucket
+// condition holds.
+func TestScoreFingerprint_EmitsPerMemberOCSFFindings(t *testing.T) {
+	quietLogs(t)
+	a := panelScoreApp(t, func(c *config.Config) {
+		c.Fingerprint.Shadow = false
+		c.Fingerprint.WarmUp = 1
+	})
+	a.panel.Seat(stubMember{name: "tool-chain", anomaly: 0.99,
+		detail: map[string]any{"perplexity": 12.5, "percentile": 0.99, "class_used": "global"}}, false, 1.0)
+	// A future live member with no OCSF mapping must emit nothing.
+	a.panel.Seat(stubMember{name: "shape", anomaly: 1.0, detail: map[string]any{"reason": "stub"}}, false, 1.0)
+	nozzle := &recordingNozzle{}
+	a.ocsfEmitter = telemetry.NewOCSFEmitterForTest([]telemetry.OCSFNozzle{nozzle})
+
+	snap := panelScoreSession("sess-ocsf-members", 5)
+	snap.Backend = "https://backend"
+	snap.SystemPrompt = planCSentinel
+	snap.Messages[0].Content = planCSentinel
+	at := snap.StartTime
+	for i, tool := range []string{"read", planCToolArgSentinel, "edit"} {
+		snap.ToolCallHistory = append(snap.ToolCallHistory, session.ToolCallRecord{
+			Timestamp: at.Add(time.Duration(i) * time.Second), ToolName: tool,
+			Arguments: map[string]any{"path": planCToolArgSentinel}, Result: planCSentinel,
+		})
+	}
+
+	res := a.scoreFingerprint(snap)
+	if !res.Scored {
+		t.Fatalf("the session must be scored: %+v", res)
+	}
+
+	if n := nozzle.count(`"tool-chain Markov"`); n != 1 {
+		t.Fatalf("tool-chain findings = %d, want 1", n)
+	}
+	if n := nozzle.count(`"elida.tool_chain"`); n != 1 {
+		t.Fatalf("findings carrying elida.tool_chain = %d, want 1", n)
+	}
+	if n := nozzle.count(`"percentile":0.99`); n != 1 {
+		t.Fatalf("the tool-chain finding lost its percentile: %v", nozzle.count(`"percentile":0.99`))
+	}
+	if n := nozzle.count(`"severity_id":5`); n != 1 {
+		t.Fatalf("findings at critical severity = %d, want 1 (percentile 0.99)", n)
+	}
+	if n := nozzle.count(`"elida.backend":"https://backend"`); n != 1 {
+		t.Fatalf("findings carrying the backend = %d, want 1", n)
+	}
+
+	// The M3-lite finding keeps today's condition exactly.
+	wantM3 := 0
+	if res.Bucket != fingerprint.BucketNormal && res.Bucket != fingerprint.BucketMinor {
+		wantM3 = 1
+	}
+	if n := nozzle.count(`"M3-lite"`); n != wantM3 {
+		t.Fatalf("M3-lite findings = %d, want %d for bucket %q", n, wantM3, res.Bucket)
+	}
+	// Exactly the mapped members emitted: nothing for "shape".
+	if n := nozzle.count(`"behavioral_anomaly"`); n != 1+wantM3 {
+		t.Fatalf("behavioral_anomaly findings = %d, want %d", n, 1+wantM3)
+	}
+	if n := nozzle.count(planCSentinel) + nozzle.count(planCToolArgSentinel); n != 0 {
+		t.Fatalf("a sentinel reached %d OCSF findings", n)
+	}
+}
+
+// R5: a shadow M3-lite score is persisted but never reported — no risk
+// points, no findings, whatever the bucket.
+func TestScoreFingerprint_ShadowEmitsNoFindings(t *testing.T) {
+	quietLogs(t)
+	a := panelScoreApp(t, func(c *config.Config) {
+		c.Fingerprint.Shadow = true
+		c.Fingerprint.WarmUp = 1
+	})
+	a.panel.Seat(stubMember{name: "tool-chain", anomaly: 0.99,
+		detail: map[string]any{"perplexity": 12.5, "percentile": 0.99, "class_used": "global"}}, false, 1.0)
+	nozzle := &recordingNozzle{}
+	a.ocsfEmitter = telemetry.NewOCSFEmitterForTest([]telemetry.OCSFNozzle{nozzle})
+
+	res := a.scoreFingerprint(panelScoreSession("sess-ocsf-shadow", 6))
+	if !res.Scored {
+		t.Fatalf("a shadow score is still persisted: %+v", res)
+	}
+	if n := nozzle.count(`"class_uid":2004`); n != 0 {
+		t.Fatalf("a shadow session emitted %d findings, want 0", n)
 	}
 }

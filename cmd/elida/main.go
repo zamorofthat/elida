@@ -551,8 +551,10 @@ type fingerprintResult struct {
 // M3-lite is the only live member, so this reconstructs exactly the outputs
 // the pre-panel implementation computed directly from a.fingerprinter: same
 // warm-up no-op, same shadow persist-without-enforce, same risk points
-// (source label = the driving member), same OCSF emit condition, and the same
-// single "fingerprint score" line — never one for a warm-up session.
+// (source label = the driving member), the same OCSF findings (one per live
+// member at notable+, which with M3-lite alone is the former single emit for
+// a notable/anomalous/severe bucket), and the same single "fingerprint score"
+// line — never one for a warm-up session.
 //
 // The per-member opinions it returns alongside them are content-free by
 // construction (see panelOpinions), both in the record they are persisted on
@@ -570,14 +572,11 @@ func (a *app) scoreFingerprint(snap *session.Session) fingerprintResult {
 	v := a.panel.Assess(panel.BuildFeatures(snap))
 	res := fingerprintResult{Opinions: panelOpinions(v)}
 
-	// Find the M3-lite member's opinion (the only live member today).
-	var op *panel.MemberOpinion
-	for i := range v.Members {
-		if v.Members[i].Member == "m3-lite" {
-			op = &v.Members[i]
-		}
-	}
-	if op == nil || op.Detail == nil {
+	// Find the M3-lite member's opinion (the only member whose score the
+	// session record carries). A member that did not sit, or that reported
+	// nothing, yields the zero opinion with a nil Detail.
+	op := opinionFor(v, "m3-lite")
+	if op.Detail == nil {
 		return res // warm-up: not enough data yet (unchanged, and unlogged)
 	}
 
@@ -612,11 +611,32 @@ func (a *app) scoreFingerprint(snap *session.Session) fingerprintResult {
 		a.policyEngine.AddExternalRiskPoints(snap.ID, points, source)
 	}
 
-	// Emit OCSF 2004 for notable+ scores
-	if res.Bucket != fingerprint.BucketNormal && res.Bucket != fingerprint.BucketMinor && a.ocsfEmitter != nil {
-		finding := telemetry.BuildAnomalyDetection(snap.ID, res.Distance, res.Bucket, res.Class)
-		finding.Unmapped.Backend = snap.Backend
-		a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+	// Emit one OCSF 2004 finding per live member at notable+ (see
+	// anomalyFindingMembers). With M3-lite the only live member — the
+	// shipped posture — that is exactly the former single emit for a
+	// notable/anomalous/severe bucket: same builder, same severity, same
+	// backend. A member with no finding mapping yet emits nothing.
+	if a.ocsfEmitter != nil {
+		for _, name := range anomalyFindingMembers(v) {
+			var finding telemetry.OCSFDetectionFinding
+			switch name {
+			case "m3-lite":
+				finding = telemetry.BuildAnomalyDetection(snap.ID, res.Distance, res.Bucket, res.Class)
+			case "tool-chain":
+				// Only these three keys are read, each with a checked type
+				// assertion, so nothing else a member puts in Detail can
+				// reach a nozzle (same rule as panelOpinions).
+				tc := opinionFor(v, name)
+				pct, _ := tc.Detail["percentile"].(float64)
+				ppl, _ := tc.Detail["perplexity"].(float64)
+				classUsed, _ := tc.Detail["class_used"].(string)
+				finding = telemetry.BuildToolChainAnomalyDetection(snap.ID, pct, ppl, classUsed, res.Class)
+			default:
+				continue
+			}
+			finding.Unmapped.Backend = snap.Backend
+			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+		}
 	}
 
 	return res

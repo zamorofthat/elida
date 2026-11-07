@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"elida/internal/config"
+	"elida/internal/fingerprint"
 	"elida/internal/panel"
 	"elida/internal/storage"
 )
@@ -50,4 +51,48 @@ func panelOpinions(v panel.Verdict) []storage.PanelOpinion {
 // Defaults (shadow, weight 1.0) observe only, reproducing Phase 2a.
 func seatToolChain(p *panel.Panel, cfg config.PanelConfig, art *panel.ToolChainArtifact) {
 	p.Seat(panel.NewToolChainMember(art), cfg.ToolChainShadow, cfg.ToolChainWeight)
+}
+
+// anomalyFindingRung is the weighted anomaly a live member must reach to
+// earn its own OCSF finding: the risk-notable rung of the ladder on the 0..1
+// scale (5/20 = 0.25).
+//
+// For the only live member today that is exactly today's emit condition. A
+// live M3-lite seat (weight 1.0) reports Anomaly =
+// BucketRiskPoints(bucket)/RiskSevere — 0, 0.10, 0.25, 0.50, 1.00 for
+// normal/minor/notable/anomalous/severe — so weight*Anomaly >= 0.25 holds
+// for exactly the notable, anomalous and severe buckets: the same set as
+// `bucket != normal && bucket != minor`. Every value is a ratio of small
+// powers of two, so the comparison is exact, not approximate.
+const anomalyFindingRung = float64(fingerprint.RiskNotable) / float64(panel.MaxRiskPoints)
+
+// anomalyFindingMembers names the members that earn an OCSF anomaly finding
+// for this verdict, in seat order: live seats whose weighted anomaly reaches
+// the notable rung. Shadow seats are excluded — they are observed and
+// persisted, never reported — and so is any member below the rung.
+//
+// It is the panel's reporting rule, not the risk rule: every qualifying
+// member is named, not just the one that drove RiskScore.
+func anomalyFindingMembers(v panel.Verdict) []string {
+	var out []string
+	for _, m := range v.Members {
+		if m.Shadow {
+			continue
+		}
+		if m.Weight*m.Anomaly >= anomalyFindingRung {
+			out = append(out, m.Member)
+		}
+	}
+	return out
+}
+
+// opinionFor returns the named member's opinion, or the zero opinion (nil
+// Detail) when that member did not sit or did not report.
+func opinionFor(v panel.Verdict, name string) panel.MemberOpinion {
+	for i := range v.Members {
+		if v.Members[i].Member == name {
+			return v.Members[i]
+		}
+	}
+	return panel.MemberOpinion{}
 }
