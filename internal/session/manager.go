@@ -58,6 +58,12 @@ type Manager struct {
 	// Map client IPs to session IDs for IP-based session tracking
 	clientSessions   map[string]string
 	clientSessionsMu sync.RWMutex
+
+	// Periodic write-back of in-flight request sessions (Redis only). Zero
+	// disables it. Set before Run.
+	persistInterval time.Duration
+	inflightMu      sync.Mutex
+	inflight        map[*Session]struct{}
 }
 
 // NewManager creates a new session manager with default kill block settings
@@ -102,6 +108,13 @@ func (m *Manager) Run(ctx context.Context) {
 	ticker := time.NewTicker(m.cleanupInterval)
 	defer ticker.Stop()
 
+	var persistC <-chan time.Time
+	if m.persistInterval > 0 {
+		pt := time.NewTicker(m.persistInterval)
+		defer pt.Stop()
+		persistC = pt.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -110,7 +123,64 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ticker.C:
 			m.checkTimeouts()
 			m.cleanup()
+		case <-persistC:
+			m.persistInflight()
 		}
+	}
+}
+
+// DefaultRedisPersistInterval is how often in-flight request sessions are
+// written back under the Redis store, bounding what a crash mid-request
+// loses.
+const DefaultRedisPersistInterval = 5 * time.Minute
+
+// SetPersistInterval sets the in-flight write-back interval; 0 disables it.
+// Call before Run.
+func (m *Manager) SetPersistInterval(d time.Duration) {
+	m.persistInterval = d
+}
+
+// TrackRequest registers a session a request is working on so the periodic
+// persist can write its accumulated state while the request is still running
+// (an in-flight request's state is otherwise only in this process). The
+// returned func ends the request: it unregisters the session and writes it
+// back with Persist. Defer it for the life of the request. Only the request
+// goroutine's own copy is tracked: List returns fresh copies under Redis, so
+// re-writing those would persist nothing.
+func (m *Manager) TrackRequest(sess *Session) (end func()) {
+	if sess == nil {
+		return func() {}
+	}
+	if m.persistInterval > 0 {
+		m.inflightMu.Lock()
+		if m.inflight == nil {
+			m.inflight = make(map[*Session]struct{})
+		}
+		m.inflight[sess] = struct{}{}
+		m.inflightMu.Unlock()
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.inflightMu.Lock()
+			delete(m.inflight, sess)
+			m.inflightMu.Unlock()
+			m.Persist(sess)
+		})
+	}
+}
+
+// persistInflight writes back every tracked in-flight session. It persists
+// outside inflightMu: Persist does store I/O.
+func (m *Manager) persistInflight() {
+	m.inflightMu.Lock()
+	live := make([]*Session, 0, len(m.inflight))
+	for s := range m.inflight {
+		live = append(live, s)
+	}
+	m.inflightMu.Unlock()
+	for _, s := range live {
+		m.Persist(s)
 	}
 }
 

@@ -387,8 +387,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Write the request's accumulated state back when the request ends, on
 	// every return path. Under Redis a later Get returns the last written
-	// state, not this live struct; see Manager.Persist.
-	defer p.manager.Persist(sess)
+	// state, not this live struct; see Manager.Persist. TrackRequest also lets
+	// the manager write it periodically while the request runs.
+	defer p.manager.TrackRequest(sess)()
 	sess.TouchAndRecord(int64(len(requestBody)), backend.Name)
 
 	// Check if session was killed

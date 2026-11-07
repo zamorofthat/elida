@@ -296,7 +296,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sess.Touch()
 	// WebSocket frame counters accumulate on this live struct for the whole
 	// connection; write them back when it ends (Redis returns copies).
-	defer h.manager.Persist(sess)
+	// TrackRequest also lets the manager write them periodically meanwhile.
+	defer h.manager.TrackRequest(sess)()
 
 	// Check if session was killed
 	select {

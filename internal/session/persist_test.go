@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -266,5 +267,90 @@ func TestCheckTimeouts_ReReadGuardKeepsASessionKilledAfterTheList(t *testing.T) 
 	got, _ := store.Get("p-killed")
 	if got.GetState() != Killed {
 		t.Fatalf("a kill landing after the List snapshot was overwritten with TimedOut: state=%v", got.GetState())
+	}
+}
+
+func TestTrackRequest_PersistsInflightSessionsUntilTheyEnd(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	m.SetPersistInterval(time.Hour) // enabled; the test drives persistInflight itself
+	sess := m.GetOrCreate("t-1", "http://b", "127.0.0.1")
+	end := m.TrackRequest(sess)
+
+	sess.AddTokens(4, 5) // mid-request: not yet written back
+	m.persistInflight()
+	got, _ := store.Get("t-1")
+	if in, out := got.GetTokens(); in != 4 || out != 5 {
+		t.Fatalf("an in-flight session must be written by the periodic persist: %d/%d", in, out)
+	}
+
+	end() // request done: final write-back and unregistered
+	puts := store.Puts()
+	m.persistInflight()
+	if store.Puts() != puts {
+		t.Fatal("an ended request must no longer be persisted periodically")
+	}
+	end() // idempotent
+}
+
+func TestTrackRequest_PeriodicPersistKeepsAConcurrentKill(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	m.SetPersistInterval(time.Hour)
+	sess := m.GetOrCreate("t-kill", "http://b", "127.0.0.1")
+	end := m.TrackRequest(sess)
+	defer end()
+	m.Kill("t-kill")
+	sess.AddTokens(1, 1)
+	m.persistInflight()
+	got, _ := store.Get("t-kill")
+	if got.GetState() != Killed {
+		t.Fatalf("the periodic persist clobbered a kill: %v", got.GetState())
+	}
+}
+
+func TestTrackRequest_DisabledRegistersNothing(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute) // interval 0
+	sess := m.GetOrCreate("t-off", "http://b", "127.0.0.1")
+	end := m.TrackRequest(sess)
+	sess.AddTokens(2, 2)
+	puts := store.Puts()
+	m.persistInflight()
+	if store.Puts() != puts {
+		t.Fatal("with no persist interval nothing may be tracked, so the periodic persist writes nothing")
+	}
+	end() // still writes back once at request end
+	got, _ := store.Get("t-off")
+	if in, _ := got.GetTokens(); in != 2 {
+		t.Fatalf("end must still write back: %d", in)
+	}
+}
+
+func TestManagerRun_PersistsInflightOnTheTicker(t *testing.T) {
+	store := NewCopyStore()
+	m := NewManager(store, time.Minute)
+	m.SetPersistInterval(10 * time.Millisecond)
+	sess := m.GetOrCreate("t-run", "http://b", "127.0.0.1")
+	end := m.TrackRequest(sess)
+	defer end()
+	sess.AddTokens(8, 9)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	deadline := time.After(3 * time.Second)
+	for {
+		got, _ := store.Get("t-run")
+		if in, _ := got.GetTokens(); in == 8 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the periodic persist never wrote the in-flight session")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
