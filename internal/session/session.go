@@ -316,7 +316,7 @@ func (s *Session) RecordToolCall(toolName, toolType, requestID, argsJSON string)
 		Arguments: args,
 	}
 	s.ToolCallHistory = append(s.ToolCallHistory, record)
-	if len(s.ToolCallHistory) > 100 {
+	if len(s.ToolCallHistory) > maxToolCallHistory {
 		s.ToolCallHistory = s.ToolCallHistory[1:]
 	}
 }
