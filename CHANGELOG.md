@@ -139,6 +139,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   divided by 20); its risk points, OCSF findings and log-line count are
   unchanged.
 
+### Fixed
+- Redis-backed deployments no longer lose request-scoped session state. Only
+  eleven lifecycle fields were stored and nothing wrote the rest back, so
+  tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`
+  were empty in every end-of-session record (SQLite, OTEL, OCSF, fingerprint
+  features) under `session.store: redis`. The Redis session now carries the
+  durable content-free state (typically a few KB, worst case roughly
+  70 KB per session), written back
+  at request end, before a policy terminate, after async semantic deliveries
+  that recorded a shadow entry, and every 5 minutes for in-flight requests.
+  Conversation content, tool arguments and results, the system prompt and its
+  hash, and the rate-limit window are still never stored in Redis. That
+  leaves Redis rate limiting per process and means the mid-session
+  system-prompt-change WARN cannot fire under Redis. Replicas serving one
+  session concurrently are last-writer-wins, and the write-back has no
+  compare-and-set (a follow-up).
+- A terminated session now keeps its terminated flag across Redis reloads
+  (so it cannot be resumed), and an idle session now times out under Redis
+  instead of staying active until its key expires. Kill-then-resume is still
+  not supported under Redis (the store never replaces its cached kill
+  channel, a pre-existing limitation; see "Redis session state" in
+  `docs/configuration.md`).
+
 ## [0.18.0] - 2026-08-02
 
 ### Fixed

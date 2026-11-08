@@ -257,6 +257,9 @@ func (a *app) initSessionStore() {
 	}
 
 	a.manager = session.NewManagerWithKillBlock(a.store, a.cfg.Session.Timeout, killBlockConfig)
+	if a.redisStore != nil {
+		a.manager.SetPersistInterval(session.DefaultRedisPersistInterval)
+	}
 	slog.Info("session manager configured", "kill_block_mode", killBlockConfig.Mode, "kill_block_duration", killBlockConfig.Duration)
 }
 

@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,5 +287,103 @@ func TestRedisStore_KillChannel(t *testing.T) {
 		// Expected - channel is closed
 	default:
 		t.Error("expected kill channel to be closed after publish")
+	}
+}
+
+func TestRedisStore_ShadowAndAccountingSurviveRoundTrip(t *testing.T) {
+	skipIfNoRedis(t)
+	store := newTestRedisStore(t)
+	manager := session.NewManager(store, 5*time.Minute)
+
+	sess := manager.GetOrCreate("redis-parity-1", "http://backend", "127.0.0.1")
+	sess.TouchAndRecord(10, "b1")
+	sess.AddTokens(7, 9)
+	sess.RecordToolCall("bash", "function", "req-1", `{"cmd":"SENTINEL-ARG"}`)
+	sess.RecordSemanticShadow(session.SemanticShadow{DecisionID: "d1", Signal: "injection", Probability: 0.4, Model: "m"})
+	sess.RecordCorrelationShadow(session.CorrelationShadow{MatchID: "m1", Rule: "r", EventIDs: []string{"d1"}})
+	sess.RecordMessage("user", "SENTINEL-MSG", "b1")
+	manager.Persist(sess)
+
+	got, ok := store.Get("redis-parity-1")
+	if !ok {
+		t.Fatal("expected to find session")
+	}
+	if in, out := got.GetTokens(); in != 7 || out != 9 {
+		t.Errorf("tokens = %d/%d", in, out)
+	}
+	if got.GetBackendsUsed()["b1"] != 1 {
+		t.Errorf("backends used = %v", got.GetBackendsUsed())
+	}
+	if s := got.GetSemanticShadow(); len(s) != 1 || s[0].DecisionID != "d1" {
+		t.Errorf("semantic shadow = %+v", s)
+	}
+	if c := got.GetCorrelationShadow(); len(c) != 1 || c[0].MatchID != "m1" {
+		t.Errorf("correlation shadow = %+v", c)
+	}
+	if h := got.GetToolCallHistory(); len(h) != 1 || h[0].ToolName != "bash" || h[0].Arguments != nil {
+		t.Errorf("tool history = %+v, want the content-free projection", h)
+	}
+	if len(got.GetMessages()) != 0 {
+		t.Error("conversation content must not reach Redis")
+	}
+
+	client := redis.NewClient(&redis.Options{Addr: getRedisAddr()})
+	defer client.Close()
+	raw, err := client.Get(context.Background(), "elida:integration-test:redis-parity-1").Result()
+	if err != nil {
+		t.Fatalf("raw get: %v", err)
+	}
+	if strings.Contains(raw, "SENTINEL") {
+		t.Errorf("content reached the Redis blob: %s", raw)
+	}
+}
+
+func TestRedisStore_PersistKeepsAKillAndTerminate(t *testing.T) {
+	skipIfNoRedis(t)
+	store := newTestRedisStore(t)
+	manager := session.NewManager(store, 5*time.Minute)
+
+	sess := manager.GetOrCreate("redis-parity-kill", "http://backend", "127.0.0.1")
+	manager.Terminate("redis-parity-kill")
+	sess.AddTokens(1, 1) // the in-flight request finishes after the terminate
+	manager.Persist(sess)
+
+	got, ok := store.Get("redis-parity-kill")
+	if !ok {
+		t.Fatal("expected to find session")
+	}
+	if got.GetState() != session.Killed || !got.IsTerminated() {
+		t.Errorf("state = %s terminated = %v; a terminated session must stay terminated (and unresumable) across Redis", got.GetState(), got.IsTerminated())
+	}
+	if !sess.IsActive() {
+		t.Errorf("Persist must not change the live request's session: state = %s", sess.GetState())
+	}
+	if manager.Resume("redis-parity-kill") {
+		t.Error("a terminated session must not resume")
+	}
+}
+
+func TestRedisStore_SessionEndRecordIsCompleteUnderRedis(t *testing.T) {
+	skipIfNoRedis(t)
+	store := newTestRedisStore(t)
+	manager := session.NewManager(store, 5*time.Minute)
+
+	var gotIn, gotOut int64
+	var gotShadows, gotCorrelation int
+	manager.SetSessionEndCallback(func(s *session.Session) {
+		gotIn, gotOut = s.GetTokens()
+		gotShadows = len(s.GetSemanticShadow())
+		gotCorrelation = len(s.GetCorrelationShadow())
+	})
+
+	sess := manager.GetOrCreate("redis-parity-end", "http://backend", "127.0.0.1")
+	sess.AddTokens(3, 4)
+	sess.RecordSemanticShadow(session.SemanticShadow{DecisionID: "d1"})
+	sess.RecordCorrelationShadow(session.CorrelationShadow{MatchID: "m1"})
+	manager.Persist(sess)
+	manager.Kill("redis-parity-end") // exports the end-of-session record from a fresh read
+
+	if gotIn != 3 || gotOut != 4 || gotShadows != 1 || gotCorrelation != 1 {
+		t.Fatalf("end-of-session record saw tokens %d/%d, %d shadows, %d matches", gotIn, gotOut, gotShadows, gotCorrelation)
 	}
 }
