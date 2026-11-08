@@ -103,6 +103,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     evidence" section with timeline markers, and the Settings and Policy
     pages show the shadow and policy correlation counters.
   - `docs/semantic-detection.md` gains a "Residual risk" section.
+- Behavioral panel posture and observability (see `docs/panel.md`). The
+  tool-chain panel member is configured by `panel.tool_chain_artifact`
+  (empty by default: not seated), `panel.tool_chain_shadow` (default `true`:
+  observe only) and `panel.tool_chain_weight` (default `1.0`, validated to
+  `[0, 1]`); all are restart-only. The shipped posture is unchanged: M3-lite
+  enforces and tool-chain, when seated, is shadow. A live member adds
+  `round(weight * anomaly * 20)` risk points, so weight 0.5 adds at most 10.
+  - SQLite `sessions` gains a `panel_opinions` column (one content-free
+    entry per seated member: `member`, `shadow`, `weight`, `anomaly`,
+    `veto`, `bucket`, `distance`, `perplexity`, `percentile`, `class_used`,
+    `reason`), added by migration and returned by
+    `GET /control/history/{id}`. The history list leaves it out.
+  - The `fingerprint score` log line gains `panel_driver`, `panel_risk` and
+    `members` (the same content-free opinions).
+  - `GET /control/panel` reports rolling per-member `sessions_scored`,
+    `mean_anomaly`, `p95_anomaly` and `veto_count` (in memory since boot;
+    mean and p95 over the last 1000 scores per seat).
+  - A live tool-chain member emits its own OCSF 2004 Detection Finding
+    (`elida.tool_chain`: `perplexity`, `percentile`, `class_used`) when its
+    weighted anomaly reaches 0.25. Inert while the member is shadow, which
+    is the default.
 
 - `GET /control/ready` (unauthenticated, like `/control/health`): a readiness
   probe that is a status code with no body. 200 normally; **503 when
@@ -130,6 +151,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same model is also attached once as `models-injection-v5-fp32.tar.gz`
   with a `.sha256`, and the Docker image ships it at
   `/etc/elida/models/injection`.
+- Behavioral panel scoring: member anomalies are clamped to `[0, 1]` on a
+  common scale, a member veto floors the panel's risk to the maximum
+  regardless of seat order, and the driving member is attributed
+  (`panel_driver`). M3-lite is normalized to that scale (bucket points
+  divided by 20); its risk points, OCSF findings and log-line count are
+  unchanged.
+
+### Fixed
+- Redis-backed deployments no longer lose request-scoped session state. Only
+  eleven lifecycle fields were stored and nothing wrote the rest back, so
+  tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`
+  were empty in every end-of-session record (SQLite, OTEL, OCSF, fingerprint
+  features) under `session.store: redis`. The Redis session now carries the
+  durable content-free state (typically a few KB, worst case roughly
+  70 KB per session), written back
+  at request end, before a policy terminate, after async semantic deliveries
+  that recorded a shadow entry, and every 5 minutes for in-flight requests.
+  Conversation content, tool arguments and results, the system prompt and its
+  hash, and the rate-limit window are still never stored in Redis. That
+  leaves Redis rate limiting per process and means the mid-session
+  system-prompt-change WARN cannot fire under Redis. Replicas serving one
+  session concurrently are last-writer-wins, and the write-back has no
+  compare-and-set (a follow-up).
+- A terminated session now keeps its terminated flag across Redis reloads
+  (so it cannot be resumed), and an idle session now times out under Redis
+  instead of staying active until its key expires. Kill-then-resume is still
+  not supported under Redis (the store never replaces its cached kill
+  channel, a pre-existing limitation; see "Redis session state" in
+  `docs/configuration.md`).
 
 ## [0.18.0] - 2026-08-02
 

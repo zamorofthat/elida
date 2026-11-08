@@ -105,6 +105,26 @@ Shadow-mode matches are `correlation_shadow` (array) on `GET /control/sessions/{
 
 `violation_detected` events (`GET /control/events`) carry `event_id`, `event_category` and `source_role` (strings, omitted when empty) beside the existing fields.
 
+### Behavioral Panel
+
+```bash
+# Seated behavioral-panel members and their rolling stats (authenticated)
+curl http://localhost:9090/control/panel
+```
+
+`GET /control/panel` returns `{"members": [...]}`, one entry per seated member in seat order (an empty list when no panel runs). Each member has `name`, `version`, `shadow` (bool), `weight` (0..1) and four rolling stats: `sessions_scored` (integer), `mean_anomaly`, `p95_anomaly` (0..1) and `veto_count` (integer). The stats are content-free, kept in memory since boot, and zeros are returned rather than omitted. `sessions_scored` and `veto_count` count every assessment since boot, so a session scored during M3-lite warm-up counts, with anomaly 0. `mean_anomaly` and `p95_anomaly` cover the last 1000 scores per seat; the p95 is the nearest-rank 95th percentile.
+
+```json
+{"members": [
+  {"name": "m3-lite", "version": "1", "shadow": false, "weight": 1,
+   "sessions_scored": 412, "mean_anomaly": 0.03, "p95_anomaly": 0.25, "veto_count": 0},
+  {"name": "tool-chain", "version": "<artifact generated_by>", "shadow": true, "weight": 1,
+   "sessions_scored": 412, "mean_anomaly": 0.21, "p95_anomaly": 0.88, "veto_count": 0}
+]}
+```
+
+`GET /control/history/{id}` also returns `panel_opinions` (array), omitted when empty: one content-free entry per member seated when the session ended, in seat order. Each entry has `member`, `shadow`, `weight`, `anomaly` and, when set, `veto`, `bucket`, `distance`, `perplexity`, `percentile`, `class_used` and `reason` (see [Session Records](session-records.md#panel-opinions) for the fields). The list endpoint (`GET /control/history`) leaves `panel_opinions` out to keep its payload small. On reuse of a session ID the latest session's opinions replace the earlier ones. See [Behavioral Panel](panel.md) for how to read them.
+
 ### Voice Sessions (WebSocket)
 
 ```bash

@@ -579,6 +579,11 @@ Based on ELIDA benchmarks:
 **Horizontal scaling checklist:**
 
 - [ ] Redis-backed session store (`ELIDA_SESSION_STORE=redis`)
+  - Run every replica on the same ELIDA version (a replica from before the
+    session wire-format widening rewrites sessions without the newer fields),
+    and see "Redis session state" in `docs/configuration.md` for what is and
+    is not stored, the write cost, and the known limitations (no kill-then-resume
+    under Redis, last-writer-wins counters, per-process rate limiting).
 - [ ] Load balancer with session affinity (recommended, not required)
 - [ ] HPA configured on CPU and/or custom session-count metric
 - [ ] Shared audit storage (S3/GCS) for cross-instance history

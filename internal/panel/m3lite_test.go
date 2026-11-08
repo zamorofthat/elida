@@ -19,15 +19,16 @@ func (f fakeScorer) Score(*session.Session) (float64, string, map[string]float64
 }
 func (f fakeScorer) IsShadow() bool { return f.shadow }
 
-func TestM3LiteMember_AnomalyEncodesRiskPoints(t *testing.T) {
-	// Notable bucket → BucketRiskPoints == RiskNotable → Anomaly == 1.0
-	m := NewM3LiteMember(fakeScorer{dist: 4.5, bucket: fingerprint.BucketNotable})
-	op := m.Assess(SessionFeatures{})
-	if op.Anomaly != 1.0 {
-		t.Fatalf("Anomaly = %v, want 1.0 for notable bucket", op.Anomaly)
+func TestM3LiteMember_AnomalyIsBucketOverRiskSevere(t *testing.T) {
+	want := map[string]float64{
+		fingerprint.BucketNormal: 0, fingerprint.BucketMinor: 0.10, fingerprint.BucketNotable: 0.25,
+		fingerprint.BucketAnomalous: 0.50, fingerprint.BucketSevere: 1.0,
 	}
-	if op.Detail["bucket"] != fingerprint.BucketNotable {
-		t.Fatalf("Detail[bucket] = %v, want %q", op.Detail["bucket"], fingerprint.BucketNotable)
+	for bucket, w := range want {
+		op := NewM3LiteMember(fakeScorer{dist: 4.5, bucket: bucket}).Assess(SessionFeatures{})
+		if op.Anomaly != w {
+			t.Fatalf("bucket %s: Anomaly = %v, want %v", bucket, op.Anomaly, w)
+		}
 	}
 }
 
@@ -73,11 +74,11 @@ func TestM3LiteMember_ShadowReportsDetailButZeroAnomaly(t *testing.T) {
 // TestPanelOfOne_PreservesRiskPoints is the behavior-preservation golden test
 // for Task 4 (cmd/elida/main.go panel wiring). It proves that a panel seated
 // with only the M3-lite member reconstructs, via
-// round(RiskScore * fingerprint.RiskNotable), exactly the same integer risk
-// points that the pre-panel scoreFingerprint computed directly from
-// fingerprint.BucketRiskPoints(bucket). If this test fails, the Task 2/3
-// encoding (Anomaly = BucketRiskPoints(bucket) / RiskNotable) is wrong —
-// fix the mapping, not this test.
+// round(RiskScore * MaxRiskPoints), exactly the same integer risk points that
+// the pre-panel scoreFingerprint computed directly from
+// fingerprint.BucketRiskPoints(bucket). If this test fails, the encoding
+// (Anomaly = BucketRiskPoints(bucket) / RiskSevere) is wrong — fix the
+// mapping, not this test.
 func TestPanelOfOne_PreservesRiskPoints(t *testing.T) {
 	cases := []struct {
 		bucket string
@@ -93,7 +94,7 @@ func TestPanelOfOne_PreservesRiskPoints(t *testing.T) {
 		p := NewPanel()
 		p.Seat(NewM3LiteMember(fakeScorer{bucket: c.bucket}), false, 1.0)
 		v := p.Assess(SessionFeatures{})
-		got := int(math.Round(v.RiskScore * float64(fingerprint.RiskNotable)))
+		got := int(math.Round(v.RiskScore * float64(MaxRiskPoints)))
 		if got != c.want {
 			t.Fatalf("bucket %s: reconstructed points = %d, want %d", c.bucket, got, c.want)
 		}

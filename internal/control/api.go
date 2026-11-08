@@ -1043,6 +1043,12 @@ type panelMemberOut struct {
 	Version string  `json:"version"`
 	Shadow  bool    `json:"shadow"`
 	Weight  float64 `json:"weight"`
+
+	// Rolling stats since boot (content-free). Zeros are emitted, not omitted.
+	SessionsScored int     `json:"sessions_scored"`
+	MeanAnomaly    float64 `json:"mean_anomaly"`
+	P95Anomaly     float64 `json:"p95_anomaly"`
+	VetoCount      int     `json:"veto_count"`
 }
 
 // handleDecision handles GET /control/decision
@@ -1082,7 +1088,13 @@ func (h *Handler) handlePanel(w http.ResponseWriter, r *http.Request) {
 	members := h.panelProvider.Members()
 	out := make([]panelMemberOut, 0, len(members))
 	for _, m := range members {
-		out = append(out, panelMemberOut{Name: m.Name, Version: m.Version, Shadow: m.Shadow, Weight: m.Weight})
+		out = append(out, panelMemberOut{
+			Name: m.Name, Version: m.Version, Shadow: m.Shadow, Weight: m.Weight,
+			SessionsScored: m.Stats.SessionsScored,
+			MeanAnomaly:    m.Stats.MeanAnomaly,
+			P95Anomaly:     m.Stats.P95Anomaly,
+			VetoCount:      m.Stats.VetoCount,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"members": out})

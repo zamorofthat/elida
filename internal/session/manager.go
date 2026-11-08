@@ -58,6 +58,16 @@ type Manager struct {
 	// Map client IPs to session IDs for IP-based session tracking
 	clientSessions   map[string]string
 	clientSessionsMu sync.RWMutex
+
+	// Periodic write-back of in-flight request sessions (Redis only). Zero
+	// disables it. Set before Run.
+	persistInterval time.Duration
+	inflightMu      sync.Mutex
+	inflight        map[*Session]struct{}
+	// inflightIDs counts tracked in-flight requests per session ID so the
+	// idle-timeout check can skip a session this process is serving: under a
+	// copying store the stored LastActivity lags the live copy's.
+	inflightIDs map[string]int
 }
 
 // NewManager creates a new session manager with default kill block settings
@@ -102,6 +112,13 @@ func (m *Manager) Run(ctx context.Context) {
 	ticker := time.NewTicker(m.cleanupInterval)
 	defer ticker.Stop()
 
+	var persistC <-chan time.Time
+	if m.persistInterval > 0 {
+		pt := time.NewTicker(m.persistInterval)
+		defer pt.Stop()
+		persistC = pt.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -110,7 +127,76 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ticker.C:
 			m.checkTimeouts()
 			m.cleanup()
+		case <-persistC:
+			m.persistInflight()
 		}
+	}
+}
+
+// DefaultRedisPersistInterval is how often in-flight request sessions are
+// written back under the Redis store, bounding what a crash mid-request
+// loses.
+const DefaultRedisPersistInterval = 5 * time.Minute
+
+// SetPersistInterval sets the in-flight write-back interval; 0 disables it.
+// Call before Run.
+func (m *Manager) SetPersistInterval(d time.Duration) {
+	m.persistInterval = d
+}
+
+// TrackRequest registers a session a request is working on so the periodic
+// persist can write its accumulated state while the request is still running
+// (an in-flight request's state is otherwise only in this process). The
+// returned func ends the request: it unregisters the session and writes it
+// back with Persist. Defer it for the life of the request. Only the request
+// goroutine's own copy is tracked: List returns fresh copies under Redis, so
+// re-writing those would persist nothing.
+func (m *Manager) TrackRequest(sess *Session) (end func()) {
+	if sess == nil {
+		return func() {}
+	}
+	if m.persistInterval > 0 {
+		m.inflightMu.Lock()
+		if m.inflight == nil {
+			m.inflight = make(map[*Session]struct{})
+		}
+		m.inflight[sess] = struct{}{}
+		if m.inflightIDs == nil {
+			m.inflightIDs = make(map[string]int)
+		}
+		m.inflightIDs[sess.ID]++
+		m.inflightMu.Unlock()
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.inflightMu.Lock()
+			if _, tracked := m.inflight[sess]; tracked {
+				delete(m.inflight, sess)
+				if m.inflightIDs[sess.ID]--; m.inflightIDs[sess.ID] <= 0 {
+					delete(m.inflightIDs, sess.ID)
+				}
+			}
+			m.inflightMu.Unlock()
+			m.Persist(sess)
+		})
+	}
+}
+
+// persistInflight writes back every tracked in-flight session. It persists
+// outside inflightMu: Persist does store I/O. A tick can snapshot a session,
+// then the request's end() runs, then the tick issues one more write for it:
+// benign, but the request-end persist is not strictly guaranteed to be the
+// last write.
+func (m *Manager) persistInflight() {
+	m.inflightMu.Lock()
+	live := make([]*Session, 0, len(m.inflight))
+	for s := range m.inflight {
+		live = append(live, s)
+	}
+	m.inflightMu.Unlock()
+	for _, s := range live {
+		m.Persist(s)
 	}
 }
 
@@ -287,6 +373,58 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	return m.store.Get(id)
 }
 
+// dataPutter is the package-internal write seam for stores that hand out
+// copies (RedisStore, CopyStore): it stores already-converted wire data, so
+// Persist can adjust the lifecycle on the data without touching the live
+// session. MemoryStore does not implement it and does not need to.
+type dataPutter interface {
+	putData(*sessionData)
+}
+
+// Persist writes a session's request-scoped state (accounting, tool history,
+// shadow lists, WebSocket counters) back to the store. Under a store that
+// hands out copies (Redis) nothing else does: a Get returns the last
+// written state, not the live struct a request has been mutating.
+//
+// It is a read-modify-write, not a bare Put, because the lifecycle methods
+// (Kill, Terminate, Resume, Complete, timeout) each re-read and write the
+// stored session: a bare Put of a request's older copy would overwrite a
+// concurrent kill with Active. Persist overwrites the lifecycle keys (State,
+// EndTime, Terminated) on the wire data with the stored session's, and never
+// on the live session: a stored non-Active state must not flip a request
+// that is still running (Runner.Bind refuses non-Active sessions, Kill and
+// Terminate gate on IsActive). It writes nothing if the stored session is
+// already gone or is a different instance under a reused ID, and does nothing
+// for a store that shares live pointers (MemoryStore).
+//
+// Residual race: the guarantees above (not resurrecting a deleted or expired
+// session, keeping a concurrent kill or terminate) hold only outside the
+// GET->SET window below, which is one round trip and is not atomic. A delete
+// or expiry landing in it can be undone by the write, and a kill or terminate
+// landing in it can revert the stored lifecycle to Active. LastActivity and
+// RequestCount can also regress, because the write carries this request's
+// older copy. Concurrent requests for one session each hold their own copy
+// under Redis, so their counters are last-writer-wins as well. Closing the
+// window needs a compare-and-set (a Lua script or WATCH/MULTI) in the store;
+// that is the follow-up.
+func (m *Manager) Persist(sess *Session) {
+	if sess == nil {
+		return
+	}
+	dp, ok := m.store.(dataPutter)
+	if !ok {
+		return
+	}
+	cur, ok := m.store.Get(sess.ID)
+	if !ok || cur == sess || !cur.StartTime.Equal(sess.StartTime) {
+		return
+	}
+	sd := sessionToData(sess)
+	l := cur.lifecycleState()
+	sd.State, sd.EndTime, sd.Terminated = l.State, l.EndTime, l.Terminated
+	dp.putData(sd)
+}
+
 // Kill terminates a session
 func (m *Manager) Kill(id string) bool {
 	sess, ok := m.store.Get(id)
@@ -448,20 +586,44 @@ func (m *Manager) Stats() Stats {
 	return stats
 }
 
+// isInflight reports whether a request in this process is currently working
+// on the session ID. It is always false when no persist interval is set (the
+// memory store, whose listed sessions are the live ones).
+func (m *Manager) isInflight(id string) bool {
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+	return m.inflightIDs[id] > 0
+}
+
 // checkTimeouts checks for and handles timed out sessions
 func (m *Manager) checkTimeouts() {
 	// Check active sessions for idle timeout
 	sessions := m.store.List(ActiveFilter)
 	for _, sess := range sessions {
-		if sess.IdleTime() > m.timeout {
-			sess.SetState(TimedOut)
-
-			slog.Warn("session timed out",
-				"session_id", sess.ID,
-				"idle_time", sess.IdleTime(),
-				"timeout", m.timeout,
-			)
+		if sess.IdleTime() <= m.timeout {
+			continue
 		}
+		// A request this process is serving keeps its session alive even
+		// though the stored LastActivity (refreshed only at write-back) may
+		// be older than the timeout.
+		if m.isInflight(sess.ID) {
+			continue
+		}
+		// Re-read before writing: under a copying store the listed copy can
+		// predate a request's write-back, and the state must be written back
+		// for the timeout to exist outside this process at all.
+		cur, ok := m.store.Get(sess.ID)
+		if !ok || !cur.IsActive() || cur.IdleTime() <= m.timeout {
+			continue
+		}
+		cur.SetState(TimedOut)
+		m.store.Put(cur)
+
+		slog.Warn("session timed out",
+			"session_id", cur.ID,
+			"idle_time", cur.IdleTime(),
+			"timeout", m.timeout,
+		)
 	}
 
 	// Check killed sessions for auto-termination
