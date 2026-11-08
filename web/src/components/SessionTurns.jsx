@@ -79,6 +79,13 @@ function truncate(text, max) {
   return text.length > max ? text.slice(0, max - 1) + '\u2026' : text
 }
 
+// turnAnchorId is the DOM id of a violation turn, derived from the event_id
+// the turns API returns on violation turns. A turn with no event_id gets no
+// id at all, never a shared 'turn-undefined'.
+export function turnAnchorId(eventId) {
+  return eventId ? 'turn-' + eventId : undefined
+}
+
 function TurnPill({ label, style }) {
   return (
     <span
@@ -161,7 +168,7 @@ export function SessionTurns({ sessionId, preloadedTurns }) {
 
         if (turn.type === 'violation') {
           return (
-            <div key={i} class="session-turn turn-violation-row">
+            <div key={i} class="session-turn turn-violation-row" id={turnAnchorId(turn.event_id)}>
               <TreeLine isLast={isLast} />
               <span class="turn-time">{fmtTime(turn.timestamp)}</span>
               <TurnPill
