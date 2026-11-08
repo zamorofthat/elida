@@ -1,11 +1,12 @@
-import { useState, useEffect, useRef } from 'preact/hooks'
+import { createContext } from 'preact'
+import { useState, useEffect, useRef, useContext } from 'preact/hooks'
 import { apiFetch } from '../apiFetch'
 import { formatBytes, formatDuration, formatDurationStr, truncateId } from '../utils'
 import { StateBadge, SeverityBadge, FingerprintBadge } from './shared/Badge'
 import { IconX } from './shared/Icons'
 import { SessionTurns } from './SessionTurns'
 import { TimelineBand } from './TimelineBand'
-import { SemanticEvidence, evidenceMarkers, anchorId, anchoredViolations } from './SemanticEvidence'
+import { SemanticEvidence, TurnLink, SECTIONS, evidenceMarkers, anchorId, anchoredViolations } from './SemanticEvidence'
 
 // ---------------------------------------------------------------------------
 // Expandable matched text for policy violations
@@ -211,8 +212,19 @@ function RiskScoreChart({ points }) {
 // Collapsible Section
 // ---------------------------------------------------------------------------
 
+// A collapsed Section unmounts its body, so an in-page link into it has no
+// target until the section is open. Sections register their setOpen here,
+// keyed by title, so the modal's jumpTo can open the one that owns a link's
+// target. The value is a ref-shaped object ({ current: { [title]: setOpen } }).
+const SectionRegistry = createContext({ current: {} })
+
 function Section({ title, defaultOpen, badge, children }) {
   const [open, setOpen] = useState(defaultOpen)
+  const registry = useContext(SectionRegistry)
+  useEffect(() => {
+    registry.current[title] = setOpen
+    return () => { if (registry.current[title] === setOpen) delete registry.current[title] }
+  }, [registry, title])
   return (
     <div class="detail-section">
       <button class="detail-section-header" onClick={() => setOpen(!open)}>
@@ -247,6 +259,18 @@ export function SessionDetailModal({ session, onClose, onKill }) {
   const [riskCurve, setRiskCurve] = useState(null)
   const [behavior, setBehavior] = useState(null)
   const modalRef = useRef(null)
+  const sections = useRef({})
+  // Open the section that owns a link's target, then scroll to the target on
+  // the next macrotask, after Preact has flushed the render that mounts it.
+  // A target that never appears is a no-op.
+  const jumpTo = (id, sectionTitle) => {
+    if (!id) return
+    sections.current[sectionTitle]?.(true)
+    setTimeout(() => {
+      const el = modalRef.current?.querySelector('[id="' + id + '"]')
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 0)
+  }
 
   // The modal's one poll. The first tick runs on open; later ticks run every
   // POLL_MS and refresh the live detail (shadow lists), the flagged evidence
@@ -465,6 +489,8 @@ export function SessionDetailModal({ session, onClose, onKill }) {
   const semanticShadow = (historyDetail || detail)?.semantic_shadow || []
   const correlationShadow = (historyDetail || detail)?.correlation_shadow || []
   const anchored = anchoredViolations(violations, decisions)
+  const turnIds = new Set((turns || []).filter(t => t.type === 'violation' && t.event_id).map(t => t.event_id))
+  const shadowCount = semanticShadow.length + correlationShadow.length
   const markers = evidenceMarkers({ decisions, violations, semanticShadow, correlationShadow })
   const evidenceCount = decisions.length + violations.filter(v => v.correlation).length
   // The pending and unavailable notices only matter when there is evidence
@@ -485,6 +511,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
   const failedBackends = s.failed_backends || []
 
   return (
+    <SectionRegistry.Provider value={sections}>
     <div class="modal-overlay" onClick={onClose}>
       <div class="modal detail-modal" onClick={(e) => e.stopPropagation()} ref={modalRef}>
 
@@ -564,7 +591,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
         <div class="detail-body">
 
           {/* Conversation stream — always visible */}
-          <Section title="Conversation" defaultOpen={true} badge={turns ? turns.length : null}>
+          <Section title={SECTIONS.conversation} defaultOpen={true} badge={turns ? turns.length : null}>
             {turns === null
               ? <div class="detail-loading">Loading\u2026</div>
               : <SessionTurns sessionId={session.id} preloadedTurns={turns} />
@@ -594,7 +621,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
 
           {/* Policy Violations */}
           {violations.length > 0 && (
-            <Section title="Policy Violations" defaultOpen={true} badge={violations.length}>
+            <Section title={SECTIONS.violations} defaultOpen={true} badge={violations.length}>
               <div class="detail-violations">
                 {violations.map((v, i) => (
                   <div key={i} class="detail-violation" id={anchored.has(v.event_id) ? anchorId(v.event_id) : undefined}>
@@ -604,6 +631,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
                       <span class="detail-violation-time">
                         {v.timestamp ? new Date(v.timestamp).toLocaleTimeString() : ''}
                       </span>
+                      <TurnLink eventId={v.event_id} turnIds={turnIds} onJump={jumpTo} />
                     </div>
                     <div class="detail-violation-desc">{v.description}</div>
                     {v.matched_text && (
@@ -620,12 +648,16 @@ export function SessionDetailModal({ session, onClose, onKill }) {
 
           {/* Semantic evidence: decision records, correlation matches, shadow */}
           {showEvidence && (
-            <Section title="Semantic evidence" defaultOpen={true} badge={evidenceCount}>
+            <Section title={SECTIONS.evidence} defaultOpen={true} badge={evidenceCount}>
               {historyStatus === 'pending' && (
                 <div class="evidence-pending">Loading the persisted record…</div>
               )}
               {historyStatus === 'unavailable' && (
-                <div class="evidence-unavailable">Persisted record unavailable; showing the last live evidence.</div>
+                <div class="evidence-unavailable">
+                  {evidenceCount === 0
+                    ? `Persisted record unavailable; ${shadowCount} shadow ${shadowCount === 1 ? 'entry' : 'entries'} from the live session.`
+                    : 'Persisted record unavailable; showing the last live evidence.'}
+                </div>
               )}
               <SemanticEvidence
                 decisions={decisions}
@@ -633,6 +665,8 @@ export function SessionDetailModal({ session, onClose, onKill }) {
                 semanticShadow={semanticShadow}
                 correlationShadow={correlationShadow}
                 anchored={anchored}
+                onJump={jumpTo}
+                turnIds={turnIds}
               />
             </Section>
           )}
@@ -705,5 +739,6 @@ export function SessionDetailModal({ session, onClose, onKill }) {
         </div>
       </div>
     </div>
+    </SectionRegistry.Provider>
   )
 }
