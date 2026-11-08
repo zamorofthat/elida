@@ -6,7 +6,7 @@ export function setLogoutHandler(fn) {
   _onLogout = fn
 }
 
-export const DEFAULT_TIMEOUT_MS = 15000
+const DEFAULT_TIMEOUT_MS = 15000
 
 // The timer covers the time until the response headers arrive: it is cleared
 // as soon as fetch settles, so a long-running body read is not cut off.

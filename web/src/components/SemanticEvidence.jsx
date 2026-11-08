@@ -99,7 +99,7 @@ export function TurnLink({ eventId, turnIds, onJump }) {
       href={'#' + id}
       onClick={(e) => { e.preventDefault(); onJump(id, SECTIONS.conversation) }}
     >
-      {'↗ turn'}
+      {'\u2197 turn'}
     </a>
   )
 }
