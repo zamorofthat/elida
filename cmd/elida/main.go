@@ -12,7 +12,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -258,6 +257,9 @@ func (a *app) initSessionStore() {
 	}
 
 	a.manager = session.NewManagerWithKillBlock(a.store, a.cfg.Session.Timeout, killBlockConfig)
+	if a.redisStore != nil {
+		a.manager.SetPersistInterval(session.DefaultRedisPersistInterval)
+	}
 	slog.Info("session manager configured", "kill_block_mode", killBlockConfig.Mode, "kill_block_duration", killBlockConfig.Duration)
 }
 
@@ -343,9 +345,11 @@ func (a *app) initFingerprint() {
 	)
 }
 
-// initPanel seats the M3-lite scorer as the (currently sole) live member of
-// the behavioral panel. Phase 1: panel-of-one, weight 1.0, not shadowed —
-// this reproduces today's fingerprint scoring exactly (see scoreFingerprint).
+// initPanel seats the M3-lite scorer as the live member of the behavioral
+// panel (weight 1.0, not shadowed — reproducing today's fingerprint scoring,
+// see scoreFingerprint) and, when an artifact is configured, the tool-chain
+// member C. C's posture is config-driven (panel.tool_chain_shadow /
+// panel.tool_chain_weight) and defaults to shadow (observe only).
 func (a *app) initPanel() {
 	if a.fingerprinter == nil {
 		return
@@ -353,17 +357,17 @@ func (a *app) initPanel() {
 	a.panel = panel.NewPanel()
 	a.panel.Seat(panel.NewM3LiteMember(a.fingerprinter), false, 1.0)
 
-	// Phase 2a: shadow-seat the tool-chain member C, if configured. Shadow
-	// members are assessed and reported but never affect RiskScore/Class, so
-	// this is behavior-preserving. Log-and-skip on a bad/missing artifact —
+	// Seat the tool-chain member C, if configured. Shadow members are
+	// assessed and reported but never affect RiskScore/Class, so the default
+	// is behavior-preserving. Log-and-skip on a bad/missing artifact —
 	// panel seating must never hard-fail startup (spec §8).
 	if p := a.cfg.Panel.ToolChainArtifact; p != "" {
 		art, err := panel.LoadToolChainArtifact(p)
 		if err != nil {
 			slog.Warn("tool-chain artifact not loaded; member not seated", "path", p, "error", err)
 		} else {
-			a.panel.Seat(panel.NewToolChainMember(art), true, 0)
-			slog.Info("panel: tool-chain member seated (shadow)", "version", art.GeneratedBy)
+			seatToolChain(a.panel, a.cfg.Panel, art)
+			slog.Info("panel: tool-chain member seated", "version", art.GeneratedBy, "shadow", a.cfg.Panel.ToolChainShadow, "weight", a.cfg.Panel.ToolChainWeight)
 		}
 	}
 }
@@ -411,10 +415,15 @@ func (a *app) initSessionEndCallback() {
 		a.enrichRecordFromPolicy(&record, snap.ID, snap.StartTime)
 		a.enrichRecordFromCaptureBuffer(&record, snap.ID)
 		a.redactRecord(&record)
-		if distance, bucket, class, scored := a.scoreFingerprint(&snap); scored {
-			record.FingerprintDistance = distance
-			record.FingerprintBucket = bucket
-			record.FingerprintClass = class
+		res := a.scoreFingerprint(&snap)
+		// The opinions are content-free (panelOpinions) and are recorded
+		// whether or not the session was scored, so a warm-up session still
+		// shows which members were seated and how they judged it.
+		record.PanelOpinions = res.Opinions
+		if res.Scored {
+			record.FingerprintDistance = res.Distance
+			record.FingerprintBucket = res.Bucket
+			record.FingerprintClass = res.Class
 		}
 		integrity := a.persistToSQLite(&record, sess, endTime)
 		a.exportToTelemetry(&record, &snap, endTime, integrity)
@@ -525,15 +534,37 @@ func (a *app) redactRecord(record *storage.SessionRecord) {
 	}
 }
 
+// fingerprintResult is what one scoreFingerprint call produced.
+//
+// Distance, Bucket and Class are the M3-lite outputs the session record has
+// always carried, and are meaningful only when Scored is true (the caller
+// leaves the record's fields untouched otherwise, as before). Opinions is the
+// eval surface: one entry per seated member, computed on every call — also
+// during warm-up and for a shadow member, where there is no score to persist
+// but the seating and each member's own judgement are still worth recording.
+type fingerprintResult struct {
+	Distance float64
+	Bucket   string
+	Class    string
+	Scored   bool
+	Opinions []storage.PanelOpinion
+}
+
 // scoreFingerprint routes session scoring through the behavioral panel.
-// Phase 1 seats only the M3-lite member, so this reconstructs exactly the
-// outputs the pre-panel implementation computed directly from
-// a.fingerprinter: same warm-up no-op, same shadow persist-without-enforce,
-// same risk points ("m3-lite" source label, unchanged for Phase 1), same
-// OCSF emit condition.
-func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket, class string, scored bool) {
+// M3-lite is the only live member, so this reconstructs exactly the outputs
+// the pre-panel implementation computed directly from a.fingerprinter: same
+// warm-up no-op, same shadow persist-without-enforce, same risk points
+// (source label = the driving member), the same OCSF findings (one per live
+// member at notable+, which with M3-lite alone is the former single emit for
+// a notable/anomalous/severe bucket), and the same single "fingerprint score"
+// line — never one for a warm-up session.
+//
+// The per-member opinions it returns alongside them are content-free by
+// construction (see panelOpinions), both in the record they are persisted on
+// and in the attributes of that one log line.
+func (a *app) scoreFingerprint(snap *session.Session) fingerprintResult {
 	if a.panel == nil {
-		return 0, "", "", false
+		return fingerprintResult{}
 	}
 
 	// Always ingest to update baselines (unchanged).
@@ -542,53 +573,76 @@ func (a *app) scoreFingerprint(snap *session.Session) (distance float64, bucket,
 	}
 
 	v := a.panel.Assess(panel.BuildFeatures(snap))
+	res := fingerprintResult{Opinions: panelOpinions(v)}
 
-	// Find the M3-lite member's opinion (panel-of-one today).
-	var op *panel.MemberOpinion
-	for i := range v.Members {
-		if v.Members[i].Member == "m3-lite" {
-			op = &v.Members[i]
-		}
-	}
-	if op == nil || op.Detail == nil {
-		return 0, "", "", false // warm-up: not enough data yet (unchanged)
+	// Find the M3-lite member's opinion (the only member whose score the
+	// session record carries). A member that did not sit, or that reported
+	// nothing, yields the zero opinion with a nil Detail.
+	op := opinionFor(v, "m3-lite")
+	if op.Detail == nil {
+		return res // warm-up: not enough data yet (unchanged, and unlogged)
 	}
 
-	bucket, _ = op.Detail["bucket"].(string)
-	distance, _ = op.Detail["distance"].(float64)
+	res.Bucket, _ = op.Detail["bucket"].(string)
+	res.Distance, _ = op.Detail["distance"].(float64)
 	shadow, _ := op.Detail["shadow"].(bool)
 
-	class = v.Class // "" today; M3-lite doesn't set Class, so this falls through
-	if class == "" {
-		class = fingerprint.SessionClass(snap)
+	res.Class = v.Class // "" today; M3-lite doesn't set Class, so this falls through
+	if res.Class == "" {
+		res.Class = fingerprint.SessionClass(snap)
 	}
+	res.Scored = true
 
 	slog.Info("fingerprint score",
 		"session_id", snap.ID,
-		"class", class,
-		"distance", distance,
-		"bucket", bucket,
+		"class", res.Class,
+		"distance", res.Distance,
+		"bucket", res.Bucket,
 		"shadow", shadow,
+		"panel_driver", v.Driver,
+		"panel_risk", v.RiskScore,
+		"members", res.Opinions,
 	)
 
 	if shadow {
-		return distance, bucket, class, true // shadow: score is persisted but never enforced
+		return res // shadow: score is persisted but never enforced
 	}
 
 	// Add risk points for notable+ scores
-	points := int(math.Round(v.RiskScore * float64(fingerprint.RiskNotable)))
+	points, source := riskPointsFromVerdict(v)
 	if points > 0 && a.policyEngine != nil {
-		a.policyEngine.AddExternalRiskPoints(snap.ID, points, "m3-lite")
+		a.policyEngine.AddExternalRiskPoints(snap.ID, points, source)
 	}
 
-	// Emit OCSF 2004 for notable+ scores
-	if bucket != fingerprint.BucketNormal && bucket != fingerprint.BucketMinor && a.ocsfEmitter != nil {
-		finding := telemetry.BuildAnomalyDetection(snap.ID, distance, bucket, class)
-		finding.Unmapped.Backend = snap.Backend
-		a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+	// Emit one OCSF 2004 finding per live member at notable+ (see
+	// anomalyFindingMembers). With M3-lite the only live member — the
+	// shipped posture — that is exactly the former single emit for a
+	// notable/anomalous/severe bucket: same builder, same severity, same
+	// backend. A member with no finding mapping yet emits nothing.
+	if a.ocsfEmitter != nil {
+		for _, name := range anomalyFindingMembers(v) {
+			var finding telemetry.OCSFDetectionFinding
+			switch name {
+			case "m3-lite":
+				finding = telemetry.BuildAnomalyDetection(snap.ID, res.Distance, res.Bucket, res.Class)
+			case "tool-chain":
+				// Only these three keys are read, each with a checked type
+				// assertion, so nothing else a member puts in Detail can
+				// reach a nozzle (same rule as panelOpinions).
+				tc := opinionFor(v, name)
+				pct, _ := tc.Detail["percentile"].(float64)
+				ppl, _ := tc.Detail["perplexity"].(float64)
+				classUsed, _ := tc.Detail["class_used"].(string)
+				finding = telemetry.BuildToolChainAnomalyDetection(snap.ID, pct, ppl, classUsed, res.Class)
+			default:
+				continue
+			}
+			finding.Unmapped.Backend = snap.Backend
+			a.ocsfEmitter.Emit(context.Background(), telemetry.OCSFClassDetectionFinding, finding.SeverityID, finding)
+		}
 	}
 
-	return distance, bucket, class, true
+	return res
 }
 
 func (a *app) persistToSQLite(record *storage.SessionRecord, sess *session.Session, endTime time.Time) *storage.SDRIntegrity {

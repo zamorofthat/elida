@@ -11,17 +11,22 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 ### Health & Stats
 
 ```bash
-# Health check (unauthenticated). With semantic detection wired it also
-# reports "decision": {"capability", "reason", "effective_mode",
-# "threshold_set_matches", "breaker_open"}: the capability enum (inline,
-# async_only, degraded, disabled), a fixed reason, the effective mode
-# (disabled|shadow|audit|enforce) and two booleans; enums and booleans only.
-# Model identity and counters are only on the authenticated /control/decision.
-# These three facts are deliberately available without a key so health probes
-# can see detector state. An operator who does not want enforcement state
-# visible unauthenticated should keep the control listener on localhost (the
-# default control listen address is 127.0.0.1:9090).
+# Liveness (unauthenticated): {"status": "ok", "timestamp": ...} and nothing
+# else. It reports no detector state — not the capability, the effective mode,
+# the threshold-set match or the breaker. Those five facts together answer
+# "is anything enforcing, and is it working right now", which is free
+# reconnaissance for anyone who can reach this port, so they live on the
+# authenticated /control/decision. They were on this route in v0.30.0 and
+# v0.31.0.
 curl http://localhost:9090/control/health
+
+# Readiness (unauthenticated): a status code with no body. 200 normally; 503
+# when semantic detection is enabled but the model could not be loaded or
+# verified, so an orchestrator takes the instance out of service rather than
+# forwarding traffic nothing is inspecting. Use this for a readinessProbe and
+# /control/health for a livenessProbe — a 503 on the liveness path would
+# restart the container on a loop.
+curl -i http://localhost:9090/control/ready
 
 # Aggregate stats
 curl http://localhost:9090/control/stats
@@ -99,6 +104,26 @@ Shadow-mode matches are `correlation_shadow` (array) on `GET /control/sessions/{
 `GET /control/sessions/{id}/turns` violation turns carry `event_id` (string), `event_category` (string), `source_role` (string), `evidence_only` (bool) and, for a correlation match only, `correlation` (object: `match_id` string, `event_count` integer, the full count of contributing events), each omitted when empty. The full evidence is on the flagged and history responses. Message turns carry the message content and tool-call turns carry the raw tool arguments; the endpoint is authenticated but is not content-free (it is the conversation-stream API).
 
 `violation_detected` events (`GET /control/events`) carry `event_id`, `event_category` and `source_role` (strings, omitted when empty) beside the existing fields.
+
+### Behavioral Panel
+
+```bash
+# Seated behavioral-panel members and their rolling stats (authenticated)
+curl http://localhost:9090/control/panel
+```
+
+`GET /control/panel` returns `{"members": [...]}`, one entry per seated member in seat order (an empty list when no panel runs). Each member has `name`, `version`, `shadow` (bool), `weight` (0..1) and four rolling stats: `sessions_scored` (integer), `mean_anomaly`, `p95_anomaly` (0..1) and `veto_count` (integer). The stats are content-free, kept in memory since boot, and zeros are returned rather than omitted. `sessions_scored` and `veto_count` count every assessment since boot, so a session scored during M3-lite warm-up counts, with anomaly 0. `mean_anomaly` and `p95_anomaly` cover the last 1000 scores per seat; the p95 is the nearest-rank 95th percentile.
+
+```json
+{"members": [
+  {"name": "m3-lite", "version": "1", "shadow": false, "weight": 1,
+   "sessions_scored": 412, "mean_anomaly": 0.03, "p95_anomaly": 0.25, "veto_count": 0},
+  {"name": "tool-chain", "version": "<artifact generated_by>", "shadow": true, "weight": 1,
+   "sessions_scored": 412, "mean_anomaly": 0.21, "p95_anomaly": 0.88, "veto_count": 0}
+]}
+```
+
+`GET /control/history/{id}` also returns `panel_opinions` (array), omitted when empty: one content-free entry per member seated when the session ended, in seat order. Each entry has `member`, `shadow`, `weight`, `anomaly` and, when set, `veto`, `bucket`, `distance`, `perplexity`, `percentile`, `class_used` and `reason` (see [Session Records](session-records.md#panel-opinions) for the fields). The list endpoint (`GET /control/history`) leaves `panel_opinions` out to keep its payload small. On reuse of a session ID the latest session's opinions replace the earlier ones. See [Behavioral Panel](panel.md) for how to read them.
 
 ### Voice Sessions (WebSocket)
 

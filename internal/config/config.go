@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -642,6 +643,15 @@ type PanelConfig struct {
 	// file (see internal/panel.LoadToolChainArtifact). Empty (default) means
 	// the tool-chain member is not seated — panel behavior is unchanged.
 	ToolChainArtifact string `yaml:"tool_chain_artifact"`
+
+	// ToolChainShadow seats the tool-chain member in shadow: it is assessed
+	// and reported but never affects RiskScore/Class. Default true (observe
+	// only). Set false to let it influence the verdict at ToolChainWeight.
+	ToolChainShadow bool `yaml:"tool_chain_shadow"`
+
+	// ToolChainWeight is the member's weight in the panel verdict. It only
+	// matters when ToolChainShadow is false. Validated to [0, 1]; default 1.0.
+	ToolChainWeight float64 `yaml:"tool_chain_weight"`
 }
 
 // FingerprintThresholds holds the bucket boundaries for the fingerprint
@@ -934,7 +944,9 @@ func defaults() *Config {
 			},
 		},
 		Panel: PanelConfig{
-			ToolChainArtifact: "", // not seated by default (unchanged behavior)
+			ToolChainArtifact: "",   // not seated by default (unchanged behavior)
+			ToolChainShadow:   true, // observe only until an operator promotes it
+			ToolChainWeight:   1.0,  // only matters once ToolChainShadow is false
 		},
 		Decision: DecisionConfig{
 			Enabled:           false, // loads ~90 MiB of model assets; opt-in only
@@ -1375,6 +1387,14 @@ func (c *Config) Validate() *ValidationResult {
 	result := &ValidationResult{Valid: true}
 	var errors []ValidationError
 	var warnings []ValidationError
+
+	if w := c.Panel.ToolChainWeight; math.IsNaN(w) || w < 0 || w > 1 {
+		errors = append(errors, ValidationError{
+			Field:   "panel.tool_chain_weight",
+			Message: fmt.Sprintf("%v is outside [0, 1]", w),
+			Hint:    "0 disables its influence; 1 lets a 99th-percentile trajectory add the full severe risk",
+		})
+	}
 
 	// Required: listen address
 	if c.Listen == "" {

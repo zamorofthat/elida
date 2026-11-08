@@ -111,6 +111,8 @@ type OCSFUnmapped struct {
 	Semantic *OCSFSemantic `json:"elida.semantic,omitempty"`
 	// Correlation is set for correlation-match findings only.
 	Correlation *OCSFCorrelation `json:"elida.correlation,omitempty"`
+	// ToolChain is set for tool-chain anomaly findings only.
+	ToolChain *OCSFToolChain `json:"elida.tool_chain,omitempty"`
 }
 
 // OCSFSemantic is semantic decision metadata in a Detection Finding's
@@ -172,6 +174,16 @@ func ocsfCorrelation(m CorrelationMetadata) *OCSFCorrelation {
 		FirstEvent: safeTime(m.FirstEvent), LastEvent: safeTime(m.LastEvent),
 		EventIDs: safeTokens(m.EventIDs, MaxExportedCorrelationEventIDs),
 	}
+}
+
+// OCSFToolChain is the tool-chain member's evidence in a Detection Finding's
+// unmapped block: the transition perplexity, its calibrated percentile and
+// the artifact class the chain came from. Numbers and one short token only —
+// never a tool name, an argument or any request content.
+type OCSFToolChain struct {
+	Perplexity float64 `json:"perplexity"`
+	Percentile float64 `json:"percentile"`
+	ClassUsed  string  `json:"class_used"`
 }
 
 // OCSFDetectionFinding represents OCSF class 2004 — Detection Finding
@@ -376,6 +388,56 @@ func BuildAnomalyDetection(sessionID string, score float64, bucket, class string
 		},
 		Actor: OCSFActor{
 			Session: OCSFSession{UID: sessionID},
+		},
+	}
+}
+
+// BuildToolChainAnomalyDetection builds a Detection Finding (class 2004) for
+// the tool-chain member's Markov transition anomaly. It is the M3-lite
+// finding's twin — same envelope, same behavioral_anomaly type, a different
+// analytic — so a SIEM rule written for one matches both.
+//
+// percentile is the calibrated 0..1 rank of perplexity; severity follows it:
+// >=0.95 critical, >=0.75 warning, else informational. class (the session
+// class) and classUsed (the artifact chain the member scored against) are
+// operator-controlled, but both pass through safeToken anyway: only numbers
+// and identifier-shaped tokens reach a nozzle.
+func BuildToolChainAnomalyDetection(sessionID string, percentile, perplexity float64, classUsed, class string) OCSFDetectionFinding {
+	severityID := OCSFSeverityInfo
+	if percentile >= 0.95 {
+		severityID = OCSFSeverityCritical
+	} else if percentile >= 0.75 {
+		severityID = OCSFSeverityWarning
+	}
+
+	cls := safeToken(class)
+	return OCSFDetectionFinding{
+		ClassUID:    OCSFClassDetectionFinding,
+		CategoryUID: OCSFCategoryFindings,
+		TypeUID:     200401, // Detection Finding: Create
+		ActivityID:  OCSFActivityCreate,
+		SeverityID:  severityID,
+		Time:        nowMillis(),
+		Message:     "Behavioral anomaly: tool-chain transitions",
+		Metadata:    newMetadata(),
+		FindingInfo: OCSFFinding{
+			Title: cls,
+			Desc:  "Improbable tool-call sequence for the session class",
+			Types: []string{"behavioral_anomaly"},
+		},
+		Analytic: OCSFAnalytic{
+			Name: "tool-chain Markov",
+			Type: "ML/AI",
+		},
+		Actor: OCSFActor{
+			Session: OCSFSession{UID: sessionID},
+		},
+		Unmapped: OCSFUnmapped{
+			ToolChain: &OCSFToolChain{
+				Perplexity: perplexity,
+				Percentile: percentile,
+				ClassUsed:  safeToken(classUsed),
+			},
 		},
 	}
 }

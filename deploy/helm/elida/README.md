@@ -351,7 +351,13 @@ kubectl run redis-test --rm -it --image=redis -- redis-cli -h elida-redis-master
 ### Health check failing
 
 ```bash
+# Liveness: {"status":"ok","timestamp":...}
 kubectl exec -it deploy/elida -- wget -qO- http://localhost:9090/control/health
+
+# Readiness: 200, or 503 when semantic detection is enabled but its model
+# could not be loaded. Neither route reports detector state in its body; for
+# that, use the authenticated /control/decision.
+kubectl exec -it deploy/elida -- wget -S -qO- http://localhost:9090/control/ready
 ```
 
 ## Chart Structure

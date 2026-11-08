@@ -20,7 +20,8 @@ func (m m3liteMember) Name() string    { return "m3-lite" }
 func (m m3liteMember) Version() string { return "1" }
 
 // Assess maps the M3-lite bucket to a 0..1 anomaly that encodes today's risk
-// points: Anomaly = BucketRiskPoints(bucket) / RiskNotable. Warm-up → 0, no
+// points: Anomaly = BucketRiskPoints(bucket) / RiskSevere, i.e. 0, 0.10, 0.25,
+// 0.50, 1.00 for normal/minor/notable/anomalous/severe. Warm-up → 0, no
 // Detail (nothing to persist yet). Shadow mode still computes and reports a
 // real score (Detail is populated, with "shadow": true) so callers can
 // persist distance/bucket/class as before, but Anomaly stays 0 so shadow
@@ -35,7 +36,7 @@ func (m m3liteMember) Assess(f SessionFeatures) MemberOpinion {
 	shadow := m.s.IsShadow()
 	op.Detail = map[string]any{"bucket": bucket, "distance": dist, "shadow": shadow}
 	if !shadow {
-		op.Anomaly = float64(fingerprint.BucketRiskPoints(bucket)) / float64(fingerprint.RiskNotable)
+		op.Anomaly = float64(fingerprint.BucketRiskPoints(bucket)) / float64(fingerprint.RiskSevere)
 	}
 	return op
 }

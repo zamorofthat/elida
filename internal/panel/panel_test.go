@@ -1,6 +1,10 @@
 package panel
 
 import (
+	"context"
+	"log/slog"
+	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,5 +121,294 @@ func TestBuildFeatures_PopulatesTrajectoryFromToolHistory(t *testing.T) {
 	}
 	if f.Trajectory[0].DtMs != 0 || f.Trajectory[1].DtMs != 150 {
 		t.Errorf("DtMs = %d,%d, want 0,150", f.Trajectory[0].DtMs, f.Trajectory[1].DtMs)
+	}
+}
+
+func TestPanel_AnomalyClampedToUnitInterval(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+	}{{"above", 4.0, 1.0}, {"below", -0.5, 0}, {"nan", math.NaN(), 0}, {"inside", 0.4, 0.4}}
+	for _, c := range cases {
+		p := NewPanel()
+		p.Seat(stubMember{"m", MemberOpinion{Member: "m", Anomaly: c.in}}, false, 1.0)
+		v := p.Assess(SessionFeatures{})
+		if v.RiskScore != c.want || v.Members[0].Anomaly != c.want {
+			t.Fatalf("%s: RiskScore=%v member Anomaly=%v, want %v", c.name, v.RiskScore, v.Members[0].Anomaly, c.want)
+		}
+	}
+}
+
+type countHandler struct {
+	mu    *sync.Mutex
+	warns *int
+}
+
+func (h countHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h countHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn {
+		h.mu.Lock()
+		*h.warns++
+		h.mu.Unlock()
+	}
+	return nil
+}
+func (h countHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h countHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestPanel_OutOfRangeAnomalyWarnsOncePerMember(t *testing.T) {
+	var mu sync.Mutex
+	warns := 0
+	old := slog.Default()
+	slog.SetDefault(slog.New(countHandler{&mu, &warns}))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	p := NewPanel()
+	p.Seat(stubMember{"bad", MemberOpinion{Member: "bad", Anomaly: 9}}, false, 1.0)
+	for i := 0; i < 3; i++ {
+		p.Assess(SessionFeatures{})
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if warns != 1 {
+		t.Fatalf("warnings = %d, want exactly 1 across 3 assessments", warns)
+	}
+}
+
+func TestPanel_VetoIsOrderIndependentFloor(t *testing.T) {
+	hi := stubMember{"hi", MemberOpinion{Member: "hi", Anomaly: 1.0}}
+	vt := stubMember{"vt", MemberOpinion{Member: "vt", Veto: true}}
+	for _, order := range [][]Member{{hi, vt}, {vt, hi}} {
+		p := NewPanel()
+		for _, m := range order {
+			p.Seat(m, false, 1.0)
+		}
+		v := p.Assess(SessionFeatures{})
+		if v.RiskScore != 1.0 || v.Driver != "veto:vt" {
+			t.Fatalf("order %v: RiskScore=%v Driver=%q, want 1.0 / veto:vt", order, v.RiskScore, v.Driver)
+		}
+	}
+}
+
+func TestPanel_DriverNamesTheMaxMember(t *testing.T) {
+	p := NewPanel()
+	p.Seat(stubMember{"a", MemberOpinion{Member: "a", Anomaly: 0.2}}, false, 1.0)
+	p.Seat(stubMember{"b", MemberOpinion{Member: "b", Anomaly: 0.6}}, false, 0.5) // 0.30 wins
+	p.Seat(stubMember{"s", MemberOpinion{Member: "s", Anomaly: 1.0}}, true, 1.0)  // shadow never drives
+	if v := p.Assess(SessionFeatures{}); v.Driver != "b" {
+		t.Fatalf("Driver = %q, want b", v.Driver)
+	}
+	q := NewPanel()
+	q.Seat(stubMember{"z", MemberOpinion{Member: "z"}}, false, 1.0)
+	if v := q.Assess(SessionFeatures{}); v.Driver != "" || v.RiskScore != 0 {
+		t.Fatalf("zero case: Driver=%q RiskScore=%v, want empty/0", v.Driver, v.RiskScore)
+	}
+}
+
+func TestPanel_RiskScoreNeverExceedsOne(t *testing.T) {
+	p := NewPanel()
+	p.Seat(stubMember{"a", MemberOpinion{Member: "a", Anomaly: 1.0}}, false, 1.0)
+	p.Seat(stubMember{"b", MemberOpinion{Member: "b", Anomaly: 1.0}}, false, 1.0)
+	if v := p.Assess(SessionFeatures{}); v.RiskScore != 1.0 {
+		t.Fatalf("RiskScore = %v, want 1.0", v.RiskScore)
+	}
+}
+
+func TestPanel_SeatClampsWeightAndOpinionsCarrySeatPosture(t *testing.T) {
+	p := NewPanel()
+	p.Seat(stubMember{"hi", MemberOpinion{Member: "hi", Anomaly: 1.0}}, false, 3.0)
+	p.Seat(stubMember{"lo", MemberOpinion{Member: "lo", Anomaly: 1.0}}, true, -1.0)
+	ms := p.Members()
+	if ms[0].Weight != 1.0 || ms[1].Weight != 0 {
+		t.Fatalf("clamped weights = %v, %v; want 1, 0", ms[0].Weight, ms[1].Weight)
+	}
+	v := p.Assess(SessionFeatures{})
+	if v.Members[0].Shadow || v.Members[0].Weight != 1.0 || !v.Members[1].Shadow || v.Members[1].Weight != 0 {
+		t.Fatalf("opinions lost seat posture: %+v", v.Members)
+	}
+}
+
+// seqMember emits a fixed sequence of opinions, one per Assess call (looping).
+type seqMember struct {
+	name string
+	mu   sync.Mutex
+	ops  []MemberOpinion
+	i    int
+}
+
+func (s *seqMember) Name() string    { return s.name }
+func (s *seqMember) Version() string { return "test" }
+func (s *seqMember) Assess(SessionFeatures) MemberOpinion {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	op := s.ops[s.i%len(s.ops)]
+	s.i++
+	op.Member = s.name
+	return op
+}
+
+func TestPanel_RollingStatsMeanP95AndVetoCount(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "live", ops: []MemberOpinion{{Anomaly: 0.2}, {Anomaly: 0.4}, {Anomaly: 1.0, Veto: true}}}, false, 1)
+	p.Seat(&seqMember{name: "shadowy", ops: []MemberOpinion{{Anomaly: 0.5, Veto: false}}}, true, 1)
+	for i := 0; i < 3; i++ {
+		p.Assess(SessionFeatures{})
+	}
+	ms := p.Members()
+	live := ms[0].Stats
+	if live.SessionsScored != 3 {
+		t.Errorf("SessionsScored = %d, want 3", live.SessionsScored)
+	}
+	if math.Abs(live.MeanAnomaly-0.5333333) > 1e-4 {
+		t.Errorf("MeanAnomaly = %v, want ~0.5333", live.MeanAnomaly)
+	}
+	if live.P95Anomaly != 1.0 {
+		t.Errorf("P95Anomaly = %v, want 1.0", live.P95Anomaly)
+	}
+	if live.VetoCount != 1 {
+		t.Errorf("VetoCount = %d, want 1", live.VetoCount)
+	}
+	sh := ms[1].Stats
+	if sh.SessionsScored != 3 || math.Abs(sh.MeanAnomaly-0.5) > 1e-9 || sh.P95Anomaly != 0.5 || sh.VetoCount != 0 {
+		t.Errorf("shadow seat stats = %+v, want tracked (3, 0.5, 0.5, 0)", sh)
+	}
+}
+
+func TestPanel_StatsUseClampedAnomaly(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "wild", ops: []MemberOpinion{{Anomaly: 7}, {Anomaly: math.NaN()}}}, false, 1)
+	p.Assess(SessionFeatures{})
+	p.Assess(SessionFeatures{})
+	st := p.Members()[0].Stats
+	if math.Abs(st.MeanAnomaly-0.5) > 1e-9 || st.P95Anomaly != 1.0 {
+		t.Errorf("stats = %+v, want mean 0.5 p95 1.0 from clamped values", st)
+	}
+}
+
+func TestPanel_StatsRingIsBounded(t *testing.T) {
+	p := NewPanel()
+	// First 4000 assessments emit 1.0, the last 1000 emit 0.0: the mean over
+	// the ring must reflect only the last 1000, while the count is since boot.
+	m := &seqMember{name: "m", ops: make([]MemberOpinion, 5000)}
+	for i := 0; i < 4000; i++ {
+		m.ops[i].Anomaly = 1.0
+	}
+	p.Seat(m, false, 1)
+	for i := 0; i < 5000; i++ {
+		p.Assess(SessionFeatures{})
+	}
+	st := p.Members()[0].Stats
+	if st.SessionsScored != 5000 {
+		t.Errorf("SessionsScored = %d, want 5000 (since boot, uncapped)", st.SessionsScored)
+	}
+	if st.MeanAnomaly != 0 || st.P95Anomaly != 0 {
+		t.Errorf("mean/p95 = %v/%v, want 0/0 (ring holds only the last 1000)", st.MeanAnomaly, st.P95Anomaly)
+	}
+	p.mu.Lock()
+	n := len(p.seats[0].stats.ring)
+	p.mu.Unlock()
+	if n > statsRingSize {
+		t.Errorf("ring len = %d, want <= %d", n, statsRingSize)
+	}
+}
+
+func TestPanel_StatsZeroBeforeAnyAssessment(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "m", ops: []MemberOpinion{{}}}, false, 1)
+	if st := p.Members()[0].Stats; st != (MemberStats{}) {
+		t.Errorf("stats = %+v, want zero value", st)
+	}
+}
+
+func TestPanel_ConcurrentAssessAndMembersRace(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "a", ops: []MemberOpinion{{Anomaly: 0.3}, {Anomaly: 0.9, Veto: true}}}, false, 1)
+	p.Seat(&seqMember{name: "b", ops: []MemberOpinion{{Anomaly: 0.6}}}, true, 0.5)
+	var wg sync.WaitGroup
+	for g := 0; g < 50; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				p.Assess(SessionFeatures{})
+				_ = p.Members()
+			}
+		}()
+	}
+	wg.Wait()
+	if got := p.Members()[0].Stats.SessionsScored; got != 2500 {
+		t.Errorf("SessionsScored = %d, want 2500", got)
+	}
+}
+
+func p95Of(t *testing.T, vals []float64) float64 {
+	t.Helper()
+	ops := make([]MemberOpinion, len(vals))
+	for i, v := range vals {
+		ops[i].Anomaly = v
+	}
+	p := NewPanel()
+	p.Seat(&seqMember{name: "m", ops: ops}, false, 1)
+	for range vals {
+		p.Assess(SessionFeatures{})
+	}
+	return p.Members()[0].Stats.P95Anomaly
+}
+
+func TestPanel_P95IsNearestRankNotMax(t *testing.T) {
+	// n=20: nearest-rank p95 is ceil(0.95*20)=19th smallest = 0.95, not the max 1.0.
+	vals := make([]float64, 20)
+	for i := range vals {
+		vals[i] = float64(i+1) * 0.05
+	}
+	if got := p95Of(t, vals); math.Abs(got-0.95) > 1e-9 {
+		t.Errorf("p95 of 0.05..1.00 (n=20) = %v, want 0.95", got)
+	}
+}
+
+func TestPanel_P95RankOffByOne(t *testing.T) {
+	// n=100: rank 95 -> 0.95. A floor/off-by-one rank would give 0.94 or 0.96.
+	vals := make([]float64, 100)
+	for i := range vals {
+		vals[i] = float64(i+1) / 100
+	}
+	if got := p95Of(t, vals); math.Abs(got-0.95) > 1e-9 {
+		t.Errorf("p95 of 0.01..1.00 (n=100) = %v, want 0.95", got)
+	}
+	// n=21: ceil(0.95*21)=20 -> 20th smallest (floor would give 19th).
+	vals = make([]float64, 21)
+	for i := range vals {
+		vals[i] = float64(i+1) / 100
+	}
+	if got := p95Of(t, vals); math.Abs(got-0.20) > 1e-9 {
+		t.Errorf("p95 of 0.01..0.21 (n=21) = %v, want 0.20", got)
+	}
+}
+
+// panicMember panics on every Assess call.
+type panicMember struct{ name string }
+
+func (p panicMember) Name() string                         { return p.name }
+func (p panicMember) Version() string                      { return "test" }
+func (p panicMember) Assess(SessionFeatures) MemberOpinion { panic("boom") }
+
+func TestPanel_PanickingMemberDoesNotRecordPhantomStats(t *testing.T) {
+	p := NewPanel()
+	p.Seat(&seqMember{name: "ok", ops: []MemberOpinion{{Anomaly: 0.8}}}, false, 1)
+	p.Seat(panicMember{name: "bad"}, false, 1)
+	p.Seat(&seqMember{name: "never-reached", ops: []MemberOpinion{{Anomaly: 0.1}}}, false, 1)
+	func() {
+		defer func() { _ = recover() }()
+		p.Assess(SessionFeatures{})
+	}()
+	ms := p.Members()
+	if ms[0].Stats.SessionsScored != 1 {
+		t.Errorf("completed seat SessionsScored = %d, want 1", ms[0].Stats.SessionsScored)
+	}
+	for _, i := range []int{1, 2} {
+		if st := ms[i].Stats; st != (MemberStats{}) {
+			t.Errorf("seat %q stats = %+v, want zero (did not complete)", ms[i].Name, st)
+		}
 	}
 }

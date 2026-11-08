@@ -200,6 +200,11 @@ func (a *app) setupDecision(ctx context.Context) error {
 		// reach the interface as a typed nil.
 		rcfg.ShadowCorrelator = shadowCorr
 	}
+	if a.manager != nil {
+		// Under Redis the store serves copies, so an async result's shadow
+		// entries reach it only through this write-back.
+		rcfg.SessionPersister = a.manager.Persist
+	}
 	r, err := runner.New(rcfg)
 	if err != nil {
 		return a.abandonDecision(ctx, fmt.Errorf("semantic runner configuration is invalid: %w", err))

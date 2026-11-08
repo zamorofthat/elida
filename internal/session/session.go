@@ -316,7 +316,7 @@ func (s *Session) RecordToolCall(toolName, toolType, requestID, argsJSON string)
 		Arguments: args,
 	}
 	s.ToolCallHistory = append(s.ToolCallHistory, record)
-	if len(s.ToolCallHistory) > 100 {
+	if len(s.ToolCallHistory) > maxToolCallHistory {
 		s.ToolCallHistory = s.ToolCallHistory[1:]
 	}
 }
@@ -583,6 +583,25 @@ func (s *Session) Resume() bool {
 		return true
 	}
 	return false
+}
+
+// lifecycle is the part of a session that only the manager's lifecycle
+// methods (Kill, Resume, Terminate, Complete, timeout) change.
+type lifecycle struct {
+	State      State
+	EndTime    *time.Time
+	Terminated bool
+}
+
+func (s *Session) lifecycleState() lifecycle {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	l := lifecycle{State: s.State, Terminated: s.Terminated}
+	if s.EndTime != nil {
+		t := *s.EndTime
+		l.EndTime = &t
+	}
+	return l
 }
 
 // KillChan returns the channel that's closed when the session is killed

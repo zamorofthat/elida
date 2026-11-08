@@ -168,6 +168,21 @@ fingerprint:
   #   anomalous: 5.0
   #   severe: 6.0
 
+# Behavioral panel (see docs/panel.md)
+# M3-lite (the fingerprint above) is the live member. The tool-chain member
+# scores the ordered tool-call sequence against a per-class Markov chain. It
+# is only seated when an artifact is configured, and it is observe-only
+# (shadow) by default. Restart-only.
+# panel:
+#   # Path to a tool-chain artifact JSON. Empty (default): member not seated.
+#   tool_chain_artifact: ""
+#   # true (default): assessed, persisted and counted, never affects risk.
+#   # Do not set false until the promotion gate in docs/panel.md is met.
+#   tool_chain_shadow: true
+#   # Weight in [0, 1] (default 1.0); only matters when tool_chain_shadow is
+#   # false. Points added = round(weight * percentile * 20).
+#   tool_chain_weight: 1.0
+
 # Storage configuration (for dashboard history)
 storage:
   # Enable SQLite storage for session history

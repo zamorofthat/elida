@@ -496,3 +496,12 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   shadow-correlated. Its correlator state is in memory and bounded like the
   policy correlator's; the persisted `correlation_shadow` list keeps at
   most 50 entries per session ID.
+- **Shadow lists under Redis are last-writer-wins across replicas.** With
+  `session.store: redis`, `semantic_shadow` and `correlation_shadow` persist
+  with the session (as of this release; earlier versions lost them). Two
+  replicas serving the same session concurrently each write their own copy
+  back, so one replica's entries can be dropped, and the write-back's read and
+  write are not a compare-and-set (a CAS is a follow-up). The shadow
+  correlator's own state is per process, so a session that moves replicas
+  mid-stream starts its correlation windows over on the new one. See "Redis
+  session state" in `docs/configuration.md`.
