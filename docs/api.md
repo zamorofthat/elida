@@ -16,7 +16,8 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 # the threshold-set match or the breaker. Those five facts together answer
 # "is anything enforcing, and is it working right now", which is free
 # reconnaissance for anyone who can reach this port, so they live on the
-# authenticated /control/decision. Until v0.31.0 they were also here.
+# authenticated /control/decision. They were on this route in v0.30.0 and
+# v0.31.0.
 curl http://localhost:9090/control/health
 
 # Readiness (unauthenticated): a status code with no body. 200 normally; 503
