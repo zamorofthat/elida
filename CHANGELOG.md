@@ -145,6 +145,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one of them is still on the authenticated `GET /control/decision`, where
   they also were before. Liveness and readiness probes are unaffected: both
   read a status code, and `status` is unchanged.
+  Deployments that already scrape those fields can set
+  `ELIDA_CONTROL_HEALTH_LEGACY_DECISION=true` to restore the block in exactly
+  the shape v0.30.0 and v0.31.0 served, byte for byte. It is deprecated from
+  the day it ships, logs a warning naming the disclosure at startup, and will
+  be removed — it exists so an upgrade is never forced to break a reader on
+  the same day it closes the disclosure.
 - **Breaking (Helm chart).** The control API is now authenticated by default:
   `elida.controlAuth.enabled` defaults to `true` and
   `elida.controlAuth.allowInsecure` to `false`. The control API serves session

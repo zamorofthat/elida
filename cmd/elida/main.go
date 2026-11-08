@@ -1348,6 +1348,18 @@ func (a *app) initControlAPI() {
 	if a.cfg.Control.Auth.Enabled {
 		controlOpts = append(controlOpts, control.WithAuth(a.cfg.Control.Auth.APIKey))
 	}
+	// Deprecated compatibility shim, deliberately an environment variable and
+	// not a config key: it is temporary, it changes nothing at runtime, and it
+	// should not grow a home in the settings API. It restores the detector
+	// posture block on the unauthenticated /control/health for deployments
+	// that scraped it from v0.30.0 or v0.31.0.
+	if os.Getenv("ELIDA_CONTROL_HEALTH_LEGACY_DECISION") == "true" {
+		controlOpts = append(controlOpts, control.WithLegacyHealthDecision())
+		slog.Warn("ELIDA_CONTROL_HEALTH_LEGACY_DECISION is set: the detector posture block is served on the unauthenticated /control/health, which tells any caller that can reach the control port whether anything is enforcing and whether it is working — move those readers to the authenticated /control/decision; this switch will be removed",
+			"route", "/control/health",
+			"fields", "capability,reason,effective_mode,threshold_set_matches,breaker_open",
+		)
+	}
 	a.controlHandler = control.New(a.store, a.manager, controlOpts...)
 	if a.settingsStore != nil {
 		a.controlHandler.SetSettingsStore(a.settingsStore)
