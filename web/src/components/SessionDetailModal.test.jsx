@@ -571,7 +571,31 @@ describe('SessionDetailModal jump links, timeouts and the shadow-only notice', (
     expect(r.container.querySelector('.session-turns-empty').textContent).toBe('No turns recorded')
   })
 
-  it('releases a hung history request through the timeout and settles as unavailable instead of pending forever', async () => {
+  it('treats a history request timeout as transient: still pending and polling, then loads the record on a later success', async () => {
+    let hits = 0
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
+    routes['/control/history/' + SID] = () => (++hits === 1 ? new Promise(() => {}) : json(fixture))
+    routes['/control/flagged/' + SID] = () => json({ violations: [fixture.violations[1]] })
+    const r = open({ id: SID, state: 'active' })
+    await flush()
+    expect(hits).toBe(1)
+    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+
+    // The hung request is released by the 15 s timeout. That spends one retry
+    // but is not terminal: the modal is still pending and still polling.
+    await tick(15000)
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+
+    // The next poll retries and the persisted record loads.
+    await tick()
+    expect(hits).toBe(2)
+    expect(r.container.querySelector('.evidence-pending')).toBeNull()
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+    expect(r.container.querySelectorAll('.evidence-decision').length).toBe(3)
+  })
+
+  it('settles as unavailable and stops polling once every history attempt has timed out through the retry budget', async () => {
     let hits = 0
     routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
     routes['/control/history/' + SID] = () => { hits++; return new Promise(() => {}) }
@@ -579,11 +603,16 @@ describe('SessionDetailModal jump links, timeouts and the shadow-only notice', (
     const r = open({ id: SID, state: 'active' })
     await flush()
     expect(hits).toBe(1)
-    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
 
-    // Without the timeout the in-flight guard would hold the phase here
-    // forever. A timeout is a non-404 failure, so the record is unavailable
-    // and polling stops (the same path as any other history error).
+    // Each attempt hangs for the 15 s timeout, then the next poll retries.
+    // Still pending until the last allowed attempt times out.
+    for (let i = 0; i < 4; i++) {
+      await tick(15000)
+      expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+      expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+      await tick()
+    }
+    expect(hits).toBe(5)
     await tick(15000)
     expect(r.container.querySelector('.evidence-pending')).toBeNull()
     expect(r.container.querySelector('.evidence-unavailable')).toBeTruthy()

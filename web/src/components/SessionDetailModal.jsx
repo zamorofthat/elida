@@ -244,8 +244,8 @@ function Section({ title, defaultOpen, badge, children }) {
 const POLL_MS = 3000
 
 // A session that has just ended may not be in history yet: the store writes
-// the row after the session closes. A 404 is retried on this many polls
-// before the record is shown as unavailable.
+// the row after the session closes. A 404 or a request timeout is retried on
+// this many polls before the record is shown as unavailable.
 const HISTORY_RETRIES = 5
 
 export function SessionDetailModal({ session, onClose, onKill }) {
@@ -278,11 +278,11 @@ export function SessionDetailModal({ session, onClose, onKill }) {
   // 404s, the poll switches to /control/history/{id}: that record becomes
   // the authoritative evidence source (an empty list there replaces stale
   // live evidence) and polling stops once it is loaded or the bounded 404
-  // retries are spent. Other history errors stop polling with an
-  // unavailable state; there is no fallback. Every response is checked
-  // against the controller (ID change or unmount aborts it) and a
-  // per-resource sequence number, so a slow earlier response never replaces
-  // a newer one.
+  // retries are spent (a request timeout spends a retry the same way). Other
+  // history errors stop polling with an unavailable state; there is no
+  // fallback. Every response is checked against the controller (ID change or
+  // unmount aborts it) and a per-resource sequence number, so a slow earlier
+  // response never replaces a newer one.
   useEffect(() => {
     if (!session?.id) return
     const id = session.id
@@ -315,7 +315,10 @@ export function SessionDetailModal({ session, onClose, onKill }) {
     // loaded or the retries were spent), so it can never overwrite a loaded
     // record or its status.
     let historyInFlight = false
-    const settleHistory = (record, status) => {
+    // A timeout is transient (a stalled network), so like a 404 it spends one
+    // retry instead of ending the phase; the status is 0 for any other
+    // network error, which stays terminal.
+    const settleHistory = (record, status, timedOut = false) => {
       historyInFlight = false
       if (controller.signal.aborted || phase !== 'history') return
       if (record) {
@@ -325,7 +328,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
         return
       }
       historyTries++
-      if (status === 404 && historyTries < HISTORY_RETRIES) {
+      if ((status === 404 || timedOut) && historyTries < HISTORY_RETRIES) {
         setHistoryStatus('pending')
         return
       }
@@ -339,7 +342,7 @@ export function SessionDetailModal({ session, onClose, onKill }) {
         .then(res => (res.ok
           ? res.json().then(record => settleHistory(record, res.status))
           : settleHistory(null, res.status)))
-        .catch(() => settleHistory(null, 0))
+        .catch(err => settleHistory(null, 0, !!err && err.message === 'Timeout'))
     }
 
     const toHistory = () => {
