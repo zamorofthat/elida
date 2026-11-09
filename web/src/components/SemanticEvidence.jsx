@@ -5,6 +5,15 @@
 
 import { useState } from 'preact/hooks'
 import { SeverityBadge } from './shared/Badge'
+import { turnAnchorId } from './SessionTurns'
+
+// Section titles double as the modal's section-registry keys; links name the
+// section that owns their target through these.
+export const SECTIONS = {
+  conversation: 'Conversation',
+  violations: 'Policy Violations',
+  evidence: 'Semantic evidence',
+}
 
 export function correlationMatches(violations) {
   return (violations || []).filter((v) => v && v.correlation)
@@ -79,7 +88,23 @@ function fmtTime(ts) {
   return ts ? new Date(ts).toLocaleTimeString() : ''
 }
 
-function DecisionRow({ d }) {
+// A link from a record to its turn in the Conversation. Shown only when the
+// loaded turns actually contain that event, so it never points at nothing.
+export function TurnLink({ eventId, turnIds, onJump }) {
+  if (!onJump || !eventId || !turnIds || !turnIds.has(eventId)) return null
+  const id = turnAnchorId(eventId)
+  return (
+    <a
+      class="evidence-turn-link"
+      href={'#' + id}
+      onClick={(e) => { e.preventDefault(); onJump(id, SECTIONS.conversation) }}
+    >
+      {'\u2197 turn'}
+    </a>
+  )
+}
+
+function DecisionRow({ d, onJump, turnIds }) {
   const ev = d.evidence || {}
   return (
     <div class="evidence-decision" id={anchorId(d.event_id)}>
@@ -90,6 +115,7 @@ function DecisionRow({ d }) {
         {d.evidence_only && <span class="evidence-badge">evidence only</span>}
         {ev.vetoed && <span class="evidence-badge evidence-veto">vetoed</span>}
         <span class="evidence-time">{fmtTime(d.timestamp)}</span>
+        <TurnLink eventId={d.event_id} turnIds={turnIds} onJump={onJump} />
       </div>
       <div class="evidence-row-meta mono">
         {ev.signal} {fmtProb(ev.probability)} · {d.source_role} #{d.message_index}
@@ -100,7 +126,7 @@ function DecisionRow({ d }) {
   )
 }
 
-function MatchRow({ m, decisions, violations, anchored }) {
+function MatchRow({ m, decisions, violations, anchored, onJump, turnIds }) {
   const c = m.correlation
   const links = linkedEvents(m, decisions, violations, anchored)
   return (
@@ -111,6 +137,7 @@ function MatchRow({ m, decisions, violations, anchored }) {
         <span class="evidence-badge">{c.shape} · {c.mode}</span>
         {m.evidence_only && <span class="evidence-badge">evidence only</span>}
         <span class="evidence-time">{fmtTime(m.timestamp)}</span>
+        <TurnLink eventId={m.event_id} turnIds={turnIds} onJump={onJump} />
       </div>
       <div class="evidence-row-meta mono">{c.match_id}</div>
       <ul class="evidence-events">
@@ -118,7 +145,18 @@ function MatchRow({ m, decisions, violations, anchored }) {
           <li key={l.id}>
             {l.kind === 'unresolved'
               ? <span class="evidence-unresolved mono" title="not among this record's decisions or violations">{l.id}</span>
-              : <a class="evidence-link mono" href={'#' + anchorId(l.id)}>{l.id}</a>}
+              : (
+                <a
+                  class="evidence-link mono"
+                  href={'#' + anchorId(l.id)}
+                  onClick={onJump && ((e) => {
+                    e.preventDefault()
+                    onJump(anchorId(l.id), l.kind === 'violation' ? SECTIONS.violations : SECTIONS.evidence)
+                  })}
+                >
+                  {l.id}
+                </a>
+              )}
             {l.kind === 'decision' && <span class="evidence-link-label"> {l.ref.rule_name} #{l.ref.message_index}</span>}
             {l.kind === 'violation' && <span class="evidence-link-label"> {l.ref.rule_name}</span>}
           </li>
@@ -157,7 +195,8 @@ function ShadowSection({ semanticShadow, correlationShadow }) {
 
 // anchored (optional) is the set of ordinary violation event IDs the host
 // renders with id={anchorId(event_id)}; see anchoredViolations.
-export function SemanticEvidence({ decisions, violations, semanticShadow, correlationShadow, anchored }) {
+// onJump(anchorId, sectionTitle) and turnIds (Set of event IDs with a Conversation turn) are optional; without onJump every link is a plain anchor.
+export function SemanticEvidence({ decisions, violations, semanticShadow, correlationShadow, anchored, onJump, turnIds }) {
   const matches = correlationMatches(violations)
   const ds = decisions || []
   const shadowCount = (semanticShadow || []).length + (correlationShadow || []).length
@@ -167,13 +206,13 @@ export function SemanticEvidence({ decisions, violations, semanticShadow, correl
       {matches.length > 0 && (
         <div class="evidence-group">
           <div class="evidence-group-title">Correlation matches</div>
-          {matches.map((m, i) => <MatchRow key={i} m={m} decisions={ds} violations={violations} anchored={anchored} />)}
+          {matches.map((m, i) => <MatchRow key={i} m={m} decisions={ds} violations={violations} anchored={anchored} onJump={onJump} turnIds={turnIds} />)}
         </div>
       )}
       {ds.length > 0 && (
         <div class="evidence-group">
           <div class="evidence-group-title">Semantic decisions</div>
-          {ds.map((d, i) => <DecisionRow key={i} d={d} />)}
+          {ds.map((d, i) => <DecisionRow key={i} d={d} onJump={onJump} turnIds={turnIds} />)}
         </div>
       )}
       <ShadowSection semanticShadow={semanticShadow} correlationShadow={correlationShadow} />
