@@ -1825,6 +1825,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .detail-violation-time {
@@ -1899,6 +1900,8 @@ body {
 .evidence-events { list-style: none; padding: 0; margin: 0.375rem 0 0; font-size: 0.75rem; }
 .evidence-link { color: #ec4899; text-decoration: none; }
 .evidence-link:hover { text-decoration: underline; }
+.evidence-turn-link { color: #ec4899; text-decoration: none; font-size: 0.75rem; }
+.evidence-turn-link:hover { text-decoration: underline; }
 .evidence-unresolved { color: var(--text-dim); text-decoration: line-through dotted; }
 .evidence-link-label { color: var(--text-muted); }
 .evidence-shadow-toggle { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 0.75rem; padding: 0.25rem 0; }
