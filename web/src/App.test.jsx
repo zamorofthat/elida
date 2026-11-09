@@ -24,7 +24,7 @@ describe('App auth gating', () => {
     vi.unstubAllGlobals()
   })
 
-  it('skips login when server has no auth configured (health 200)', async () => {
+  it('skips login when server has no auth configured (decision 200)', async () => {
     mockFetch.mockResolvedValue({ status: 200, ok: true, json: () => Promise.resolve({}) })
 
     const { container } = render(<App />)
@@ -35,8 +35,14 @@ describe('App auth gating', () => {
     expect(container.querySelector('.login-container')).toBeNull()
   })
 
-  it('shows login when server requires auth (health 401)', async () => {
-    mockFetch.mockResolvedValue({ status: 401, ok: false })
+  it('shows login when server requires auth (decision 401, health still 200)', async () => {
+    mockFetch.mockImplementation((url) =>
+      Promise.resolve(
+        url === '/control/health'
+          ? { status: 200, ok: true, json: () => Promise.resolve({ status: 'ok' }) }
+          : { status: 401, ok: false }
+      )
+    )
 
     const { container } = render(<App />)
 
@@ -44,6 +50,33 @@ describe('App auth gating', () => {
       expect(container.querySelector('.login-container')).toBeTruthy()
     })
     expect(container.querySelector('.topnav')).toBeNull()
+  })
+
+  it('validates the entered key against an authenticated route, not health', async () => {
+    mockFetch.mockImplementation((url, opts) => {
+      const bearer = opts?.headers?.Authorization
+      if (url === '/control/decision') {
+        return Promise.resolve(
+          bearer === 'Bearer good-key'
+            ? { status: 200, ok: true, json: () => Promise.resolve({}) }
+            : { status: 401, ok: false }
+        )
+      }
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve({}) })
+    })
+
+    const { container } = render(<App />)
+    await waitFor(() => expect(container.querySelector('.login-container')).toBeTruthy())
+
+    const input = container.querySelector('.login-input')
+    fireEvent.input(input, { target: { value: 'bad-key' } })
+    fireEvent.submit(container.querySelector('form'))
+    await waitFor(() => expect(container.querySelector('.login-error')?.textContent).toBe('Invalid API key'))
+    expect(storage[AUTH_KEY]).toBeUndefined()
+
+    fireEvent.input(input, { target: { value: 'good-key' } })
+    fireEvent.submit(container.querySelector('form'))
+    await waitFor(() => expect(storage[AUTH_KEY]).toBe('good-key'))
   })
 
   it('skips probe and renders dashboard when key exists in localStorage', async () => {
