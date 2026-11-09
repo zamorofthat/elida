@@ -177,7 +177,11 @@ func planCNozzleEvents(n *recordingNozzle) []string {
 // emitter recording every finding. The operator taxonomy adds one argument
 // pattern carrying planCPatternSentinel; it categorizes the read_note calls
 // and no rule counts its category, so the match under test is unchanged.
-func planCApp(t *testing.T, mode string) planCRun {
+func planCApp(t *testing.T, mode string) planCRun { return planCAppWith(t, mode, nil) }
+
+// planCAppWith is planCApp with mutate applied to the loaded config before
+// the app is built.
+func planCAppWith(t *testing.T, mode string, mutate func(*config.Config)) planCRun {
 	t.Helper()
 	logs := captureLogs(t)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +207,9 @@ func planCApp(t *testing.T, mode string) planCRun {
 	cfg.Decision.InlineTimeout = 5 * time.Second
 	cfg.Storage.Enabled = true
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "elida.db")
+	if mutate != nil {
+		mutate(cfg)
+	}
 
 	a := &app{cfg: cfg, configPath: filepath.Join(t.TempDir(), "elida.yaml")}
 	a.decisionPipeline = func(context.Context, string, *embedded.Manifest) (embedded.Pipeline, error) {

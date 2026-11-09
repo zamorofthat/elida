@@ -12,12 +12,13 @@ import (
 
 	"elida/internal/config"
 	"elida/internal/decision/embedded"
+	"elida/internal/session"
 )
 
 // shadowStorageApp is slowBurnTraffic's wiring (shipped config, correlation
 // on, decision shadow, slowBurnPipeline) with SQLite storage and the
 // session-end callback, so correlation_shadow reaches the stored record.
-func shadowStorageApp(t *testing.T) (*app, func(body string) int) {
+func shadowStorageAppWithStore(t *testing.T, copyStore bool) (*app, func(body string) int) {
 	t.Helper()
 	quietLogs(t)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +48,21 @@ func shadowStorageApp(t *testing.T) (*app, func(body string) int) {
 	}
 	pinInline(a)
 	a.initSessionStore()
+	if copyStore {
+		// Redis semantics without Redis: every Get is a fresh decoded copy.
+		// The manager is built from the same kill-block settings
+		// initSessionStore used, so the store is the only difference between
+		// the two arms of the parity test.
+		kb := session.KillBlockConfig{
+			Mode:     session.KillBlockMode(cfg.Session.KillBlock.Mode),
+			Duration: cfg.Session.KillBlock.Duration,
+		}
+		if kb.Mode == "" {
+			kb.Mode = session.KillBlockUntilHourChange
+		}
+		a.store = session.NewCopyStore()
+		a.manager = session.NewManagerWithKillBlock(a.store, cfg.Session.Timeout, kb)
+	}
 	a.initSQLiteStorage()
 	t.Cleanup(func() { _ = a.sqliteStore.Close() })
 	if err := a.setupPolicyEngine(); err != nil {
@@ -68,6 +84,11 @@ func shadowStorageApp(t *testing.T) (*app, func(body string) int) {
 		return w.Code
 	}
 	return a, send
+}
+
+func shadowStorageApp(t *testing.T) (*app, func(body string) int) {
+	t.Helper()
+	return shadowStorageAppWithStore(t, false)
 }
 
 // D2: the shadow match recorded on the live session reaches the stored

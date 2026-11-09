@@ -13,9 +13,11 @@ import fixture from './__fixtures__/history-correlation.json'
 
 const SID = 'sess-live-1'
 const POLL = 3000
-// More ticks than the modal's bounded history retries, so an overlapping
-// dispatch or a dispatch-counted budget would show up as 'unavailable'.
-const HISTORY_RETRY_PROBE = 8
+// Ticks run while a history request is still pending. Fewer than 15 s of fake
+// time in total (apiFetch's default timeout), so the pending request is still
+// pending, yet enough that an overlapping dispatch would load the second
+// response early and fail the test.
+const HISTORY_RETRY_PROBE = 4
 
 function json(body, status = 200) {
   return { status, ok: status < 400, json: () => Promise.resolve(body) }
@@ -169,7 +171,15 @@ describe('SessionDetailModal evidence lifecycle', () => {
     }
     const target = r.container.querySelector(links[0].getAttribute('href'))
     expect(target.className).toContain('evidence-decision')
-    fireEvent.click(links[0])
+    // Clicking now runs the modal's jump, which scrolls on a timer; jsdom has
+    // no scrollIntoView, so stub it for this click and remove it afterwards.
+    Element.prototype.scrollIntoView = vi.fn()
+    try {
+      fireEvent.click(links[0])
+      await tick(0)
+    } finally {
+      delete Element.prototype.scrollIntoView
+    }
     expect(r.container.querySelectorAll('[id="evidence-ev_0000000000000000000000000000000c"]').length).toBe(1)
     expect(r.container.querySelector('.detail-violation[id]')).toBeNull()
 
@@ -425,5 +435,212 @@ describe('SessionDetailModal evidence lifecycle', () => {
     expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
     expect(r.container.querySelector('.evidence')).toBeNull()
     expect(r.container.textContent).not.toContain('Semantic evidence')
+  })
+})
+
+describe('SessionDetailModal jump links, timeouts and the shadow-only notice', () => {
+  let routes
+  let calls
+  let scroll
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    const storage = { [AUTH_KEY]: 'k' }
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k) => storage[k] ?? null),
+      setItem: vi.fn((k, v) => { storage[k] = String(v) }),
+      removeItem: vi.fn((k) => { delete storage[k] }),
+    })
+    routes = {}
+    calls = []
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      calls.push({ url, opts })
+      const r = routes[url]
+      if (!r) return Promise.resolve(json({}, 404))
+      const v = typeof r === 'function' ? r(opts) : r
+      return v && typeof v.then === 'function' ? v : Promise.resolve(v)
+    }))
+    scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete Element.prototype.scrollIntoView
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  async function flush() {
+    await act(async () => { for (let i = 0; i < 8; i++) await Promise.resolve() })
+  }
+  async function tick(ms = POLL) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+    await flush()
+  }
+  function open(session) {
+    return render(<SessionDetailModal session={session} onClose={() => {}} />)
+  }
+  function sectionHeader(r, title) {
+    return [...r.container.querySelectorAll('.detail-section-header')]
+      .find((h) => h.querySelector('.detail-section-title').textContent === title)
+  }
+  async function jump(el) {
+    // Two acts: the click's render flushes when the first act exits, and only
+    // then does the jump's setTimeout(0) run (in a browser Preact's microtask
+    // render lands before the macrotask; inside one act it would not).
+    await act(async () => { fireEvent.click(el) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+  }
+
+  const DEC_C = 'ev_0000000000000000000000000000000c'
+  const turnsRoute = (id) => '/control/sessions/' + id + '/turns?full=true'
+  const violationTurn = { type: 'violation', rule_name: 'injection_elevated', severity: 'warning', event_id: DEC_C, timestamp: '2026-10-20T09:01:00Z' }
+
+  it('jumps from a Policy Violations row to its turn, opening a collapsed Conversation first', async () => {
+    routes['/control/history/' + fixture.id] = () => json(fixture)
+    routes[turnsRoute(fixture.id)] = () => json({ turns: [violationTurn] })
+    const r = open({ id: fixture.id, state: 'completed' })
+    await flush()
+
+    // Collapse Conversation: its turns unmount, so the target id is gone.
+    fireEvent.click(sectionHeader(r, 'Conversation'))
+    await flush()
+    expect(r.container.querySelector('[id="turn-' + DEC_C + '"]')).toBeNull()
+
+    const link = r.container.querySelector('.detail-violation a.evidence-turn-link')
+    expect(link).toBeTruthy()
+    await jump(link)
+
+    const target = r.container.querySelector('[id="turn-' + DEC_C + '"]')
+    expect(target).toBeTruthy()
+    expect(scroll).toHaveBeenCalledTimes(1)
+    expect(scroll.mock.contexts[0]).toBe(target)
+  })
+
+  it('shows turn links only for violations that have a loaded turn', async () => {
+    routes['/control/history/' + fixture.id] = () => json(fixture)
+    routes[turnsRoute(fixture.id)] = () => json({ turns: [violationTurn] })
+    const r = open({ id: fixture.id, state: 'completed' })
+    await flush()
+    // The persisted record has two violations; only injection_elevated has a turn.
+    expect(r.container.querySelectorAll('.detail-violation').length).toBe(2)
+    expect(r.container.querySelectorAll('.detail-violation a.evidence-turn-link').length).toBe(1)
+    // The decision row for the same event links too; the match row's event has no turn.
+    expect(r.container.querySelectorAll('.evidence-decision a.evidence-turn-link').length).toBe(1)
+    expect(r.container.querySelectorAll('.evidence-match a.evidence-turn-link').length).toBe(0)
+  })
+
+  it('opens a collapsed Policy Violations section when an evidence link targets a violation row', async () => {
+    const regex = { rule_name: 'prompt_injection_probe', event_id: 'ev_regex', event_category: 'prompt_injection', severity: 'warning', description: 'probe', timestamp: '2026-10-20T09:01:00Z' }
+    const match = { rule_name: 'correlation.probe_twice', event_id: 'cm_1', event_category: 'correlation_match', severity: 'warning', evidence_only: true, timestamp: '2026-10-20T09:02:00Z',
+      correlation: { match_id: 'cm_1', rule: 'probe_twice', shape: 'repeated', mode: 'audit', event_ids: ['ev_regex'], categories: ['prompt_injection'], first_event: '2026-10-20T09:01:00Z', last_event: '2026-10-20T09:02:00Z' } }
+    routes['/control/history/' + SID] = () => json({ id: SID, state: 'completed', violations: [regex, match] })
+    const r = open({ id: SID, state: 'completed' })
+    await flush()
+
+    fireEvent.click(sectionHeader(r, 'Policy Violations'))
+    await flush()
+    expect(r.container.querySelector('[id="evidence-ev_regex"]')).toBeNull()
+
+    await jump(r.container.querySelector('a.evidence-link'))
+    const target = r.container.querySelector('[id="evidence-ev_regex"]')
+    expect(target).toBeTruthy()
+    expect(scroll.mock.contexts[0]).toBe(target)
+  })
+
+  it('is a no-op, not an error, when the target never renders', async () => {
+    routes['/control/history/' + fixture.id] = () => json(fixture)
+    routes[turnsRoute(fixture.id)] = () => json({ turns: [violationTurn] })
+    const r = open({ id: fixture.id, state: 'completed' })
+    await flush()
+    // Remove the target behind the modal's back, then click the link.
+    r.container.querySelector('[id="turn-' + DEC_C + '"]').removeAttribute('id')
+    await jump(r.container.querySelector('.detail-violation a.evidence-turn-link'))
+    expect(scroll).not.toHaveBeenCalled()
+  })
+
+  it('settles a request that never answers through the apiFetch timeout instead of loading forever', async () => {
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'active', request_count: 1 })
+    routes[turnsRoute(SID)] = () => new Promise(() => {})
+    const r = open({ id: SID, state: 'active' })
+    await flush()
+    expect(r.container.querySelector('.detail-loading')).toBeTruthy()
+    await tick(15000)
+    expect(r.container.querySelector('.detail-loading')).toBeNull()
+    expect(r.container.querySelector('.session-turns-empty').textContent).toBe('No turns recorded')
+  })
+
+  it('treats a history request timeout as transient: still pending and polling, then loads the record on a later success', async () => {
+    let hits = 0
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
+    routes['/control/history/' + SID] = () => (++hits === 1 ? new Promise(() => {}) : json(fixture))
+    routes['/control/flagged/' + SID] = () => json({ violations: [fixture.violations[1]] })
+    const r = open({ id: SID, state: 'active' })
+    await flush()
+    expect(hits).toBe(1)
+    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+
+    // The hung request is released by the 15 s timeout. That spends one retry
+    // but is not terminal: the modal is still pending and still polling.
+    await tick(15000)
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+    expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+
+    // The next poll retries and the persisted record loads.
+    await tick()
+    expect(hits).toBe(2)
+    expect(r.container.querySelector('.evidence-pending')).toBeNull()
+    expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+    expect(r.container.querySelectorAll('.evidence-decision').length).toBe(3)
+  })
+
+  it('settles as unavailable and stops polling once every history attempt has timed out through the retry budget', async () => {
+    let hits = 0
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'completed' })
+    routes['/control/history/' + SID] = () => { hits++; return new Promise(() => {}) }
+    routes['/control/flagged/' + SID] = () => json({ violations: [fixture.violations[1]] })
+    const r = open({ id: SID, state: 'active' })
+    await flush()
+    expect(hits).toBe(1)
+
+    // Each attempt hangs for the 15 s timeout, then the next poll retries.
+    // Still pending until the last allowed attempt times out.
+    for (let i = 0; i < 4; i++) {
+      await tick(15000)
+      expect(r.container.querySelector('.evidence-unavailable')).toBeNull()
+      expect(r.container.querySelector('.evidence-pending')).toBeTruthy()
+      await tick()
+    }
+    expect(hits).toBe(5)
+    await tick(15000)
+    expect(r.container.querySelector('.evidence-pending')).toBeNull()
+    expect(r.container.querySelector('.evidence-unavailable')).toBeTruthy()
+    const hitsAfter = hits
+    await tick()
+    await tick()
+    expect(hits).toBe(hitsAfter)
+  })
+
+  it('says how many shadow entries remain when the persisted record is unavailable and there is no other evidence', async () => {
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'active', request_count: 1, correlation_shadow: [fixture.correlation_shadow[0]] })
+    const r = open({ id: SID, state: 'active' })
+    await flush()
+    routes['/control/sessions/' + SID] = () => json({}, 404)
+    for (let i = 0; i < 8; i++) await tick()
+
+    const notice = r.container.querySelector('.evidence-unavailable')
+    expect(notice.textContent).toContain('Persisted record unavailable; 1 shadow entry from the live session')
+    expect(notice.textContent).not.toContain('showing the last live evidence')
+  })
+
+  it('keeps the last-live-evidence wording when real evidence is shown', async () => {
+    routes['/control/sessions/' + SID] = () => json({ id: SID, state: 'active', request_count: 1 })
+    routes['/control/flagged/' + SID] = () => json({ violations: [fixture.violations[1]], semantic_decisions: [fixture.semantic_decisions[0]] })
+    const r = open({ id: SID, state: 'active' })
+    await flush()
+    routes['/control/sessions/' + SID] = () => json({}, 404)
+    for (let i = 0; i < 8; i++) await tick()
+    expect(r.container.querySelector('.evidence-unavailable').textContent).toContain('showing the last live evidence')
   })
 })

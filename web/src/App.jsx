@@ -33,7 +33,9 @@ export function Login({ onLogin }) {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(API_BASE + '/control/health', {
+      // /control/health ignores credentials (liveness), so it cannot validate
+      // a key; /control/decision is authenticated and always answers 200.
+      const res = await fetch(API_BASE + '/control/decision', {
         headers: { 'Authorization': 'Bearer ' + key.trim() },
       })
       if (res.status === 401) {
@@ -322,200 +324,6 @@ function SessionDetails({ session, onClose }) {
               <h3>Captured Requests</h3>
               <div class="captured-list">
                 {capturedContent.map((c, i) => (
-                  <div key={i} class="captured-item">
-                    <div class="captured-header">
-                      <span class="mono">{c.method} {c.path}</span>
-                      <span class="muted">{new Date(c.timestamp).toLocaleTimeString()}</span>
-                    </div>
-                    {c.request_body && (
-                      <div class="captured-body">
-                        <strong>Request:</strong>
-                        <pre>{c.request_body}</pre>
-                      </div>
-                    )}
-                    {c.response_body && (
-                      <div class="captured-body">
-                        <strong>Response:</strong>
-                        <pre>{c.response_body}</pre>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ============================================================================
-// Flagged Table Component
-// ============================================================================
-
-function FlaggedTable({ flagged, onViewDetails, searchTerm }) {
-  const filtered = searchTerm
-    ? flagged.filter(f =>
-        f.session_id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        f.violations?.some(v => v.rule_name?.toLowerCase().includes(searchTerm.toLowerCase()))
-      )
-    : flagged
-
-  if (!filtered || filtered.length === 0) {
-    return (
-      <div class="empty-state">
-        <IconShield />
-        <p>{searchTerm ? 'No matching flagged sessions' : 'No flagged sessions - all sessions within policy'}</p>
-      </div>
-    )
-  }
-
-  return (
-    <div class="table-container">
-      <table class="data-table">
-        <thead>
-          <tr>
-            <th>Session ID</th>
-            <th>Severity</th>
-            <th>Violations</th>
-            <th>First Flagged</th>
-            <th>Last Flagged</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.map((f) => (
-            <tr key={f.session_id}>
-              <td class="mono">{truncateId(f.session_id)}</td>
-              <td><SeverityBadge severity={f.max_severity} /></td>
-              <td>
-                {f.violations.map((v, i) => (
-                  <span key={i} class="violation-tag">{v.rule_name}</span>
-                ))}
-              </td>
-              <td class="mono muted">{new Date(f.first_flagged).toLocaleTimeString()}</td>
-              <td class="mono muted">{new Date(f.last_flagged).toLocaleTimeString()}</td>
-              <td>
-                <button class="btn btn-secondary btn-sm" onClick={() => onViewDetails(f)}>
-                  View
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
-
-// ============================================================================
-// Flagged Details Modal
-// ============================================================================
-
-function FlaggedDetails({ flagged, onClose }) {
-  const [sessionInfo, setSessionInfo] = useState(null)
-
-  useEffect(() => {
-    if (!flagged?.session_id) return
-    const controller = new AbortController()
-
-    apiFetch(API_BASE + '/control/sessions/' + flagged.session_id, { signal: controller.signal })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => { if (!controller.signal.aborted) setSessionInfo(data) })
-      .catch(() => { if (!controller.signal.aborted) setSessionInfo(null) })
-
-    return () => controller.abort()
-  }, [flagged?.session_id])
-
-  if (!flagged) return null
-
-  return (
-    <div class="modal-overlay" onClick={onClose}>
-      <div class="modal" onClick={(e) => e.stopPropagation()}>
-        <div class="modal-header">
-          <h2>Flagged Session Details</h2>
-          <button class="btn btn-icon btn-secondary" onClick={onClose}>
-            <IconX />
-          </button>
-        </div>
-        <div class="modal-body">
-          <div class="session-metrics-grid">
-            <div class="session-metric">
-              <span class="session-metric-label">Session ID</span>
-              <span class="session-metric-value mono">{truncateId(flagged.session_id, 12)}</span>
-            </div>
-            <div class="session-metric">
-              <span class="session-metric-label">Max Severity</span>
-              <span class="session-metric-value"><SeverityBadge severity={flagged.max_severity} /></span>
-            </div>
-            {sessionInfo && (
-              <>
-                <div class="session-metric">
-                  <span class="session-metric-label">State</span>
-                  <span class="session-metric-value"><StateBadge state={sessionInfo.state} /></span>
-                </div>
-                <div class="session-metric">
-                  <span class="session-metric-label">Duration</span>
-                  <span class="session-metric-value">{formatDurationStr(sessionInfo.duration)}</span>
-                </div>
-                <div class="session-metric">
-                  <span class="session-metric-label">Requests</span>
-                  <span class="session-metric-value">{sessionInfo.request_count}</span>
-                </div>
-                <div class="session-metric">
-                  <span class="session-metric-label">Bytes In</span>
-                  <span class="session-metric-value">{formatBytes(sessionInfo.bytes_in)}</span>
-                </div>
-                <div class="session-metric">
-                  <span class="session-metric-label">Bytes Out</span>
-                  <span class="session-metric-value">{formatBytes(sessionInfo.bytes_out)}</span>
-                </div>
-                <div class="session-metric">
-                  <span class="session-metric-label">Client</span>
-                  <span class="session-metric-value mono">{sessionInfo.client_addr}</span>
-                </div>
-              </>
-            )}
-          </div>
-
-          <h3>Violations</h3>
-          <div class="violations-list">
-            {flagged.violations.map((v, i) => (
-              <div key={i} class="violation-item">
-                <div class="violation-header">
-                  <SeverityBadge severity={v.effective_severity || v.severity} />
-                  <strong>{v.rule_name}</strong>
-                  {v.source_role && (
-                    <span class={'source-role-badge source-role-' + v.source_role}>
-                      {v.source_role}
-                      {v.message_index >= 0 ? ' #' + v.message_index : ''}
-                    </span>
-                  )}
-                </div>
-                <div class="violation-desc">
-                  {v.framework_ref && <span class="framework-ref">{v.framework_ref}</span>}
-                  {v.description}
-                </div>
-                {v.matched_text && (
-                  <div class="violation-match">
-                    Matched: <code>{v.matched_text}</code>
-                  </div>
-                )}
-                {v.threshold && (
-                  <div class="violation-stats">
-                    Threshold: {v.threshold} | Actual: {v.actual_value}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-
-          {flagged.captured_content && flagged.captured_content.length > 0 && (
-            <>
-              <h3>Captured Requests</h3>
-              <div class="captured-list">
-                {flagged.captured_content.map((c, i) => (
                   <div key={i} class="captured-item">
                     <div class="captured-header">
                       <span class="mono">{c.method} {c.path}</span>
@@ -1296,7 +1104,9 @@ export function App() {
   useEffect(() => {
     setLogoutHandler(() => setAuthed(false))
     if (!authed) {
-      fetch(API_BASE + '/control/health')
+      // Health is always 200 (liveness), so it cannot tell whether auth is
+      // required; an unauthenticated /control/decision answers 401 if it is.
+      fetch(API_BASE + '/control/decision')
         .then((res) => {
           if (res.ok) {
             setAuthed(true)
@@ -1325,7 +1135,6 @@ function AppShell() {
   const [flaggedStats, setFlaggedStats] = useState({})
   const [voiceSessions, setVoiceSessions] = useState([])
   const [voiceHistory, setVoiceHistory] = useState([])
-  const [selectedFlagged, setSelectedFlagged] = useState(null)
   const [selectedSession, setSelectedSession] = useState(null)
   const [selectedVoice, setSelectedVoice] = useState(null)
   const [status, setStatus] = useState('connecting')
@@ -1584,10 +1393,6 @@ function AppShell() {
 
         {page === 'settings' && <SettingsPage />}
       </main>
-
-      {selectedFlagged && (
-        <FlaggedDetails flagged={selectedFlagged} onClose={() => setSelectedFlagged(null)} />
-      )}
 
       {selectedSession && (
         <SessionDetails session={selectedSession} onClose={() => setSelectedSession(null)} />

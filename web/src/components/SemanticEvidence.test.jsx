@@ -1,6 +1,6 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, cleanup, fireEvent } from '@testing-library/preact'
-import { SemanticEvidence, correlationMatches, linkedEvents, evidenceMarkers } from './SemanticEvidence'
+import { SemanticEvidence, TurnLink, SECTIONS, correlationMatches, linkedEvents, evidenceMarkers } from './SemanticEvidence'
 import fixture from './__fixtures__/history-correlation.json'
 
 const props = {
@@ -101,5 +101,76 @@ describe('SemanticEvidence', () => {
     // A link to a record with no ID renders as unresolved, not as an href.
     expect(container.querySelector('a.evidence-link')).toBeNull()
     expect(container.querySelector('.evidence-unresolved')).toBeTruthy()
+  })
+
+  describe('jump links', () => {
+    const DEC_C = 'ev_0000000000000000000000000000000c'
+    const MATCH = 'cm_0123456789abcdef0123456789abcdef'
+
+    it('TurnLink renders only when onJump is set and the turn exists', () => {
+      const onJump = vi.fn()
+      const turnIds = new Set(['ev_1'])
+      const a = render(<TurnLink eventId="ev_1" turnIds={turnIds} onJump={onJump} />)
+      expect(a.container.querySelector('a.evidence-turn-link').getAttribute('href')).toBe('#turn-ev_1')
+      cleanup()
+      expect(render(<TurnLink eventId="ev_2" turnIds={turnIds} onJump={onJump} />).container.textContent).toBe('')
+      cleanup()
+      expect(render(<TurnLink eventId="ev_1" turnIds={turnIds} />).container.textContent).toBe('')
+      cleanup()
+      expect(render(<TurnLink eventId="ev_1" onJump={onJump} />).container.textContent).toBe('')
+    })
+
+    it('clicking a TurnLink prevents navigation and jumps to the Conversation section', () => {
+      const onJump = vi.fn()
+      const { container } = render(<TurnLink eventId="ev_1" turnIds={new Set(['ev_1'])} onJump={onJump} />)
+      const notPrevented = fireEvent.click(container.querySelector('a'))
+      expect(notPrevented).toBe(false)
+      expect(onJump).toHaveBeenCalledWith('turn-ev_1', SECTIONS.conversation)
+    })
+
+    it('puts a turn link on the decision and match rows whose events have a turn', () => {
+      const onJump = vi.fn()
+      const { container } = render(<SemanticEvidence {...props} onJump={onJump} turnIds={new Set([DEC_C, MATCH])} />)
+      const dec = [...container.querySelectorAll('.evidence-decision')].find((r) => r.id === 'evidence-' + DEC_C)
+      expect(dec.querySelectorAll('a.evidence-turn-link').length).toBe(1)
+      expect(container.querySelectorAll('.evidence-decision a.evidence-turn-link').length).toBe(1)
+      expect(container.querySelectorAll('.evidence-match a.evidence-turn-link').length).toBe(1)
+      fireEvent.click(dec.querySelector('a.evidence-turn-link'))
+      expect(onJump).toHaveBeenCalledWith('turn-' + DEC_C, 'Conversation')
+    })
+
+    it('renders no turn links without onJump or without a matching turn', () => {
+      const a = render(<SemanticEvidence {...props} turnIds={new Set([DEC_C])} />)
+      expect(a.container.querySelector('a.evidence-turn-link')).toBeNull()
+      cleanup()
+      const b = render(<SemanticEvidence {...props} onJump={vi.fn()} turnIds={new Set()} />)
+      expect(b.container.querySelector('a.evidence-turn-link')).toBeNull()
+    })
+
+    it('routes a contributing-event link to the section that owns its target', () => {
+      const onJump = vi.fn()
+      const a = render(<SemanticEvidence {...props} onJump={onJump} />)
+      const decisionLink = a.container.querySelector('.evidence-match a.evidence-link')
+      expect(fireEvent.click(decisionLink)).toBe(false)
+      expect(onJump).toHaveBeenCalledWith('evidence-ev_0000000000000000000000000000000a', 'Semantic evidence')
+      cleanup()
+
+      const violations = [
+        { rule_name: 'prompt_injection_probe', event_id: 'ev_regex', event_category: 'prompt_injection', severity: 'warning', timestamp: '2026-10-20T09:01:00Z' },
+        { rule_name: 'correlation.probe_twice', event_id: 'cm_1', event_category: 'correlation_match', evidence_only: true, timestamp: '2026-10-20T09:02:00Z',
+          correlation: { match_id: 'cm_1', rule: 'probe_twice', shape: 'repeated', mode: 'audit', event_ids: ['ev_regex'], categories: ['prompt_injection'], first_event: '2026-10-20T09:01:00Z', last_event: '2026-10-20T09:02:00Z' } },
+      ]
+      const onJump2 = vi.fn()
+      const b = render(<SemanticEvidence decisions={[]} violations={violations} onJump={onJump2} />)
+      fireEvent.click(b.container.querySelector('a.evidence-link'))
+      expect(onJump2).toHaveBeenCalledWith('evidence-ev_regex', 'Policy Violations')
+    })
+
+    it('leaves evidence links as plain anchors when no onJump is given', () => {
+      const { container } = render(<SemanticEvidence {...props} />)
+      const link = container.querySelector('a.evidence-link')
+      expect(link.getAttribute('href')).toBe('#evidence-ev_0000000000000000000000000000000a')
+      expect(fireEvent.click(link)).toBe(true)
+    })
   })
 })

@@ -140,6 +140,7 @@ telemetry:
   insecure: true
   capture_content: "none"   # "none", "flagged", or "all"
   max_body_size: 4096       # Truncation limit for captured bodies
+  semantic_shadow_logs: false  # Opt in: export shadow semantic decisions as OTEL logs (calibration data, max 50 per session)
 ```
 
 ## CLI Flags
@@ -179,6 +180,72 @@ All configuration can be overridden with environment variables:
 | `ELIDA_REDIS_DB` | `0` | Redis database number |
 | `ELIDA_CONTROL_API_KEY` | — | API key for control API auth (auto-enables auth) |
 | `ELIDA_PROXY_API_KEY` | — | API key for proxy auth (auto-enables auth) |
+
+### Redis session state
+
+With `session.store: redis` (`redis.*` above) a session is stored as one JSON
+value per session. It carries the durable, content-free state: lifecycle
+(`state`, `end_time`, `terminated`, `start_time`, `last_activity`), the
+backend and client address, the session metadata map, request, byte and token
+counters, the backends used (with per-backend request counts), the tool-call
+count, per-tool call counts and the tool-call projection (tool name, type,
+request ID and timestamp of the last 100 calls), failed backends, the
+WebSocket flag and frame-counter fields, and both shadow lists
+(`semantic_shadow`, `correlation_shadow`, at most 50 entries each, newest
+first). The frame-counter fields (`frame_count`, `text_frames`,
+`binary_frames`) are carried but are currently always zero: nothing in the
+proxy increments them. A value is typically a few KB. The worst case is
+roughly 70 KB: about 30 KB for 50 semantic shadow entries, 24 KB for 50
+correlation shadow entries and 15.5 KB for 100 tool-call records (measured
+with full-length decision IDs and 64-character model checksums).
+
+Deliberately **not** stored: conversation messages and the system prompt
+(`Messages`, `SystemPrompt`, `SystemPromptHash`), tool-call arguments and
+results, and the rate-limit request window (`RequestTimes`). Failover replay of
+conversation history therefore does not work across requests under Redis, and
+the per-session request-rate limit stays per process: it is not persisted with
+the session, so each replica counts only the requests it served (persisting it
+is a follow-up). The mid-session system-prompt-change WARN cannot fire under
+Redis, because the system-prompt hash it compares is not stored.
+
+The session is written back at bounded points, not on every update: when each
+proxied request or WebSocket connection ends, before a policy terminate, after
+each asynchronous semantic delivery that recorded a shadow entry (never for
+deliveries that recorded nothing, so at most one write per recorded shadow
+decision), and every 5 minutes for requests still in flight.
+
+Write cost: one SET per proxied request end, plus one per tracked in-flight
+session every 5 minutes, plus one for a pre-terminate write, plus the
+async-delivery writes above. Each write-back is a read plus a write (GET, SET,
+SADD) rather than a single SET. The manager's 30-second tick re-reads each
+session that looks idle before writing the timeout, and it skips any session
+that has a request in flight in this process (the stored last-activity time
+only advances at write-back, so it can lag a live request). Outside the GET to
+SET window described below, a write-back keeps a kill or terminate that landed
+meanwhile, never recreates a session that was deleted or expired, and never
+changes the state of a request that is still running. A request that finishes
+after its session was killed still writes its accounting afterwards; the
+exported end-of-session record is finalised again at cleanup, not only at
+kill.
+
+Concurrency: concurrent requests for the same session on different replicas
+are last-writer-wins at write-back, for the counters and for both shadow lists
+(their counters can undercount and one replica's shadow entries can be
+dropped). Within a write-back, the GET to SET window has no compare-and-set: a
+change another replica makes between the two is overwritten (a Lua or WATCH
+based CAS is a follow-up). A kill issued on another replica while a request is
+in flight loses at most that request's state since its last periodic write.
+Run all replicas on the same version: an older replica rewrites a session
+without the newer fields.
+
+Known limitation (pre-existing, not changed here): the Redis store caches one
+kill channel per session ID (`RedisStore.killChans`) and never replaces it.
+Kill-then-resume is therefore not supported under Redis: a session that is
+killed and then resumed keeps a closed channel on later loads, and a freshly
+created session's channel is not the one cross-replica kill signals close.
+Kill and resume behavior across replicas is not at parity with the memory
+store; this release only guarantees that a terminated session stays
+terminated.
 
 ## Secrets in Config: `${ENV}` Expansion and Auto Provider Keys
 
@@ -722,6 +789,33 @@ about 1.4 KB, measured). A client that reuses that session ID after the session 
 meets the same action. At most 4096 ended sessions are retained, oldest evicted
 first; an evicted ID no longer meets its old action. The full session record
 has already been persisted at session end.
+
+## Behavioral Panel (`panel.*`)
+
+The panel combines session-level behavioral detectors: M3-lite (the
+`fingerprint` block, live) and an optional tool-chain member. The `panel`
+block configures only the tool-chain member. All three keys are read at
+startup, so changing them needs a restart. How the scores combine, how to
+observe them and when a shadow member may be promoted are in
+[Behavioral Panel](panel.md).
+
+```yaml
+panel:
+  tool_chain_artifact: ""   # path to a tool-chain artifact JSON; empty = not seated (default)
+  tool_chain_shadow: true   # true = observe only (default); false = counts toward the verdict
+  tool_chain_weight: 1.0    # [0, 1] (default 1.0); only matters when tool_chain_shadow is false
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `panel.tool_chain_artifact` | `""` | Filesystem path to the artifact. A missing or invalid artifact logs a warning and the member is not seated; startup continues. |
+| `panel.tool_chain_shadow` | `true` | `true`: the member is assessed, persisted in `panel_opinions` and counted on `/control/panel`, but never changes risk points or OCSF findings. |
+| `panel.tool_chain_weight` | `1.0` | Validated to `[0, 1]`. A live member adds `round(weight * percentile * 20)` risk points, so a weight of 0.5 adds at most 10. |
+
+The panel only runs when `fingerprint.enabled` is `true` and storage is
+enabled. A promoted member also needs `fingerprint.shadow: false`; while
+M3-lite is in shadow no panel member adds points or findings. Roll a
+promoted member back with `tool_chain_shadow: true`.
 
 ## Session ID Behavior
 

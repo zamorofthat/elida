@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity and checksum, effective mode, lane sizes, admission reasons,
   queue and drop counters, `coverage_gaps` (including `not_assessed` and
   `messages_not_assessed`), and `async_dropped_no_session`.
-  `/control/health` adds only the capability enum and a fixed reason.
+  `/control/health` carries none of it: it is liveness only.
 - SQLite `sessions` columns `semantic_shadow` (bounded per-session shadow
   decisions for calibration) and `prior_history` (violations and captures
   carried across reuse of a session ID). Both are added by migration.
@@ -96,23 +96,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     counted in `shadow_matches_dropped` rather than lost silently.
   - `GET /control/sessions/{id}/turns` violation turns carry `event_id`,
     `event_category`, `source_role`, `evidence_only` and a `correlation`
-    summary; `GET /control/health` adds `effective_mode`,
-    `threshold_set_matches` and `breaker_open`; `GET /control/decision`
-    adds `shadow_correlation`.
+    summary; `GET /control/decision` adds `shadow_correlation`. (The
+    matching `/control/health` fields shipped in v0.30.0 and were then
+    withdrawn; see Changed.)
   - The dashboard's session detail and history views show a "Semantic
     evidence" section with timeline markers, and the Settings and Policy
     pages show the shadow and policy correlation counters.
   - `docs/semantic-detection.md` gains a "Residual risk" section.
+- Behavioral panel posture and observability (see `docs/panel.md`). The
+  tool-chain panel member is configured by `panel.tool_chain_artifact`
+  (empty by default: not seated), `panel.tool_chain_shadow` (default `true`:
+  observe only) and `panel.tool_chain_weight` (default `1.0`, validated to
+  `[0, 1]`); all are restart-only. The shipped posture is unchanged: M3-lite
+  enforces and tool-chain, when seated, is shadow. A live member adds
+  `round(weight * anomaly * 20)` risk points, so weight 0.5 adds at most 10.
+  - SQLite `sessions` gains a `panel_opinions` column (one content-free
+    entry per seated member: `member`, `shadow`, `weight`, `anomaly`,
+    `veto`, `bucket`, `distance`, `perplexity`, `percentile`, `class_used`,
+    `reason`), added by migration and returned by
+    `GET /control/history/{id}`. The history list leaves it out.
+  - The `fingerprint score` log line gains `panel_driver`, `panel_risk` and
+    `members` (the same content-free opinions).
+  - `GET /control/panel` reports rolling per-member `sessions_scored`,
+    `mean_anomaly`, `p95_anomaly` and `veto_count` (in memory since boot;
+    mean and p95 over the last 1000 scores per seat).
+  - A live tool-chain member emits its own OCSF 2004 Detection Finding
+    (`elida.tool_chain`: `perplexity`, `percentile`, `class_used`) when its
+    weighted anomaly reaches 0.25. Inert while the member is shadow, which
+    is the default.
+
+- `GET /control/ready` (unauthenticated, like `/control/health`): a readiness
+  probe that is a status code with no body. 200 normally; **503 when
+  `decision.enabled` is set but the capability is `degraded`** — detection was
+  asked for, the process is serving, and nothing is inspecting traffic, so an
+  orchestrator should take the instance out of service. The Helm chart's
+  `readinessProbe` now points here; `livenessProbe` stays on
+  `/control/health`, which still answers 200 while the process serves.
+  Pointing liveness at `/control/ready` would restart the container on a loop.
+- `telemetry.semantic_shadow_logs` (default `false`, restart-only): opt-in OTEL
+  export of shadow-mode semantic decisions, one content-free Info log per
+  stored `semantic_shadow` entry (at most 50 per session), plus the session
+  span attribute `elida.semantic.shadow.count`. The session ID is exported as
+  a domain-separated SHA-256 digest. No OCSF finding, no risk contribution.
+  With the default the export is unchanged.
 
 ### Changed
+- **Breaking, for anyone scraping `/control/health` without a credential:**
+  the unauthenticated health payload is `{"status", "timestamp"}` again. The
+  `decision` block — `capability`, `reason`, `effective_mode`,
+  `threshold_set_matches` and `breaker_open` — is gone from it. Those five
+  facts shipped there in v0.30.0 and together answer "is anything enforcing,
+  and is it working right now" to any caller who can reach the control port,
+  which is reconnaissance an attacker would otherwise have to pay for. Every
+  one of them is still on the authenticated `GET /control/decision`, where
+  they also were before. Liveness and readiness probes are unaffected: both
+  read a status code, and `status` is unchanged.
 - **Breaking (Helm chart).** The control API is now authenticated by default:
   `elida.controlAuth.enabled` defaults to `true` and
   `elida.controlAuth.allowInsecure` to `false`. The control API serves session
   content and raw tool arguments and exposes `PUT /control/settings`, which
   mutates running configuration, while `elida.controlListen` is pod-reachable
   — so the previous defaults left all of that open to anything in the cluster.
-  The probe route `/control/health` stays unauthenticated so Kubernetes probes
-  and uptime checks keep working. With no key supplied the chart generates one into a Secret and
+  The probe routes `/control/health` and `/control/ready` stay unauthenticated
+  so Kubernetes probes and uptime checks keep working. With no key supplied the chart generates one into a Secret and
   re-uses the stored value on upgrade; set
   `elida.controlAuth.existingSecret` to manage it yourself, which is also what
   GitOps flows that run `helm template` should do. To keep the old behavior,
@@ -138,6 +184,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same model is also attached once as `models-injection-v5-fp32.tar.gz`
   with a `.sha256`, and the Docker image ships it at
   `/etc/elida/models/injection`.
+- Behavioral panel scoring: member anomalies are clamped to `[0, 1]` on a
+  common scale, a member veto floors the panel's risk to the maximum
+  regardless of seat order, and the driving member is attributed
+  (`panel_driver`). M3-lite is normalized to that scale (bucket points
+  divided by 20); its risk points, OCSF findings and log-line count are
+  unchanged.
+
+### Fixed
+- Redis-backed deployments no longer lose request-scoped session state. Only
+  eleven lifecycle fields were stored and nothing wrote the rest back, so
+  tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`
+  were empty in every end-of-session record (SQLite, OTEL, OCSF, fingerprint
+  features) under `session.store: redis`. The Redis session now carries the
+  durable content-free state (typically a few KB, worst case roughly
+  70 KB per session), written back
+  at request end, before a policy terminate, after async semantic deliveries
+  that recorded a shadow entry, and every 5 minutes for in-flight requests.
+  Conversation content, tool arguments and results, the system prompt and its
+  hash, and the rate-limit window are still never stored in Redis. That
+  leaves Redis rate limiting per process and means the mid-session
+  system-prompt-change WARN cannot fire under Redis. Replicas serving one
+  session concurrently are last-writer-wins, and the write-back has no
+  compare-and-set (a follow-up).
+- A terminated session now keeps its terminated flag across Redis reloads
+  (so it cannot be resumed), and an idle session now times out under Redis
+  instead of staying active until its key expires. Kill-then-resume is still
+  not supported under Redis (the store never replaces its cached kill
+  channel, a pre-existing limitation; see "Redis session state" in
+  `docs/configuration.md`).
 
 ## [0.18.0] - 2026-08-02
 

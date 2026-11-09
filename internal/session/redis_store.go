@@ -34,27 +34,6 @@ type RedisStore struct {
 	killTopic string
 }
 
-// sessionData is the JSON-serializable session data for Redis.
-//
-// It holds live session state only. Session history (policy violations,
-// captured content, semantic shadow decisions, per-decision semantic
-// records) is not stored in Redis, so a
-// reused session ID starts clean here; history across sessions that shared
-// an ID is merged only by storage.SQLiteStore.SaveSession.
-type sessionData struct {
-	ID           string            `json:"id"`
-	State        State             `json:"state"`
-	StartTime    time.Time         `json:"start_time"`
-	LastActivity time.Time         `json:"last_activity"`
-	EndTime      *time.Time        `json:"end_time,omitempty"`
-	RequestCount int               `json:"request_count"`
-	BytesIn      int64             `json:"bytes_in"`
-	BytesOut     int64             `json:"bytes_out"`
-	Backend      string            `json:"backend"`
-	ClientAddr   string            `json:"client_addr"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-}
-
 // NewRedisStore creates a new Redis-backed session store
 func NewRedisStore(cfg RedisConfig, sessionTTL time.Duration) (*RedisStore, error) {
 	client := redis.NewClient(&redis.Options{
@@ -133,33 +112,39 @@ func (s *RedisStore) Get(id string) (*Session, bool) {
 
 // Put stores a session
 func (s *RedisStore) Put(session *Session) {
+	s.putData(sessionToData(session))
+}
+
+// putData stores already-converted wire data (see Manager.Persist).
+func (s *RedisStore) putData(sd *sessionData) {
 	ctx := context.Background()
 
-	sd := s.dataFromSession(session)
 	data, err := json.Marshal(sd)
 	if err != nil {
-		slog.Error("Failed to marshal session", "session_id", session.ID, "error", err)
+		slog.Error("Failed to marshal session", "session_id", sd.ID, "error", err)
 		return
 	}
 
 	// Store session with TTL
-	if err := s.client.Set(ctx, s.sessionKey(session.ID), data, s.ttl).Err(); err != nil {
-		slog.Error("Redis Set error", "session_id", session.ID, "error", err)
+	if err := s.client.Set(ctx, s.sessionKey(sd.ID), data, s.ttl).Err(); err != nil {
+		slog.Error("Redis Set error", "session_id", sd.ID, "error", err)
 		return
 	}
 
 	// Add to index
-	if err := s.client.SAdd(ctx, s.indexKey(), session.ID).Err(); err != nil {
-		slog.Error("Redis SAdd error", "session_id", session.ID, "error", err)
+	if err := s.client.SAdd(ctx, s.indexKey(), sd.ID).Err(); err != nil {
+		slog.Error("Redis SAdd error", "session_id", sd.ID, "error", err)
 	}
 
 	// Ensure we have a local kill channel
 	s.mu.Lock()
-	if _, ok := s.killChans[session.ID]; !ok {
-		s.killChans[session.ID] = make(chan struct{})
+	if _, ok := s.killChans[sd.ID]; !ok {
+		s.killChans[sd.ID] = make(chan struct{})
 	}
 	s.mu.Unlock()
 }
+
+var _ dataPutter = (*RedisStore)(nil)
 
 // Delete removes a session
 func (s *RedisStore) Delete(id string) {
@@ -272,62 +257,24 @@ func (s *RedisStore) Close() error {
 	return s.client.Close()
 }
 
-// sessionFromData converts Redis data to a Session
+// sessionFromData converts Redis data to a Session wired to the store's
+// local kill channel for the session.
 func (s *RedisStore) sessionFromData(sd *sessionData) *Session {
-	sess := &Session{
-		ID:           sd.ID,
-		State:        sd.State,
-		StartTime:    sd.StartTime,
-		LastActivity: sd.LastActivity,
-		EndTime:      sd.EndTime,
-		RequestCount: sd.RequestCount,
-		BytesIn:      sd.BytesIn,
-		BytesOut:     sd.BytesOut,
-		Backend:      sd.Backend,
-		ClientAddr:   sd.ClientAddr,
-		Metadata:     sd.Metadata,
-	}
-
-	if sess.Metadata == nil {
-		sess.Metadata = make(map[string]string)
-	}
-
 	// Get or create kill channel
 	s.mu.Lock()
-	if ch, ok := s.killChans[sd.ID]; ok {
-		sess.killChan = ch
-	} else {
-		sess.killChan = make(chan struct{})
-		s.killChans[sd.ID] = sess.killChan
+	ch, ok := s.killChans[sd.ID]
+	if !ok {
+		ch = make(chan struct{})
+		s.killChans[sd.ID] = ch
 
 		// If session is already killed, close the channel
 		if sd.State == Killed {
-			close(sess.killChan)
+			close(ch)
 		}
 	}
 	s.mu.Unlock()
 
-	return sess
-}
-
-// dataFromSession converts a Session to Redis-storable data
-func (s *RedisStore) dataFromSession(sess *Session) *sessionData {
-	sess.mu.RLock()
-	defer sess.mu.RUnlock()
-
-	return &sessionData{
-		ID:           sess.ID,
-		State:        sess.State,
-		StartTime:    sess.StartTime,
-		LastActivity: sess.LastActivity,
-		EndTime:      sess.EndTime,
-		RequestCount: sess.RequestCount,
-		BytesIn:      sess.BytesIn,
-		BytesOut:     sess.BytesOut,
-		Backend:      sess.Backend,
-		ClientAddr:   sess.ClientAddr,
-		Metadata:     sess.Metadata,
-	}
+	return newSessionFromData(sd, ch)
 }
 
 // UpdateSession updates a session in Redis (call after modifying session)

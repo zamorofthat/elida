@@ -58,14 +58,27 @@ the metadata is exported whenever OTEL or OCSF export is on.
   `elida.correlation.shadow=true` and `elida.correlation.severity`, and the
   three `gen_ai.*` session attributes; at most 50 per session end, one per
   `correlation_shadow` entry of the ending session instance. There is no
-  OCSF finding: a shadow match is calibration data. `semantic_shadow`
-  decisions are not exported.
+  OCSF finding: a shadow match is calibration data.
+- **Per shadow semantic decision (opt-in)**, one OTEL log at Info severity
+  (body `shadow semantic decision: <signal> (calibration only, never a
+  violation)`), only when `telemetry.semantic_shadow_logs: true` (default
+  `false`). It carries `elida.semantic.shadow=true`,
+  `elida.semantic.source_role`, `elida.semantic.message_index`,
+  `elida.semantic.latency_ms`, the same sixteen `elida.semantic.*` metadata
+  fields as a decision log, and `gen_ai.provider.name` / `gen_ai.request.model`.
+  `gen_ai.conversation.id` is a domain-separated SHA-256 of the session ID
+  (`sha256:<hex>`), not the session ID itself, and differs from the digest the
+  correlation shadow logs use. At most 50 per session end, one per
+  `semantic_shadow` entry of the ending session instance. No OCSF finding, no
+  `policy.violation` event, no risk.
 - **On the session span**, `elida.semantic.decisions.count` (decisions
   exported as logs; set only when OTEL logs are on) and
   `elida.semantic.decisions.dropped` (decisions dropped past the per-session
   cap), set when the session has stored or dropped semantic decisions; and
   `elida.correlation.shadow.count` (shadow correlation matches exported as
-  logs; set only when OTEL logs are on and the session has any).
+  logs; set only when OTEL logs are on and the session has any) and
+  `elida.semantic.shadow.count` (shadow semantic decisions exported as logs;
+  set only when the switch is on, OTEL logs are on and the session has any).
 
 Decisions never raise `elida.violations.max_severity`; only violations feed
 it, and evidence-only violations are excluded from it. Decisions stamped
@@ -88,7 +101,10 @@ attributes plus `elida.violation.event_id` (ten over a plain violation):
 about 1.3 KB with
 32 event IDs at their usual 35-byte width, about 6 KB with every string at
 the 128-byte cap. A session end emits at most 50 shadow correlation logs of
-14 attributes each.
+14 attributes each. With `telemetry.semantic_shadow_logs: true` a session end
+adds at most 50 shadow semantic logs of 23 attributes each (about 1 KB with
+typical values). With the switch off (the default) none are emitted and
+nothing else changes.
 
 **What is never exported**
 
@@ -480,3 +496,12 @@ Each entry says what is not caught or not guaranteed, and how it fails.
   shadow-correlated. Its correlator state is in memory and bounded like the
   policy correlator's; the persisted `correlation_shadow` list keeps at
   most 50 entries per session ID.
+- **Shadow lists under Redis are last-writer-wins across replicas.** With
+  `session.store: redis`, `semantic_shadow` and `correlation_shadow` persist
+  with the session (as of this release; earlier versions lost them). Two
+  replicas serving the same session concurrently each write their own copy
+  back, so one replica's entries can be dropped, and the write-back's read and
+  write are not a compare-and-set (a CAS is a follow-up). The shadow
+  correlator's own state is per process, so a session that moves replicas
+  mid-stream starts its correlation windows over on the new one. See "Redis
+  session state" in `docs/configuration.md`.
