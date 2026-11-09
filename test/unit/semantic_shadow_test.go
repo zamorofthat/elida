@@ -245,13 +245,37 @@ var allowedShadowStringFields = map[string]bool{
 
 func assertNoContentFields(t *testing.T, typ reflect.Type) {
 	t.Helper()
+	assertNoContentFieldsAllowing(t, typ, allowedShadowStringFields, nil)
+}
+
+// allowedCorrelationShadowStringFields enumerates every string field a
+// correlation shadow entry may carry: a match ID, the rule name, its shape,
+// severity and configured mode, all configuration or identifiers.
+var allowedCorrelationShadowStringFields = map[string]bool{
+	"MatchID": true, "Rule": true, "Shape": true, "Severity": true, "Mode": true,
+}
+
+// allowedCorrelationShadowStringSliceFields enumerates the []string fields:
+// decision/event identifiers and category names.
+var allowedCorrelationShadowStringSliceFields = map[string]bool{
+	"EventIDs": true, "Categories": true,
+}
+
+// assertNoContentFieldsAllowing is assertNoContentFields with explicit
+// allowlists: strings by field name, and []string fields by field name.
+func assertNoContentFieldsAllowing(t *testing.T, typ reflect.Type, strs, strSlices map[string]bool) {
+	t.Helper()
 	timeType := reflect.TypeOf(time.Time{})
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
 		switch f.Type.Kind() {
 		case reflect.String:
-			if !allowedShadowStringFields[f.Name] {
+			if !strs[f.Name] {
 				t.Errorf("%s.%s is a string field not in the allowlist; shadow entries must not carry content", typ, f.Name)
+			}
+		case reflect.Slice:
+			if f.Type.Elem().Kind() != reflect.String || !strSlices[f.Name] {
+				t.Errorf("%s.%s has type %s, which is not an allowlisted []string", typ, f.Name, f.Type)
 			}
 		case reflect.Float64, reflect.Int, reflect.Int64, reflect.Bool:
 		case reflect.Struct:
@@ -279,6 +303,11 @@ func TestSemanticShadow_CarriesNoContentFields(t *testing.T) {
 			t.Errorf("field %d differs: session %s %s %q, storage %s %s %q", i, fa.Name, fa.Type, fa.Tag, fb.Name, fb.Type, fb.Tag)
 		}
 	}
+}
+
+func TestCorrelationShadow_CarriesNoContentFields(t *testing.T) {
+	assertNoContentFieldsAllowing(t, reflect.TypeOf(session.CorrelationShadow{}),
+		allowedCorrelationShadowStringFields, allowedCorrelationShadowStringSliceFields)
 }
 
 func TestSemanticShadow_MigrationIsIdempotentAcrossReopen(t *testing.T) {
