@@ -2,8 +2,9 @@ ELIDA has been deployed successfully!
 
 {{- if .Values.elida.controlAuth.enabled }}
 
-The control API requires a credential. The probe route /control/health stays
-unauthenticated so Kubernetes probes and uptime checks keep working.
+The control API requires a credential. The probe routes /control/health and
+/control/ready stay unauthenticated so Kubernetes probes and uptime checks
+keep working.
 {{- if .Values.elida.controlAuth.existingSecret }}
 The key comes from the Secret you supplied: {{ .Values.elida.controlAuth.existingSecret }} (key {{ include "elida.controlAuthSecretKey" . }}).
 {{- else }}

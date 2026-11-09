@@ -23,8 +23,10 @@ elida:
   # Control API authentication. On by default: the control API serves session
   # content, raw tool arguments and a settings endpoint that mutates running
   # config, and controlListen is pod-reachable, so anything in the cluster can
-  # reach it. The probe route /control/health stays unauthenticated so
-  # Kubernetes probes and uptime checks keep working.
+  # reach it. The probe routes /control/health and /control/ready stay
+  # unauthenticated so Kubernetes probes and uptime checks keep working.
+  # Neither reports detector state; for that, use /control/decision, which
+  # does require the credential.
   controlAuth:
     enabled: true
     # The key is delivered as a Secret, never templated into the ConfigMap.

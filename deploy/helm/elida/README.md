@@ -80,8 +80,9 @@ tool arguments, and `PUT /control/settings` changes running configuration, while
 `elida.controlListen` has to be pod-reachable for Kubernetes to probe it — so an
 unauthenticated control API is reachable by anything in the cluster.
 
-`/control/health` stays unauthenticated, so Kubernetes probes and uptime
-checks need no credential.
+`/control/health` and `/control/ready` stay unauthenticated, so Kubernetes
+probes and uptime checks need no credential. Neither reports detector state in
+its body — `/control/decision` does, and it requires the credential.
 
 **Default install.** The chart generates a key into a Secret and re-uses the
 stored value on upgrade, so the credential is stable:
