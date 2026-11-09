@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.27.0"
+  GO_VERSION: "1.27.3"
   # The injection model pins (upstream commit, model.onnx and manifest.json
   # sha256) live only in scripts/models/pins.env; jobs that need them load
   # that file into $GITHUB_ENV. Bumping a pin is a model change and
