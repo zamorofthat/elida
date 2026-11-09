@@ -48,7 +48,8 @@ check "chart-managed Secret created"    'printf "%s" "$D" | grep -qE "^  name: r
 check "key delivered by secretKeyRef"   'printf "%s" "$D" | grep -q secretKeyRef'
 check "no api_key in the ConfigMap"     '! printf "%s" "$D" | grep -q "api_key:"'
 check "no control Service"              '! printf "%s" "$D" | grep -qE "^  name: r-elida-control$"'
-check "probes are configured"            'printf "%s" "$D" | grep -q livenessProbe && printf "%s" "$D" | grep -q readinessProbe'
+check "readinessProbe on /control/ready"  'printf "%s" "$D" | grep -q "path: /control/ready"'
+check "livenessProbe on /control/health" 'printf "%s" "$D" | grep -q "path: /control/health"'
 KEY=$(secret_key "$D")
 check "generated key is 32 chars"       '[ ${#KEY} -eq 32 ]'
 
