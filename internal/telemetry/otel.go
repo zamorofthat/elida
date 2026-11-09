@@ -458,6 +458,47 @@ func (p *Provider) EmitCorrelationShadowLog(ctx context.Context, sessionID strin
 	p.logger.Emit(ctx, rec)
 }
 
+const semanticShadowConversationIDDomain = "elida.semantic_shadow.session.v1\x00"
+
+// semanticShadowConversationID derives a stable, content-free identifier for
+// the request-controlled session ID, used only by the semantic shadow log
+// path. Its domain differs from the correlation shadow path's so the two
+// digests cannot be confused or joined.
+func semanticShadowConversationID(sessionID string) string {
+	digest := sha256.Sum256([]byte(semanticShadowConversationIDDomain + sessionID))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// EmitSemanticShadowLog emits one Info log record for one shadow-mode
+// semantic decision: calibration data, never a violation. The session ID is
+// represented by a domain-separated digest; every other string passes
+// safeToken.
+func (p *Provider) EmitSemanticShadowLog(ctx context.Context, sessionID string, s SemanticShadow, model, providerName string) {
+	if p.logger == nil {
+		return
+	}
+	var rec otellog.Record
+	ts := s.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	rec.SetTimestamp(ts)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetBody(attribute.StringValue("shadow semantic decision: " + safeToken(s.Metadata.Signal) + " (calibration only, never a violation)"))
+	rec.AddAttributes(
+		attribute.String("gen_ai.conversation.id", safeToken(semanticShadowConversationID(sessionID))),
+		attribute.String("gen_ai.provider.name", safeToken(providerName)),
+		attribute.String("gen_ai.request.model", safeToken(modelOrUnknown(model))),
+		attribute.Bool("elida.semantic.shadow", true),
+		attribute.String("elida.semantic.source_role", safeToken(s.SourceRole)),
+		attribute.Int("elida.semantic.message_index", s.MessageIndex),
+		attribute.Int64("elida.semantic.latency_ms", s.LatencyMs),
+	)
+	rec.AddAttributes(semanticAttributes("elida.semantic.", s.Metadata)...)
+	setTraceContext(&rec, ctx)
+	p.logger.Emit(ctx, rec)
+}
+
 // EmitSessionKilledLog emits a session kill/terminate OTEL log record
 func (p *Provider) EmitSessionKilledLog(ctx context.Context, sessionID, reason, backend, model string, durationMs int64, requestCount int) {
 	if p.logger == nil {
@@ -721,6 +762,11 @@ const (
 	// AttrCorrelationShadowCount is how many shadow correlation matches the
 	// session exported as logs (set only when OTEL logs are on).
 	AttrCorrelationShadowCount = "elida.correlation.shadow.count"
+
+	// AttrSemanticShadowCount is how many shadow semantic decisions the
+	// session exported as logs (set only when OTEL logs are on and the
+	// opt-in switch put entries on the record).
+	AttrSemanticShadowCount = "elida.semantic.shadow.count"
 )
 
 // Violation represents a policy violation for telemetry export
@@ -934,6 +980,17 @@ type CorrelationShadow struct {
 	Metadata  CorrelationMetadata
 }
 
+// SemanticShadow is one shadow-mode semantic decision for export:
+// calibration data, never a finding. Identifiers, enums, numbers and times
+// only; the same SemanticMetadata allowlist as a stored decision.
+type SemanticShadow struct {
+	Timestamp    time.Time
+	SourceRole   string
+	MessageIndex int
+	LatencyMs    int64
+	Metadata     SemanticMetadata
+}
+
 // exportedSeverity is the severity a violation is exported at: its own,
 // except that evidence-only violations are informational.
 func (v Violation) exportedSeverity() string {
@@ -974,9 +1031,13 @@ type SessionRecord struct {
 	// correlation matches (at most 50); each is exported as one OTEL log,
 	// never as an OCSF finding.
 	CorrelationShadow []CorrelationShadow
-	Captures          []CapturedRequest
-	CaptureCount      int
-	Model             string // For GenAI semconv
+	// SemanticShadow holds the ending session instance's shadow semantic
+	// decisions (at most 50) when the operator opted in; each is exported
+	// as one OTEL log, never as an OCSF finding.
+	SemanticShadow []SemanticShadow
+	Captures       []CapturedRequest
+	CaptureCount   int
+	Model          string // For GenAI semconv
 
 	// WebSocket fields
 	IsWebSocket  bool
@@ -1120,6 +1181,9 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	if len(record.CorrelationShadow) > 0 && p.logger != nil {
 		attrs = append(attrs, attribute.Int(AttrCorrelationShadowCount, len(record.CorrelationShadow)))
 	}
+	if len(record.SemanticShadow) > 0 && p.logger != nil {
+		attrs = append(attrs, attribute.Int(AttrSemanticShadowCount, len(record.SemanticShadow)))
+	}
 
 	// Add WebSocket attributes if this is a WebSocket session
 	if record.IsWebSocket {
@@ -1197,6 +1261,13 @@ func (p *Provider) ExportSessionRecord(ctx context.Context, record SessionRecord
 	// OCSF finding: a shadow match is calibration data.
 	for _, s := range record.CorrelationShadow {
 		p.EmitCorrelationShadowLog(ctx, record.SessionID, s, record.Model, record.Backend)
+	}
+
+	// One log per shadow semantic decision (at most 50 per session, and only
+	// when the operator opted in). No OCSF finding: a shadow decision is
+	// calibration data.
+	for _, s := range record.SemanticShadow {
+		p.EmitSemanticShadowLog(ctx, record.SessionID, s, record.Model, record.Backend)
 	}
 
 	// Emit OCSF Detection Finding events for policy violations

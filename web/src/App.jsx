@@ -33,7 +33,9 @@ export function Login({ onLogin }) {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(API_BASE + '/control/health', {
+      // /control/health ignores credentials (liveness), so it cannot validate
+      // a key; /control/decision is authenticated and always answers 200.
+      const res = await fetch(API_BASE + '/control/decision', {
         headers: { 'Authorization': 'Bearer ' + key.trim() },
       })
       if (res.status === 401) {
@@ -1102,7 +1104,9 @@ export function App() {
   useEffect(() => {
     setLogoutHandler(() => setAuthed(false))
     if (!authed) {
-      fetch(API_BASE + '/control/health')
+      // Health is always 200 (liveness), so it cannot tell whether auth is
+      // required; an unauthenticated /control/decision answers 401 if it is.
+      fetch(API_BASE + '/control/decision')
         .then((res) => {
           if (res.ok) {
             setAuthed(true)

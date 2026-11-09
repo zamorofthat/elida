@@ -377,10 +377,3 @@ func TestPlanCFix_ShadowLogHashesSessionAndGuardsGenericStrings(t *testing.T) {
 		})
 	}
 }
-
-// The record never carries a semantic_shadow list for export (D12).
-func TestCorrelationExport_SemanticShadowIsNotExported(t *testing.T) {
-	if _, ok := reflect.TypeOf(SessionRecord{}).FieldByName("SemanticShadow"); ok {
-		t.Fatal("semantic_shadow is not exported in Plan C (D12)")
-	}
-}
