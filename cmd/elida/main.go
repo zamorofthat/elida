@@ -755,7 +755,7 @@ func (a *app) exportToTelemetry(record *storage.SessionRecord, snap *session.Ses
 	if !a.tp.Enabled() && a.ocsfEmitter == nil {
 		return
 	}
-	a.tp.ExportSessionRecord(context.Background(), telemetryRecordFrom(record, snap, endTime, integrity))
+	a.tp.ExportSessionRecord(context.Background(), a.telemetryRecord(record, snap, endTime, integrity))
 }
 
 // telemetrySemantic converts stored semantic metadata for export. The fields
@@ -789,6 +789,18 @@ func telemetryCorrelation(c *storage.CorrelationEvidence) *telemetry.Correlation
 		FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
 		EventIDs: append([]string(nil), c.EventIDs...),
 	}
+}
+
+// telemetryRecord is telemetryRecordFrom with the operator's export switches
+// applied. Shadow semantic decisions are exported only when
+// telemetry.semantic_shadow_logs is true; otherwise the list is dropped here,
+// so the default export is unchanged.
+func (a *app) telemetryRecord(record *storage.SessionRecord, snap *session.Session, endTime time.Time, integrity *storage.SDRIntegrity) telemetry.SessionRecord {
+	tr := telemetryRecordFrom(record, snap, endTime, integrity)
+	if !a.cfg.Telemetry.SemanticShadowLogs {
+		tr.SemanticShadow = nil
+	}
+	return tr
 }
 
 // telemetryRecordFrom builds the telemetry export record from the stored
@@ -857,6 +869,18 @@ func telemetryRecordFrom(record *storage.SessionRecord, snap *session.Session, e
 				MatchID: c.MatchID, Rule: c.Rule, Shape: c.Shape, Mode: c.Mode, EventCount: len(c.EventIDs),
 				Categories: append([]string(nil), c.Categories...), FirstEvent: c.FirstEvent, LastEvent: c.LastEvent,
 				EventIDs: append([]string(nil), c.EventIDs...),
+			},
+		})
+	}
+	for _, s := range record.SemanticShadow {
+		telemRecord.SemanticShadow = append(telemRecord.SemanticShadow, telemetry.SemanticShadow{
+			Timestamp: s.Timestamp, SourceRole: s.SourceRole, MessageIndex: s.MessageIndex, LatencyMs: s.LatencyMs,
+			Metadata: telemetry.SemanticMetadata{
+				Signal: s.Signal, Probability: s.Probability, AuxProbability: s.AuxProbability, Vetoed: s.Vetoed,
+				Model: s.Model, ModelVersion: s.ModelVersion, ModelChecksum: s.ModelChecksum, ThresholdSet: s.ThresholdSet,
+				DecisionID: s.DecisionID, Transform: s.Transform, TransformDepth: s.TransformDepth,
+				WindowStartByte: s.WindowStartByte, WindowEndByte: s.WindowEndByte, CoverageComplete: s.CoverageComplete,
+				ExecutionMode: s.ExecutionMode, ProtectionScope: s.ProtectionScope,
 			},
 		})
 	}

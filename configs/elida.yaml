@@ -109,6 +109,9 @@ telemetry:
   capture_content: "none"
   # Max bytes of request/response body to include in OTEL exports (default 4096)
   max_body_size: 4096
+  # Opt in: export shadow semantic decisions (calibration data) as OTEL logs.
+  # Off by default; at most 50 logs per session end when on.
+  semantic_shadow_logs: false
 
 # OCSF native transport configuration
 # Emits OCSF Detection Finding events via independent transports (not OTEL)
