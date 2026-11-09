@@ -140,6 +140,7 @@ telemetry:
   insecure: true
   capture_content: "none"   # "none", "flagged", or "all"
   max_body_size: 4096       # Truncation limit for captured bodies
+  semantic_shadow_logs: false  # Opt in: export shadow semantic decisions as OTEL logs (calibration data, max 50 per session)
 ```
 
 ## CLI Flags

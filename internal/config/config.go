@@ -575,13 +575,14 @@ type LoggingConfig struct {
 
 // TelemetryConfig holds OpenTelemetry configuration
 type TelemetryConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	Exporter       string `yaml:"exporter"` // "otlp", "stdout", or "none"
-	Endpoint       string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
-	ServiceName    string `yaml:"service_name"`
-	Insecure       bool   `yaml:"insecure"`        // Use insecure connection for OTLP
-	CaptureContent string `yaml:"capture_content"` // "none" (default), "flagged", or "all"
-	MaxBodySize    int    `yaml:"max_body_size"`   // Truncation limit for bodies (default 4096)
+	Enabled            bool   `yaml:"enabled"`
+	Exporter           string `yaml:"exporter"` // "otlp", "stdout", or "none"
+	Endpoint           string `yaml:"endpoint"` // OTLP endpoint (e.g., "localhost:4317")
+	ServiceName        string `yaml:"service_name"`
+	Insecure           bool   `yaml:"insecure"`             // Use insecure connection for OTLP
+	CaptureContent     string `yaml:"capture_content"`      // "none" (default), "flagged", or "all"
+	MaxBodySize        int    `yaml:"max_body_size"`        // Truncation limit for bodies (default 4096)
+	SemanticShadowLogs bool   `yaml:"semantic_shadow_logs"` // Opt in: export shadow semantic decisions as OTEL logs (default false)
 }
 
 // OCSFConfig holds OCSF native transport configuration
