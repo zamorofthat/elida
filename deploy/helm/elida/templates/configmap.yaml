@@ -1,3 +1,4 @@
+{{- include "elida.validateControlAuth" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -33,7 +34,9 @@ data:
       auth:
         enabled: {{ .Values.elida.controlAuth.enabled }}
         {{- if .Values.elida.controlAuth.enabled }}
-        api_key: {{ .Values.elida.controlAuth.apiKey | quote }}
+        # The key is NOT written here: a ConfigMap is readable by anyone with
+        # `get configmaps`. It arrives as ELIDA_CONTROL_API_KEY from a Secret,
+        # and the environment overrides the config file.
         {{- end }}
         allow_insecure: {{ .Values.elida.controlAuth.allowInsecure }}
 

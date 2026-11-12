@@ -47,10 +47,38 @@ jobs:
           cd web
           bun install --frozen-lockfile || (echo "::error::bun.lock is out of sync with package.json. Run 'bun install' and commit the updated lockfile." && exit 1)
 
+      - name: Run dashboard tests
+        run: |
+          cd web
+          bun run test
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.14.0
+
+  chart:
+    name: Helm Chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Helm
+        run: |
+          curl -fsSLo helm.tgz https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf helm.tgz linux-amd64
+        env:
+          HELM_VERSION: 3.16.4
+          HELM_SHA256: fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+
+      - name: Lint chart
+        run: helm lint deploy/helm/elida
+
+      - name: Check rendered manifests
+        run: scripts/helm-render-check.sh deploy/helm/elida
 
   security:
     name: Security Scan
