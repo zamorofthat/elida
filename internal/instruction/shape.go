@@ -26,7 +26,7 @@ var (
 	// replayPrefixRe is the line-number prefix a file-read tool adds.
 	replayPrefixRe = regexp.MustCompile(`^\s*\d+(?:\t|→)`)
 	fenceRe        = regexp.MustCompile("^\\s*(?:```|~~~)")
-	listMarkerRe   = regexp.MustCompile("^(?:[-*+>]|\\d+[.)])\\s+(?:\\[[ xX]\\]\\s+)?")
+	listMarkerRe   = regexp.MustCompile(`^(?:[-*+>]|\d+[.)])\s+(?:\[[ xX]\]\s+)?`)
 	leadPunctRe    = regexp.MustCompile("^[*_`\"'(\\[]+")
 	mdHeadingRe    = regexp.MustCompile(`^#{1,6}\s`)
 
