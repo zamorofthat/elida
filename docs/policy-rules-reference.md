@@ -363,7 +363,7 @@ Detects dangerous content in LLM responses that could be executed by clients.
   patterns:
     - "pickle\\.loads"
     - "yaml\\.unsafe_load"
-    - "eval\\s*\\(.*input"
+    - "(?:^|[^A-Za-z0-9])eval\\s*\\(.*input"
     - "exec\\s*\\(.*input"
     - "__import__\\s*\\("
   severity: "critical"

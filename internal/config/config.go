@@ -1032,7 +1032,7 @@ func defaults() *Config {
 				ShapeConfidenceThreshold: 0.7,
 				AsyncQueueSize:           100,
 				Rules: []InstructionRuleConfig{
-					{Name: "instruction_shell_exec", Patterns: []string{`curl\s+[^|]*\|\s*(ba)?sh`, `wget\s+[^|]*\|\s*(ba)?sh`, `\beval\s*\(`, `\bexec\s*\(`}, Severity: "critical", Action: "block"},
+					{Name: "instruction_shell_exec", Patterns: []string{`curl\s+[^|]*\|\s*(ba)?sh`, `wget\s+[^|]*\|\s*(ba)?sh`, `(?:^|[^A-Za-z0-9])eval\s*\(`, `(?:^|[^A-Za-z0-9])exec\s*\(`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_prompt_injection", Patterns: []string{`ignore\s+(all\s+)?previous`, `you\s+are\s+now`, `disregard`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_permission_escalation", Patterns: []string{`always\s+approve`, `never\s+ask.*confirmation`, `auto.?accept`}, Severity: "high", Action: "flag"},
 					{Name: "instruction_hidden_content", Patterns: []string{"[\\x{200B}-\\x{200F}]", "[\\x{202A}-\\x{202E}]"}, Severity: "critical", Action: "block"},
@@ -2095,7 +2095,7 @@ func getStandardPreset() []PolicyRule {
 		{Name: "output_dangerous_code", Type: "content_match", Target: "response", Patterns: []string{
 			"pickle\\.loads",
 			"yaml\\.unsafe_load",
-			"\\beval\\s*\\(.*input",
+			"(?:^|[^A-Za-z0-9])eval\\s*\\(.*input",
 			"__import__\\s*\\(",
 		}, Severity: "critical", Action: "flag", Description: "LLM02: Response contains unsafe code patterns"},
 
@@ -2383,7 +2383,7 @@ func getMCPPreset() []PolicyRule {
 		// Detect malicious content returned via resources/read
 		{Name: "mcp06_resource_injection", Type: "content_match", Target: "response", Patterns: []string{
 			"\"contents\"[^}]*(?:<script|javascript:|on(?:click|load|error)\\s*=)",
-			"\"contents\"[^}]*(?:\\beval\\s*\\(|\\bexec\\s*\\(|__import__|subprocess)",
+			"\"contents\"[^}]*(?:(?:^|[^A-Za-z0-9])eval\\s*\\(|(?:^|[^A-Za-z0-9])exec\\s*\\(|__import__|subprocess)",
 		}, Severity: "critical", Action: "block", Description: "MCP-06: Malicious content in MCP resource response"},
 
 		// ── OWASP MCP-07: Authentication/Authorization Gaps ──
