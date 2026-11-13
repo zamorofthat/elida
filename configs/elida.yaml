@@ -287,6 +287,10 @@ policy:
       - cursor_rules
       - agents_md
       - windsurfrules
+    # Tracks unnamed text that is addressed to an agent (hook context, MCP
+    # server instructions) at medium confidence. The threshold is a 0-1
+    # "directed at an agent" score; lower it to catch more, at the cost of
+    # more documentation being tracked. A "no" here never means "safe".
     shape_detection: true
     shape_confidence_threshold: 0.7
     async_queue_size: 100

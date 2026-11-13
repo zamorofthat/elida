@@ -111,9 +111,9 @@ func TestClassifyByShape(t *testing.T) {
 			wantAbove: -1,
 		},
 		{
-			name:      "borderline - has some directive patterns",
+			name:      "short text with directives stays below the floor",
 			content:   "## Getting Started\n\nThis project is a web server. Run npm install to get started.\nAlways use TypeScript for new files.\n",
-			wantAbove: 0.3,
+			wantAbove: -1,
 		},
 	}
 
@@ -158,9 +158,9 @@ func TestExtract(t *testing.T) {
 		},
 		{
 			name:           "no marker, shape detection on, above threshold",
-			content:        "# Project Instructions\n\n## Rules\n\nYou must always test. This project uses Go.\n\n## Code Style\n\nNever skip linting. Always run gofmt. Do not use internal/ unless needed.",
+			content:        shapeFixture(t, "hook_context.md"),
 			shapeDetection: true,
-			threshold:      0.5,
+			threshold:      0.7,
 			wantNil:        false,
 			wantType:       FileTypeUnknown,
 			wantConfidence: ConfidenceMedium,
@@ -385,11 +385,17 @@ func TestExtractAllForgedMarkerKeepsTail(t *testing.T) {
 
 func TestExtractAllUntrackedOnlyBlockYieldsNothing(t *testing.T) {
 	// A marker naming a file that is not an instruction file says what the
-	// block is: a document. Shape detection must not second-guess it.
-	block := "Contents of /repo/docs/configuration.md:\n\n## Rules\n" +
-		"You must always run the linter in this project. Never skip gofmt. " +
-		"Do not edit internal/x.go without a test.\n"
-	if files := ExtractAll(block, true, 0.1); files != nil {
+	// block is: a document. Shape detection must not second-guess it, even
+	// for a body it would otherwise track.
+	body := shapeFixture(t, "hook_context.md")
+
+	files := ExtractAll(body, true, 0.7)
+	if len(files) != 1 || files[0].Confidence != ConfidenceMedium {
+		t.Fatalf("control: body with no marker gave %+v, want one medium-confidence file", files)
+	}
+
+	block := "Contents of /repo/docs/configuration.md:\n\n" + body
+	if files := ExtractAll(block, true, 0.7); files != nil {
 		t.Errorf("got %+v, want nil", files)
 	}
 }
