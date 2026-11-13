@@ -2302,9 +2302,7 @@ func (p *Proxy) extractInstructionFiles(body []byte) []*instruction.InstructionF
 		systemContent := extractMessageContent(req.System)
 		if systemContent != "" {
 			for _, tagContent := range extractTrustedTagContent(systemContent, p.trustedTagExtractRegexs) {
-				if file := instruction.Extract(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold); file != nil {
-					files = append(files, file)
-				}
+				files = append(files, instruction.ExtractAll(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold)...)
 			}
 		}
 	}
@@ -2319,9 +2317,7 @@ func (p *Proxy) extractInstructionFiles(body []byte) []*instruction.InstructionF
 			continue
 		}
 		for _, tagContent := range extractTrustedTagContent(content, p.trustedTagExtractRegexs) {
-			if file := instruction.Extract(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold); file != nil {
-				files = append(files, file)
-			}
+			files = append(files, instruction.ExtractAll(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold)...)
 		}
 	}
 
