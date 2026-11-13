@@ -89,6 +89,39 @@ type ScanResult struct {
 	ShouldBlock bool        `json:"should_block"`
 }
 
+// RuleHiddenContent is the name of the default rule for invisible Unicode. It
+// is the one rule a medium-confidence file may block on.
+const RuleHiddenContent = "instruction_hidden_content"
+
+// CappedFor returns the result as it applies to a file identified at the
+// given confidence. A medium-confidence file was identified by a heuristic,
+// not by its path, so it blocks only on hidden content; its violations are
+// returned unchanged, because the evidence is kept even where enforcement is
+// not.
+func (r ScanResult) CappedFor(c Confidence) ScanResult {
+	if c != ConfidenceMedium {
+		return r
+	}
+	r.ShouldBlock = false
+	for _, v := range r.Violations {
+		if v.RuleName == RuleHiddenContent && v.Action == "block" {
+			r.ShouldBlock = true
+			break
+		}
+	}
+	return r
+}
+
+// hasHiddenContent reports whether the hidden-content rule matched.
+func (r ScanResult) hasHiddenContent() bool {
+	for _, v := range r.Violations {
+		if v.RuleName == RuleHiddenContent {
+			return true
+		}
+	}
+	return false
+}
+
 // Record is the persistent representation stored in the DB.
 type Record struct {
 	Hash         string      `json:"hash"`

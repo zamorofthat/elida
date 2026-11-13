@@ -424,9 +424,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Extracts instruction files from trusted tag content (which policy skips)
 	if p.instructionRegistry != nil && len(requestBody) > 0 {
 		if files := p.extractInstructionFiles(requestBody); len(files) > 0 {
+			auditMode := p.policy != nil && p.policy.IsAuditMode()
 			for _, file := range files {
 				result := p.instructionRegistry.Check(sess.ID, file)
-				if result.ShouldBlock {
+				if result.ShouldBlock && auditMode {
+					slog.Warn("instruction integrity would block (audit mode)",
+						"session_id", sess.ID,
+						"hash", file.Hash,
+						"type", file.Type.String(),
+						"violations", len(result.Violations),
+					)
+				}
+				if instructionBlocks(result, auditMode) {
 					slog.Warn("request blocked by instruction integrity check",
 						"session_id", sess.ID,
 						"hash", file.Hash,
@@ -2278,6 +2287,13 @@ func extractTrustedTagContent(content string, extractRegexs []*regexp.Regexp) []
 		}
 	}
 	return extracted
+}
+
+// instructionBlocks reports whether an instruction integrity result stops the
+// request. Audit mode records the finding and enforces nothing, as it does for
+// policy rules.
+func instructionBlocks(result instruction.ScanResult, auditMode bool) bool {
+	return result.ShouldBlock && !auditMode
 }
 
 // extractInstructionFiles parses the request body and extracts instruction files

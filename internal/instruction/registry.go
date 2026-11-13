@@ -29,6 +29,8 @@ type Event struct {
 }
 
 // registryEntry tracks the status of a known instruction file hash.
+// scanResult is stored uncapped: entries are keyed by content hash alone, and
+// the same bytes can arrive at either confidence.
 type registryEntry struct {
 	status     ScanStatus
 	scanResult ScanResult
@@ -110,7 +112,7 @@ func (r *Registry) Check(sessionID string, file *InstructionFile) ScanResult {
 		}
 		slog.Debug("instruction file cache hit",
 			"session_id", sessionID, "hash", truncHash(file.Hash), "status", entry.status)
-		return entry.scanResult
+		return entry.scanResult.CappedFor(file.Confidence)
 	}
 
 	// Cache miss: inline scan
@@ -143,7 +145,7 @@ func (r *Registry) Check(sessionID string, file *InstructionFile) ScanResult {
 		slog.Warn("instruction async queue full, dropping job", "hash", truncHash(file.Hash))
 	}
 
-	return result
+	return result.CappedFor(file.Confidence)
 }
 
 // worker processes async jobs.
@@ -202,8 +204,11 @@ func (r *Registry) processJob(job asyncJob) {
 			return
 		}
 
+		// A medium-confidence file was picked out by a heuristic, so its
+		// ordinary rule hits are recorded without raising an alarm.
 		severity := "info"
-		if status == string(ScanStatusFlagged) {
+		if status == string(ScanStatusFlagged) &&
+			(file.Confidence != ConfidenceMedium || job.result.hasHiddenContent()) {
 			severity = "critical"
 		}
 		_ = r.store.SaveEvent(Event{
