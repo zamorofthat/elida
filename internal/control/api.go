@@ -626,15 +626,59 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := h.manager.Stats()
-	if h.instructionRegistry == nil {
-		writeJSON(w, http.StatusOK, stats)
-		return
+	resp := statsResponse{
+		Stats:        h.manager.Stats(),
+		Capabilities: h.capabilities(),
 	}
-	writeJSON(w, http.StatusOK, struct {
-		session.Stats
-		InstructionIntegrity instruction.Stats `json:"instruction_integrity"`
-	}{stats, h.instructionRegistry.Stats()})
+	if h.instructionRegistry != nil {
+		ii := h.instructionRegistry.Stats()
+		resp.InstructionIntegrity = &ii
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// statsResponse carries the session statistics plus what this ELIDA can do.
+// Stats is embedded, so every field it has always had stays at the top level
+// of the response and existing consumers are unaffected.
+type statsResponse struct {
+	session.Stats
+	Capabilities         capabilities       `json:"capabilities"`
+	InstructionIntegrity *instruction.Stats `json:"instruction_integrity,omitempty"`
+}
+
+// capabilities describes optional subsystems so a client can tell a feature
+// that is switched off from one that is on and simply has no data. Without
+// it the dashboard has to infer that from an error status, which it cannot
+// do for a subsystem that answers 200 with an empty list.
+type capabilities struct {
+	Voice voiceCapability `json:"voice"`
+}
+
+// voiceCapability reports whether voice sessions can be recorded at all.
+//
+// It is deliberately computed rather than read from config: voice needs the
+// WebSocket transport AND voice_sessions.enabled, and each is off by default,
+// so either one being false means the Voice view can never show anything.
+// Protocols lists what will actually be parsed, which is not necessarily what
+// the config names.
+type voiceCapability struct {
+	Enabled   bool     `json:"enabled"`
+	Protocols []string `json:"protocols"`
+}
+
+// capabilities reports the optional subsystems that are live in this process.
+func (h *Handler) capabilities() capabilities {
+	caps := capabilities{Voice: voiceCapability{Protocols: []string{}}}
+	if h.wsHandler == nil {
+		// No WebSocket transport: no handler was ever constructed, so no
+		// frame can arrive to start a voice session.
+		return caps
+	}
+	caps.Voice.Enabled = h.wsHandler.VoiceTrackingEnabled()
+	if protos := h.wsHandler.EnabledVoiceProtocols(); len(protos) > 0 {
+		caps.Voice.Protocols = protos
+	}
+	return caps
 }
 
 // handleSessions handles GET /control/sessions

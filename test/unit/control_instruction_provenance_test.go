@@ -50,7 +50,10 @@ func getBody(h http.Handler, method, url string) (int, []byte) {
 func TestControlStatsKeepsItsKeys(t *testing.T) {
 	h, manager := newProvenanceControl(t, nil)
 	base, _ := json.Marshal(manager.Stats())
-	wantKeys := keysOf(t, base)
+	// capabilities is always present: it says what this ELIDA can do, not what
+	// it was configured to track.
+	wantKeys := append(keysOf(t, base), "capabilities")
+	sort.Strings(wantKeys)
 
 	code, body := getBody(h, "GET", "/control/stats")
 	if code != 200 {
