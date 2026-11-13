@@ -56,6 +56,57 @@ func TestExtractAllPathMarkerFormats(t *testing.T) {
 			wantFound: false,
 		},
 		{
+			name:      "space in the path, labeled",
+			content:   "Contents of /Users/j/My Projects/app/CLAUDE.md (project instructions, checked into the codebase):\n\nRules.",
+			wantType:  FileTypeClaudeMD,
+			wantPath:  "/Users/j/My Projects/app/CLAUDE.md",
+			wantFound: true,
+		},
+		{
+			name:      "space in the path, no label",
+			content:   "Contents of /Users/j/My Projects/app/AGENTS.md:\n\nRules.",
+			wantType:  FileTypeAgentsMD,
+			wantPath:  "/Users/j/My Projects/app/AGENTS.md",
+			wantFound: true,
+		},
+		{
+			name:      "parenthesis in a directory name",
+			content:   "Contents of /Users/j/app (copy)/CLAUDE.md (project instructions, checked into the codebase):\n\nRules.",
+			wantType:  FileTypeClaudeMD,
+			wantPath:  "/Users/j/app (copy)/CLAUDE.md",
+			wantFound: true,
+		},
+		{
+			name:      "home-relative path with a space",
+			content:   "Contents of ~/My Projects/CLAUDE.md:\n\nRules.",
+			wantType:  FileTypeClaudeMD,
+			wantPath:  "~/My Projects/CLAUDE.md",
+			wantFound: true,
+		},
+		{
+			// Tracked by its label: backslash paths match no tracked suffix.
+			name:      "windows path with a space, CRLF",
+			content:   "Contents of C:\\Users\\J Smith\\app\\CLAUDE.md (project instructions, checked into the codebase):\r\n\r\nRules.",
+			wantType:  FileTypeUnknown,
+			wantPath:  "C:\\Users\\J Smith\\app\\CLAUDE.md",
+			wantFound: true,
+		},
+		{
+			name:      "label with nested parentheses",
+			content:   "Contents of /repo/CLAUDE.md (project instructions (checked in)):\n\nRules.",
+			wantType:  FileTypeClaudeMD,
+			wantPath:  "/repo/CLAUDE.md",
+			wantFound: true,
+		},
+		{
+			// Recognized before paths with spaces were; must stay recognized.
+			name:      "text after the marker on its line",
+			content:   "Contents of /repo/CLAUDE.md: note the following:\nRules.",
+			wantType:  FileTypeClaudeMD,
+			wantPath:  "/repo/CLAUDE.md",
+			wantFound: true,
+		},
+		{
 			name:      "claude md nested path",
 			content:   "Contents of /Users/aaron/projects/arc/.ai/CLAUDE.md:\n\n# Arc Instructions",
 			wantType:  FileTypeClaudeMD,
@@ -320,7 +371,9 @@ func TestExtractAllSplitsMultiFileBlock(t *testing.T) {
 	}{
 		{"/repo/CLAUDE.md", FileTypeClaudeMD, ConfidenceHigh, "Read the guide.\n\n"},
 		{"/repo/.entire/agent-guide.md", FileTypeUnknown, ConfidenceHigh, "Retrieval (query takes --json)\n\n"},
-		{"/home/u/.claude/projects/x/memory/MEMORY.md", FileTypeUnknown, ConfidenceMedium, "- [Note](note.md) — hook\n"},
+		// Not a tracked path and not labeled as instructions, but it shares
+		// an instruction block: it is enforced like the files around it.
+		{"/home/u/.claude/projects/x/memory/MEMORY.md", FileTypeUnknown, ConfidenceHigh, "- [Note](note.md) — hook\n"},
 	}
 	if len(files) != len(want) {
 		t.Fatalf("got %d files, want %d: %+v", len(files), len(want), files)
@@ -375,8 +428,10 @@ func TestExtractAllForgedMarkerKeepsTail(t *testing.T) {
 	if tail.SourcePath != "/tmp/notes.md" {
 		t.Errorf("tail path = %q, want /tmp/notes.md", tail.SourcePath)
 	}
-	if tail.Confidence != ConfidenceMedium {
-		t.Errorf("tail confidence = %v, want medium", tail.Confidence)
+	// A line anyone who writes the file can add must not lower the
+	// confidence, and with it the enforcement, of the text below it.
+	if tail.Confidence != ConfidenceHigh {
+		t.Errorf("tail confidence = %v, want high", tail.Confidence)
 	}
 	if !strings.Contains(tail.Content, "| sh") {
 		t.Errorf("tail content %q lost the text below the forged marker", tail.Content)
@@ -439,10 +494,24 @@ func TestExtractAllForgedMarkerAtStartOfTrackedFile(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("got %d files, want 1: %+v", len(files), files)
 	}
-	if files[0].SourcePath != "/tmp/notes.md" || files[0].Confidence != ConfidenceMedium {
-		t.Errorf("got {%q %v}, want {/tmp/notes.md medium}", files[0].SourcePath, files[0].Confidence)
+	if files[0].SourcePath != "/tmp/notes.md" || files[0].Confidence != ConfidenceHigh {
+		t.Errorf("got {%q %v}, want {/tmp/notes.md high}", files[0].SourcePath, files[0].Confidence)
 	}
 	if !strings.Contains(files[0].Content, "| sh") {
 		t.Errorf("content %q lost the text below the forged marker", files[0].Content)
+	}
+}
+
+func TestExtractAllProseLineIsNotAMarker(t *testing.T) {
+	// A sentence that happens to open with the marker's words is not a path
+	// marker: it must not split the file or become a recorded path.
+	block := "Contents of /p/CLAUDE.md:\n\n# Release\n" +
+		"Contents of the archive are listed below:\n- bin/\n- docs/\n"
+	files := ExtractAll(block, false, 0.7)
+	if len(files) != 1 {
+		t.Fatalf("got %d files, want 1: %+v", len(files), files)
+	}
+	if files[0].SourcePath != "/p/CLAUDE.md" || !strings.Contains(files[0].Content, "- docs/") {
+		t.Errorf("got {%q %q}, want the whole body under /p/CLAUDE.md", files[0].SourcePath, files[0].Content)
 	}
 }

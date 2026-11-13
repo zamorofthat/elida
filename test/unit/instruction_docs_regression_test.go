@@ -126,6 +126,7 @@ func TestRepoMarkdownNeverBlocks(t *testing.T) {
 
 	const claudeMD = "Contents of /repo/CLAUDE.md:\n\nUse gofmt.\n\n"
 	claudeHash := ""
+	behindBlocks := 0
 
 	for _, rel := range sortedKeys(docs) {
 		body := docs[rel]
@@ -143,11 +144,16 @@ func TestRepoMarkdownNeverBlocks(t *testing.T) {
 			}
 		}
 
-		// Behind a tracked file in the same block it is scanned, and still
-		// must not block or leak into the tracked file's record.
+		// Behind a tracked file in the same block it is recorded under its
+		// own path and never leaks into the tracked file's record. It is
+		// enforced like that file, though: a document in an instruction
+		// block cannot be told from text below a marker-shaped line written
+		// into CLAUDE.md (TestMarkerLineCannotDowngradeEnforcement), so one
+		// that quotes a blocked pattern is refused there, as it was before
+		// blocks were split. Which ones do is logged, not asserted.
 		files := instruction.ExtractAll(claudeMD+marker+body, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold)
-		if len(files) == 0 || files[0].SourcePath != "/repo/CLAUDE.md" {
-			t.Errorf("%s (behind CLAUDE.md): first file is not /repo/CLAUDE.md", rel)
+		if len(files) != 2 || files[0].SourcePath != "/repo/CLAUDE.md" || files[1].SourcePath != "/repo/"+rel {
+			t.Errorf("%s (behind CLAUDE.md): want /repo/CLAUDE.md then /repo/%s, got %d file(s)", rel, rel, len(files))
 			continue
 		}
 		if claudeHash == "" {
@@ -156,12 +162,15 @@ func TestRepoMarkdownNeverBlocks(t *testing.T) {
 		if files[0].Hash != claudeHash {
 			t.Errorf("%s (behind CLAUDE.md): the CLAUDE.md hash changed with the document behind it", rel)
 		}
-		for _, file := range files {
-			if result := reg.Check("behind", file); result.ShouldBlock {
-				t.Errorf("%s (behind CLAUDE.md): %s blocks on %v", rel, file.SourcePath, blockingRules(result))
-			}
+		if result := reg.Check("behind", files[0]); result.ShouldBlock {
+			t.Errorf("%s (behind CLAUDE.md): the CLAUDE.md record blocks on %v", rel, blockingRules(result))
+		}
+		if result := reg.Check("behind", files[1]); result.ShouldBlock {
+			behindBlocks++
+			t.Logf("%s (behind CLAUDE.md): would be refused on %v", rel, blockingRules(result))
 		}
 	}
+	t.Logf("%d of %d documents would be refused if imported into an instruction block", behindBlocks, len(docs))
 }
 
 // TestReportedReminderDoesNotBlock is the report this work started from: a

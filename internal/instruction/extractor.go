@@ -8,9 +8,33 @@ import (
 )
 
 // pathMarkerRegex matches "Contents of <path>" lines injected by AI coding
-// tools. Group 1 is the path; group 2 is the optional parenthetical label,
-// such as "project instructions, checked into the codebase".
-var pathMarkerRegex = regexp.MustCompile(`(?m)^Contents of ([^\s(]+)(?:\s*\(([^)]*)\))?:`)
+// tools, with an optional parenthetical label such as "project instructions,
+// checked into the codebase". It has two alternatives; markerParts reads
+// whichever matched.
+//
+// The first reads a path that may hold spaces and parentheses ("/Users/j/My
+// Projects/app (copy)/CLAUDE.md"). To tell such a path from a sentence it
+// must start like a path, hold no further colon, and the marker must end its
+// line. The second is every other marker: a path with no space in it,
+// wherever on the line the colon falls.
+var pathMarkerRegex = regexp.MustCompile(`(?m)^Contents of (?:` +
+	`((?:/|~|[A-Za-z]:[\\/])[^:\n]*?)(?:[ \t]*\(((?:[^()\n]|\([^()\n]*\))*)\))?:[ \t]*\r?$` +
+	`|` +
+	`([^\s(]+)(?:\s*\(([^)]*)\))?:` +
+	`)`)
+
+// markerParts returns the path and label one pathMarkerRegex match captured.
+func markerParts(content string, m []int) (path, label string) {
+	pathAt, labelAt := 2, 4
+	if m[pathAt] < 0 {
+		pathAt, labelAt = 6, 8
+	}
+	path = content[m[pathAt]:m[pathAt+1]]
+	if m[labelAt] >= 0 {
+		label = content[m[labelAt]:m[labelAt+1]]
+	}
+	return path, label
+}
 
 // pathToFileType maps filename patterns to FileType.
 var pathToFileType = []struct {
@@ -56,13 +80,15 @@ func Extract(content string, shapeDetection bool, shapeThreshold float64) *Instr
 // when enabled (medium confidence, no path).
 //
 // A block with markers is split into one segment per marker; text before the
-// first marker is ignored. A segment is tracked, at high confidence, when its
-// path names an instruction file or its label says "instructions" (how Claude
-// Code labels a file imported by CLAUDE.md). A segment that is not tracked is
-// still returned, at medium confidence, when the block also holds a tracked
-// marker: a marker-shaped line written into an instruction file must not make
-// the text below it invisible. A block whose markers are all untracked is a
-// document and yields nothing; shape detection is not run on it.
+// first marker is ignored. A segment is tracked when its path names an
+// instruction file or its label says "instructions" (how Claude Code labels a
+// file imported by CLAUDE.md). A block with at least one tracked segment is
+// an instruction block, and every segment in it is returned at high
+// confidence under its own path, tracked or not. Whoever can write a tracked
+// file can write a marker-shaped line into it, so a marker must never make
+// the text below it invisible or less enforced than the file it sits in. A
+// block whose markers are all untracked is a document and yields nothing;
+// shape detection is not run on it.
 func ExtractAll(content string, shapeDetection bool, shapeThreshold float64) []*InstructionFile {
 	markers := pathMarkerRegex.FindAllStringSubmatchIndex(content, -1)
 	if len(markers) == 0 {
@@ -80,15 +106,9 @@ func ExtractAll(content string, shapeDetection bool, shapeThreshold float64) []*
 	var files []*InstructionFile
 	anyTracked := false
 	for i, m := range markers {
-		path := content[m[2]:m[3]]
-		label := ""
-		if m[4] >= 0 {
-			label = content[m[4]:m[5]]
-		}
+		path, label := markerParts(content, m)
 		fileType, known := fileTypeForPath(path)
-		confidence := ConfidenceMedium
 		if known || strings.Contains(strings.ToLower(label), "instructions") {
-			confidence = ConfidenceHigh
 			// Counted before the empty-body check: a forged marker on the
 			// first line of a tracked file leaves that file's segment empty.
 			anyTracked = true
@@ -108,7 +128,7 @@ func ExtractAll(content string, shapeDetection bool, shapeThreshold float64) []*
 			Type:       fileType,
 			Content:    body,
 			Hash:       hashContent(body),
-			Confidence: confidence,
+			Confidence: ConfidenceHigh,
 			SourcePath: path,
 		})
 	}
