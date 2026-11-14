@@ -376,7 +376,7 @@ func TestProxyToolDefinitionsAreNotCauses(t *testing.T) {
 // lines by number, never the matched characters.
 func TestProxyHiddenDescriptionCarriesLabelsOnly(t *testing.T) {
 	pp := newProvenanceProxy(t, "enforce")
-	st, _ := send(t, pp, s1, reminder(provA+"x‮y​z\n"))
+	st, _ := send(t, pp, s1, reminder(provA+"x\u202ey\u200bz\n"))
 	assertStatus(t, st, http.StatusOK)
 	fs := pp.engine.GetFlaggedSession("s1")
 	if fs == nil {
@@ -390,7 +390,7 @@ func TestProxyHiddenDescriptionCarriesLabelsOnly(t *testing.T) {
 		}
 		hidden++
 		d := v.Description
-		if strings.ContainsAny(d, "‮​") {
+		if strings.ContainsAny(d, "\u202e\u200b") {
 			t.Errorf("%s: description carries a matched character", v.RuleName)
 		}
 		if !shape.MatchString(d) {

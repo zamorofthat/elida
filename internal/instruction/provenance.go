@@ -556,8 +556,10 @@ func (t *Tracker) MarkCauses(sessionID string, calls []ToolUse) {
 	t.mu.Lock()
 	var paths []string
 	if el, ok := t.sessions[sessionID]; ok {
-		for p := range el.Value.(*sessionState).chains {
-			paths = append(paths, p)
+		if s := sessionOf(el); s != nil {
+			for p := range s.chains {
+				paths = append(paths, p)
+			}
 		}
 	}
 	t.mu.Unlock()
@@ -598,8 +600,9 @@ func (t *Tracker) MarkCauses(sessionID string, calls []ToolUse) {
 	now := t.now()
 	var s *sessionState
 	if el, ok := t.sessions[sessionID]; ok {
-		s = el.Value.(*sessionState) // not moved in the LRU: only Observe is "observed"
-	} else {
+		s = sessionOf(el) // not moved in the LRU: only Observe is "observed"
+	}
+	if s == nil {
 		s = t.touchSession(sessionID) // a call to remember before any Observe
 	}
 	for _, m := range marks {
@@ -633,12 +636,24 @@ func (t *Tracker) release(set lineSet) {
 	t.retainedLines -= len(set)
 }
 
+// sessionOf reads a session's state out of its LRU element. Only
+// *sessionState values are ever stored, so nil is never returned in practice.
+func sessionOf(el *list.Element) *sessionState {
+	s, ok := el.Value.(*sessionState)
+	if !ok {
+		return nil
+	}
+	return s
+}
+
 // touchSession returns the session's state, creating it and evicting the
 // least recently observed session beyond the bound.
 func (t *Tracker) touchSession(id string) *sessionState {
 	if el, ok := t.sessions[id]; ok {
-		t.sessionLRU.MoveToFront(el)
-		return el.Value.(*sessionState)
+		if s := sessionOf(el); s != nil {
+			t.sessionLRU.MoveToFront(el)
+			return s
+		}
 	}
 	s := &sessionState{
 		id:          id,
@@ -650,7 +665,10 @@ func (t *Tracker) touchSession(id string) *sessionState {
 	for len(t.sessions) > t.maxSessions {
 		back := t.sessionLRU.Back()
 		t.sessionLRU.Remove(back)
-		evicted := back.Value.(*sessionState)
+		evicted := sessionOf(back)
+		if evicted == nil {
+			break // unreachable: only *sessionState is stored
+		}
 		for _, ch := range evicted.chains {
 			t.release(ch.lines)
 		}
@@ -672,7 +690,10 @@ func (t *Tracker) touchPath(p string) *pathRecord {
 	for len(t.paths) > t.maxPaths {
 		back := t.pathLRU.Back()
 		t.pathLRU.Remove(back)
-		evicted := back.Value.(*pathRecord)
+		evicted, ok := back.Value.(*pathRecord)
+		if !ok {
+			break // unreachable: only *pathRecord is stored
+		}
 		t.release(evicted.newestLines)
 		delete(t.paths, evicted.path)
 	}
@@ -834,10 +855,12 @@ func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFi
 	t.mu.Lock()
 	o := t.observeLocked(sessionID, identified, file, result, cl)
 	if el, ok := t.sessions[sessionID]; ok {
-		if identified {
-			el.Value.(*sessionState).seen = identityYes
-		} else {
-			el.Value.(*sessionState).seen = identityNo
+		if s := sessionOf(el); s != nil {
+			if identified {
+				s.seen = identityYes
+			} else {
+				s.seen = identityNo
+			}
 		}
 	}
 	t.mu.Unlock()
@@ -1072,7 +1095,11 @@ func (r *Registry) Stats() Stats {
 	t.mu.Lock()
 	st := Stats{TrackedPaths: len(t.paths), ChangedSinceLastSeen: t.sinceLastSeen}
 	for _, el := range t.sessions {
-		switch el.Value.(*sessionState).seen {
+		s := sessionOf(el)
+		if s == nil {
+			continue
+		}
+		switch s.seen {
 		case identityYes:
 			st.IdentifiedSessions++
 		case identityNo:

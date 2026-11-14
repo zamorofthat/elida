@@ -96,7 +96,7 @@ func staticSeverity(file *instruction.InstructionFile, v instruction.Violation) 
 
 // fileLabel names a file by path (or as unnamed), type and short hash. A
 // path longer than instruction.MaxSourcePathLen is not tracked, and is
-// labelled as unnamed too.
+// labeled as unnamed too.
 func fileLabel(file *instruction.InstructionFile) string {
 	name := file.SourcePath
 	if name == "" || len(name) > instruction.MaxSourcePathLen {

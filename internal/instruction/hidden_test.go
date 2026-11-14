@@ -18,7 +18,7 @@ func hiddenScanner(t *testing.T, rules ...Rule) *Scanner {
 var hiddenX = Rule{Name: "instruction_hidden_x", Patterns: []string{"[\\x{200B}\\x{202E}]"}, Severity: "critical", Action: "flag"}
 
 func TestHiddenContentTally(t *testing.T) {
-	result := hiddenScanner(t, hiddenX).Scan("a​b\n\nc‮d‮\ne​")
+	result := hiddenScanner(t, hiddenX).Scan("a\u200bb\n\nc\u202ed\u202e\ne\u200b")
 	if len(result.Violations) != 1 {
 		t.Fatalf("violations = %d", len(result.Violations))
 	}
@@ -38,7 +38,7 @@ func TestHiddenContentTally(t *testing.T) {
 }
 
 func TestHiddenContentLineCap(t *testing.T) {
-	content := strings.Repeat("x​\n", 30)
+	content := strings.Repeat("x\u200b\n", 30)
 	v := hiddenScanner(t, hiddenX).Scan(content).Violations[0]
 	if len(v.Hidden.Lines) != MaxHiddenLines || v.Hidden.Total != 30 {
 		t.Errorf("lines=%d total=%d", len(v.Hidden.Lines), v.Hidden.Total)
@@ -58,29 +58,29 @@ func TestHiddenContentLeadingBOM(t *testing.T) {
 
 func TestStrippedBeforeOtherRules(t *testing.T) {
 	s := hiddenScanner(t, Rule{Name: "instruction_prompt_injection", Patterns: []string{`ignore\s+(all\s+)?previous`}, Severity: "critical", Action: "block"}, hiddenX)
-	r := s.Scan("ig​nore previous")
+	r := s.Scan("ig\u200bnore previous")
 	if len(r.Violations) != 2 {
 		t.Fatalf("violations = %+v", r.Violations)
 	}
 }
 
 func TestLegacyHiddenRuleNameStillTallies(t *testing.T) {
-	s := hiddenScanner(t, Rule{Name: RuleHiddenContent, Patterns: []string{"[​]"}, Severity: "critical", Action: "block"})
-	r := s.Scan("a​b")
+	s := hiddenScanner(t, Rule{Name: RuleHiddenContent, Patterns: []string{"[\u200b]"}, Severity: "critical", Action: "block"})
+	r := s.Scan("a\u200bb")
 	if len(r.Violations) != 1 || r.Violations[0].Hidden == nil {
 		t.Fatalf("%+v", r.Violations)
 	}
 }
 
 func TestStripInvisible(t *testing.T) {
-	if got := stripInvisible("a​⁠b\U000E0041c"); got != "abc" {
+	if got := stripInvisible("a\u200b\u2060b\U000E0041c"); got != "abc" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestHiddenContentTallyIsCapped(t *testing.T) {
 	s := hiddenScanner(t, hiddenX)
-	content := strings.Repeat("​", 1<<20) // 3MB of U+200B
+	content := strings.Repeat("\u200b", 1<<20) // 3MB of U+200B
 	var v Violation
 	allocs := testing.AllocsPerRun(1, func() {
 		v = s.Scan(content).Violations[0]
@@ -98,19 +98,19 @@ func TestHiddenContentTallyIsCapped(t *testing.T) {
 		t.Errorf("allocations per scan = %.0f, want at most %d", allocs, 20*MaxHiddenCounted)
 	}
 
-	small := s.Scan("a​b").Violations[0].Hidden
+	small := s.Scan("a\u200bb").Violations[0].Hidden
 	if small.Truncated || small.Total != 1 {
 		t.Errorf("small: truncated=%v total=%d, want false and 1", small.Truncated, small.Total)
 	}
 }
 
 // An operator's hidden-content pattern that matches visible text counts it,
-// but only invisible code points are labelled and given line numbers.
+// but only invisible code points are labeled and given line numbers.
 func TestHiddenContentLabelsOnlyInvisible(t *testing.T) {
 	s := hiddenScanner(t, Rule{Name: "instruction_hidden_x", Patterns: []string{"[a\\x{200B}]"}, Severity: "critical", Action: "flag"})
-	h := s.Scan("xa\nyy\n​").Violations[0].Hidden
+	h := s.Scan("xa\nyy\n\u200b").Violations[0].Hidden
 	if _, ok := h.CodePoints["U+0061"]; ok {
-		t.Errorf("visible rune labelled: %v", h.CodePoints)
+		t.Errorf("visible rune labeled: %v", h.CodePoints)
 	}
 	if !reflect.DeepEqual(h.CodePoints, map[string]int{"U+200B": 1}) {
 		t.Errorf("code points = %v, want only U+200B", h.CodePoints)

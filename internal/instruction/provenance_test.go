@@ -542,10 +542,10 @@ func TestUnidentifiedCauseIsNotGlobal(t *testing.T) {
 
 // observeT runs the tracker alone (no Check), for tests that observe many
 // versions.
-func observeT(reg *Registry, session, path, content string) Observation {
+func observeT(reg *Registry, path, content string) Observation {
 	file := &InstructionFile{Type: FileTypeClaudeMD, Content: content, Hash: hashContent(content),
 		Confidence: ConfidenceHigh, SourcePath: path}
-	o, _ := reg.tracker.Observe(session, true, file, ScanResult{})
+	o, _ := reg.tracker.Observe("s1", true, file, ScanResult{})
 	return o
 }
 
@@ -553,7 +553,7 @@ func observeT(reg *Registry, session, path, content string) Observation {
 func shownEntries(reg *Registry, session string) (total, fifo int) {
 	reg.tracker.mu.Lock()
 	defer reg.tracker.mu.Unlock()
-	s := reg.tracker.sessions[session].Value.(*sessionState)
+	s := sessionOf(reg.tracker.sessions[session])
 	for _, ch := range s.chains {
 		total += len(ch.shown)
 	}
@@ -567,7 +567,7 @@ func TestShownPerSessionCap(t *testing.T) {
 	const per = 600 // 1200 across both paths, past the session cap
 	for _, p := range paths {
 		for i := 0; i < per; i++ {
-			observeT(reg, "s1", p, version(p, i))
+			observeT(reg, p, version(p, i))
 		}
 	}
 	total, fifo := shownEntries(reg, "s1")
@@ -576,16 +576,16 @@ func TestShownPerSessionCap(t *testing.T) {
 	}
 	// The oldest entries (the first path's first 176) were dropped; a later
 	// one of the same path, and every one of the second path, are still shown.
-	if o := observeT(reg, "s1", paths[0], version(paths[0], 300)); o.Change != ChangeNone {
+	if o := observeT(reg, paths[0], version(paths[0], 300)); o.Change != ChangeNone {
 		t.Fatalf("kept version re-reported: %q", o.Change)
 	}
-	if o := observeT(reg, "s1", paths[1], version(paths[1], 0)); o.Change != ChangeNone {
+	if o := observeT(reg, paths[1], version(paths[1], 0)); o.Change != ChangeNone {
 		t.Fatalf("kept version of the second path re-reported: %q", o.Change)
 	}
-	if o := observeT(reg, "s1", paths[0], version(paths[0], 0)); o.Change != ChangeInSession {
+	if o := observeT(reg, paths[0], version(paths[0], 0)); o.Change != ChangeInSession {
 		t.Fatalf("dropped version replayed: Change = %q, want re-reported once", o.Change)
 	}
-	if o := observeT(reg, "s1", paths[0], version(paths[0], 0)); o.Change != ChangeNone {
+	if o := observeT(reg, paths[0], version(paths[0], 0)); o.Change != ChangeNone {
 		t.Fatalf("dropped version replayed twice: Change = %q, want none", o.Change)
 	}
 }
@@ -682,11 +682,11 @@ func TestFullPathNeedsBoundary(t *testing.T) {
 func TestShownCapKeepsCurrentVersion(t *testing.T) {
 	reg := newProvenanceRegistry(t)
 	const quiet, busy = "/repo/AGENTS.md", "/repo/CLAUDE.md"
-	observeT(reg, "s1", quiet, provA)
+	observeT(reg, quiet, provA)
 	for i := 0; i < MaxShownPerSession+50; i++ {
-		observeT(reg, "s1", busy, fmt.Sprintf("v%d\n", i))
+		observeT(reg, busy, fmt.Sprintf("v%d\n", i))
 	}
-	if o := observeT(reg, "s1", quiet, provA); o.Change != ChangeNone {
+	if o := observeT(reg, quiet, provA); o.Change != ChangeNone {
 		t.Fatalf("unchanged quiet file: Change = %q (prev %.8s, hash %.8s), want none", o.Change, o.PrevHash, o.Hash)
 	}
 	if total, fifo := shownEntries(reg, "s1"); total > MaxShownPerSession || fifo != total {
@@ -698,10 +698,10 @@ func TestShownCapKeepsCurrentVersion(t *testing.T) {
 func TestShownCapEvictionTerminates(t *testing.T) {
 	reg := newProvenanceRegistry(t)
 	for i := 0; i < MaxPathsPerSession; i++ {
-		observeT(reg, "s1", fmt.Sprintf("/repo/d%d/CLAUDE.md", i), provA)
+		observeT(reg, fmt.Sprintf("/repo/d%d/CLAUDE.md", i), provA)
 	}
 	reg.tracker.mu.Lock()
-	s := reg.tracker.sessions["s1"].Value.(*sessionState)
+	s := sessionOf(reg.tracker.sessions["s1"])
 	// Run the eviction with a bound below the number of protected entries.
 	reg.tracker.evictShown(s, 1)
 	n := len(s.shownOrder)

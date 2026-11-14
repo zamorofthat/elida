@@ -43,7 +43,7 @@ func stripInvisible(s string) string {
 // tallyHidden counts the runes matched by any pattern, once per position, up
 // to MaxHiddenCounted (then Truncated is set). A U+FEFF that is the first
 // rune of content is a byte-order mark and is not counted. Only runes that
-// are invisible (isInvisible) are labelled in CodePoints and give a line
+// are invisible (isInvisible) are labeled in CodePoints and give a line
 // number: a pattern that matches visible text has it counted in Total only.
 // It returns nil when nothing was counted.
 func tallyHidden(content string, patterns []*regexp.Regexp) *HiddenContent {

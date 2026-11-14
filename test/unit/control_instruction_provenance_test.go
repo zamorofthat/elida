@@ -140,8 +140,8 @@ func TestControlInstructionPaths(t *testing.T) {
 		t.Fatalf("limit=1 returned %d versions: %s", n, body)
 	}
 
-	if code, _ := getBody(h, "POST", "/control/instructions/paths"); code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST: %d, want 405", code)
+	if postCode, _ := getBody(h, "POST", "/control/instructions/paths"); postCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST: %d, want 405", postCode)
 	}
 
 	hNone, _ := newProvenanceControl(t, nil)
