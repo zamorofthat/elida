@@ -1950,9 +1950,10 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 }
 
 // extractScannableMessages parses a chat request and returns individual messages to scan
-// with role/index attribution. System prompts are hash-cached — only scanned once per session
-// unless the content changes. Supports both Anthropic (top-level "system") and OpenAI
-// (role: "system" message) formats. Returns nil for non-chat requests (caller should fallback).
+// with role/index attribution. System content is hash-cached: each distinct piece is scanned
+// once per session. That covers the Anthropic top-level "system" field, OpenAI-style
+// role "system" messages, and requests that carry both, as Claude Code's do.
+// Returns nil for non-chat requests (caller should fallback).
 //
 // This is the policy engine's view only. The semantic assessor gets its own
 // view from extractSemanticMessages.
@@ -1980,18 +1981,22 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 	}
 
 	var messages []policy.MessageToScan
-	cachedHash := sess.GetSystemPromptHash()
+
+	// The primary system prompt is the top-level system field, or the first
+	// role "system" message when there is none. Only the primary prompt can
+	// "change"; further role "system" entries are additions to the list.
+	primaryClaimed := false
 
 	// Handle Anthropic top-level system field (scan once, then skip via hash cache)
 	if req.System != nil {
 		systemContent := extractMessageContent(req.System)
 		if systemContent != "" {
+			primaryClaimed = true
 			if len(trustedTagRegexs) > 0 {
 				systemContent = stripTrustedTags(systemContent, trustedTagRegexs)
 			}
-			if msg, newHash := systemMessageIfChanged(systemContent, cachedHash, sess, -1); msg != nil {
+			if msg := systemMessageIfNew(systemContent, sess, -1, true); msg != nil {
 				messages = append(messages, *msg)
-				cachedHash = newHash
 			}
 		}
 	}
@@ -2008,11 +2013,10 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 		}
 
 		if msg.Role == "system" {
-			// OpenAI-style system message — same hash-cache logic
-			if m, newHash := systemMessageIfChanged(content, cachedHash, sess, i); m != nil {
+			if m := systemMessageIfNew(content, sess, i, !primaryClaimed); m != nil {
 				messages = append(messages, *m)
-				cachedHash = newHash
 			}
+			primaryClaimed = true
 		} else {
 			messages = append(messages, policy.MessageToScan{
 				Role:    msg.Role,
@@ -2210,27 +2214,36 @@ func (p *Proxy) applyRiskLadder(w http.ResponseWriter, sess *session.Session, al
 	return false, alreadyThrottled
 }
 
-// systemMessageIfChanged returns a MessageToScan for the system prompt only if it's new or changed.
-// Returns nil if the hash matches the cached version (already scanned).
-func systemMessageIfChanged(content, cachedHash string, sess *session.Session, index int) (*policy.MessageToScan, string) {
+// systemMessageIfNew returns a MessageToScan for system content the session
+// has not scanned before, and nil for content it has.
+//
+// primary marks the session's main system prompt. A primary prompt whose hash
+// differs from the previous one and is new to the session is logged as
+// changed. Returning to a prompt already scanned is not: a subagent that
+// shares its parent's session ID alternates with it on every request.
+func systemMessageIfNew(content string, sess *session.Session, index int, primary bool) *policy.MessageToScan {
 	hash := hashContent(content)
 
-	if cachedHash == "" {
-		// First time seeing system prompt — scan it and cache hash
-		sess.SetSystemPromptHash(hash)
+	previous := ""
+	if primary {
+		previous = sess.GetSystemPromptHash()
+		if previous != hash {
+			sess.SetSystemPromptHash(hash)
+		}
+	}
+
+	if !sess.MarkSystemContentSeen(hash) {
+		// Already scanned in this session — skip.
+		return nil
+	}
+
+	switch {
+	case primary && previous != "" && previous != hash:
+		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", previous[:16], "new_hash", hash[:16])
+	case primary:
 		slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
-		return &policy.MessageToScan{Role: "system", Index: index, Content: content}, hash
 	}
-
-	if hash != cachedHash {
-		// System prompt changed — scan it and update cache
-		sess.SetSystemPromptHash(hash)
-		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", cachedHash[:16], "new_hash", hash[:16])
-		return &policy.MessageToScan{Role: "system", Index: index, Content: content}, hash
-	}
-
-	// Hash matches cache — skip scanning (already validated)
-	return nil, cachedHash
+	return &policy.MessageToScan{Role: "system", Index: index, Content: content}
 }
 
 // containsOnlyAllowlistedTools checks if the most recent assistant message only uses allowlisted tools.

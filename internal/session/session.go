@@ -53,8 +53,18 @@ type Session struct {
 	// Terminated sessions cannot be resumed (for malicious agents)
 	Terminated bool `json:"terminated,omitempty"`
 
-	// Cached system prompt hash (avoids re-scanning identical prompts)
+	// Hash of the session's most recent primary system prompt (the top-level
+	// `system` field, or the first role "system" message when there is none).
+	// Only tells "the prompt changed" from "the prompt is the same"; whether
+	// content still needs scanning is seenSystemHashes' question.
 	SystemPromptHash string `json:"-"` // Not persisted, session-local cache
+
+	// seenSystemHashes holds the hash of every piece of system content the
+	// policy engine has already scanned in this session. One session carries
+	// several at once: a top-level prompt, role "system" entries in the
+	// message list, and a different prompt for each subagent sharing the ID.
+	// Not persisted; bounded by maxSeenSystemHashes.
+	seenSystemHashes map[string]struct{}
 
 	// WebSocket session fields
 	IsWebSocket  bool  `json:"is_websocket,omitempty"`
@@ -419,6 +429,26 @@ func cloneCorrelationShadow(in []CorrelationShadow) []CorrelationShadow {
 		out[i] = c.clone()
 	}
 	return out
+}
+
+// maxSeenSystemHashes bounds seenSystemHashes, which is filled from
+// client-supplied content. A session that exceeds it starts the set again,
+// at the cost of scanning its current system content one more time.
+const maxSeenSystemHashes = 4096
+
+// MarkSystemContentSeen records hash as scanned and reports whether this is
+// the first time the session has seen it.
+func (s *Session) MarkSystemContentSeen(hash string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, seen := s.seenSystemHashes[hash]; seen {
+		return false
+	}
+	if s.seenSystemHashes == nil || len(s.seenSystemHashes) >= maxSeenSystemHashes {
+		s.seenSystemHashes = make(map[string]struct{})
+	}
+	s.seenSystemHashes[hash] = struct{}{}
+	return true
 }
 
 // GetSystemPromptHash returns the cached system prompt hash
