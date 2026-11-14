@@ -1209,8 +1209,9 @@ requests on it; the hit raises the session's risk score. Startup logs a warning 
 - A session keeps at most 1024 shown versions across all its files. Past that its oldest is forgotten, and
   that version shown again is reported again, once. At most 64 versions per path and 4096 paths are kept in
   memory across sessions.
-- Only the first 32 instruction files of a request are tracked. Every file is still checked against the
-  rules, so a file past the 32nd can still refuse the request.
+- Only the first 32 instruction files of a request get change tracking. A file past the 32nd is still
+  checked against the rules (it can still refuse the request) and its rule hits are still scored, but it is
+  handled like an unnamed block: no change history, and its hits are counted once per content hash.
 - A file whose path is longer than 1024 bytes is handled like an unnamed block: no change history, and its
   findings do not name the path. A tool name is kept to its first 128 bytes, with control characters
   replaced by `?`.

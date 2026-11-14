@@ -443,3 +443,24 @@ func TestProxyAuditModeBlockHitScore(t *testing.T) {
 		t.Errorf("violation = %s %s %s, want %s critical flag", v.RuleName, v.Severity, v.Action, instruction.RulePipeToShell)
 	}
 }
+
+// A file past the per-request tracking cap is still scored for its rule
+// hits: forged markers cannot push a payload out of scoring.
+func TestProxyFilesPastCapAreStillScored(t *testing.T) {
+	score := func(n int) float64 {
+		pp := newProvenanceProxy(t, "enforce")
+		st, _ := send(t, pp, s1, manyFiles(n, "x = eval(y)\n"))
+		assertStatus(t, st, http.StatusOK)
+		got, _, _ := pp.engine.GetSessionRiskScore("s1")
+		return got
+	}
+	want := score(instruction.MaxInstructionFilesPerRequest)
+	if want == 0 {
+		t.Fatal("payload in the last tracked file scored nothing")
+	}
+	for _, n := range []int{instruction.MaxInstructionFilesPerRequest + 1, 40} {
+		if got := score(n); math.Abs(got-want) > 1e-6 {
+			t.Errorf("n=%d: score %.3f, want %.3f (as at n=%d)", n, got, want, instruction.MaxInstructionFilesPerRequest)
+		}
+	}
+}

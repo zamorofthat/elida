@@ -465,15 +465,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// Not refused: track each file and score what comes back. This
 			// runs only once no file refused the request, so a refused
-			// request scores nothing and leaves no chain behind. Files past
-			// the per-request cap were checked above but are not tracked.
+			// request scores nothing and leaves no chain behind. A file past
+			// the per-request tracking cap is observed as an unnamed block
+			// (a copy with no path): its rule hits are still scored, once
+			// per content hash, but it gets no chain and no change tracking.
 			identified := sessionID != ""
 			recorded := false
 			for i, file := range files {
+				observed := file
 				if i >= instruction.MaxInstructionFilesPerRequest {
-					break
+					unnamed := *file
+					unnamed.SourcePath = ""
+					observed = &unnamed
 				}
-				obs := p.instructionRegistry.Observe(sess.ID, identified, file, results[i])
+				obs := p.instructionRegistry.Observe(sess.ID, identified, observed, results[i])
 				if p.policy != nil && p.recordInstructionFindings(sess.ID, file, obs) {
 					recorded = true
 				}
