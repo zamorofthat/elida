@@ -676,3 +676,37 @@ func TestFullPathNeedsBoundary(t *testing.T) {
 		})
 	}
 }
+
+// A quiet file's current version is never evicted by other paths' churn:
+// showing it unchanged later is not a change.
+func TestShownCapKeepsCurrentVersion(t *testing.T) {
+	reg := newProvenanceRegistry(t)
+	const quiet, busy = "/repo/AGENTS.md", "/repo/CLAUDE.md"
+	observeT(reg, "s1", quiet, provA)
+	for i := 0; i < MaxShownPerSession+50; i++ {
+		observeT(reg, "s1", busy, fmt.Sprintf("v%d\n", i))
+	}
+	if o := observeT(reg, "s1", quiet, provA); o.Change != ChangeNone {
+		t.Fatalf("unchanged quiet file: Change = %q (prev %.8s, hash %.8s), want none", o.Change, o.PrevHash, o.Hash)
+	}
+	if total, fifo := shownEntries(reg, "s1"); total > MaxShownPerSession || fifo != total {
+		t.Fatalf("shown entries = %d (fifo %d), want at most %d", total, fifo, MaxShownPerSession)
+	}
+}
+
+// When every entry left is a chain's current version, eviction stops.
+func TestShownCapEvictionTerminates(t *testing.T) {
+	reg := newProvenanceRegistry(t)
+	for i := 0; i < MaxPathsPerSession; i++ {
+		observeT(reg, "s1", fmt.Sprintf("/repo/d%d/CLAUDE.md", i), provA)
+	}
+	reg.tracker.mu.Lock()
+	s := reg.tracker.sessions["s1"].Value.(*sessionState)
+	// Run the eviction with a bound below the number of protected entries.
+	reg.tracker.evictShown(s, 1)
+	n := len(s.shownOrder)
+	reg.tracker.mu.Unlock()
+	if n != MaxPathsPerSession {
+		t.Fatalf("shown entries = %d, want all %d current versions kept", n, MaxPathsPerSession)
+	}
+}

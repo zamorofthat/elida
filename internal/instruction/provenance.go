@@ -131,6 +131,7 @@ type contentLines struct {
 type chain struct {
 	shown        map[uint64]struct{} // salted content hashes this session has shown
 	last         string              // the hash last added to the chain
+	lastKey      uint64              // shownKey(last)
 	lines        lineSet             // retained line set of last, or nil
 	pendingCause *pendingCause       // an unconsumed cause, or nil
 }
@@ -726,14 +727,30 @@ func (t *Tracker) addToChain(s *sessionState, ch *chain, hash string, set lineSe
 	key := t.shownKey(hash)
 	ch.shown[key] = struct{}{}
 	s.shownOrder = append(s.shownOrder, shownRef{ch: ch, key: key})
-	for len(s.shownOrder) > MaxShownPerSession {
-		delete(s.shownOrder[0].ch.shown, s.shownOrder[0].key)
-		s.shownOrder[0] = shownRef{}
-		s.shownOrder = s.shownOrder[1:]
-	}
-	ch.last = hash
+	ch.last, ch.lastKey = hash, key
+	t.evictShown(s, MaxShownPerSession)
 	t.release(ch.lines)
 	ch.lines = t.retain(set)
+}
+
+// evictShown drops the session's oldest shown entries until at most max
+// remain. A chain's current version is never dropped: it moves to the back
+// instead, so an unchanged file shown again is not a change. When every
+// entry left is a current version, eviction stops (there are at most
+// MaxPathsPerSession of them). Caller holds t.mu.
+func (t *Tracker) evictShown(s *sessionState, max int) {
+	for kept := 0; len(s.shownOrder) > max && kept < len(s.shownOrder); {
+		ref := s.shownOrder[0]
+		s.shownOrder[0] = shownRef{}
+		s.shownOrder = s.shownOrder[1:]
+		if ref.key == ref.ch.lastKey {
+			s.shownOrder = append(s.shownOrder, ref)
+			kept++
+			continue
+		}
+		delete(ref.ch.shown, ref.key)
+		kept = 0
+	}
 }
 
 // linesOf hashes content's distinct non-blank lines, one trailing '\r'
@@ -870,7 +887,7 @@ func (t *Tracker) observeLocked(sessionID string, identified bool, file *Instruc
 		return o
 	}
 
-	if _, shown := ch.shown[t.shownKey(file.Hash)]; shown {
+	if _, shown := ch.shown[t.shownKey(file.Hash)]; shown || file.Hash == ch.last {
 		// A version this session has already shown: no finding.
 		if versionKnown {
 			if seeVersion(version, now) {
