@@ -79,6 +79,7 @@ const (
 const (
 	severityCritical = "critical"
 	severityWarning  = "warning"
+	severityInfo     = "info"
 )
 
 // lineSet holds salted hashes of a version's non-blank lines. A nil lineSet
@@ -112,12 +113,30 @@ type sessionState struct {
 
 // versionRecord is one version of a path as seen by any session.
 type versionRecord struct {
-	hash      string
-	prevHash  string
-	firstSeen time.Time
-	lastSeen  time.Time
-	caused    bool
-	causeTool string
+	hash       string
+	prevHash   string
+	changeType string // VersionFirstSeen, VersionInSession or VersionSinceLastSeen
+	firstSeen  time.Time
+	lastSeen   time.Time
+	written    time.Time // the lastSeen last handed out for persistence
+	caused     bool
+	causeTool  string
+}
+
+// row is the version as a PathVersion, with an unknown diff. Only the row
+// that creates a version carries its diff; the store keeps that one.
+func (v *versionRecord) row(path string) *PathVersion {
+	return &PathVersion{
+		SourcePath: path, Hash: v.hash, PrevHash: v.prevHash,
+		FirstSeen: v.firstSeen, LastSeen: v.lastSeen, ChangeType: v.changeType,
+		Caused: v.caused, CauseTool: v.causeTool,
+	}
+}
+
+// versionDiff is a version's diff against the version it was compared with.
+type versionDiff struct {
+	known          bool
+	added, removed int
 }
 
 // pathRecord is the global, cross-session record for one path.
@@ -149,6 +168,7 @@ type Tracker struct {
 	paths         map[string]*pathRecord
 	pathLRU       *list.List // value: *pathRecord; front = most recently observed
 	now           func() time.Time
+	sinceLastSeen bool // grade a first sight of a new version of a known path
 
 	// unlockedHook, when set by a test, runs in MarkCauses while it matches
 	// calls without the lock.
@@ -189,8 +209,130 @@ func (r *Registry) MarkCauses(sessionID string, calls []ToolUse) {
 
 // Observe updates the session's chain for the file and grades any change.
 // Call it for every extracted file on every request, after Check.
+//
+// It writes nothing itself: a version row due a write and an event for any
+// change (scored, unscored or suppressed) go to the async worker, and a full
+// queue drops them.
 func (r *Registry) Observe(sessionID string, identified bool, file *InstructionFile, result ScanResult) Observation {
-	return r.tracker.Observe(sessionID, identified, file, result)
+	obs, row := r.tracker.Observe(sessionID, identified, file, result)
+	if r.store == nil {
+		return obs
+	}
+	if row != nil {
+		r.enqueue(asyncJob{kind: jobPathVersion, version: *row}, row.Hash)
+	}
+	if obs.Change != ChangeNone {
+		r.enqueue(asyncJob{kind: jobEvent, event: changeEvent(sessionID, obs)}, obs.Hash)
+	}
+	return obs
+}
+
+// SetChangedSinceLastSeen turns the since-last-seen finding on or off. A new
+// Registry has it off; version rows are written either way.
+func (r *Registry) SetChangedSinceLastSeen(on bool) {
+	r.tracker.setSinceLastSeen(on)
+}
+
+// LoadPathVersions reads the persisted version record into the tracker, so a
+// restart does not forget which versions of a path were seen. With no store
+// it does nothing.
+func (r *Registry) LoadPathVersions() error {
+	if r.store == nil {
+		return nil
+	}
+	rows, err := r.store.ListPathVersions(MaxLoadedPathVersions)
+	if err != nil {
+		return err
+	}
+	r.tracker.load(rows)
+	return nil
+}
+
+// changeEvent is the instruction_file_changed event for a change observation.
+// Its Data holds hashes, counts, rule and tool names and the path only.
+func changeEvent(sessionID string, obs Observation) Event {
+	severity := obs.Severity
+	if severity == "" {
+		severity = severityInfo
+	}
+	return Event{
+		Timestamp: time.Now(),
+		EventType: "instruction_file_changed",
+		SessionID: sessionID,
+		Severity:  severity,
+		Data: map[string]interface{}{
+			"source_path":     obs.Path,
+			"hash":            obs.Hash,
+			"prev_hash":       obs.PrevHash,
+			"change_type":     string(obs.Change),
+			"caused":          obs.Caused,
+			"cause_tool":      obs.CauseTool,
+			"diff_known":      obs.DiffKnown,
+			"lines_added":     obs.LinesAdded,
+			"lines_removed":   obs.LinesRemoved,
+			"added_rule_hits": append([]string{}, obs.AddedRuleHits...),
+			"suppressed":      obs.Suppressed,
+		},
+	}
+}
+
+// load adds persisted versions to the global record. rows come newest
+// last_seen first. At most maxPaths paths are kept (the most recently seen),
+// and per path the MaxVersionsPerPath most recently created; versions of a
+// path are ordered by first_seen, so the newest is the latest created. A path
+// already in memory keeps its live record. Loaded paths go to the back of the
+// LRU, so loading never evicts a live path, and no line set is loaded: the
+// newest version's set is filled in when a session next shows it.
+func (t *Tracker) load(rows []PathVersion) {
+	byPath := make(map[string][]PathVersion)
+	var order []string
+	for _, v := range rows {
+		if v.SourcePath == "" || v.Hash == "" {
+			continue
+		}
+		if _, ok := byPath[v.SourcePath]; !ok {
+			if len(order) >= t.maxPaths {
+				continue
+			}
+			order = append(order, v.SourcePath)
+		}
+		byPath[v.SourcePath] = append(byPath[v.SourcePath], v)
+	}
+	for _, p := range order {
+		vs := byPath[p]
+		sort.SliceStable(vs, func(i, j int) bool {
+			if !vs[i].FirstSeen.Equal(vs[j].FirstSeen) {
+				return vs[i].FirstSeen.Before(vs[j].FirstSeen)
+			}
+			return vs[i].LastSeen.Before(vs[j].LastSeen)
+		})
+		if len(vs) > MaxVersionsPerPath {
+			byPath[p] = vs[len(vs)-MaxVersionsPerPath:]
+		}
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, p := range order {
+		if _, live := t.paths[p]; live || len(t.paths) >= t.maxPaths {
+			continue
+		}
+		pr := &pathRecord{path: p, versions: make(map[string]*versionRecord)}
+		for _, v := range byPath[p] {
+			if _, dup := pr.versions[v.Hash]; dup {
+				continue
+			}
+			pr.versions[v.Hash] = &versionRecord{
+				hash: v.Hash, prevHash: v.PrevHash, changeType: v.ChangeType,
+				firstSeen: v.FirstSeen, lastSeen: v.LastSeen, written: v.LastSeen,
+				caused: v.Caused, causeTool: v.CauseTool,
+			}
+			pr.order = append(pr.order, v.Hash)
+			pr.newest = v.Hash
+		}
+		pr.elem = t.pathLRU.PushBack(pr)
+		t.paths[p] = pr
+	}
 }
 
 func isReadOnlyTool(name string) bool {
@@ -385,14 +527,30 @@ func (t *Tracker) touchPath(p string) *pathRecord {
 	return pr
 }
 
-// recordVersion notes that hash was seen at the path, adding it as the newest
-// version when it is new.
-func (t *Tracker) recordVersion(pr *pathRecord, hash string, now time.Time, set lineSet) *versionRecord {
-	if v, ok := pr.versions[hash]; ok {
-		v.lastSeen = now
-		return v
+// setSinceLastSeen turns the since-last-seen finding on or off.
+func (t *Tracker) setSinceLastSeen(on bool) {
+	t.mu.Lock()
+	t.sinceLastSeen = on
+	t.mu.Unlock()
+}
+
+// seeVersion advances a known version's lastSeen and reports whether its row
+// is due a write: lastSeen has moved by more than PathVersionTouchInterval
+// since it was last handed out.
+func seeVersion(v *versionRecord, now time.Time) bool {
+	v.lastSeen = now
+	if v.lastSeen.Sub(v.written) > PathVersionTouchInterval {
+		v.written = v.lastSeen
+		return true
 	}
-	v := &versionRecord{hash: hash, prevHash: pr.newest, firstSeen: now, lastSeen: now}
+	return false
+}
+
+// newVersion adds hash as the path's newest version, with set as its line
+// set. The caller has checked that hash is not a version of the path.
+func (t *Tracker) newVersion(pr *pathRecord, hash, prevHash, changeType string, now time.Time, set lineSet) *versionRecord {
+	v := &versionRecord{hash: hash, prevHash: prevHash, changeType: changeType,
+		firstSeen: now, lastSeen: now, written: now}
 	pr.versions[hash] = v
 	pr.order = append(pr.order, hash)
 	pr.newest = hash
@@ -477,10 +635,19 @@ func (t *Tracker) markStatic(s *sessionState, prefix string, result ScanResult) 
 	return out
 }
 
-// Observe implements Registry.Observe.
-func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFile, result ScanResult) Observation {
+// observed is what observeLocked hands back to Observe.
+type observed struct {
+	obs     Observation
+	added   []string     // added lines' text (request-scoped), for the scan
+	row     *PathVersion // the version row due a write, or nil
+	rowHits bool         // row's AddedRuleHits are the scan of added
+}
+
+// Observe implements Registry.Observe. It also returns the version row the
+// observation made due for persistence, or nil; it does no I/O itself.
+func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFile, result ScanResult) (Observation, *PathVersion) {
 	if file == nil {
-		return Observation{}
+		return Observation{}, nil
 	}
 	var cl contentLines
 	if file.SourcePath != "" {
@@ -488,82 +655,175 @@ func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFi
 	}
 
 	t.mu.Lock()
-	obs, added := t.observeLocked(sessionID, file, result, cl)
+	o := t.observeLocked(sessionID, file, result, cl)
 	t.mu.Unlock()
 
-	if obs.Change != ChangeNone {
-		t.grade(&obs, identified, added)
+	hits := t.ruleHits(o.added) // outside the lock: the scanner holds no state
+	if o.obs.Change != ChangeNone {
+		o.obs.AddedRuleHits = hits
+		grade(&o.obs, identified)
 	}
-	return obs
+	if o.row != nil && o.rowHits && len(hits) > 0 {
+		o.row.AddedRuleHits = append([]string(nil), hits...)
+	}
+	return o.obs, o.row
 }
 
 // observeLocked applies one observation to the session's chain and the global
-// record. It returns the added lines' text (request-scoped) for grading.
-// Caller holds t.mu.
-func (t *Tracker) observeLocked(sessionID string, file *InstructionFile, result ScanResult, cl contentLines) (obs Observation, added []string) {
+// record. Caller holds t.mu.
+func (t *Tracker) observeLocked(sessionID string, file *InstructionFile, result ScanResult, cl contentLines) (o observed) {
 	s := t.touchSession(sessionID)
 
 	ch, hasChain := s.chains[file.SourcePath]
 	if file.SourcePath == "" || (!hasChain && len(s.chains) >= MaxPathsPerSession) {
 		// No chain: only deduplicated static hits.
-		obs.Static = t.markStatic(s, "h\x00"+file.Hash, result)
-		return obs, nil
+		o.obs.Static = t.markStatic(s, "h\x00"+file.Hash, result)
+		return o
 	}
 
-	obs.Path, obs.Hash = file.SourcePath, file.Hash
-	obs.Static = t.markStatic(s, "p\x00"+file.SourcePath, result)
-	version := t.recordVersion(t.touchPath(file.SourcePath), file.Hash, t.now(), cl.set)
+	o.obs.Path, o.obs.Hash = file.SourcePath, file.Hash
+	o.obs.Static = t.markStatic(s, "p\x00"+file.SourcePath, result)
+
+	now := t.now()
+	_, pathKnown := t.paths[file.SourcePath]
+	pr := t.touchPath(file.SourcePath)
+	version, versionKnown := pr.versions[file.Hash]
 
 	if !hasChain {
-		// First sight in this session: a baseline.
+		// First sight in this session. The session's chain starts here.
 		ch = &chain{shown: make(map[string]struct{})}
 		s.chains[file.SourcePath] = ch
+		t.firstSight(&o, pr, pathKnown, version, file.Hash, now, cl)
 		t.addToChain(ch, file.Hash, cl.set)
-		return obs, nil
+		return o
 	}
+
 	if _, shown := ch.shown[file.Hash]; shown {
-		return obs, nil // a version this session has already shown
+		// A version this session has already shown: no finding.
+		if versionKnown {
+			if seeVersion(version, now) {
+				o.row = version.row(file.SourcePath)
+			}
+		} else {
+			// The global record lost it (evicted or past the version bound).
+			changeType, prev := VersionFirstSeen, ""
+			if pathKnown {
+				changeType, prev = VersionSinceLastSeen, pr.newest
+			}
+			version = t.newVersion(pr, file.Hash, prev, changeType, now, cl.set)
+			o.row = version.row(file.SourcePath)
+		}
+		return o
 	}
 
 	// A hash new to this session.
-	obs.Change = ChangeInSession
-	obs.PrevHash = ch.last
+	o.obs.Change = ChangeInSession
+	o.obs.PrevHash = ch.last
 	if ch.lines != nil && cl.set != nil {
-		obs.DiffKnown = true
-		added, obs.LinesAdded, obs.LinesRemoved = diffLines(ch.lines, cl)
+		o.obs.DiffKnown = true
+		o.added, o.obs.LinesAdded, o.obs.LinesRemoved = diffLines(ch.lines, cl)
 	}
 
-	if ch.pendingCause != "" {
-		obs.Caused, obs.CauseTool = true, ch.pendingCause
-		ch.pendingCause = ""
-		if !version.caused {
-			version.caused, version.causeTool = true, obs.CauseTool
+	cause := ch.pendingCause
+	ch.pendingCause = ""
+	if versionKnown {
+		due := seeVersion(version, now)
+		if cause != "" && !version.caused {
+			version.caused, version.causeTool = true, cause
+			due = true
 		}
+		if due {
+			o.row = version.row(file.SourcePath)
+		}
+	} else {
+		// The session's change creates the version: its row carries this diff.
+		version = t.newVersion(pr, file.Hash, ch.last, VersionInSession, now, cl.set)
+		if cause != "" {
+			version.caused, version.causeTool = true, cause
+		}
+		o.row = version.row(file.SourcePath)
+		o.row.DiffKnown, o.row.LinesAdded, o.row.LinesRemoved = o.obs.DiffKnown, o.obs.LinesAdded, o.obs.LinesRemoved
+		o.rowHits = true
+	}
+	if cause != "" {
+		o.obs.Caused, o.obs.CauseTool = true, cause
 	} else if version.caused {
-		obs.Caused, obs.CauseTool = true, version.causeTool
+		o.obs.Caused, o.obs.CauseTool = true, version.causeTool
 	}
 	t.addToChain(ch, file.Hash, cl.set)
-	return obs, added
+	return o
 }
 
-// grade scans the added lines and sets Severity, Suppressed and the final
-// Static. It runs without the lock: the scanner holds no state.
-func (t *Tracker) grade(obs *Observation, identified bool, added []string) {
-	if len(added) > 0 && t.scanner != nil {
-		hits := t.scanner.Scan(strings.Join(added, "\n"))
-		seen := make(map[string]bool, len(hits.Violations))
-		for _, v := range hits.Violations {
-			if !seen[v.RuleName] {
-				seen[v.RuleName] = true
-				obs.AddedRuleHits = append(obs.AddedRuleHits, v.RuleName)
-			}
-		}
-		sort.Strings(obs.AddedRuleHits)
-	}
+// firstSight handles a session's first sight of a path against the global
+// record. Caller holds t.mu.
+//
+//  1. Path unknown: a baseline; the version is created as first_seen.
+//  2. Path known, hash one of its versions: a baseline; lastSeen advances, and
+//     the newest version's missing line set (after a restart) is filled in.
+//  3. Path known, hash new: the version is created as since_last_seen against
+//     the path's newest version. With the toggle on it is a finding, never
+//     caused; the diff is known only when the newest line set is in memory.
+func (t *Tracker) firstSight(o *observed, pr *pathRecord, pathKnown bool, version *versionRecord, hash string, now time.Time, cl contentLines) {
+	switch {
+	case !pathKnown:
+		version = t.newVersion(pr, hash, "", VersionFirstSeen, now, cl.set)
+		o.row = version.row(pr.path)
 
+	case version != nil:
+		if hash == pr.newest && pr.newestLines == nil {
+			pr.newestLines = t.retain(cl.set)
+		}
+		if seeVersion(version, now) {
+			o.row = version.row(pr.path)
+		}
+
+	default:
+		prev := pr.newest
+		var d versionDiff
+		var added []string
+		if pr.newestLines != nil && cl.set != nil {
+			d.known = true
+			added, d.added, d.removed = diffLines(pr.newestLines, cl)
+		}
+		version = t.newVersion(pr, hash, prev, VersionSinceLastSeen, now, cl.set)
+		o.row = version.row(pr.path)
+		o.row.DiffKnown, o.row.LinesAdded, o.row.LinesRemoved = d.known, d.added, d.removed
+		o.added, o.rowHits = added, true
+		if t.sinceLastSeen {
+			o.obs.Change = ChangeSinceLastSeen
+			o.obs.PrevHash = prev
+			o.obs.DiffKnown, o.obs.LinesAdded, o.obs.LinesRemoved = d.known, d.added, d.removed
+		}
+	}
+}
+
+// ruleHits scans the added lines and returns the sorted, distinct names of
+// the rules they trip. It runs without the lock: the scanner holds no state.
+func (t *Tracker) ruleHits(added []string) []string {
+	if len(added) == 0 || t.scanner == nil {
+		return nil
+	}
+	hits := t.scanner.Scan(strings.Join(added, "\n"))
+	var names []string
+	seen := make(map[string]bool, len(hits.Violations))
+	for _, v := range hits.Violations {
+		if !seen[v.RuleName] {
+			seen[v.RuleName] = true
+			names = append(names, v.RuleName)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// grade sets Severity, Suppressed and the final Static from the observation's
+// change and AddedRuleHits.
+func grade(obs *Observation, identified bool) {
 	switch {
 	case len(obs.AddedRuleHits) > 0:
 		obs.Severity = severityCritical
+	case obs.Change == ChangeSinceLastSeen:
+		obs.Severity = severityInfo // never caused; an unknown diff is info too
 	case !obs.Caused:
 		obs.Severity = severityWarning
 	}

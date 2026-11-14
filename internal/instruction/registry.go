@@ -17,7 +17,42 @@ type Store interface {
 	SaveInstructionFile(record Record) error
 	IncrementInstructionFileSessionCount(hash string, lastSeen time.Time) error
 	SaveEvent(evt Event) error
+	// SavePathVersion upserts on (source_path, hash). It never moves
+	// first_seen, never lowers caused from true to false, only advances
+	// last_seen, and keeps prev_hash, change_type and the diff as first written.
+	SavePathVersion(v PathVersion) error
+	// ListPathVersions returns at most limit versions, newest last_seen first.
+	ListPathVersions(limit int) ([]PathVersion, error)
 }
+
+// PathVersion is one version of one named instruction file, as seen by any
+// session. It holds hashes, counts, rule and tool names and times; never file
+// text, tool arguments or line hashes.
+type PathVersion struct {
+	SourcePath, Hash, PrevHash string
+	FirstSeen, LastSeen        time.Time
+	ChangeType                 string // "first_seen", "in_session", "since_last_seen"
+	Caused                     bool
+	CauseTool                  string
+	DiffKnown                  bool
+	LinesAdded, LinesRemoved   int
+	AddedRuleHits              []string
+}
+
+// Version change types, as stored in PathVersion.ChangeType.
+const (
+	VersionFirstSeen     = "first_seen"
+	VersionInSession     = string(ChangeInSession)
+	VersionSinceLastSeen = string(ChangeSinceLastSeen)
+)
+
+const (
+	// MaxLoadedPathVersions bounds the rows LoadPathVersions reads.
+	MaxLoadedPathVersions = 50000
+	// PathVersionTouchInterval is how far a version's last_seen must move
+	// past its last written value before the row is written again.
+	PathVersionTouchInterval = 5 * time.Minute
+)
 
 // Event represents an instruction integrity event for the events table.
 type Event struct {
@@ -36,11 +71,23 @@ type registryEntry struct {
 	scanResult ScanResult
 }
 
-// asyncJob is sent to the background worker for deep analysis.
+// jobKind says what an asyncJob asks the worker to write.
+type jobKind int
+
+const (
+	jobInstructionFile jobKind = iota // persist a newly registered file (Check)
+	jobPathVersion                    // upsert a version row (Observe)
+	jobEvent                          // save a change event (Observe)
+)
+
+// asyncJob is sent to the background worker for persistence.
 type asyncJob struct {
+	kind      jobKind
 	sessionID string
 	file      InstructionFile
 	result    ScanResult
+	version   PathVersion
+	event     Event
 }
 
 // Registry is the in-memory hash registry with inline scanning and async persistence.
@@ -53,8 +100,9 @@ type Registry struct {
 	mu      sync.RWMutex
 	entries map[string]*registryEntry
 
-	jobCh chan asyncJob
-	done  chan struct{}
+	jobCh    chan asyncJob
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // NewRegistry creates a registry with the given scanner, storage backend, and async queue size.
@@ -82,9 +130,19 @@ func (r *Registry) SetRedactor(red Redactor) {
 }
 
 // Stop shuts down the async worker.
+// It is safe to call more than once.
 func (r *Registry) Stop() {
-	close(r.jobCh)
+	r.stopOnce.Do(func() { close(r.jobCh) })
 	<-r.done
+}
+
+// enqueue hands job to the worker without blocking; a full queue drops it.
+func (r *Registry) enqueue(job asyncJob, hash string) {
+	select {
+	case r.jobCh <- job:
+	default:
+		slog.Warn("instruction async queue full, dropping job", "hash", truncHash(hash))
+	}
 }
 
 // truncHash returns the first 16 characters of a hash, or the full hash if shorter.
@@ -141,11 +199,7 @@ func (r *Registry) Check(sessionID string, file *InstructionFile) ScanResult {
 		"violations", len(result.Violations),
 	)
 
-	select {
-	case r.jobCh <- asyncJob{sessionID: sessionID, file: *file, result: result}:
-	default:
-		slog.Warn("instruction async queue full, dropping job", "hash", truncHash(file.Hash))
-	}
+	r.enqueue(asyncJob{kind: jobInstructionFile, sessionID: sessionID, file: *file, result: result}, file.Hash)
 
 	return result.CappedFor(file.Confidence)
 }
@@ -159,6 +213,24 @@ func (r *Registry) worker() {
 }
 
 func (r *Registry) processJob(job asyncJob) {
+	switch job.kind {
+	case jobPathVersion:
+		if r.store != nil {
+			if err := r.store.SavePathVersion(job.version); err != nil {
+				slog.Error("failed to persist instruction path version",
+					"source_path", job.version.SourcePath, "hash", truncHash(job.version.Hash), "error", err)
+			}
+		}
+		return
+	case jobEvent:
+		if r.store != nil {
+			if err := r.store.SaveEvent(job.event); err != nil {
+				slog.Error("failed to save instruction change event", "error", err)
+			}
+		}
+		return
+	}
+
 	now := time.Now()
 	file := job.file
 

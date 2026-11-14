@@ -464,6 +464,9 @@ type InstructionIntegrityConfig struct {
 	ShapeConfidenceThreshold float64                 `yaml:"shape_confidence_threshold"`
 	AsyncQueueSize           int                     `yaml:"async_queue_size"`
 	Rules                    []InstructionRuleConfig `yaml:"rules"`
+	// ChangedSinceLastSeen grades a named file that a session first shows
+	// with bytes the proxy has not seen at that path before. YAML-only.
+	ChangedSinceLastSeen bool `yaml:"changed_since_last_seen"`
 }
 
 // InstructionRuleConfig defines a single instruction-specific policy rule.
@@ -1031,6 +1034,7 @@ func defaults() *Config {
 				ShapeDetection:           true,
 				ShapeConfidenceThreshold: 0.7,
 				AsyncQueueSize:           100,
+				ChangedSinceLastSeen:     true,
 				Rules: []InstructionRuleConfig{
 					{Name: "instruction_pipe_to_shell", Patterns: []string{`curl\s+[^|]*\|\s*(ba)?sh`, `wget\s+[^|]*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
 					{Name: "instruction_shell_exec", Patterns: []string{`(?:^|[^A-Za-z0-9])eval\s*\(`, `(?:^|[^A-Za-z0-9])exec\s*\(`}, Severity: "critical", Action: "flag"},
