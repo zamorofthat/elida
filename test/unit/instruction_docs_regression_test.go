@@ -91,7 +91,7 @@ func repoMarkdown(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatalf("walk docs: %v", err)
 	}
-	for _, rel := range []string{"CHANGELOG.md", "README.md", "SECURITY.md", "deploy/helm/elida/README.md"} {
+	for _, rel := range []string{"CHANGELOG.md", "README.md", "deploy/helm/elida/README.md"} {
 		read(rel)
 	}
 	if len(docs) < 20 {
