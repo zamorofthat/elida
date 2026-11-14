@@ -20,6 +20,12 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 # v0.31.0.
 curl http://localhost:9090/control/health
 
+# Compatibility escape hatch, deprecated: if something already scrapes the
+# five removed fields, ELIDA_CONTROL_HEALTH_LEGACY_DECISION=true restores the
+# decision block on this route in exactly the shape v0.30.0 and v0.31.0
+# served. It logs a warning at startup and will be removed; move readers to
+# /control/decision. It does not affect /control/ready.
+
 # Readiness (unauthenticated): a status code with no body. 200 normally; 503
 # when semantic detection is enabled but the model could not be loaded or
 # verified, so an orchestrator takes the instance out of service rather than
