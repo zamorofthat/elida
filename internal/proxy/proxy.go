@@ -363,7 +363,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get or create session.
-	// Identity precedence: X-Session-ID header -> body-derived (OpenAI user
+	// Identity precedence: configured session header -> Claude Code's
+	// X-Claude-Code-Session-Id (when safe) -> body-derived (OpenAI user
 	// field / configured path; backend-independent so failover doesn't split
 	// a conversation) -> per-(client,backend) IP-hash fallback.
 	sessionID := p.resolveSessionID(r, requestBody)
@@ -708,12 +709,17 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 	}
 }
 
-// resolveSessionID returns the session ID for a request: the session header
-// if present, else an ID derived from the request body (OpenAI `user` field
-// or session.derive_from.body_path). Returns "" when neither applies, which
-// selects the per-(client,backend) fallback in the caller.
+// resolveSessionID returns the session ID for a request: the configured
+// session header if present, else Claude Code's session header when its value
+// is a safe ID (an unsafe one is ignored), else an ID derived from the request
+// body (OpenAI `user` field or session.derive_from.body_path). Returns ""
+// only when none applies, which selects the per-(client,backend) fallback in
+// the caller.
 func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
 	if id := r.Header.Get(p.config.Session.Header); id != "" {
+		return id
+	}
+	if id := r.Header.Get(session.ClaudeCodeSessionHeader); session.SafeID(id) {
 		return id
 	}
 	df := p.config.Session.DeriveFrom
