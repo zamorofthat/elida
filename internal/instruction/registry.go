@@ -17,7 +17,42 @@ type Store interface {
 	SaveInstructionFile(record Record) error
 	IncrementInstructionFileSessionCount(hash string, lastSeen time.Time) error
 	SaveEvent(evt Event) error
+	// SavePathVersion upserts on (source_path, hash). It never moves
+	// first_seen, never lowers caused from true to false, only advances
+	// last_seen, and keeps prev_hash, change_type and the diff as first written.
+	SavePathVersion(v PathVersion) error
+	// ListPathVersions returns at most limit versions, newest last_seen first.
+	ListPathVersions(limit int) ([]PathVersion, error)
 }
+
+// PathVersion is one version of one named instruction file, as seen by any
+// session. It holds hashes, counts, rule and tool names and times; never file
+// text, tool arguments or line hashes.
+type PathVersion struct {
+	SourcePath, Hash, PrevHash string
+	FirstSeen, LastSeen        time.Time
+	ChangeType                 string // "first_seen", "in_session", "since_last_seen"
+	Caused                     bool
+	CauseTool                  string
+	DiffKnown                  bool
+	LinesAdded, LinesRemoved   int
+	AddedRuleHits              []string
+}
+
+// Version change types, as stored in PathVersion.ChangeType.
+const (
+	VersionFirstSeen     = "first_seen"
+	VersionInSession     = string(ChangeInSession)
+	VersionSinceLastSeen = string(ChangeSinceLastSeen)
+)
+
+const (
+	// MaxLoadedPathVersions bounds the rows LoadPathVersions reads.
+	MaxLoadedPathVersions = 50000
+	// PathVersionTouchInterval is how far a version's last_seen must move
+	// past its last written value before the row is written again.
+	PathVersionTouchInterval = 5 * time.Minute
+)
 
 // Event represents an instruction integrity event for the events table.
 type Event struct {
@@ -29,16 +64,30 @@ type Event struct {
 }
 
 // registryEntry tracks the status of a known instruction file hash.
+// scanResult is stored uncapped: entries are keyed by content hash alone, and
+// the same bytes can arrive at either confidence.
 type registryEntry struct {
 	status     ScanStatus
 	scanResult ScanResult
 }
 
-// asyncJob is sent to the background worker for deep analysis.
+// jobKind says what an asyncJob asks the worker to write.
+type jobKind int
+
+const (
+	jobInstructionFile jobKind = iota // persist a newly registered file (Check)
+	jobPathVersion                    // upsert a version row (Observe)
+	jobEvent                          // save a change event (Observe)
+)
+
+// asyncJob is sent to the background worker for persistence.
 type asyncJob struct {
+	kind      jobKind
 	sessionID string
 	file      InstructionFile
 	result    ScanResult
+	version   PathVersion
+	event     Event
 }
 
 // Registry is the in-memory hash registry with inline scanning and async persistence.
@@ -46,12 +95,20 @@ type Registry struct {
 	scanner  *Scanner
 	store    Store
 	redactor Redactor
+	tracker  *Tracker
 
 	mu      sync.RWMutex
 	entries map[string]*registryEntry
 
-	jobCh chan asyncJob
-	done  chan struct{}
+	jobCh    chan asyncJob
+	done     chan struct{}
+	stopOnce sync.Once
+
+	// sendMu guards closed and every send on jobCh: senders hold the read
+	// lock (sends never block), Stop takes the write lock to close the
+	// channel, so a send can never meet a closed channel.
+	sendMu sync.RWMutex
+	closed bool
 }
 
 // NewRegistry creates a registry with the given scanner, storage backend, and async queue size.
@@ -62,6 +119,7 @@ func NewRegistry(scanner *Scanner, store Store, queueSize int) *Registry {
 	r := &Registry{
 		scanner: scanner,
 		store:   store,
+		tracker: newTracker(scanner),
 		entries: make(map[string]*registryEntry),
 		jobCh:   make(chan asyncJob, queueSize),
 		done:    make(chan struct{}),
@@ -78,9 +136,30 @@ func (r *Registry) SetRedactor(red Redactor) {
 }
 
 // Stop shuts down the async worker.
+// It is safe to call more than once.
 func (r *Registry) Stop() {
-	close(r.jobCh)
+	r.stopOnce.Do(func() {
+		r.sendMu.Lock()
+		r.closed = true
+		close(r.jobCh)
+		r.sendMu.Unlock()
+	})
 	<-r.done
+}
+
+// enqueue hands job to the worker without blocking; a full queue drops it.
+// After Stop it drops the job.
+func (r *Registry) enqueue(job asyncJob, hash string) {
+	r.sendMu.RLock()
+	defer r.sendMu.RUnlock()
+	if r.closed {
+		return
+	}
+	select {
+	case r.jobCh <- job:
+	default:
+		slog.Warn("instruction async queue full, dropping job", "hash", truncHash(hash))
+	}
 }
 
 // truncHash returns the first 16 characters of a hash, or the full hash if shorter.
@@ -110,7 +189,7 @@ func (r *Registry) Check(sessionID string, file *InstructionFile) ScanResult {
 		}
 		slog.Debug("instruction file cache hit",
 			"session_id", sessionID, "hash", truncHash(file.Hash), "status", entry.status)
-		return entry.scanResult
+		return entry.scanResult.CappedFor(file.Confidence)
 	}
 
 	// Cache miss: inline scan
@@ -137,13 +216,9 @@ func (r *Registry) Check(sessionID string, file *InstructionFile) ScanResult {
 		"violations", len(result.Violations),
 	)
 
-	select {
-	case r.jobCh <- asyncJob{sessionID: sessionID, file: *file, result: result}:
-	default:
-		slog.Warn("instruction async queue full, dropping job", "hash", truncHash(file.Hash))
-	}
+	r.enqueue(asyncJob{kind: jobInstructionFile, sessionID: sessionID, file: *file, result: result}, file.Hash)
 
-	return result
+	return result.CappedFor(file.Confidence)
 }
 
 // worker processes async jobs.
@@ -155,6 +230,24 @@ func (r *Registry) worker() {
 }
 
 func (r *Registry) processJob(job asyncJob) {
+	switch job.kind {
+	case jobPathVersion:
+		if r.store != nil {
+			if err := r.store.SavePathVersion(job.version); err != nil {
+				slog.Error("failed to persist instruction path version",
+					"source_path", job.version.SourcePath, "hash", truncHash(job.version.Hash), "error", err)
+			}
+		}
+		return
+	case jobEvent:
+		if r.store != nil {
+			if err := r.store.SaveEvent(job.event); err != nil {
+				slog.Error("failed to save instruction change event", "error", err)
+			}
+		}
+		return
+	}
+
 	now := time.Now()
 	file := job.file
 
@@ -202,8 +295,11 @@ func (r *Registry) processJob(job asyncJob) {
 			return
 		}
 
+		// A medium-confidence file was picked out by a heuristic, so its
+		// ordinary rule hits are recorded without raising an alarm.
 		severity := "info"
-		if status == string(ScanStatusFlagged) {
+		if status == string(ScanStatusFlagged) &&
+			(file.Confidence != ConfidenceMedium || job.result.hasHiddenContent()) {
 			severity = "critical"
 		}
 		_ = r.store.SaveEvent(Event{

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"reflect"
 	"regexp"
 	"testing"
 )
@@ -65,5 +66,24 @@ func TestExtractTrustedTagContentValues(t *testing.T) {
 	}
 	if result[0] != "\nContents of /project/CLAUDE.md:\n\n# Rules\nDo good.\n" {
 		t.Errorf("unexpected content: %q", result[0])
+	}
+}
+
+// A tool definition (no ID, no arguments) is not a call and never a cause.
+func TestInstructionToolUsesDropsDefinitions(t *testing.T) {
+	calls := []ToolCallInfo{
+		{Name: "edit_claude_md", Type: "function"},                                 // a definition
+		{Name: "Edit", Type: "tool_use", ID: "toolu_1", Arguments: `{"a":1}`},      // Anthropic call
+		{Name: "write_file", Type: "function", ID: "call_1", Arguments: `{"b":2}`}, // OpenAI call
+		{Name: "bash", Type: "function", Arguments: `{"c":3}`},                     // generic, no ID
+		{Name: "Write", Type: "tool_use", ID: "toolu_2"},                           // a call with empty input
+	}
+	got := instructionToolUses(calls)
+	var names []string
+	for _, u := range got {
+		names = append(names, u.Name)
+	}
+	if want := []string{"Edit", "write_file", "bash", "Write"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("tool uses = %v, want %v", names, want)
 	}
 }

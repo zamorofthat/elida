@@ -427,6 +427,9 @@ var SourceRoleWeights = map[string]float64{
 	// found in one message, so it carries the rule's severity at full
 	// weight (Plan B wiring ruling M-2).
 	"correlation": 1.0,
+	// A provenance finding is derived from a change between requests, not
+	// found in one message, so it carries the rule's severity at full weight.
+	"provenance": 1.0,
 }
 
 // RiskLadderAction defines actions that can be taken based on risk score
@@ -2565,6 +2568,45 @@ func (e *Engine) RecordSemanticViolation(sessionID string, v Violation) {
 	if v.Semantic != nil && v.Semantic.DecisionID != "" {
 		// The ordinal is ignored for a semantic event: its ID is its decision.
 		v.EventID = eventIDFor(sessionID, 0, v)
+	}
+	e.recordViolations(sessionID, []Violation{v})
+}
+
+// NormalizeInstructionSeverity maps an instruction rule's severity onto the
+// three the risk ladder weighs: "critical" and "high" are SeverityCritical,
+// "warning" and "medium" are SeverityWarning, anything else is SeverityInfo.
+// Case-insensitive.
+func NormalizeInstructionSeverity(s string) Severity {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "critical", "high":
+		return SeverityCritical
+	case "warning", "medium":
+		return SeverityWarning
+	default:
+		return SeverityInfo
+	}
+}
+
+// RecordInstructionViolation scores one instruction-integrity finding.
+// It normalises v.Severity, clears MatchedText, MatchedPattern and
+// SourceContent, forces EvidenceOnly false, stamps Timestamp and
+// EffectiveSeverity when unset, and records it like any violation.
+// An empty RuleName records nothing.
+func (e *Engine) RecordInstructionViolation(sessionID string, v Violation) {
+	if v.RuleName == "" {
+		return
+	}
+	v.Severity = NormalizeInstructionSeverity(string(v.Severity))
+	v.MatchedText = ""
+	v.MatchedPattern = ""
+	v.SourceContent = ""
+	v.EvidenceOnly = false
+	v.WouldContributePoints = 0
+	if v.Timestamp.IsZero() {
+		v.Timestamp = time.Now()
+	}
+	if v.EffectiveSeverity == "" {
+		v.EffectiveSeverity = effectiveSeverity(v.Severity, v.SourceRole)
 	}
 	e.recordViolations(sessionID, []Violation{v})
 }

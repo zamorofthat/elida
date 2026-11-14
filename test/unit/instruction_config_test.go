@@ -1,6 +1,8 @@
 package unit
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"elida/internal/config"
@@ -127,5 +129,30 @@ func TestSettingsDiffInstructionIntegrity(t *testing.T) {
 	}
 	if d.LocalValue != false {
 		t.Errorf("local = %v, want false", d.LocalValue)
+	}
+}
+
+func TestChangedSinceLastSeenDefault(t *testing.T) {
+	if !config.DefaultConfig().Policy.InstructionIntegrity.ChangedSinceLastSeen {
+		t.Error("DefaultConfig: changed_since_last_seen = false, want true")
+	}
+
+	load := func(yaml string) bool {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "elida.yaml")
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return cfg.Policy.InstructionIntegrity.ChangedSinceLastSeen
+	}
+	if !load("policy:\n  instruction_integrity:\n    enabled: true\n") {
+		t.Error("YAML without the key: changed_since_last_seen = false, want the default true")
+	}
+	if load("policy:\n  instruction_integrity:\n    enabled: true\n    changed_since_last_seen: false\n") {
+		t.Error("YAML with changed_since_last_seen: false loaded true")
 	}
 }

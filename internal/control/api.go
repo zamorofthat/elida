@@ -17,6 +17,7 @@ import (
 	"elida/internal/correlation"
 	"elida/internal/dashboard"
 	"elida/internal/fingerprint"
+	"elida/internal/instruction"
 	"elida/internal/panel"
 	"elida/internal/policy"
 	"elida/internal/session"
@@ -192,6 +193,9 @@ type Handler struct {
 	authEnabled bool
 	apiKey      string
 
+	// instructionRegistry, when set, adds instruction_integrity to /control/stats
+	instructionRegistry *instruction.Registry
+
 	// Capture mode for display in health endpoint
 	captureMode string
 }
@@ -207,6 +211,12 @@ func WithHistory(store *storage.SQLiteStore) Option {
 // WithPolicy enables the policy engine.
 func WithPolicy(engine *policy.Engine) Option {
 	return func(h *Handler) { h.policyEngine = engine }
+}
+
+// WithInstructionRegistry attaches the instruction registry so /control/stats
+// can report instruction provenance state.
+func WithInstructionRegistry(reg *instruction.Registry) Option {
+	return func(h *Handler) { h.instructionRegistry = reg }
 }
 
 // WithAuth enables API key authentication on /control/* endpoints.
@@ -283,6 +293,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 
 	// Instruction file integrity
 	h.mux.HandleFunc("/control/instructions", h.handleInstructionFiles)
+	h.mux.HandleFunc("/control/instructions/paths", h.handleInstructionPaths)
 	h.mux.HandleFunc("/control/instructions/{hash}", h.handleInstructionFile)
 
 	// Fingerprint baseline visibility
@@ -616,7 +627,14 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := h.manager.Stats()
-	writeJSON(w, http.StatusOK, stats)
+	if h.instructionRegistry == nil {
+		writeJSON(w, http.StatusOK, stats)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		session.Stats
+		InstructionIntegrity instruction.Stats `json:"instruction_integrity"`
+	}{stats, h.instructionRegistry.Stats()})
 }
 
 // handleSessions handles GET /control/sessions
@@ -2299,4 +2317,86 @@ func (h *Handler) handleInstructionFile(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, file)
+}
+
+// Bounds for GET /control/instructions/paths.
+const (
+	defaultInstructionPaths = 500
+	maxInstructionPaths     = 5000
+)
+
+type instructionPathVersion struct {
+	Hash          string    `json:"hash"`
+	PrevHash      string    `json:"prev_hash"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+	ChangeType    string    `json:"change_type"`
+	Caused        bool      `json:"caused"`
+	CauseTool     string    `json:"cause_tool"`
+	DiffKnown     bool      `json:"diff_known"`
+	LinesAdded    int       `json:"lines_added"`
+	LinesRemoved  int       `json:"lines_removed"`
+	AddedRuleHits []string  `json:"added_rule_hits"`
+}
+
+type instructionPathHistory struct {
+	SourcePath string                   `json:"source_path"`
+	Versions   []instructionPathVersion `json:"versions"`
+}
+
+// handleInstructionPaths handles GET /control/instructions/paths: the version
+// history of each named instruction file. It carries hashes, counts, rule and
+// tool names, timestamps and the path; never file text.
+func (h *Handler) handleInstructionPaths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"paths": []interface{}{}, "total": 0})
+		return
+	}
+
+	limit := defaultInstructionPaths
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = min(n, maxInstructionPaths)
+	}
+
+	rows, err := h.historyStore.ListInstructionPathVersions(limit)
+	if err != nil {
+		slog.Error("failed to list instruction path versions", "error", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	paths := []instructionPathHistory{}
+	index := map[string]int{}
+	for _, v := range rows {
+		i, ok := index[v.SourcePath]
+		if !ok {
+			i = len(paths)
+			index[v.SourcePath] = i
+			paths = append(paths, instructionPathHistory{SourcePath: v.SourcePath, Versions: []instructionPathVersion{}})
+		}
+		hits := v.AddedRuleHits
+		if hits == nil {
+			hits = []string{}
+		}
+		paths[i].Versions = append(paths[i].Versions, instructionPathVersion{
+			Hash: v.Hash, PrevHash: v.PrevHash, FirstSeen: v.FirstSeen, LastSeen: v.LastSeen,
+			ChangeType: v.ChangeType, Caused: v.Caused, CauseTool: v.CauseTool,
+			DiffKnown: v.DiffKnown, LinesAdded: v.LinesAdded, LinesRemoved: v.LinesRemoved,
+			AddedRuleHits: hits,
+		})
+	}
+	for i := range paths {
+		vs := paths[i].Versions
+		sort.SliceStable(vs, func(a, b int) bool { return vs[a].FirstSeen.Before(vs[b].FirstSeen) })
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"paths": paths, "total": len(paths)})
 }
