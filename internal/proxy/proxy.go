@@ -424,10 +424,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Instruction file integrity check — runs BEFORE policy scanning
 	// Extracts instruction files from trusted tag content (which policy skips)
 	if p.instructionRegistry != nil && len(requestBody) > 0 {
+		// Tool calls in the history are possible causes of a file change.
+		p.instructionRegistry.MarkCauses(sess.ID, instructionToolUses(requestBody))
 		if files := p.extractInstructionFiles(requestBody); len(files) > 0 {
 			auditMode := p.policy != nil && p.policy.IsAuditMode()
-			for _, file := range files {
+			results := make([]instruction.ScanResult, len(files))
+			for i, file := range files {
 				result := p.instructionRegistry.Check(sess.ID, file)
+				results[i] = result
 				if result.ShouldBlock && auditMode {
 					slog.Warn("instruction integrity would block (audit mode)",
 						"session_id", sess.ID,
@@ -448,6 +452,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if _, err := w.Write([]byte(`{"error":"instruction_integrity_violation","message":"Instruction file contains prohibited content"}`)); err != nil {
 						slog.Warn("write failed", "session_id", sess.ID, "error", err)
 					}
+					return
+				}
+			}
+
+			// Not refused: track each file and score what comes back. This
+			// runs only once no file refused the request, so a refused
+			// request scores nothing and leaves no chain behind.
+			identified := sessionID != ""
+			recorded := false
+			for i, file := range files {
+				obs := p.instructionRegistry.Observe(sess.ID, identified, file, results[i])
+				if p.policy != nil && p.recordInstructionFindings(sess.ID, file, obs) {
+					recorded = true
+				}
+			}
+			if recorded {
+				// The ladder check above ran before these findings existed.
+				// Passing throttled keeps a request from being delayed twice.
+				var blocked bool
+				if blocked, throttled = p.applyRiskLadder(w, sess, throttled); blocked {
 					return
 				}
 			}
