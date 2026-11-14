@@ -1192,7 +1192,13 @@ requests on it; the hit raises the session's risk score. Startup logs a warning 
 - A path is a string. The same absolute path on two machines behind one proxy is one history, so a
   since-last-seen finding can be two different checkouts.
 - If another session shows an edited file before the editing session's next request carries the tool call,
-  the change is graded uncaused in that other session. The version is marked caused afterwards.
+  the change is graded uncaused in that other session. The version is marked caused afterwards, and only
+  when the editing session is identified.
+- A tool call that names a file is a possible cause of that file's next change for 10 minutes from the
+  request that first carried it. A change after that is graded uncaused.
+- A conversation resumed after a restart, or after its session was dropped from tracking, replays its
+  history before the file has a change history in the proxy. A tool call already in that history is not
+  counted as a cause for the first change shown in that request.
 - A fallback session can use up a since-last-seen finding: its observation makes the version known and its
   own finding is suppressed.
 - Only tool calls in the request count as causes. A call whose result has not come back is not seen, and a
@@ -1200,5 +1206,15 @@ requests on it; the hit raises the session's risk score. Startup logs a warning 
 - The diff is a set difference of lines. A moved or re-indented line counts as added and removed; a
   duplicated line counts as nothing.
 - Beyond 4096 tracked sessions the least recently seen is dropped, and its next request is a baseline.
+- A session keeps at most 1024 shown versions across all its files. Past that its oldest is forgotten, and
+  that version shown again is reported again, once. At most 64 versions per path and 4096 paths are kept in
+  memory across sessions.
+- Only the first 32 instruction files of a request are tracked. Every file is still checked against the
+  rules, so a file past the 32nd can still refuse the request.
+- A file whose path is longer than 1024 bytes is handled like an unnamed block: no change history, and its
+  findings do not name the path. A tool name is kept to its first 128 bytes, with control characters
+  replaced by `?`.
+- `instruction_path_versions` has no retention, like `instruction_files`: session history retention does
+  not prune either table.
 - There is no dashboard view of the chain. It is available through `/control/instructions/paths` and the
   events table.
