@@ -55,7 +55,7 @@ func (s *Scanner) Scan(content string) ScanResult {
 					Action:   cr.rule.Action,
 					Hidden:   h,
 				})
-				if cr.rule.Action == "block" {
+				if cr.rule.Action == "block" && BlocksRequest(cr.rule.Name, ConfidenceHigh) {
 					result.ShouldBlock = true
 				}
 			}
@@ -69,7 +69,7 @@ func (s *Scanner) Scan(content string) ScanResult {
 					Action:      cr.rule.Action,
 					MatchedText: match,
 				})
-				if cr.rule.Action == "block" {
+				if cr.rule.Action == "block" && BlocksRequest(cr.rule.Name, ConfidenceHigh) {
 					result.ShouldBlock = true
 				}
 				break // One match per rule is enough

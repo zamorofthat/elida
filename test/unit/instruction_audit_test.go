@@ -56,7 +56,7 @@ func TestInstructionIntegrityAuditModeDoesNotBlock(t *testing.T) {
 			defer backend.Close()
 
 			scanner, err := instruction.NewScanner([]instruction.Rule{
-				{Name: "shell", Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
+				{Name: instruction.RulePipeToShell, Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
 			})
 			if err != nil {
 				t.Fatal(err)

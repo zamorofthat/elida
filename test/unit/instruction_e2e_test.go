@@ -12,7 +12,7 @@ func TestInstructionIntegrityEndToEnd(t *testing.T) {
 	store := &memStore{files: make(map[string]*instruction.Record)}
 
 	rules := []instruction.Rule{
-		{Name: "shell_exec", Patterns: []string{`curl.*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
+		{Name: instruction.RulePipeToShell, Patterns: []string{`curl.*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
 		{Name: "prompt_injection", Patterns: []string{`ignore\s+all\s+previous`}, Severity: "critical", Action: "block"},
 		{Name: "perm_escalation", Patterns: []string{`always\s+approve`}, Severity: "high", Action: "flag"},
 	}
@@ -45,8 +45,8 @@ func TestInstructionIntegrityEndToEnd(t *testing.T) {
 	if !result.ShouldBlock {
 		t.Error("poisoned file should block")
 	}
-	if len(result.Violations) == 0 || result.Violations[0].RuleName != "shell_exec" {
-		t.Error("expected shell_exec violation")
+	if len(result.Violations) == 0 || result.Violations[0].RuleName != instruction.RulePipeToShell {
+		t.Error("expected pipe-to-shell violation")
 	}
 
 	// Test 3: Cache hit for same clean file

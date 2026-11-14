@@ -1,6 +1,7 @@
 package instruction
 
 import (
+	"sort"
 	"strings"
 	"time"
 )
@@ -94,8 +95,9 @@ type ScanResult struct {
 	ShouldBlock bool        `json:"should_block"`
 }
 
-// RuleHiddenContent is the name of the default rule for invisible Unicode. It
-// is the one rule a medium-confidence file may block on.
+// RuleHiddenContent is the name the single hidden-content rule had before the
+// defaults were split into instruction_hidden_*. It is no longer shipped, but
+// an operator config may still name it, and it counts as a hidden-content rule.
 const RuleHiddenContent = "instruction_hidden_content"
 
 // IsHiddenContentRule reports whether a rule is a hidden-content rule.
@@ -103,18 +105,44 @@ func IsHiddenContentRule(name string) bool {
 	return strings.HasPrefix(name, "instruction_hidden_")
 }
 
-// CappedFor returns the result as it applies to a file identified at the
-// given confidence. A medium-confidence file was identified by a heuristic,
-// not by its path, so it blocks only on hidden content; its violations are
-// returned unchanged, because the evidence is kept even where enforcement is
-// not.
-func (r ScanResult) CappedFor(c Confidence) ScanResult {
-	if c != ConfidenceMedium {
-		return r
+// RulePipeToShell is the one non-hidden rule that may refuse a request.
+const RulePipeToShell = "instruction_pipe_to_shell"
+
+// BlocksRequest reports whether a block-action hit on this rule may refuse a
+// request for a file identified at this confidence.
+//
+//	hidden-content rule -> true at either confidence
+//	RulePipeToShell     -> true at ConfidenceHigh only
+//	anything else       -> false
+func BlocksRequest(ruleName string, c Confidence) bool {
+	if IsHiddenContentRule(ruleName) {
+		return true
 	}
+	return ruleName == RulePipeToShell && c == ConfidenceHigh
+}
+
+// RulesBlockingOutsideNarrowSet returns, sorted, the names of rules whose
+// action is "block" and for which BlocksRequest is false at ConfidenceHigh:
+// rules an operator may believe still refuse a request, and no longer do.
+func RulesBlockingOutsideNarrowSet(rules []Rule) []string {
+	var names []string
+	for _, r := range rules {
+		if r.Action == "block" && !BlocksRequest(r.Name, ConfidenceHigh) {
+			names = append(names, r.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// CappedFor returns the result as it applies to a file identified at the
+// given confidence. ShouldBlock is recomputed from BlocksRequest; violations
+// are returned unchanged, with their configured Action, because the evidence
+// is kept even where enforcement is not.
+func (r ScanResult) CappedFor(c Confidence) ScanResult {
 	r.ShouldBlock = false
 	for _, v := range r.Violations {
-		if IsHiddenContentRule(v.RuleName) && v.Action == "block" {
+		if v.Action == "block" && BlocksRequest(v.RuleName, c) {
 			r.ShouldBlock = true
 			break
 		}

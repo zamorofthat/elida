@@ -90,7 +90,7 @@ func TestRegistryCheckKnownClean(t *testing.T) {
 func TestRegistryCheckBlocksMalicious(t *testing.T) {
 	store := newMockStore()
 	scanner, _ := NewScanner([]Rule{
-		{Name: "shell_exec", Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
+		{Name: RulePipeToShell, Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
 	})
 	reg := NewRegistry(scanner, store, 10)
 	defer reg.Stop()
@@ -201,7 +201,7 @@ func (r *testRedactor) Redact(s string) string {
 func confidenceScanner(t *testing.T) *Scanner {
 	t.Helper()
 	scanner, err := NewScanner([]Rule{
-		{Name: "shell", Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
+		{Name: RulePipeToShell, Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
 		{Name: RuleHiddenContent, Patterns: []string{"[\\x{200B}-\\x{200F}]"}, Severity: "critical", Action: "block"},
 	})
 	if err != nil {

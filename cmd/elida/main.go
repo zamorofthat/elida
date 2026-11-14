@@ -1207,6 +1207,11 @@ func (a *app) initInstructionIntegrity() {
 		})
 	}
 
+	if names := instruction.RulesBlockingOutsideNarrowSet(instrRules); len(names) > 0 {
+		slog.Warn("instruction rules set to block no longer refuse requests; they raise the session's risk score instead. Only instruction_pipe_to_shell and instruction_hidden_* rules can refuse. Move any curl|sh or wget|sh pattern into a rule named instruction_pipe_to_shell to keep refusing on it.",
+			"rules", names)
+	}
+
 	scanner, err := instruction.NewScanner(instrRules)
 	if err != nil {
 		slog.Error("failed to create instruction scanner", "error", err)
