@@ -53,3 +53,13 @@ func TestShapeDetectedStaticHitScore(t *testing.T) {
 		t.Fatalf("risk score = %.4f, want 0.1", got)
 	}
 }
+
+// A hidden-content hit with no invisible code point has no labels: its
+// description omits the code-point clause.
+func TestHiddenDescriptionWithoutLabels(t *testing.T) {
+	file := &instruction.InstructionFile{Type: instruction.FileTypeClaudeMD, SourcePath: "/repo/CLAUDE.md", Hash: "0123456789abcdef"}
+	v := instruction.Violation{RuleName: "instruction_hidden_x", Hidden: &instruction.HiddenContent{CodePoints: map[string]int{}, Lines: []int{}, Total: 3}}
+	if got, want := staticDescription(file, v), "instruction_hidden_x in /repo/CLAUDE.md (claude_md, 0123456789ab)"; got != want {
+		t.Fatalf("description = %q, want %q", got, want)
+	}
+}

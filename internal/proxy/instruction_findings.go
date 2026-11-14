@@ -111,7 +111,8 @@ func fileLabel(file *instruction.InstructionFile) string {
 
 func staticDescription(file *instruction.InstructionFile, v instruction.Violation) string {
 	d := v.RuleName + " in " + fileLabel(file)
-	if instruction.IsHiddenContentRule(v.RuleName) && v.Hidden != nil {
+	// A hit whose matched runes were all visible has no labels: no clause.
+	if instruction.IsHiddenContentRule(v.RuleName) && v.Hidden != nil && len(v.Hidden.CodePoints) > 0 {
 		labels := make([]string, 0, len(v.Hidden.CodePoints))
 		for cp := range v.Hidden.CodePoints {
 			labels = append(labels, cp)
