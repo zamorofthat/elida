@@ -1187,6 +1187,15 @@ func (a *app) logCorrelationSummary() {
 	)
 }
 
+// warnRulesBlockingOutsideNarrowSet logs, by rule name only, the block-action
+// rules that no longer refuse a request.
+func warnRulesBlockingOutsideNarrowSet(rules []instruction.Rule) {
+	if names := instruction.RulesBlockingOutsideNarrowSet(rules); len(names) > 0 {
+		slog.Warn("instruction rules set to block no longer refuse requests; they raise the session's risk score instead. Only instruction_pipe_to_shell and instruction_hidden_* rules can refuse. Move any curl|sh or wget|sh pattern into a rule named instruction_pipe_to_shell to keep refusing on it.",
+			"rules", names)
+	}
+}
+
 func (a *app) initInstructionIntegrity() {
 	if !a.cfg.Policy.Enabled || !a.cfg.Policy.InstructionIntegrity.Enabled {
 		return
@@ -1207,6 +1216,8 @@ func (a *app) initInstructionIntegrity() {
 		})
 	}
 
+	warnRulesBlockingOutsideNarrowSet(instrRules)
+
 	scanner, err := instruction.NewScanner(instrRules)
 	if err != nil {
 		slog.Error("failed to create instruction scanner", "error", err)
@@ -1218,6 +1229,20 @@ func (a *app) initInstructionIntegrity() {
 	if a.redactor != nil {
 		a.instructionRegistry.SetRedactor(a.redactor)
 	}
+
+	a.instructionRegistry.SetChangedSinceLastSeen(iiCfg.ChangedSinceLastSeen)
+	pathVersionsLoaded := true
+	if err := a.instructionRegistry.LoadPathVersions(); err != nil {
+		pathVersionsLoaded = false
+		slog.Warn("failed to load instruction path versions; the first new version of each path after this start has an unknown diff", "error", err)
+	}
+	slog.Info("instruction provenance",
+		"session_header", a.cfg.Session.Header,
+		"claude_code_header", true,
+		"changed_since_last_seen", iiCfg.ChangedSinceLastSeen,
+		"path_versions_loaded", pathVersionsLoaded,
+		"note", "sessions identified by neither header are tracked but produce no change findings",
+	)
 
 	slog.Info("instruction integrity enabled",
 		"tracked_types", iiCfg.TrackedTypes,
@@ -1371,6 +1396,9 @@ func (a *app) initControlAPI() {
 	}
 	if a.policyEngine != nil {
 		controlOpts = append(controlOpts, control.WithPolicy(a.policyEngine))
+	}
+	if a.instructionRegistry != nil {
+		controlOpts = append(controlOpts, control.WithInstructionRegistry(a.instructionRegistry))
 	}
 	if a.cfg.Control.Auth.Enabled {
 		controlOpts = append(controlOpts, control.WithAuth(a.cfg.Control.Auth.APIKey))

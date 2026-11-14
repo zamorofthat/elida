@@ -551,6 +551,27 @@ func (s *SQLiteStore) migrate() error {
 		return fmt.Errorf("instruction_files migration: %w", err)
 	}
 
+	// One row per version of a named instruction file, across sessions and
+	// restarts. diff holds counts and rule names only, never text.
+	pathVersionSchema := `
+	CREATE TABLE IF NOT EXISTS instruction_path_versions (
+		source_path TEXT NOT NULL,
+		hash        TEXT NOT NULL,
+		prev_hash   TEXT,
+		first_seen  DATETIME NOT NULL,
+		last_seen   DATETIME NOT NULL,
+		change_type TEXT NOT NULL,
+		caused      INTEGER NOT NULL DEFAULT 0,
+		cause_tool  TEXT,
+		diff        TEXT,
+		PRIMARY KEY (source_path, hash)
+	);
+	CREATE INDEX IF NOT EXISTS idx_instruction_path_versions_last_seen ON instruction_path_versions(last_seen);
+	`
+	if _, err := s.db.Exec(pathVersionSchema); err != nil {
+		return fmt.Errorf("instruction_path_versions migration: %w", err)
+	}
+
 	// Add instruction columns to sessions table (idempotent — ignore "duplicate column" errors)
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN instruction_hash TEXT")
 	_, _ = s.db.Exec("ALTER TABLE sessions ADD COLUMN instruction_file_type TEXT")
@@ -1664,6 +1685,85 @@ func (s *SQLiteStore) ListInstructionFiles(fileType, scanStatus string) ([]instr
 		records = append(records, r)
 	}
 	return records, rows.Err()
+}
+
+// pathVersionDiff is the JSON stored in instruction_path_versions.diff.
+type pathVersionDiff struct {
+	Known         bool     `json:"known"`
+	LinesAdded    int      `json:"lines_added"`
+	LinesRemoved  int      `json:"lines_removed"`
+	AddedRuleHits []string `json:"added_rule_hits"`
+}
+
+// SaveInstructionPathVersion upserts one version on (source_path, hash).
+// first_seen, prev_hash, change_type and diff stay as first written;
+// last_seen only advances; caused never goes back from 1 to 0, and
+// cause_tool is taken from the write that first sets it.
+//
+// Times are written in UTC. The driver stores them as time.Time.String(), so
+// within one zone the text orders as the instant does; the last_seen
+// comparison and ListInstructionPathVersions' ORDER BY rely on that.
+func (s *SQLiteStore) SaveInstructionPathVersion(v instruction.PathVersion) error {
+	hits := v.AddedRuleHits
+	if hits == nil {
+		hits = []string{}
+	}
+	diff, err := json.Marshal(pathVersionDiff{
+		Known: v.DiffKnown, LinesAdded: v.LinesAdded, LinesRemoved: v.LinesRemoved, AddedRuleHits: hits,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal path version diff: %w", err)
+	}
+	caused := 0
+	if v.Caused {
+		caused = 1
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO instruction_path_versions
+		(source_path, hash, prev_hash, first_seen, last_seen, change_type, caused, cause_tool, diff)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(source_path, hash) DO UPDATE SET
+			last_seen = CASE WHEN excluded.last_seen > last_seen
+			                 THEN excluded.last_seen ELSE last_seen END,
+			cause_tool = CASE WHEN caused = 0 AND excluded.caused = 1
+			                  THEN excluded.cause_tool ELSE cause_tool END,
+			caused = MAX(caused, excluded.caused)`,
+		v.SourcePath, v.Hash, v.PrevHash, v.FirstSeen.UTC(), v.LastSeen.UTC(),
+		v.ChangeType, caused, v.CauseTool, string(diff),
+	)
+	return err
+}
+
+// ListInstructionPathVersions returns at most limit versions, newest
+// last_seen first.
+func (s *SQLiteStore) ListInstructionPathVersions(limit int) ([]instruction.PathVersion, error) {
+	rows, err := s.db.Query(`
+		SELECT source_path, hash, prev_hash, first_seen, last_seen, change_type, caused, cause_tool, diff
+		FROM instruction_path_versions ORDER BY last_seen DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []instruction.PathVersion
+	for rows.Next() {
+		var v instruction.PathVersion
+		var prevHash, causeTool, diffStr sql.NullString
+		var caused int
+		if err := rows.Scan(&v.SourcePath, &v.Hash, &prevHash, &v.FirstSeen, &v.LastSeen,
+			&v.ChangeType, &caused, &causeTool, &diffStr); err != nil {
+			return nil, err
+		}
+		v.PrevHash, v.CauseTool, v.Caused = prevHash.String, causeTool.String, caused != 0
+		var d pathVersionDiff
+		unmarshalJSON(diffStr, &d, "diff", v.SourcePath)
+		v.DiffKnown, v.LinesAdded, v.LinesRemoved = d.Known, d.LinesAdded, d.LinesRemoved
+		if len(d.AddedRuleHits) > 0 {
+			v.AddedRuleHits = d.AddedRuleHits
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // TTSStats represents aggregate statistics for TTS requests

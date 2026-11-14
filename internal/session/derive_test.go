@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDeriveIDFromBody(t *testing.T) {
 	tests := []struct {
@@ -45,5 +48,27 @@ func TestDeriveIDSanitization(t *testing.T) {
 	unsafe := DeriveIDFromBody([]byte(`{"user":"a b/c"}`), true, "")
 	if len(unsafe) != len("user-")+16 {
 		t.Errorf("unsafe chars: got %q, want hashed form", unsafe)
+	}
+}
+
+func TestSafeID(t *testing.T) {
+	tests := []struct {
+		name string
+		v    string
+		want bool
+	}{
+		{"empty", "", false},
+		{"64 characters", strings.Repeat("a", 64), true},
+		{"65 characters", strings.Repeat("a", 65), false},
+		{"space", "a b", false},
+		{"slash", "a/b", false},
+		{"uuid", "0c1d2e3f-aaaa-bbbb-cccc-000000000001", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SafeID(tt.v); got != tt.want {
+				t.Errorf("SafeID(%q) = %v, want %v", tt.v, got, tt.want)
+			}
+		})
 	}
 }

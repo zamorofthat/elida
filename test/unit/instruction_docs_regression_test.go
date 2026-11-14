@@ -201,13 +201,12 @@ func TestReportedReminderDoesNotBlock(t *testing.T) {
 	}
 }
 
-// TestRepoInstructionFilesKnownResidual pins what is still true after the
-// noise-floor work, so that changing it is deliberate. .ai/AGENTS.md is a
-// tracked instruction file that documents a blocked pattern (its detection
-// table names exec()), and it still blocks under enforce. It stops when the
-// instruction provenance plan (plan 2) narrows the 403 to hidden content and
-// pipe-to-shell and moves everything else onto the risk ladder.
-func TestRepoInstructionFilesKnownResidual(t *testing.T) {
+// TestRepoInstructionFilesDoNotBlock pins what is true now that only
+// hidden content and pipe-to-shell refuse a request. .ai/AGENTS.md is a tracked
+// instruction file that documents a detected pattern (its detection table names
+// exec()); the violation is still recorded as instruction_shell_exec, but that
+// rule flags and no longer blocks, so the file passes under enforce.
+func TestRepoInstructionFilesDoNotBlock(t *testing.T) {
 	reg, cfg := defaultInstructionRegistry(t)
 	root := repoRoot(t)
 
@@ -229,8 +228,15 @@ func TestRepoInstructionFilesKnownResidual(t *testing.T) {
 	}
 
 	result := check("AGENTS.md")
-	if blocking := blockingRules(result); len(blocking) != 1 || blocking[0] != "instruction_shell_exec" || !result.ShouldBlock {
-		t.Errorf(".ai/AGENTS.md: blocks on %v (ShouldBlock %v), want exactly [instruction_shell_exec]", blocking, result.ShouldBlock)
+	if result.ShouldBlock {
+		t.Errorf(".ai/AGENTS.md: ShouldBlock true (blocking: %v), want false", blockingRules(result))
+	}
+	var rules []string
+	for _, v := range result.Violations {
+		rules = append(rules, v.RuleName)
+	}
+	if len(rules) != 1 || rules[0] != "instruction_shell_exec" {
+		t.Errorf(".ai/AGENTS.md: violations %v, want exactly [instruction_shell_exec]", rules)
 	}
 }
 

@@ -799,3 +799,88 @@ Custom rules are **appended** to preset rules, so you get both.
 | `tool_fanout` | Distinct tools used threshold | `threshold` | — |
 | `rate_anomaly` | Poisson rate anomaly (end-of-session) | `threshold_float` (p-value) | — |
 | `compound_anomaly` | Adaptive CUSUM + entropy (real-time) | `threshold_float` (compound score) | — |
+
+## Instruction integrity rules
+
+These rules apply to instruction files (CLAUDE.md, AGENTS.md, cursor and windsurf rule files) and to
+unnamed blocks of text that are addressed to an agent. They live under
+`policy.instruction_integrity.rules`, not in the preset tables above, and they are loaded from defaults
+unless the config lists its own. Only `instruction_pipe_to_shell` refuses a request, and only for a file
+identified with high confidence; a rule named `instruction_hidden_*` may refuse too if its action is set to
+block. Every other hit is recorded and adds to the session's risk score on the risk ladder.
+
+### Shipped rules
+
+| Rule | Severity | Action |
+|------|----------|--------|
+| `instruction_pipe_to_shell` | critical | block |
+| `instruction_shell_exec` | critical | flag |
+| `instruction_prompt_injection` | critical | flag |
+| `instruction_permission_escalation` | high | flag |
+| `instruction_hidden_bidi` | critical | flag |
+| `instruction_hidden_tags` | critical | flag |
+| `instruction_hidden_format` | medium | flag |
+| `instruction_obfuscation` | high | flag |
+| `instruction_tool_manipulation` | medium | flag |
+| `instruction_exfil_urls` | high | flag |
+
+### How a rule hit is scored
+
+A rule hit in a file's content is scored at the system source weight (0.1), once per session, per path and
+per rule. An unnamed block, and a file whose path is longer than 1024 bytes, is counted per content hash
+instead of per path. The points follow the hit's severity:
+
+| Hit | Severity scored | Points |
+|-----|-----------------|--------|
+| Rule severity critical or high | critical | 1 |
+| Rule severity medium or warning | warning | 0.3 |
+| Any other rule severity | info | 0.1 |
+| A rule whose action is block, whether or not it refuses the request (and in audit mode) | critical | 1 |
+| A non-hidden rule in a file identified only by its shape (medium confidence), whatever its action | info | 0.1 |
+
+A hidden-content rule (`instruction_hidden_*`) follows the first four rows in a file of either confidence,
+so the shipped `instruction_hidden_bidi` and `instruction_hidden_tags` hits score 1 point and an
+`instruction_hidden_format` hit scores 0.3. A request that is refused scores nothing and leaves no change
+history behind.
+
+### Derived change rules
+
+Two further rule names are produced by the provenance tracker rather than by a pattern. Both describe a
+named file whose bytes changed.
+
+- `instruction_file_changed`: a session showed a different version of a file it had already shown.
+- `instruction_file_changed_since_last_seen`: a session showed, for the first time, a version of a path
+  that the proxy had not seen before at that path.
+
+| Situation | Score |
+|-----------|-------|
+| Uncaused change, no added line trips a rule | 3 points |
+| A line added by the change trips a rule | 10 points |
+| Change caused by a tool call in the same session, no added line trips a rule | recorded only, no score |
+| Since-last-seen change, no added line trips a rule | 1 point |
+
+A change is caused when either of these holds:
+
+- A tool call in the session's request history names the file, by its full path or by a relative
+  reference to its name (`CLAUDE.md`, `./CLAUDE.md` or `.cursor/rules` after a quote, a space, `=`, `(`,
+  `[`, `,` or `:`), the call has not already been used for another change, and the change comes within 10
+  minutes of the request that first carried the call. The call may be in the same request that shows the
+  change. The tail of a different path does not name the file: `/home/u/.claude/CLAUDE.md` names only that
+  file, not `/repo/CLAUDE.md`. One call is one cause: a call that names two files by name is used up by the
+  first of them to change. Read-only tools (Read, Grep, Glob, ls and MCP read, list, search and get tools)
+  never count.
+- The same version was already marked caused by another identified session. A session that no header
+  identifies never marks a version caused for other sessions.
+
+A cause is not legitimacy: a caused change whose added lines trip a rule still scores 10 points. Rule hits
+inside a change that already scores 10 points are not scored a second time. Sessions that no header
+identifies produce no change findings.
+
+### What a hidden-content finding reports
+
+A hidden-content finding names the code-point labels found (for example a bidirectional override or a tag
+character), the line numbers they sit on and a total count. Only invisible code points (format characters
+and the tag block) are labelled and given line numbers; a custom `instruction_hidden_*` pattern that also
+matches visible text has those characters counted in the total only. Counting stops at 10,000 characters,
+in which case the finding is marked `truncated` and the total is a lower bound. It never carries the text of
+the file or of any line.

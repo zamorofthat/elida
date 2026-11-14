@@ -294,8 +294,12 @@ policy:
     shape_detection: true
     shape_confidence_threshold: 0.7
     async_queue_size: 100
-    # Rules are loaded from defaults — see internal/config/config.go
-    # Override here to customize
+    # Grade a named file that a session first shows with bytes the proxy has
+    # not seen at that path before. Findings only for identified sessions.
+    changed_since_last_seen: true
+    # Rules are loaded from defaults (see internal/config/config.go). Only
+    # instruction_pipe_to_shell refuses a request; every other default rule
+    # raises the session's risk score instead.
 
   # Circuit breaker — automatic limits on runaway sessions
   circuit_breaker:

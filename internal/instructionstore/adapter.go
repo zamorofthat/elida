@@ -38,3 +38,11 @@ func (a *SQLiteAdapter) SaveEvent(evt instruction.Event) error {
 		Data:      evt.Data,
 	})
 }
+
+func (a *SQLiteAdapter) SavePathVersion(v instruction.PathVersion) error {
+	return a.store.SaveInstructionPathVersion(v)
+}
+
+func (a *SQLiteAdapter) ListPathVersions(limit int) ([]instruction.PathVersion, error) {
+	return a.store.ListInstructionPathVersions(limit)
+}

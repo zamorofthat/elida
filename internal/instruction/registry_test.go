@@ -1,6 +1,7 @@
 package instruction
 
 import (
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -8,13 +9,53 @@ import (
 
 // mockStore implements the minimal storage interface for testing.
 type mockStore struct {
-	mu     sync.Mutex
-	files  map[string]*Record
-	events []Event
+	mu       sync.Mutex
+	files    map[string]*Record
+	events   []Event
+	versions map[string]PathVersion // key: source_path + "\x00" + hash
+	saves    int                    // SavePathVersion calls
 }
 
 func newMockStore() *mockStore {
-	return &mockStore{files: make(map[string]*Record)}
+	return &mockStore{files: make(map[string]*Record), versions: make(map[string]PathVersion)}
+}
+
+// SavePathVersion upserts as the SQLite store does: first_seen, prev_hash,
+// change_type and the diff stay as first written, last_seen only advances,
+// and caused never goes back to false.
+func (m *mockStore) SavePathVersion(v PathVersion) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.saves++
+	key := v.SourcePath + "\x00" + v.Hash
+	old, ok := m.versions[key]
+	if !ok {
+		v.AddedRuleHits = append([]string(nil), v.AddedRuleHits...)
+		m.versions[key] = v
+		return nil
+	}
+	if v.LastSeen.After(old.LastSeen) {
+		old.LastSeen = v.LastSeen
+	}
+	if v.Caused && !old.Caused {
+		old.Caused, old.CauseTool = true, v.CauseTool
+	}
+	m.versions[key] = old
+	return nil
+}
+
+func (m *mockStore) ListPathVersions(limit int) ([]PathVersion, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]PathVersion, 0, len(m.versions))
+	for _, v := range m.versions {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen.After(out[j].LastSeen) })
+	if limit >= 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 func (m *mockStore) GetInstructionFile(hash string) (*Record, error) {
@@ -90,7 +131,7 @@ func TestRegistryCheckKnownClean(t *testing.T) {
 func TestRegistryCheckBlocksMalicious(t *testing.T) {
 	store := newMockStore()
 	scanner, _ := NewScanner([]Rule{
-		{Name: "shell_exec", Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
+		{Name: RulePipeToShell, Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
 	})
 	reg := NewRegistry(scanner, store, 10)
 	defer reg.Stop()
@@ -201,7 +242,7 @@ func (r *testRedactor) Redact(s string) string {
 func confidenceScanner(t *testing.T) *Scanner {
 	t.Helper()
 	scanner, err := NewScanner([]Rule{
-		{Name: "shell", Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
+		{Name: RulePipeToShell, Patterns: []string{`curl.*\|\s*sh`}, Severity: "critical", Action: "block"},
 		{Name: RuleHiddenContent, Patterns: []string{"[\\x{200B}-\\x{200F}]"}, Severity: "critical", Action: "block"},
 	})
 	if err != nil {

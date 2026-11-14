@@ -363,7 +363,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get or create session.
-	// Identity precedence: X-Session-ID header -> body-derived (OpenAI user
+	// Identity precedence: configured session header -> Claude Code's
+	// X-Claude-Code-Session-Id (when safe) -> body-derived (OpenAI user
 	// field / configured path; backend-independent so failover doesn't split
 	// a conversation) -> per-(client,backend) IP-hash fallback.
 	sessionID := p.resolveSessionID(r, requestBody)
@@ -420,13 +421,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The request's tool calls, parsed once: possible causes of an
+	// instruction file change below, and recorded on the session further on.
+	var toolCalls []ToolCallInfo
+	if len(requestBody) > 0 {
+		toolCalls = ExtractToolCalls(requestBody)
+	}
+
 	// Instruction file integrity check — runs BEFORE policy scanning
 	// Extracts instruction files from trusted tag content (which policy skips)
 	if p.instructionRegistry != nil && len(requestBody) > 0 {
+		// Tool calls in the history are possible causes of a file change.
+		p.instructionRegistry.MarkCauses(sess.ID, instructionToolUses(toolCalls))
 		if files := p.extractInstructionFiles(requestBody); len(files) > 0 {
 			auditMode := p.policy != nil && p.policy.IsAuditMode()
-			for _, file := range files {
+			results := make([]instruction.ScanResult, len(files))
+			for i, file := range files {
 				result := p.instructionRegistry.Check(sess.ID, file)
+				results[i] = result
 				if result.ShouldBlock && auditMode {
 					slog.Warn("instruction integrity would block (audit mode)",
 						"session_id", sess.ID,
@@ -447,6 +459,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if _, err := w.Write([]byte(`{"error":"instruction_integrity_violation","message":"Instruction file contains prohibited content"}`)); err != nil {
 						slog.Warn("write failed", "session_id", sess.ID, "error", err)
 					}
+					return
+				}
+			}
+
+			// Not refused: track each file and score what comes back. This
+			// runs only once no file refused the request, so a refused
+			// request scores nothing and leaves no chain behind. A file past
+			// the per-request tracking cap is observed as an unnamed block
+			// (a copy with no path): its rule hits are still scored, once
+			// per content hash, but it gets no chain and no change tracking.
+			identified := sessionID != ""
+			recorded := false
+			for i, file := range files {
+				observed := file
+				if i >= instruction.MaxInstructionFilesPerRequest {
+					unnamed := *file
+					unnamed.SourcePath = ""
+					observed = &unnamed
+				}
+				obs := p.instructionRegistry.Observe(sess.ID, identified, observed, results[i])
+				if p.policy != nil && p.recordInstructionFindings(sess.ID, file, obs) {
+					recorded = true
+				}
+			}
+			if recorded {
+				// The ladder check above ran before these findings existed.
+				// Passing throttled keeps a request from being delayed twice.
+				var blocked bool
+				if blocked, throttled = p.applyRiskLadder(w, sess, throttled); blocked {
 					return
 				}
 			}
@@ -545,13 +586,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract tool calls from request (tools being defined or tool results being sent)
-	if len(requestBody) > 0 {
-		if toolCalls := ExtractToolCalls(requestBody); len(toolCalls) > 0 {
-			for _, tc := range toolCalls {
-				sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
-			}
-		}
+	// Record the request's tool calls (tools being defined or tool results
+	// being sent), parsed once above.
+	for _, tc := range toolCalls {
+		sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 	}
 
 	// Capture request body for capture-all mode (policy-independent)
@@ -708,12 +746,17 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 	}
 }
 
-// resolveSessionID returns the session ID for a request: the session header
-// if present, else an ID derived from the request body (OpenAI `user` field
-// or session.derive_from.body_path). Returns "" when neither applies, which
-// selects the per-(client,backend) fallback in the caller.
+// resolveSessionID returns the session ID for a request: the configured
+// session header if present, else Claude Code's session header when its value
+// is a safe ID (an unsafe one is ignored), else an ID derived from the request
+// body (OpenAI `user` field or session.derive_from.body_path). Returns ""
+// only when none applies, which selects the per-(client,backend) fallback in
+// the caller.
 func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
 	if id := r.Header.Get(p.config.Session.Header); id != "" {
+		return id
+	}
+	if id := r.Header.Get(session.ClaudeCodeSessionHeader); session.SafeID(id) {
 		return id
 	}
 	df := p.config.Session.DeriveFrom
