@@ -15,16 +15,18 @@ import (
 // rule hit scored from a file's content.
 const categoryInstructionIntegrity = "instruction_integrity"
 
-// instructionToolUses returns the tool calls in the request's message array,
-// as possible causes of an instruction file change.
-func instructionToolUses(body []byte) []instruction.ToolUse {
-	calls := ExtractToolCalls(body)
-	if len(calls) == 0 {
-		return nil
-	}
-	uses := make([]instruction.ToolUse, len(calls))
-	for i, c := range calls {
-		uses[i] = instruction.ToolUse{ID: c.ID, Name: c.Name, Arguments: c.Arguments}
+// instructionToolUses returns the tool calls among calls (the request's
+// ExtractToolCalls result), as possible causes of an instruction file change.
+// A tool_use block is a call; any other entry is a call only when it carries
+// an ID or arguments. An entry with neither is a tool definition (an OpenAI
+// "tools" entry), which names a tool and calls nothing.
+func instructionToolUses(calls []ToolCallInfo) []instruction.ToolUse {
+	var uses []instruction.ToolUse
+	for _, c := range calls {
+		if c.Type != "tool_use" && c.ID == "" && c.Arguments == "" {
+			continue
+		}
+		uses = append(uses, instruction.ToolUse{ID: c.ID, Name: c.Name, Arguments: c.Arguments})
 	}
 	return uses
 }

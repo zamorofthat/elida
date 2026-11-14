@@ -338,3 +338,35 @@ func TestProxyLongPathIsUnnamed(t *testing.T) {
 		t.Errorf("description (%d bytes) carries the long path or lacks the unnamed label", len(d))
 	}
 }
+
+// OpenAI tool definitions are not calls: a definition that names CLAUDE.md
+// does not cause the file's next change.
+func TestProxyToolDefinitionsAreNotCauses(t *testing.T) {
+	pp := newProvenanceProxy(t, "enforce")
+	post := func(content string) {
+		body, err := json.Marshal(map[string]any{
+			"model": "m",
+			"tools": []map[string]any{{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "edit_claude_md",
+					"description": "Edit /repo/CLAUDE.md",
+					"parameters":  map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string", "default": "/repo/CLAUDE.md"}}},
+				},
+			}},
+			"messages": []map[string]any{reminder(content)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Session-ID", "s1")
+		rec := httptest.NewRecorder()
+		pp.p.ServeHTTP(rec, req)
+		assertStatus(t, rec.Code, http.StatusOK)
+	}
+	post(provA)
+	post(provB)
+	assertScore(t, pp, "s1", 3.0)
+}

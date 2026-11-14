@@ -421,11 +421,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The request's tool calls, parsed once: possible causes of an
+	// instruction file change below, and recorded on the session further on.
+	var toolCalls []ToolCallInfo
+	if len(requestBody) > 0 {
+		toolCalls = ExtractToolCalls(requestBody)
+	}
+
 	// Instruction file integrity check — runs BEFORE policy scanning
 	// Extracts instruction files from trusted tag content (which policy skips)
 	if p.instructionRegistry != nil && len(requestBody) > 0 {
 		// Tool calls in the history are possible causes of a file change.
-		p.instructionRegistry.MarkCauses(sess.ID, instructionToolUses(requestBody))
+		p.instructionRegistry.MarkCauses(sess.ID, instructionToolUses(toolCalls))
 		if files := p.extractInstructionFiles(requestBody); len(files) > 0 {
 			auditMode := p.policy != nil && p.policy.IsAuditMode()
 			results := make([]instruction.ScanResult, len(files))
@@ -574,13 +581,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract tool calls from request (tools being defined or tool results being sent)
-	if len(requestBody) > 0 {
-		if toolCalls := ExtractToolCalls(requestBody); len(toolCalls) > 0 {
-			for _, tc := range toolCalls {
-				sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
-			}
-		}
+	// Record the request's tool calls (tools being defined or tool results
+	// being sent), parsed once above.
+	for _, tc := range toolCalls {
+		sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 	}
 
 	// Capture request body for capture-all mode (policy-independent)
