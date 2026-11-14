@@ -3,13 +3,17 @@ import {
   IconSettings, IconLogo, IconRefresh, IconTool,
 } from './shared/Icons'
 
-export function TopNav({ activePage, onNavigate, activeCount, status, lastUpdated, isRefreshing }) {
+export function TopNav({ activePage, onNavigate, activeCount, status, lastUpdated, isRefreshing, voiceEnabled }) {
+  // Voice is only offered when ELIDA reports that it can record a voice
+  // session. Otherwise the tab is a dead end: it can only ever say "No voice
+  // sessions", which reads as "none happened" rather than "this is switched
+  // off".
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: IconDashboard },
     { id: 'sessions', label: 'Sessions', icon: IconSessions },
     { id: 'tooluse', label: 'Tool Use', icon: IconTool },
     { id: 'flagged', label: 'Flagged', icon: IconShield },
-    { id: 'voice', label: 'Voice', icon: IconMic },
+    ...(voiceEnabled ? [{ id: 'voice', label: 'Voice', icon: IconMic }] : []),
     { id: 'history', label: 'History', icon: IconClock },
     { id: 'settings', label: 'Settings', icon: IconSettings },
   ]
