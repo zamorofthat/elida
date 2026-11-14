@@ -88,13 +88,13 @@ func NewSessionControlParser(customPatterns *CustomPatternConfig) *SessionContro
 }
 
 // NewSessionControlParserFor creates a parser carrying only the named
-// protocols, which is how websocket.voice_sessions.protocols is honoured.
+// protocols, which is how websocket.voice_sessions.protocols is honored.
 //
 // An empty list means every built-in protocol, so a deployment that never
-// names any keeps the behaviour it had before this filter existed. Names are
+// names any keeps the behavior it had before this filter existed. Names are
 // matched against ProtocolParser.Name (openai_realtime, deepgram, elevenlabs,
 // livekit) and compared case-insensitively after trimming, since they are
-// hand-written in YAML. An unrecognised name selects nothing rather than
+// hand-written in YAML. An unrecognized name selects nothing rather than
 // everything: silently widening what a frame may be parsed as would defeat
 // the point of naming protocols at all.
 //

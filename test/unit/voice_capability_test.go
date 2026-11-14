@@ -164,7 +164,7 @@ func TestSessionControlParser_ProtocolNamesAreForgiving(t *testing.T) {
 	}
 }
 
-// An unrecognised name must not fall back to enabling everything: that would
+// An unrecognized name must not fall back to enabling everything: that would
 // parse frames the operator deliberately excluded.
 func TestSessionControlParser_UnknownProtocolSelectsNothing(t *testing.T) {
 	parser := ws.NewSessionControlParserFor(nil, []string{"not_a_protocol"})
