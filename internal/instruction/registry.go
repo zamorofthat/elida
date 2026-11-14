@@ -48,6 +48,7 @@ type Registry struct {
 	scanner  *Scanner
 	store    Store
 	redactor Redactor
+	tracker  *Tracker
 
 	mu      sync.RWMutex
 	entries map[string]*registryEntry
@@ -64,6 +65,7 @@ func NewRegistry(scanner *Scanner, store Store, queueSize int) *Registry {
 	r := &Registry{
 		scanner: scanner,
 		store:   store,
+		tracker: newTracker(scanner),
 		entries: make(map[string]*registryEntry),
 		jobCh:   make(chan asyncJob, queueSize),
 		done:    make(chan struct{}),
