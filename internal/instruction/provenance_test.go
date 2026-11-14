@@ -539,3 +539,115 @@ func TestUnidentifiedCauseIsNotGlobal(t *testing.T) {
 		t.Fatalf("identified s2: change=%q caused=%v severity=%q, want uncaused warning", o.Change, o.Caused, o.Severity)
 	}
 }
+
+// observeT runs the tracker alone (no Check), for tests that observe many
+// versions.
+func observeT(reg *Registry, session, path, content string) Observation {
+	file := &InstructionFile{Type: FileTypeClaudeMD, Content: content, Hash: hashContent(content),
+		Confidence: ConfidenceHigh, SourcePath: path}
+	o, _ := reg.tracker.Observe(session, true, file, ScanResult{})
+	return o
+}
+
+// shownEntries counts the session's shown entries across all its chains.
+func shownEntries(reg *Registry, session string) (total, fifo int) {
+	reg.tracker.mu.Lock()
+	defer reg.tracker.mu.Unlock()
+	s := reg.tracker.sessions[session].Value.(*sessionState)
+	for _, ch := range s.chains {
+		total += len(ch.shown)
+	}
+	return total, len(s.shownOrder)
+}
+
+func TestShownPerSessionCap(t *testing.T) {
+	reg := newProvenanceRegistry(t)
+	paths := []string{"/repo/CLAUDE.md", "/repo/AGENTS.md"}
+	version := func(p string, i int) string { return fmt.Sprintf("%s v%d\n", p, i) }
+	const per = 600 // 1200 across both paths, past the session cap
+	for _, p := range paths {
+		for i := 0; i < per; i++ {
+			observeT(reg, "s1", p, version(p, i))
+		}
+	}
+	total, fifo := shownEntries(reg, "s1")
+	if total != MaxShownPerSession || fifo != MaxShownPerSession {
+		t.Fatalf("shown entries = %d (fifo %d), want %d", total, fifo, MaxShownPerSession)
+	}
+	// The oldest entries (the first path's first 176) were dropped; a later
+	// one of the same path, and every one of the second path, are still shown.
+	if o := observeT(reg, "s1", paths[0], version(paths[0], 300)); o.Change != ChangeNone {
+		t.Fatalf("kept version re-reported: %q", o.Change)
+	}
+	if o := observeT(reg, "s1", paths[1], version(paths[1], 0)); o.Change != ChangeNone {
+		t.Fatalf("kept version of the second path re-reported: %q", o.Change)
+	}
+	if o := observeT(reg, "s1", paths[0], version(paths[0], 0)); o.Change != ChangeInSession {
+		t.Fatalf("dropped version replayed: Change = %q, want re-reported once", o.Change)
+	}
+	if o := observeT(reg, "s1", paths[0], version(paths[0], 0)); o.Change != ChangeNone {
+		t.Fatalf("dropped version replayed twice: Change = %q, want none", o.Change)
+	}
+}
+
+// The worst-case number of entries the tracker can hold, from the bounds.
+// A change to a bound that pushes it past the ceiling must be deliberate.
+func TestWorstCaseEntries(t *testing.T) {
+	const ceiling = 12_000_000
+	worst := MaxTrackedSessions*MaxShownPerSession + // shown versions
+		MaxTrackedSessions*(MaxCauseMarksPerSession+maxStaticMarksPerSession) + // marks
+		MaxTrackedSessions*MaxPathsPerSession + // chains
+		MaxTrackedPaths*MaxVersionsPerPath + // global versions
+		MaxRetainedLines // retained line hashes, chains and global together
+	t.Logf("worst-case tracker entries: %d", worst)
+	if worst > ceiling {
+		t.Fatalf("worst-case tracker entries %d exceed %d", worst, ceiling)
+	}
+}
+
+func TestToolNameIsBounded(t *testing.T) {
+	long := strings.Repeat("é", 2500) // 5000 bytes
+	rows := []struct{ name, want string }{
+		{long, strings.Repeat("é", 64)},             // 128 bytes, on a rune boundary
+		{"x" + long, "x" + strings.Repeat("é", 63)}, // 127 bytes: no split rune
+		{"Ed\x01it\x7f\n", "Ed?it??"},
+	}
+	for _, r := range rows {
+		reg := newProvenanceRegistry(t)
+		observe(reg, "s1", true, provPath, provA)
+		reg.MarkCauses("s1", []ToolUse{{ID: "toolu_1", Name: r.name, Arguments: `{"file_path":"` + provPath + `"}`}})
+		o := observe(reg, "s1", true, provPath, provB)
+		if !o.Caused || o.CauseTool != r.want {
+			t.Errorf("CauseTool is %d bytes (%.20q...), want %d bytes (%.20q...)", len(o.CauseTool), o.CauseTool, len(r.want), r.want)
+		}
+	}
+}
+
+func TestLongPathHasNoChain(t *testing.T) {
+	reg := newProvenanceRegistry(t)
+	long := "/repo/" + strings.Repeat("d/", 600) + "CLAUDE.md" // over 1024 bytes
+	for _, c := range []string{provA, provB} {
+		file := &InstructionFile{Type: FileTypeClaudeMD, Content: c, Hash: hashContent(c),
+			Confidence: ConfidenceHigh, SourcePath: long}
+		o, row := reg.tracker.Observe("s1", true, file, ScanResult{})
+		if row != nil {
+			t.Fatalf("path-version row for a %d-byte path", len(long))
+		}
+		if o.Change != ChangeNone || o.Path != "" {
+			t.Fatalf("change=%q path len %d, want no chain", o.Change, len(o.Path))
+		}
+	}
+	if n := reg.Stats().TrackedPaths; n != 0 {
+		t.Fatalf("tracked paths = %d, want 0", n)
+	}
+	// Static hits are deduplicated by content hash, as for an unnamed block.
+	file := &InstructionFile{Type: FileTypeClaudeMD, Content: "x = eval(y)\n", Hash: hashContent("x = eval(y)\n"),
+		Confidence: ConfidenceHigh, SourcePath: long}
+	res := reg.Check("s1", file)
+	if o := reg.Observe("s1", true, file, res); len(o.Static) != 1 {
+		t.Fatalf("first static = %d, want 1", len(o.Static))
+	}
+	if o := reg.Observe("s1", true, file, res); len(o.Static) != 0 {
+		t.Fatalf("repeat static = %d, want 0", len(o.Static))
+	}
+}

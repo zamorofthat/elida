@@ -458,10 +458,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// Not refused: track each file and score what comes back. This
 			// runs only once no file refused the request, so a refused
-			// request scores nothing and leaves no chain behind.
+			// request scores nothing and leaves no chain behind. Files past
+			// the per-request cap were checked above but are not tracked.
 			identified := sessionID != ""
 			recorded := false
 			for i, file := range files {
+				if i >= instruction.MaxInstructionFilesPerRequest {
+					break
+				}
 				obs := p.instructionRegistry.Observe(sess.ID, identified, file, results[i])
 				if p.policy != nil && p.recordInstructionFindings(sess.ID, file, obs) {
 					recorded = true

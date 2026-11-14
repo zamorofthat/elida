@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // ToolUse is a tool call found in a request's message history.
@@ -51,12 +52,42 @@ type Observation struct {
 var ReadOnlyToolGlobs = []string{"read", "grep", "glob", "ls", "notebookread",
 	"read_*", "*_read", "*__read*", "*__list*", "*__search*", "*__get*"}
 
+// The tracker's bounds. Worst case, every bound full, in entries:
+//
+//	sessions x shown     4096 x 1024      = 4,194,304 salted uint64s
+//	sessions x marks     4096 x (512+512) = 4,194,304 salted uint64s
+//	sessions x chains    4096 x 64        =   262,144 chains
+//	paths x versions     4096 x 64        =   262,144 version records
+//	retained line hashes                  = 2,097,152 (MaxRetainedLines)
+//
+// about 11M entries, a few hundred MB of maps at the very worst.
+// TestWorstCaseEntries fails when a change to these passes 12M.
 const (
 	MaxTrackedSessions      = 4096
 	MaxPathsPerSession      = 64
-	MaxCauseMarksPerSession = 1024
-	MaxTrackedPaths         = 8192
-	MaxVersionsPerPath      = 256
+	MaxCauseMarksPerSession = 512
+	MaxTrackedPaths         = 4096
+	MaxVersionsPerPath      = 64
+
+	// MaxShownPerSession bounds a session's shown versions across all its
+	// paths. Past it the session's oldest shown entry is dropped; a dropped
+	// version shown again is reported again, once, which fails toward a
+	// finding.
+	MaxShownPerSession = 1024
+
+	// MaxInstructionFilesPerRequest bounds how many of a request's
+	// instruction files the proxy hands to Observe. Files past it are still
+	// checked (and may still refuse the request) but are not tracked.
+	MaxInstructionFilesPerRequest = 32
+
+	// MaxToolNameLen bounds a tool name as it is kept: as a pending cause,
+	// a version's cause tool, an Observation's CauseTool and so in the
+	// finding's description, the event and the version row.
+	MaxToolNameLen = 128
+	// MaxSourcePathLen bounds a path the tracker keeps. A file with a longer
+	// path is handled like an unnamed block: no chain, no global record, and
+	// its static hits deduplicated by content hash only.
+	MaxSourcePathLen = 1024
 
 	// MaxLinesPerSet bounds one version's line set. A version with more
 	// distinct non-blank lines has no retained set, and a change to or from
@@ -74,7 +105,7 @@ const (
 	// maxStaticMarksPerSession bounds the (session, path|content, rule) set
 	// that deduplicates Static. When it is full, hits are returned again
 	// rather than forgotten: it fails toward a finding.
-	maxStaticMarksPerSession = 1024
+	maxStaticMarksPerSession = 512
 )
 
 const (
@@ -98,11 +129,16 @@ type contentLines struct {
 
 // chain is one session's history for one path.
 type chain struct {
-	shown        map[string]struct{} // content hashes this session has shown
-	order        []string            // shown, oldest first, for the bound
+	shown        map[uint64]struct{} // salted content hashes this session has shown
 	last         string              // the hash last added to the chain
 	lines        lineSet             // retained line set of last, or nil
 	pendingCause *pendingCause       // an unconsumed cause, or nil
+}
+
+// shownRef is one shown entry, in the session's shown order.
+type shownRef struct {
+	ch  *chain
+	key uint64
 }
 
 type sessionState struct {
@@ -110,7 +146,8 @@ type sessionState struct {
 	chains      map[string]*chain
 	causeMarks  map[uint64]struct{}
 	staticMarks map[uint64]struct{}
-	seen        identity // set by Observe; MarkCauses alone leaves it unknown
+	shownOrder  []shownRef // every chain's shown entries, oldest first, for the bound
+	seen        identity   // set by Observe; MarkCauses alone leaves it unknown
 }
 
 // identity is whether a session was observed as identified.
@@ -348,6 +385,30 @@ func (t *Tracker) load(rows []PathVersion) {
 	}
 }
 
+// toolName is name as the tracker keeps it: at most MaxToolNameLen bytes,
+// cut on a rune boundary, with control characters (below 0x20, and 0x7f)
+// replaced by '?'.
+func toolName(name string) string {
+	if len(name) > MaxToolNameLen {
+		cut := MaxToolNameLen
+		for cut > 0 && !utf8.RuneStart(name[cut]) {
+			cut--
+		}
+		name = name[:cut]
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, name)
+}
+
+// tracked reports whether a file at path p gets a chain and a global record.
+func tracked(p string) bool {
+	return p != "" && len(p) <= MaxSourcePathLen
+}
+
 func isReadOnlyTool(name string) bool {
 	lower := strings.ToLower(name)
 	for _, g := range ReadOnlyToolGlobs {
@@ -498,7 +559,7 @@ func (t *Tracker) MarkCauses(sessionID string, calls []ToolUse) {
 		if id == "" {
 			id = c.Name + "\x00" + c.Arguments
 		}
-		marks = append(marks, causeMark{key: maphash.String(t.seed, id), name: c.Name, paths: matched})
+		marks = append(marks, causeMark{key: maphash.String(t.seed, id), name: toolName(c.Name), paths: matched})
 	}
 	if len(marks) == 0 {
 		return
@@ -626,13 +687,22 @@ func (t *Tracker) newVersion(pr *pathRecord, hash, prevHash, changeType string, 
 	return v
 }
 
+// shownKey is the salted key a chain's shown set holds for a content hash.
+func (t *Tracker) shownKey(hash string) uint64 {
+	return maphash.String(t.seed, hash)
+}
+
 // addToChain makes hash the chain's last version, replacing its line set.
-func (t *Tracker) addToChain(ch *chain, hash string, set lineSet) {
-	ch.shown[hash] = struct{}{}
-	ch.order = append(ch.order, hash)
-	if len(ch.order) > MaxVersionsPerPath {
-		delete(ch.shown, ch.order[0])
-		ch.order = ch.order[1:]
+// hash is not in the chain's shown set. Past MaxShownPerSession the
+// session's oldest shown entry, of whichever chain, is dropped.
+func (t *Tracker) addToChain(s *sessionState, ch *chain, hash string, set lineSet) {
+	key := t.shownKey(hash)
+	ch.shown[key] = struct{}{}
+	s.shownOrder = append(s.shownOrder, shownRef{ch: ch, key: key})
+	for len(s.shownOrder) > MaxShownPerSession {
+		delete(s.shownOrder[0].ch.shown, s.shownOrder[0].key)
+		s.shownOrder[0] = shownRef{}
+		s.shownOrder = s.shownOrder[1:]
 	}
 	ch.last = hash
 	t.release(ch.lines)
@@ -713,7 +783,7 @@ func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFi
 		return Observation{}, nil
 	}
 	var cl contentLines
-	if file.SourcePath != "" {
+	if tracked(file.SourcePath) {
 		cl = t.linesOf(file.Content) // client-sized: outside the lock
 	}
 
@@ -750,7 +820,7 @@ func (t *Tracker) observeLocked(sessionID string, identified bool, file *Instruc
 	s := t.touchSession(sessionID)
 
 	ch, hasChain := s.chains[file.SourcePath]
-	if file.SourcePath == "" || (!hasChain && len(s.chains) >= MaxPathsPerSession) {
+	if !tracked(file.SourcePath) || (!hasChain && len(s.chains) >= MaxPathsPerSession) {
 		// No chain: only deduplicated static hits.
 		o.obs.Static = t.markStatic(s, "h\x00"+file.Hash, result)
 		return o
@@ -766,14 +836,14 @@ func (t *Tracker) observeLocked(sessionID string, identified bool, file *Instruc
 
 	if !hasChain {
 		// First sight in this session. The session's chain starts here.
-		ch = &chain{shown: make(map[string]struct{})}
+		ch = &chain{shown: make(map[uint64]struct{})}
 		s.chains[file.SourcePath] = ch
 		t.firstSight(&o, pr, pathKnown, version, file.Hash, now, cl)
-		t.addToChain(ch, file.Hash, cl.set)
+		t.addToChain(s, ch, file.Hash, cl.set)
 		return o
 	}
 
-	if _, shown := ch.shown[file.Hash]; shown {
+	if _, shown := ch.shown[t.shownKey(file.Hash)]; shown {
 		// A version this session has already shown: no finding.
 		if versionKnown {
 			if seeVersion(version, now) {
@@ -824,7 +894,7 @@ func (t *Tracker) observeLocked(sessionID string, identified bool, file *Instruc
 	} else if version.caused {
 		o.obs.Caused, o.obs.CauseTool = true, version.causeTool
 	}
-	t.addToChain(ch, file.Hash, cl.set)
+	t.addToChain(s, ch, file.Hash, cl.set)
 	return o
 }
 

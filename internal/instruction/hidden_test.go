@@ -77,3 +77,48 @@ func TestStripInvisible(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestHiddenContentTallyIsCapped(t *testing.T) {
+	s := hiddenScanner(t, hiddenX)
+	content := strings.Repeat("​", 1<<20) // 3MB of U+200B
+	var v Violation
+	allocs := testing.AllocsPerRun(1, func() {
+		v = s.Scan(content).Violations[0]
+	})
+	if !v.Hidden.Truncated || v.Hidden.Total != MaxHiddenCounted {
+		t.Fatalf("truncated=%v total=%d, want true and %d", v.Hidden.Truncated, v.Hidden.Total, MaxHiddenCounted)
+	}
+	if got := v.Hidden.CodePoints["U+200B"]; got != MaxHiddenCounted {
+		t.Errorf("U+200B count = %d, want %d", got, MaxHiddenCounted)
+	}
+	// A capped tally allocates a few times per counted match (about 3x the
+	// cap, about 6x under -race); an uncapped one allocates for every one of
+	// the string's million runes.
+	if allocs > 20*MaxHiddenCounted {
+		t.Errorf("allocations per scan = %.0f, want at most %d", allocs, 20*MaxHiddenCounted)
+	}
+
+	small := s.Scan("a​b").Violations[0].Hidden
+	if small.Truncated || small.Total != 1 {
+		t.Errorf("small: truncated=%v total=%d, want false and 1", small.Truncated, small.Total)
+	}
+}
+
+// An operator's hidden-content pattern that matches visible text counts it,
+// but only invisible code points are labelled and given line numbers.
+func TestHiddenContentLabelsOnlyInvisible(t *testing.T) {
+	s := hiddenScanner(t, Rule{Name: "instruction_hidden_x", Patterns: []string{"[a\\x{200B}]"}, Severity: "critical", Action: "flag"})
+	h := s.Scan("xa\nyy\n​").Violations[0].Hidden
+	if _, ok := h.CodePoints["U+0061"]; ok {
+		t.Errorf("visible rune labelled: %v", h.CodePoints)
+	}
+	if !reflect.DeepEqual(h.CodePoints, map[string]int{"U+200B": 1}) {
+		t.Errorf("code points = %v, want only U+200B", h.CodePoints)
+	}
+	if !reflect.DeepEqual(h.Lines, []int{3}) {
+		t.Errorf("lines = %v, want [3]", h.Lines)
+	}
+	if h.Total != 2 {
+		t.Errorf("total = %d, want 2", h.Total)
+	}
+}
