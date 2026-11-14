@@ -435,13 +435,40 @@ func shortName(p string) string {
 // chainName is a chain path and its short name, as MarkCauses matches them.
 type chainName struct{ path, short string }
 
-// namedBy reports whether args name the chain: by its full path anywhere, or
-// by its short name as a relative reference (see relativeRef). The tail of
-// another absolute or deeper path ("/home/u/.claude/CLAUDE.md",
-// "sub/CLAUDE.md") does not name a chain by its short name.
+// namedBy reports whether args name the chain: by its full path where no
+// path character precedes it (see fullRef), or by its short name as a
+// relative reference (see relativeRef). The tail of another path
+// ("/other/repo/CLAUDE.md", "/home/u/.claude/CLAUDE.md", "sub/CLAUDE.md")
+// names neither way.
 func (n chainName) namedBy(args string) bool {
-	return (n.path != "" && strings.Contains(args, n.path)) ||
+	return (n.path != "" && fullRef(args, n.path)) ||
 		(n.short != "" && relativeRef(args, n.short))
+}
+
+// pathChar reports whether b may be part of a path: an ASCII letter or digit,
+// or one of _ - . / ~.
+func pathChar(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return b == '_' || b == '-' || b == '.' || b == '/' || b == '~'
+}
+
+// fullRef reports whether p occurs in args at the start or after a byte that
+// is not a pathChar. Every occurrence is tried.
+func fullRef(args, p string) bool {
+	for off := 0; ; {
+		j := strings.Index(args[off:], p)
+		if j < 0 {
+			return false
+		}
+		i := off + j
+		if i == 0 || !pathChar(args[i-1]) {
+			return true
+		}
+		off = i + 1
+	}
 }
 
 // refDelimiter reports whether b may precede a relative file reference: a

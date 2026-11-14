@@ -651,3 +651,28 @@ func TestLongPathHasNoChain(t *testing.T) {
 		t.Fatalf("repeat static = %d, want 0", len(o.Static))
 	}
 }
+
+// A full chain path names the chain only when no path character precedes it.
+func TestFullPathNeedsBoundary(t *testing.T) {
+	rows := []struct {
+		tool, args string
+		caused     bool
+	}{
+		{"Edit", `{"file_path":"/other/repo/CLAUDE.md"}`, false},
+		{"Bash", `{"command":"cp /a/repo/CLAUDE.md /repo/CLAUDE.md"}`, true},
+		{"Edit", `{"file_path":"/repo/CLAUDE.md"}`, true},
+		{"Bash", `{"command":"cat ~/repo/CLAUDE.md"}`, false},
+		{"Bash", `{"command":"x=/repo/CLAUDE.md"}`, true},
+	}
+	for _, r := range rows {
+		t.Run(r.args, func(t *testing.T) {
+			reg := newProvenanceRegistry(t)
+			observe(reg, "s1", true, provPath, provA)
+			reg.MarkCauses("s1", []ToolUse{{ID: "toolu_1", Name: r.tool, Arguments: r.args}})
+			o := observe(reg, "s1", true, provPath, provB)
+			if o.Change != ChangeInSession || o.Caused != r.caused {
+				t.Fatalf("change=%q caused=%v, want caused=%v", o.Change, o.Caused, r.caused)
+			}
+		})
+	}
+}
