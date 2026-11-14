@@ -280,3 +280,46 @@ func TestObserveConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// A resumed conversation replays old tool calls before the file has a chain.
+// Those calls are remembered, so the next replay is not a new cause.
+func TestReplayBeforeFirstSightIsNotACause(t *testing.T) {
+	for _, id := range []string{"toolu_1", ""} {
+		t.Run(fmt.Sprintf("id=%q", id), func(t *testing.T) {
+			reg := newProvenanceRegistry(t)
+			markEdit(reg, "s1", id) // before any Observe: no chain yet
+			observe(reg, "s1", true, provPath, provA)
+			markEdit(reg, "s1", id) // the same call, replayed
+			o := observe(reg, "s1", true, provPath, provB)
+			if o.Change != ChangeInSession {
+				t.Fatalf("Change = %q, want %q", o.Change, ChangeInSession)
+			}
+			if o.Caused || o.Severity != "warning" {
+				t.Fatalf("got caused=%v severity=%q, want uncaused warning", o.Caused, o.Severity)
+			}
+		})
+	}
+}
+
+// A call that names only a tracked basename is remembered as seen; it never
+// becomes a cause, even once that basename's path has a chain.
+func TestBasenameOnlyCallIsNeverACause(t *testing.T) {
+	const agents = "/repo/AGENTS.md"
+	call := []ToolUse{{ID: "toolu_9", Name: "Bash", Arguments: `{"command":"echo x >> AGENTS.md"}`}}
+
+	reg := newProvenanceRegistry(t)
+	observe(reg, "s1", true, provPath, provA) // a chain, for another path
+	reg.MarkCauses("s1", call)                // names only a tracked basename
+	if o := observe(reg, "s1", true, provPath, provB); o.Caused {
+		t.Fatal("CLAUDE.md change caused by a call naming only AGENTS.md")
+	}
+	observe(reg, "s1", true, agents, provA) // AGENTS.md now has a chain
+	reg.MarkCauses("s1", call)              // replayed: it now names a chain path
+	o := observe(reg, "s1", true, agents, provB)
+	if o.Change != ChangeInSession {
+		t.Fatalf("Change = %q, want %q", o.Change, ChangeInSession)
+	}
+	if o.Caused || o.Severity != "warning" {
+		t.Fatalf("got caused=%v severity=%q, want uncaused warning", o.Caused, o.Severity)
+	}
+}

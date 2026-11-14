@@ -185,31 +185,52 @@ func namesPath(args, p string) bool {
 	return s != "" && strings.Contains(args, s)
 }
 
-// MarkCauses sets a pending cause on each chain a new, non-read-only call names.
+// namesTrackedBasename reports whether args name any tracked instruction file
+// by its basename (CLAUDE.md, .cursor/rules, ...), whatever its directory.
+func namesTrackedBasename(args string) bool {
+	for _, m := range pathToFileType {
+		if strings.Contains(args, strings.TrimPrefix(m.suffix, "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkCauses remembers every new, non-read-only call that names an
+// instruction file, and sets a pending cause on each chain such a call names.
+//
+// A call is remembered when it names one of the session's chain paths (or
+// its short name) or any tracked instruction-file basename, so a call
+// replayed from before the file's first sight is not new when replayed again.
+// Only a match on a chain path or its short name is a cause.
 func (t *Tracker) MarkCauses(sessionID string, calls []ToolUse) {
 	if len(calls) == 0 {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	el, ok := t.sessions[sessionID]
-	if !ok {
-		return
+	var s *sessionState
+	if el, ok := t.sessions[sessionID]; ok {
+		s = el.Value.(*sessionState)
 	}
-	s := el.Value.(*sessionState)
 	var matched []*chain
 	for _, c := range calls {
 		if isReadOnlyTool(c.Name) {
 			continue
 		}
 		matched = matched[:0]
-		for p, ch := range s.chains {
-			if namesPath(c.Arguments, p) {
-				matched = append(matched, ch)
+		if s != nil {
+			for p, ch := range s.chains {
+				if namesPath(c.Arguments, p) {
+					matched = append(matched, ch)
+				}
 			}
 		}
-		if len(matched) == 0 {
+		if len(matched) == 0 && !namesTrackedBasename(c.Arguments) {
 			continue
+		}
+		if s == nil {
+			s = t.touchSession(sessionID) // a call to remember before any Observe
 		}
 		id := c.ID
 		if id == "" {
