@@ -34,7 +34,14 @@ curl http://localhost:9090/control/health
 # restart the container on a loop.
 curl -i http://localhost:9090/control/ready
 
-# Aggregate stats
+# Aggregate stats. Alongside the session counters the response carries
+# capabilities, which reports optional subsystems that are switched off in
+# this process so a client can tell "disabled" from "enabled with no data":
+#   "capabilities": {"voice": {"enabled": false, "protocols": []}}
+# Voice is true only when the WebSocket transport AND
+# websocket.voice_sessions.enabled are both on; protocols lists what will
+# actually be parsed. The dashboard uses it to decide whether to offer the
+# Voice tab at all.
 curl http://localhost:9090/control/stats
 ```
 
