@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -170,5 +171,87 @@ func TestHealthPosture_ReadyRejectsNonProbeMethods(t *testing.T) {
 	}
 	if w := doJSON(t, h, http.MethodPost, "/control/ready", nil); w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /control/ready = %d, want 405", w.Code)
+	}
+}
+
+// The deprecated compatibility shim. Off by default — every other test in
+// this file proves that — and when switched on it serves exactly the block
+// v0.30.0 and v0.31.0 served, so a deployment that scrapes those fields can
+// upgrade without losing them. Enabling it restores the disclosure, which is
+// the point of making it explicit and temporary.
+func TestHealthPosture_LegacyDecisionBlockIsOptIn(t *testing.T) {
+	h := newPostureHandler(t, postureStatus(), control.WithLegacyHealthDecision())
+
+	w := doJSON(t, h, http.MethodGet, "/control/health", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", w.Code)
+	}
+
+	var resp struct {
+		Status    string         `json:"status"`
+		Timestamp string         `json:"timestamp"`
+		Decision  map[string]any `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+
+	if resp.Status != "ok" {
+		t.Fatalf("status = %q, want ok", resp.Status)
+	}
+	if resp.Timestamp == "" {
+		t.Fatal("timestamp must stay on the legacy payload")
+	}
+
+	// The v0.30.0 key set, exactly: no more, no fewer.
+	want := map[string]any{
+		"capability":            "degraded",
+		"reason":                "semantic detection was enabled but the model could not be loaded or verified; no detection is active",
+		"effective_mode":        "shadow",
+		"threshold_set_matches": false,
+		"breaker_open":          true,
+	}
+	if len(resp.Decision) != len(want) {
+		t.Fatalf("legacy decision block has %d keys (%v), want exactly %d", len(resp.Decision), resp.Decision, len(want))
+	}
+	for k, v := range want {
+		got, ok := resp.Decision[k]
+		if !ok {
+			t.Errorf("legacy decision block is missing %q", k)
+			continue
+		}
+		if got != v {
+			t.Errorf("legacy decision[%q] = %v, want %v", k, got, v)
+		}
+	}
+
+	// Still no model identity, checksum, threshold set or provider reason:
+	// the shim restores the old block, not a wider one.
+	for _, forbidden := range []string{"model", "model_checksum", "threshold_set", "enabled", "mode"} {
+		if _, ok := resp.Decision[forbidden]; ok {
+			t.Errorf("legacy decision block must not carry %q: %s", forbidden, w.Body.String())
+		}
+	}
+	for _, leak := range []string{"deadbeef", "minilm", "/etc/elida"} {
+		if contains(w.Body.String(), leak) {
+			t.Errorf("legacy health payload leaks %q: %s", leak, w.Body.String())
+		}
+	}
+}
+
+// The shim does not touch readiness: /control/ready stays a status code with
+// no body whether or not the legacy block is restored.
+func TestHealthPosture_LegacyShimLeavesReadinessAlone(t *testing.T) {
+	st := postureStatus()
+	st.Enabled = true
+	st.Capability = "degraded"
+	h := newPostureHandler(t, st, control.WithLegacyHealthDecision())
+
+	w := doJSON(t, h, http.MethodGet, "/control/ready", nil)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ready status = %d, want 503", w.Code)
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("ready must carry no body, got %q", w.Body.String())
 	}
 }

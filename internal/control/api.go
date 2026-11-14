@@ -198,6 +198,10 @@ type Handler struct {
 
 	// Capture mode for display in health endpoint
 	captureMode string
+
+	// legacyHealthDecision restores the deprecated posture block on the
+	// unauthenticated health route. See WithLegacyHealthDecision.
+	legacyHealthDecision bool
 }
 
 // Option configures a Handler.
@@ -225,6 +229,21 @@ func WithAuth(apiKey string) Option {
 		h.authEnabled = true
 		h.apiKey = apiKey
 	}
+}
+
+// WithLegacyHealthDecision puts the detector posture block back on the
+// unauthenticated /control/health, in exactly the shape v0.30.0 and v0.31.0
+// served: capability, a fixed content-free reason, the effective mode, the
+// threshold-set match and the breaker state.
+//
+// Deprecated: those five facts together tell any caller who can reach the
+// control port whether anything is enforcing and whether it is working right
+// now, which is reconnaissance an attacker would otherwise have to pay for.
+// This exists so a deployment that already scrapes them can upgrade without
+// losing them, and it will be removed. Read them from the authenticated
+// /control/decision instead.
+func WithLegacyHealthDecision() Option {
+	return func(h *Handler) { h.legacyHealthDecision = true }
 }
 
 // New creates a new control API handler with the given options.
@@ -577,10 +596,41 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// would otherwise have to pay for. All of it is on /control/decision,
 	// behind the credential. /control/ready carries the one bit an operator
 	// needs without a credential, as a status code.
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"status":    "ok",
 		"timestamp": time.Now(),
-	})
+	}
+	// Opt-in and deprecated: see WithLegacyHealthDecision. Off by default, so
+	// the route above is what an unconfigured deployment serves.
+	if h.legacyHealthDecision && h.decisionProvider != nil {
+		st := h.decisionProvider.DecisionStatus()
+		response["decision"] = map[string]any{
+			"capability":            st.Capability,
+			"reason":                healthCapabilityReason(st.Capability),
+			"effective_mode":        st.EffectiveMode,
+			"threshold_set_matches": st.ThresholdSetMatches,
+			"breaker_open":          st.BreakerOpen,
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// healthCapabilityReason maps a capability to a fixed, content-free sentence.
+// It never reports a path, a model identity or a provider error string, which
+// is why the deprecated health block could carry a reason at all.
+func healthCapabilityReason(capability string) string {
+	switch capability {
+	case "inline":
+		return "accelerated inference is available; inline results can protect the current request"
+	case "async_only":
+		return "this build cannot meet an inline budget; results protect later activity only"
+	case "degraded":
+		return "semantic detection was enabled but the model could not be loaded or verified; no detection is active"
+	case "disabled":
+		return "semantic detection is off"
+	default:
+		return "unknown capability"
+	}
 }
 
 // handleReady handles GET /control/ready: the readiness probe.
@@ -626,15 +676,59 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := h.manager.Stats()
-	if h.instructionRegistry == nil {
-		writeJSON(w, http.StatusOK, stats)
-		return
+	resp := statsResponse{
+		Stats:        h.manager.Stats(),
+		Capabilities: h.capabilities(),
 	}
-	writeJSON(w, http.StatusOK, struct {
-		session.Stats
-		InstructionIntegrity instruction.Stats `json:"instruction_integrity"`
-	}{stats, h.instructionRegistry.Stats()})
+	if h.instructionRegistry != nil {
+		ii := h.instructionRegistry.Stats()
+		resp.InstructionIntegrity = &ii
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// statsResponse carries the session statistics plus what this ELIDA can do.
+// Stats is embedded, so every field it has always had stays at the top level
+// of the response and existing consumers are unaffected.
+type statsResponse struct {
+	session.Stats
+	Capabilities         capabilities       `json:"capabilities"`
+	InstructionIntegrity *instruction.Stats `json:"instruction_integrity,omitempty"`
+}
+
+// capabilities describes optional subsystems so a client can tell a feature
+// that is switched off from one that is on and simply has no data. Without
+// it the dashboard has to infer that from an error status, which it cannot
+// do for a subsystem that answers 200 with an empty list.
+type capabilities struct {
+	Voice voiceCapability `json:"voice"`
+}
+
+// voiceCapability reports whether voice sessions can be recorded at all.
+//
+// It is deliberately computed rather than read from config: voice needs the
+// WebSocket transport AND voice_sessions.enabled, and each is off by default,
+// so either one being false means the Voice view can never show anything.
+// Protocols lists what will actually be parsed, which is not necessarily what
+// the config names.
+type voiceCapability struct {
+	Enabled   bool     `json:"enabled"`
+	Protocols []string `json:"protocols"`
+}
+
+// capabilities reports the optional subsystems that are live in this process.
+func (h *Handler) capabilities() capabilities {
+	caps := capabilities{Voice: voiceCapability{Protocols: []string{}}}
+	if h.wsHandler == nil {
+		// No WebSocket transport: no handler was ever constructed, so no
+		// frame can arrive to start a voice session.
+		return caps
+	}
+	caps.Voice.Enabled = h.wsHandler.VoiceTrackingEnabled()
+	if protos := h.wsHandler.EnabledVoiceProtocols(); len(protos) > 0 {
+		caps.Voice.Protocols = protos
+	}
+	return caps
 }
 
 // handleSessions handles GET /control/sessions
