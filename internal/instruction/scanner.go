@@ -45,9 +45,24 @@ func NewScanner(rules []Rule) (*Scanner, error) {
 // Scan checks content against all rules and returns the result.
 func (s *Scanner) Scan(content string) ScanResult {
 	var result ScanResult
+	stripped := stripInvisible(content)
 	for _, cr := range s.rules {
+		if IsHiddenContentRule(cr.rule.Name) {
+			if h := tallyHidden(content, cr.patterns); h != nil {
+				result.Violations = append(result.Violations, Violation{
+					RuleName: cr.rule.Name,
+					Severity: cr.rule.Severity,
+					Action:   cr.rule.Action,
+					Hidden:   h,
+				})
+				if cr.rule.Action == "block" {
+					result.ShouldBlock = true
+				}
+			}
+			continue
+		}
 		for _, re := range cr.patterns {
-			if match := re.FindString(content); match != "" {
+			if match := re.FindString(stripped); match != "" {
 				result.Violations = append(result.Violations, Violation{
 					RuleName:    cr.rule.Name,
 					Severity:    cr.rule.Severity,

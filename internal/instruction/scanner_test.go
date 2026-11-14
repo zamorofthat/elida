@@ -125,6 +125,9 @@ func TestScannerDetectsHiddenUnicode(t *testing.T) {
 	if !result.ShouldBlock {
 		t.Error("expected block for hidden unicode")
 	}
+	if h := result.Violations[0].Hidden; h == nil || h.CodePoints["U+200B"] != 1 {
+		t.Errorf("hidden = %+v", h)
+	}
 }
 
 func TestScannerDetectsObfuscation(t *testing.T) {

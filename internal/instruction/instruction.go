@@ -1,6 +1,9 @@
 package instruction
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // FileType identifies the kind of instruction file.
 type FileType int
@@ -81,6 +84,8 @@ type Violation struct {
 	Severity    string `json:"severity"`
 	Action      string `json:"action"`
 	MatchedText string `json:"matched_text"`
+	// Hidden is set, instead of MatchedText, for hidden-content rules.
+	Hidden *HiddenContent `json:"hidden,omitempty"`
 }
 
 // ScanResult holds the outcome of scanning an instruction file.
@@ -93,6 +98,11 @@ type ScanResult struct {
 // is the one rule a medium-confidence file may block on.
 const RuleHiddenContent = "instruction_hidden_content"
 
+// IsHiddenContentRule reports whether a rule is a hidden-content rule.
+func IsHiddenContentRule(name string) bool {
+	return strings.HasPrefix(name, "instruction_hidden_")
+}
+
 // CappedFor returns the result as it applies to a file identified at the
 // given confidence. A medium-confidence file was identified by a heuristic,
 // not by its path, so it blocks only on hidden content; its violations are
@@ -104,7 +114,7 @@ func (r ScanResult) CappedFor(c Confidence) ScanResult {
 	}
 	r.ShouldBlock = false
 	for _, v := range r.Violations {
-		if v.RuleName == RuleHiddenContent && v.Action == "block" {
+		if IsHiddenContentRule(v.RuleName) && v.Action == "block" {
 			r.ShouldBlock = true
 			break
 		}
@@ -115,7 +125,7 @@ func (r ScanResult) CappedFor(c Confidence) ScanResult {
 // hasHiddenContent reports whether the hidden-content rule matched.
 func (r ScanResult) hasHiddenContent() bool {
 	for _, v := range r.Violations {
-		if v.RuleName == RuleHiddenContent {
+		if IsHiddenContentRule(v.RuleName) {
 			return true
 		}
 	}
