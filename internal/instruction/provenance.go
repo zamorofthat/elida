@@ -102,7 +102,7 @@ type chain struct {
 	order        []string            // shown, oldest first, for the bound
 	last         string              // the hash last added to the chain
 	lines        lineSet             // retained line set of last, or nil
-	pendingCause string              // tool name of an unconsumed cause mark
+	pendingCause *pendingCause       // an unconsumed cause, or nil
 }
 
 type sessionState struct {
@@ -374,9 +374,43 @@ func shortName(p string) string {
 // chainName is a chain path and its short name, as MarkCauses matches them.
 type chainName struct{ path, short string }
 
+// namedBy reports whether args name the chain: by its full path anywhere, or
+// by its short name as a relative reference (see relativeRef). The tail of
+// another absolute or deeper path ("/home/u/.claude/CLAUDE.md",
+// "sub/CLAUDE.md") does not name a chain by its short name.
 func (n chainName) namedBy(args string) bool {
 	return (n.path != "" && strings.Contains(args, n.path)) ||
-		(n.short != "" && strings.Contains(args, n.short))
+		(n.short != "" && relativeRef(args, n.short))
+}
+
+// refDelimiter reports whether b may precede a relative file reference: a
+// quote, whitespace, or one of = ( [ , :.
+func refDelimiter(b byte) bool {
+	switch b {
+	case '\'', '"', '`', ' ', '\t', '\n', '\r', '\v', '\f', '=', '(', '[', ',', ':':
+		return true
+	}
+	return false
+}
+
+// relativeRef reports whether short occurs in args preceded by the start of
+// args, a refDelimiter, or a "./" that is itself at the start or after a
+// refDelimiter.
+func relativeRef(args, short string) bool {
+	for off := 0; ; {
+		j := strings.Index(args[off:], short)
+		if j < 0 {
+			return false
+		}
+		i := off + j
+		switch {
+		case i == 0 || refDelimiter(args[i-1]):
+			return true
+		case i >= 2 && args[i-1] == '/' && args[i-2] == '.' && (i == 2 || refDelimiter(args[i-3])):
+			return true
+		}
+		off = i + 1
+	}
 }
 
 // namesTrackedBasename reports whether args name any tracked instruction file
@@ -388,6 +422,18 @@ func namesTrackedBasename(args string) bool {
 		}
 	}
 	return false
+}
+
+// PendingCauseTTL is how long a call that names a chain stays a possible
+// cause of that chain's next change. An older pending cause is ignored.
+const PendingCauseTTL = 10 * time.Minute
+
+// pendingCause is an unconsumed cause on a chain: the arming call's tool name
+// and salted identity, and when it was armed (tracker clock).
+type pendingCause struct {
+	tool string
+	key  uint64
+	at   time.Time
 }
 
 // causeMark is one call MarkCauses will remember: its salted identity, its
@@ -404,7 +450,10 @@ type causeMark struct {
 // A call is remembered when it names one of the session's chain paths (or
 // its short name) or any tracked instruction-file basename, so a call
 // replayed from before the file's first sight is not new when replayed again.
-// Only a match on a chain path or its short name is a cause.
+// Only a match on a chain path, or on its short name as a relative reference,
+// is a cause. A pending cause expires PendingCauseTTL after it was armed, and
+// is used by one change only: the change that consumes it clears the same
+// call's pending cause on the session's other chains.
 //
 // The session's chain paths are snapshotted under the lock, the arguments are
 // matched and hashed without it, and the marks are applied under it again. A
@@ -457,6 +506,7 @@ func (t *Tracker) MarkCauses(sessionID string, calls []ToolUse) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	now := t.now()
 	var s *sessionState
 	if el, ok := t.sessions[sessionID]; ok {
 		s = el.Value.(*sessionState) // not moved in the LRU: only Observe is "observed"
@@ -473,7 +523,7 @@ func (t *Tracker) MarkCauses(sessionID string, calls []ToolUse) {
 		s.causeMarks[m.key] = struct{}{}
 		for _, p := range m.paths {
 			if ch, ok := s.chains[p]; ok {
-				ch.pendingCause = m.name
+				ch.pendingCause = &pendingCause{tool: m.name, key: m.key, at: now}
 			}
 		}
 	}
@@ -668,7 +718,7 @@ func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFi
 	}
 
 	t.mu.Lock()
-	o := t.observeLocked(sessionID, file, result, cl)
+	o := t.observeLocked(sessionID, identified, file, result, cl)
 	if el, ok := t.sessions[sessionID]; ok {
 		if identified {
 			el.Value.(*sessionState).seen = identityYes
@@ -694,8 +744,9 @@ func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFi
 }
 
 // observeLocked applies one observation to the session's chain and the global
-// record. Caller holds t.mu.
-func (t *Tracker) observeLocked(sessionID string, file *InstructionFile, result ScanResult, cl contentLines) (o observed) {
+// record. Caller holds t.mu. Only an identified session's cause marks the
+// global version caused: an unidentified session's cause is its own.
+func (t *Tracker) observeLocked(sessionID string, identified bool, file *InstructionFile, result ScanResult, cl contentLines) (o observed) {
 	s := t.touchSession(sessionID)
 
 	ch, hasChain := s.chains[file.SourcePath]
@@ -748,11 +799,10 @@ func (t *Tracker) observeLocked(sessionID string, file *InstructionFile, result 
 		o.added, o.obs.LinesAdded, o.obs.LinesRemoved = diffLines(ch.lines, cl)
 	}
 
-	cause := ch.pendingCause
-	ch.pendingCause = ""
+	cause := t.consumeCause(s, ch, now)
 	if versionKnown {
 		due := seeVersion(version, now)
-		if cause != "" && !version.caused {
+		if cause != "" && identified && !version.caused {
 			version.caused, version.causeTool = true, cause
 			due = true
 		}
@@ -762,7 +812,7 @@ func (t *Tracker) observeLocked(sessionID string, file *InstructionFile, result 
 	} else {
 		// The session's change creates the version: its row carries this diff.
 		version = t.newVersion(pr, file.Hash, ch.last, VersionInSession, now, cl.set)
-		if cause != "" {
+		if cause != "" && identified {
 			version.caused, version.causeTool = true, cause
 		}
 		o.row = version.row(file.SourcePath)
@@ -776,6 +826,24 @@ func (t *Tracker) observeLocked(sessionID string, file *InstructionFile, result 
 	}
 	t.addToChain(ch, file.Hash, cl.set)
 	return o
+}
+
+// consumeCause takes the chain's pending cause and returns its tool name, or
+// "" when there is none or it has expired. A cause taken also clears the same
+// call's pending cause on the session's other chains: one call is one cause.
+// Caller holds t.mu.
+func (t *Tracker) consumeCause(s *sessionState, ch *chain, now time.Time) string {
+	pc := ch.pendingCause
+	ch.pendingCause = nil
+	if pc == nil || now.Sub(pc.at) > PendingCauseTTL {
+		return ""
+	}
+	for _, other := range s.chains {
+		if other.pendingCause != nil && other.pendingCause.key == pc.key {
+			other.pendingCause = nil
+		}
+	}
+	return pc.tool
 }
 
 // firstSight handles a session's first sight of a path against the global

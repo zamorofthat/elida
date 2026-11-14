@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -433,5 +434,108 @@ func TestMarkCausesDoesNotHoldLockWhileMatching(t *testing.T) {
 	}
 	if o := observe(reg, "s1", true, provPath, provB); !o.Caused {
 		t.Fatal("cause lost")
+	}
+}
+
+// Two files share the short name CLAUDE.md. A call naming one by its full
+// path arms only that one; a relative reference arms both, but one call is
+// one cause, used by the first file to change.
+func TestCauseToolsTwoClaudeMD(t *testing.T) {
+	const user = "/home/u/.claude/CLAUDE.md"
+	setup := func(t *testing.T) *Registry {
+		reg := newProvenanceRegistry(t)
+		observe(reg, "s1", true, provPath, provA)
+		observe(reg, "s1", true, user, provA)
+		return reg
+	}
+	t.Run("full path names only its file", func(t *testing.T) {
+		reg := setup(t)
+		markEdit(reg, "s1", "toolu_1")
+		o := observe(reg, "s1", true, user, provB)
+		if o.Change != ChangeInSession || o.Caused || o.Severity != "warning" {
+			t.Fatalf("user file: change=%q caused=%v severity=%q, want uncaused warning", o.Change, o.Caused, o.Severity)
+		}
+		if o := observe(reg, "s1", true, provPath, provB); !o.Caused {
+			t.Fatal("repo file: not caused by the Edit naming it")
+		}
+	})
+	t.Run("relative reference is one cause", func(t *testing.T) {
+		reg := setup(t)
+		reg.MarkCauses("s1", []ToolUse{{ID: "toolu_2", Name: "Bash", Arguments: `{"command":"git add CLAUDE.md"}`}})
+		if o := observe(reg, "s1", true, provPath, provB); !o.Caused {
+			t.Fatal("first consumer: not caused")
+		}
+		o := observe(reg, "s1", true, user, provB)
+		if o.Change != ChangeInSession || o.Caused || o.Severity != "warning" {
+			t.Fatalf("second consumer: change=%q caused=%v severity=%q, want uncaused warning", o.Change, o.Caused, o.Severity)
+		}
+	})
+}
+
+func TestShortNameMatchIsRelativeOnly(t *testing.T) {
+	n := chainName{path: provPath, short: "CLAUDE.md"}
+	rows := []struct {
+		args string
+		want bool
+	}{
+		{`CLAUDE.md`, true},
+		{`{"file_path":"CLAUDE.md"}`, true},
+		{`{"command":"git add CLAUDE.md"}`, true},
+		{`{"command":"cat ./CLAUDE.md"}`, true},
+		{`{"command":"x=CLAUDE.md"}`, true},
+		{`{"command":"f(CLAUDE.md)"}`, true},
+		{`{"paths":[CLAUDE.md,AGENTS.md]}`, true},
+		{`{"command":"x 'CLAUDE.md'"}`, true},
+		{"{\"command\":\"x `CLAUDE.md`\"}", true},
+		{`{"file_path":"/repo/CLAUDE.md"}`, true}, // the full chain path
+		{`{"file_path":"/home/u/.claude/CLAUDE.md"}`, false},
+		{`{"file_path":"sub/CLAUDE.md"}`, false},
+		{`{"command":"cat ../CLAUDE.md"}`, false},
+		{`{"command":"cat /x/./CLAUDE.md"}`, false},
+		{`{"command":"cat xCLAUDE.md"}`, false},
+	}
+	for _, r := range rows {
+		if got := n.namedBy(r.args); got != r.want {
+			t.Errorf("namedBy(%s) = %v, want %v", r.args, got, r.want)
+		}
+	}
+}
+
+func TestPendingCauseExpires(t *testing.T) {
+	reg := newProvenanceRegistry(t)
+	clock := time.Unix(1_800_000_000, 0)
+	reg.tracker.now = func() time.Time { return clock }
+	observe(reg, "s1", true, provPath, provA)
+	markEdit(reg, "s1", "toolu_1")
+	clock = clock.Add(11 * time.Minute)
+	o := observe(reg, "s1", true, provPath, provB)
+	if o.Change != ChangeInSession || o.Caused || o.Severity != "warning" {
+		t.Fatalf("change=%q caused=%v severity=%q, want uncaused warning", o.Change, o.Caused, o.Severity)
+	}
+
+	// Within the TTL the cause still holds.
+	reg = newProvenanceRegistry(t)
+	reg.tracker.now = func() time.Time { return clock }
+	observe(reg, "s1", true, provPath, provA)
+	markEdit(reg, "s1", "toolu_1")
+	clock = clock.Add(9 * time.Minute)
+	if o := observe(reg, "s1", true, provPath, provB); !o.Caused {
+		t.Fatal("cause armed 9 minutes ago was ignored")
+	}
+}
+
+// An unidentified session's cause is its own: it never marks the version
+// caused for other sessions.
+func TestUnidentifiedCauseIsNotGlobal(t *testing.T) {
+	reg := newProvenanceRegistry(t)
+	observe(reg, "fb", false, provPath, provA)
+	observe(reg, "s2", true, provPath, provA)
+	markEdit(reg, "fb", "toolu_1")
+	if o := observe(reg, "fb", false, provPath, provB); !o.Caused {
+		t.Fatal("unidentified session: its own cause lost")
+	}
+	o := observe(reg, "s2", true, provPath, provB)
+	if o.Change != ChangeInSession || o.Caused || o.Severity != "warning" {
+		t.Fatalf("identified s2: change=%q caused=%v severity=%q, want uncaused warning", o.Change, o.Caused, o.Severity)
 	}
 }
