@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -109,7 +110,17 @@ type sessionState struct {
 	chains      map[string]*chain
 	causeMarks  map[uint64]struct{}
 	staticMarks map[uint64]struct{}
+	seen        identity // set by Observe; MarkCauses alone leaves it unknown
 }
+
+// identity is whether a session was observed as identified.
+type identity int8
+
+const (
+	identityUnknown identity = iota
+	identityYes
+	identityNo
+)
 
 // versionRecord is one version of a path as seen by any session.
 type versionRecord struct {
@@ -168,7 +179,9 @@ type Tracker struct {
 	paths         map[string]*pathRecord
 	pathLRU       *list.List // value: *pathRecord; front = most recently observed
 	now           func() time.Time
-	sinceLastSeen bool // grade a first sight of a new version of a known path
+	changes       atomic.Int64 // changes observed since start
+	suppressed    atomic.Int64 // findings suppressed since start
+	sinceLastSeen bool         // grade a first sight of a new version of a known path
 
 	// unlockedHook, when set by a test, runs in MarkCauses while it matches
 	// calls without the lock.
@@ -656,12 +669,23 @@ func (t *Tracker) Observe(sessionID string, identified bool, file *InstructionFi
 
 	t.mu.Lock()
 	o := t.observeLocked(sessionID, file, result, cl)
+	if el, ok := t.sessions[sessionID]; ok {
+		if identified {
+			el.Value.(*sessionState).seen = identityYes
+		} else {
+			el.Value.(*sessionState).seen = identityNo
+		}
+	}
 	t.mu.Unlock()
 
 	hits := t.ruleHits(o.added) // outside the lock: the scanner holds no state
 	if o.obs.Change != ChangeNone {
 		o.obs.AddedRuleHits = hits
 		grade(&o.obs, identified)
+		t.changes.Add(1)
+		if o.obs.Suppressed {
+			t.suppressed.Add(1)
+		}
 	}
 	if o.row != nil && o.rowHits && len(hits) > 0 {
 		o.row.AddedRuleHits = append([]string(nil), hits...)
@@ -845,4 +869,35 @@ func grade(obs *Observation, identified bool) {
 		}
 		obs.Static = kept
 	}
+}
+
+// Stats is the operator's view of instruction provenance tracking.
+// A session counts toward IdentifiedSessions or FallbackSessions once Observe
+// has run for it; a session that so far only had MarkCauses called is
+// identified as unknown and is counted in neither.
+type Stats struct {
+	IdentifiedSessions   int   `json:"identified_sessions"` // currently tracked
+	FallbackSessions     int   `json:"fallback_sessions"`   // currently tracked
+	TrackedPaths         int   `json:"tracked_paths"`
+	Changes              int64 `json:"changes"`             // since start
+	SuppressedFindings   int64 `json:"suppressed_findings"` // since start
+	ChangedSinceLastSeen bool  `json:"changed_since_last_seen"`
+}
+
+// Stats returns the current counters. It holds only counts.
+func (r *Registry) Stats() Stats {
+	t := r.tracker
+	t.mu.Lock()
+	st := Stats{TrackedPaths: len(t.paths), ChangedSinceLastSeen: t.sinceLastSeen}
+	for _, el := range t.sessions {
+		switch el.Value.(*sessionState).seen {
+		case identityYes:
+			st.IdentifiedSessions++
+		case identityNo:
+			st.FallbackSessions++
+		}
+	}
+	t.mu.Unlock()
+	st.Changes, st.SuppressedFindings = t.changes.Load(), t.suppressed.Load()
+	return st
 }

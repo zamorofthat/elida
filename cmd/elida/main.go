@@ -1224,6 +1224,20 @@ func (a *app) initInstructionIntegrity() {
 		a.instructionRegistry.SetRedactor(a.redactor)
 	}
 
+	a.instructionRegistry.SetChangedSinceLastSeen(iiCfg.ChangedSinceLastSeen)
+	pathVersionsLoaded := true
+	if err := a.instructionRegistry.LoadPathVersions(); err != nil {
+		pathVersionsLoaded = false
+		slog.Warn("failed to load instruction path versions; the first new version of each path after this start has an unknown diff", "error", err)
+	}
+	slog.Info("instruction provenance",
+		"session_header", a.cfg.Session.Header,
+		"claude_code_header", true,
+		"changed_since_last_seen", iiCfg.ChangedSinceLastSeen,
+		"path_versions_loaded", pathVersionsLoaded,
+		"note", "sessions identified by neither header are tracked but produce no change findings",
+	)
+
 	slog.Info("instruction integrity enabled",
 		"tracked_types", iiCfg.TrackedTypes,
 		"rules", len(instrRules),
@@ -1376,6 +1390,9 @@ func (a *app) initControlAPI() {
 	}
 	if a.policyEngine != nil {
 		controlOpts = append(controlOpts, control.WithPolicy(a.policyEngine))
+	}
+	if a.instructionRegistry != nil {
+		controlOpts = append(controlOpts, control.WithInstructionRegistry(a.instructionRegistry))
 	}
 	if a.cfg.Control.Auth.Enabled {
 		controlOpts = append(controlOpts, control.WithAuth(a.cfg.Control.Auth.APIKey))

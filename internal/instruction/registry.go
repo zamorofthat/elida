@@ -103,6 +103,12 @@ type Registry struct {
 	jobCh    chan asyncJob
 	done     chan struct{}
 	stopOnce sync.Once
+
+	// sendMu guards closed and every send on jobCh: senders hold the read
+	// lock (sends never block), Stop takes the write lock to close the
+	// channel, so a send can never meet a closed channel.
+	sendMu sync.RWMutex
+	closed bool
 }
 
 // NewRegistry creates a registry with the given scanner, storage backend, and async queue size.
@@ -132,12 +138,23 @@ func (r *Registry) SetRedactor(red Redactor) {
 // Stop shuts down the async worker.
 // It is safe to call more than once.
 func (r *Registry) Stop() {
-	r.stopOnce.Do(func() { close(r.jobCh) })
+	r.stopOnce.Do(func() {
+		r.sendMu.Lock()
+		r.closed = true
+		close(r.jobCh)
+		r.sendMu.Unlock()
+	})
 	<-r.done
 }
 
 // enqueue hands job to the worker without blocking; a full queue drops it.
+// After Stop it drops the job.
 func (r *Registry) enqueue(job asyncJob, hash string) {
+	r.sendMu.RLock()
+	defer r.sendMu.RUnlock()
+	if r.closed {
+		return
+	}
 	select {
 	case r.jobCh <- job:
 	default:

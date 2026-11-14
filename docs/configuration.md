@@ -1142,3 +1142,63 @@ count) while correlation is enabled.
 index; index 0 is a real message, so several windows of one long first
 message count once). Events with no message at all (metric and anomaly
 violations, which carry no source role) count individually.
+
+## Instruction integrity
+
+`policy.instruction_integrity` watches instruction files (CLAUDE.md, AGENTS.md, cursor and windsurf rule
+files) and unnamed blocks addressed to an agent. It needs `policy.enabled: true` and the SQLite history
+store.
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Turns the feature on. |
+| `tracked_types` | File types tracked: `claude_md`, `cursorrules`, `cursor_rules`, `agents_md`, `windsurfrules`. |
+| `shape_detection` | Also tracks unnamed text whose shape suggests it is addressed to an agent, at medium confidence. |
+| `shape_confidence_threshold` | A 0-1 score for that shape test. A lower value tracks more text, including some documentation. |
+| `async_queue_size` | Length of the queue to the background writer. A full queue drops the write, never the request. |
+| `rules` | The scan rules (name, patterns, severity, action). Omitted, the defaults load. |
+| `changed_since_last_seen` | Grades a named file that a session first shows with bytes the proxy has not seen at that path. YAML only. Default true. |
+
+### How a session is identified
+
+A session counts as identified when the configured `session.header` is present, or when Claude Code's own
+session header carries a safe ID. A session identified by neither is a fallback session (one per client and
+backend). Fallback sessions are still tracked and still scored for rule hits, but they produce no change
+findings, because a fallback session can mix several unrelated conversations. Their changes are counted as
+suppressed findings.
+
+### Control routes
+
+Both routes sit behind the same authentication as the other control routes.
+
+- `GET /control/stats` keeps every existing key and adds `instruction_integrity` when the feature is on:
+  `identified_sessions` and `fallback_sessions` (sessions currently tracked, counted once an observation has
+  run for them), `tracked_paths`, `changes` and `suppressed_findings` (since start), and
+  `changed_since_last_seen`.
+- `GET /control/instructions/paths` lists the version history of each named file, oldest version first:
+  hashes, change type, whether a tool call caused it, the cause tool name, line counts, rule names and
+  timestamps. It holds no file text. The optional `limit` caps the number of versions read (default 500,
+  at most 5000). Without a history store it returns an empty list.
+
+### Upgrading
+
+A rule set copied from the old defaults that gives `instruction_shell_exec` the action block no longer refuses
+requests on it; the hit raises the session's risk score. Startup logs a warning that names every such rule.
+
+### Limits
+
+- Line hashes do not survive a restart. The first new version of a path after a restart is reported with an
+  unknown diff, at info level, until some session shows the newest known version again.
+- A path is a string. The same absolute path on two machines behind one proxy is one history, so a
+  since-last-seen finding can be two different checkouts.
+- If another session shows an edited file before the editing session's next request carries the tool call,
+  the change is graded uncaused in that other session. The version is marked caused afterwards.
+- A fallback session can use up a since-last-seen finding: its observation makes the version known and its
+  own finding is suppressed.
+- Only tool calls in the request count as causes. A call whose result has not come back is not seen, and a
+  tool that names the file only by a directory or a glob is not matched.
+- The diff is a set difference of lines. A moved or re-indented line counts as added and removed; a
+  duplicated line counts as nothing.
+- Beyond 4096 tracked sessions the least recently seen is dropped, and its next request is a baseline.
+- There is no dashboard view of the chain. It is available through `/control/instructions/paths` and the
+  events table.

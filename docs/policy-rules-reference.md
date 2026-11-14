@@ -799,3 +799,53 @@ Custom rules are **appended** to preset rules, so you get both.
 | `tool_fanout` | Distinct tools used threshold | `threshold` | — |
 | `rate_anomaly` | Poisson rate anomaly (end-of-session) | `threshold_float` (p-value) | — |
 | `compound_anomaly` | Adaptive CUSUM + entropy (real-time) | `threshold_float` (compound score) | — |
+
+## Instruction integrity rules
+
+These rules apply to instruction files (CLAUDE.md, AGENTS.md, cursor and windsurf rule files) and to
+unnamed blocks of text that are addressed to an agent. They live under
+`policy.instruction_integrity.rules`, not in the preset tables above, and they are loaded from defaults
+unless the config lists its own. Only `instruction_pipe_to_shell` refuses a request, and only for a file
+identified with high confidence; a rule named `instruction_hidden_*` may refuse too if its action is set to
+block. Every other hit is recorded and adds to the session's risk score on the risk ladder.
+
+### Shipped rules
+
+| Rule | Severity | Action |
+|------|----------|--------|
+| `instruction_pipe_to_shell` | critical | block |
+| `instruction_shell_exec` | critical | flag |
+| `instruction_prompt_injection` | critical | flag |
+| `instruction_permission_escalation` | high | flag |
+| `instruction_hidden_bidi` | critical | flag |
+| `instruction_hidden_tags` | critical | flag |
+| `instruction_hidden_format` | medium | flag |
+| `instruction_obfuscation` | high | flag |
+| `instruction_tool_manipulation` | medium | flag |
+| `instruction_exfil_urls` | high | flag |
+
+### Derived change rules
+
+Two further rule names are produced by the provenance tracker rather than by a pattern. Both describe a
+named file whose bytes changed.
+
+- `instruction_file_changed`: a session showed a different version of a file it had already shown.
+- `instruction_file_changed_since_last_seen`: a session showed, for the first time, a version of a path
+  that the proxy had not seen before at that path.
+
+| Situation | Score |
+|-----------|-------|
+| Uncaused change, no added line trips a rule | 3 points |
+| A line added by the change trips a rule | 10 points |
+| Change caused by a tool call in the same session, no added line trips a rule | recorded only, no score |
+| Since-last-seen change, no added line trips a rule | 1 point |
+
+A change is caused when an earlier request in the session carries a tool call that names the file. Rule
+hits inside a change that already scores 10 points are not scored a second time. Sessions that no header
+identifies produce no change findings.
+
+### What a hidden-content finding reports
+
+A hidden-content finding names the code-point labels found (for example a bidirectional override or a tag
+character), the line numbers they sit on and a total count. It never carries the text of the file or of any
+line.
