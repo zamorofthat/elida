@@ -189,7 +189,9 @@ storage:
   enabled: true
   # Path to SQLite database file
   path: "data/elida.db"
-  # How many days to retain session history
+  # Days to keep session, voice and TTS history. Older records are deleted at
+  # startup and then hourly. 0 keeps history forever.
+  # The event log follows this value unless storage.events.retention_days is set.
   retention_days: 30
   # Capture mode: "flagged_only" (default) or "all" (CDR-style full audit)
   #   flagged_only - Only capture request/response bodies for policy-flagged sessions
