@@ -213,6 +213,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   system-prompt-change WARN cannot fire under Redis. Replicas serving one
   session concurrently are last-writer-wins, and the write-back has no
   compare-and-set (a follow-up).
+- The shipped Compose files and the Helm chart now give ELIDA time to stop.
+  On SIGTERM ELIDA waits up to `shutdown_timeout` (30s) for in-flight requests
+  and then saves and exports every live session, but neither Compose file set
+  `stop_grace_period` (Docker's default is 10s) and the chart set no
+  `terminationGracePeriodSeconds` (Kubernetes' default is 30s), so a routine
+  stop or rollout could kill ELIDA before its live sessions reached history
+  or telemetry. Both Compose files now set `stop_grace_period: 60s` and the
+  chart has a `terminationGracePeriodSeconds` value, default `60`. Plain
+  `docker run` deployments need `--stop-timeout 60` (or `docker stop -t 60`).
+  Saving the sessions is not bounded by `shutdown_timeout`, and with
+  `capture_mode: all` it can take longer than 30 seconds; see
+  [Stopping ELIDA](docs/deployment.md#stopping-elida) for measurements and
+  sizing.
 - A terminated session now keeps its terminated flag across Redis reloads
   (so it cannot be resumed), and an idle session now times out under Redis
   instead of staying active until its key expires. Kill-then-resume is still
