@@ -319,17 +319,31 @@ func (m *Manager) forgetEnd(sess *Session) {
 	}
 }
 
-// dropEndMarksBefore removes marks set before cutoff. Cleanup forgets a mark
-// as it deletes the session; a mark outlives that only if the session left
-// the store some other way (a Redis expiry, another replica's cleanup, a
-// reuse of its ID) or was resumed.
+// dropEndMarksBefore removes marks set before cutoff whose session is no
+// longer in the store. Cleanup forgets a mark as it deletes the session; a
+// mark outlives that only if the session left the store some other way (a
+// Redis expiry, another replica's cleanup, a reuse of its ID). A session
+// cleanup keeps, such as a killed one under a long kill block, keeps its
+// mark: dropping it would let cleanup report the session a second time.
 func (m *Manager) dropEndMarksBefore(cutoff time.Time) {
 	m.inflightMu.Lock()
-	defer m.inflightMu.Unlock()
+	stale := make(map[string]endMark)
 	for id, mk := range m.ends {
 		if mk.at.Before(cutoff) {
+			stale[id] = mk
+		}
+	}
+	m.inflightMu.Unlock()
+
+	for id, mk := range stale {
+		if cur, ok := m.store.Get(id); ok && cur.StartTime.Equal(mk.start) {
+			continue
+		}
+		m.inflightMu.Lock()
+		if now, ok := m.ends[id]; ok && now == mk {
 			delete(m.ends, id)
 		}
+		m.inflightMu.Unlock()
 	}
 }
 
@@ -838,6 +852,31 @@ func (m *Manager) checkKilledSessionsForTermination() {
 	}
 }
 
+// killBlockRetains reports whether the kill block still needs sess, a killed
+// session, to stay in the store. A killed session is what turns requests
+// away, so removing it lifts the block: kill_block.mode must decide how long
+// it stays, not the retention period that applies to every other ended
+// session.
+func (m *Manager) killBlockRetains(sess *Session) bool {
+	if sess.GetState() != Killed || sess.EndTime == nil {
+		return false
+	}
+	end := *sess.EndTime
+	switch m.killBlockConfig.Mode {
+	case KillBlockPermanent:
+		return true // until the process restarts, as documented
+	case KillBlockDuration:
+		return time.Since(end) < m.killBlockConfig.Duration
+	case KillBlockUntilHourChange:
+		// Client session IDs carry the hour, so once the hour of the kill is
+		// over the same client gets a new ID and the block has nothing left
+		// to block.
+		return time.Now().Before(end.In(time.Local).Truncate(time.Hour).Add(time.Hour))
+	default:
+		return true // an unknown mode blocks, as isKillBlockActive does
+	}
+}
+
 // cleanup removes old completed/terminated sessions
 func (m *Manager) cleanup() {
 	// Marks older than this are dropped at the end of the pass. Taken before
@@ -851,9 +890,10 @@ func (m *Manager) cleanup() {
 		if s.IsActive() {
 			return false
 		}
-		// Remove sessions that ended more than retentionPeriod ago
+		// Remove sessions that ended more than retentionPeriod ago, except a
+		// killed one the kill block still depends on.
 		if s.EndTime != nil {
-			return time.Since(*s.EndTime) > m.retentionPeriod
+			return time.Since(*s.EndTime) > m.retentionPeriod && !m.killBlockRetains(s)
 		}
 		return false
 	})

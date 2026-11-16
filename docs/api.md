@@ -184,6 +184,15 @@ When you kill a session, ELIDA blocks subsequent requests from that client. The 
 
 Killed sessions return `403 Forbidden` until the block expires.
 
+The block lasts as long as the mode says, however long that is. ELIDA keeps
+the killed session in memory for the duration of the block, and removes it
+(the next request then starts a new session) only after the block ends. A
+killed session is otherwise removed five minutes after it ended, like any
+other ended session. In `permanent` mode the killed sessions stay in memory
+until the process restarts, one entry per kill, and the block does not survive
+a restart with the in-memory store. An explicit `X-Session-ID` that was killed
+is blocked for the same time.
+
 ```bash
 # Kill a runaway Claude Code session
 curl -X POST http://localhost:9090/control/sessions/client-abc123/kill

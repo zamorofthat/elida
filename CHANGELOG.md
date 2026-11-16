@@ -204,6 +204,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- A killed session stays blocked for as long as `session.kill_block` says.
+  ELIDA removed every ended session five minutes after it ended, killed ones
+  included, and the next request then started a new session. So `permanent`
+  ("until server restart") lasted five minutes, as did any `duration` or
+  `until_hour_change` block longer than that, and the 30-minute resume window
+  for a killed session was cut to the same five. A killed session is now kept
+  until its block is over (until the process restarts for `permanent`, until
+  the end of the hour of the kill for `until_hour_change`), and its saved
+  record is still written once. Memory holds one entry per killed session
+  while its block lasts. The default is `until_hour_change`.
 - A session that times out is now saved and exported when it times out. The
   timeout used to only mark the session: its history record and telemetry
   export were written when the session was dropped from memory five minutes
