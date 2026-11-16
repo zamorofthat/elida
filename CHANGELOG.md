@@ -198,6 +198,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- `storage.retention_days` is now enforced. It was read and logged but
+  nothing ever deleted a record, so the database grew without bound. ELIDA now
+  sweeps at startup and then hourly: session, voice session and TTS records
+  older than `storage.retention_days` (default 30), and events older than
+  `storage.events.retention_days` (unset: same as `storage.retention_days`).
+  `storage.retention_days: 0` keeps history forever; a negative
+  `storage.events.retention_days` keeps events forever. A session's integrity
+  root is removed with the first of its events to expire, so a pruned session
+  reports no root instead of a proof that fails. **On upgrade, the first start
+  deletes everything older than the configured period**: back up the database
+  or set `storage.retention_days: 0` first if you need the older data. See
+  [Retention](docs/session-records.md#retention).
 - Redis-backed deployments no longer lose request-scoped session state. Only
   eleven lifecycle fields were stored and nothing wrote the rest back, so
   tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`
