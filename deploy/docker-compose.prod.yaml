@@ -13,6 +13,12 @@ services:
   elida:
     image: ${ELIDA_IMAGE:-elida}:${ELIDA_IMAGE_TAG:-latest}
     restart: unless-stopped
+    # On SIGTERM ELIDA waits up to shutdown_timeout (30s) for in-flight
+    # requests, then saves and exports every live session. Docker's default
+    # of 10s would SIGKILL it part-way and those sessions would be lost.
+    # Keep this above shutdown_timeout, and raise it for capture_mode "all"
+    # with many live sessions; see docs/deployment.md#stopping-elida.
+    stop_grace_period: 60s
     ports:
       - "443:8080"   # Proxy (HTTPS)
       - "9090:9090"  # Dashboard/Control API

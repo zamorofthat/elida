@@ -1094,21 +1094,6 @@ func (s *SQLiteStore) GetTimeSeries(since time.Time, interval string) ([]TimeSer
 	return points, nil
 }
 
-// Cleanup removes old session records
-func (s *SQLiteStore) Cleanup(retentionDays int) (int64, error) {
-	cutoff := time.Now().AddDate(0, 0, -retentionDays)
-	result, err := s.db.Exec("DELETE FROM sessions WHERE end_time < ?", cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("failed to cleanup old sessions: %w", err)
-	}
-
-	deleted, _ := result.RowsAffected()
-	if deleted > 0 {
-		slog.Info("cleaned up old sessions", "deleted", deleted, "retention_days", retentionDays)
-	}
-	return deleted, nil
-}
-
 // DB returns the underlying database handle for shared use by subsystems.
 func (s *SQLiteStore) DB() *sql.DB {
 	return s.db

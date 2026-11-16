@@ -366,7 +366,7 @@ type TLSConfig struct {
 type StorageConfig struct {
 	Enabled               bool            `yaml:"enabled"`
 	Path                  string          `yaml:"path"`                     // SQLite database path
-	RetentionDays         int             `yaml:"retention_days"`           // How long to keep history
+	RetentionDays         int             `yaml:"retention_days"`           // Days to keep session, voice and TTS history; 0 or less keeps it forever
 	CaptureMode           string          `yaml:"capture_mode"`             // "all" or "flagged_only" (default)
 	MaxCaptureSize        int             `yaml:"max_capture_size"`         // Max bytes per request/response body (default 10KB)
 	MaxCapturedPerSession int             `yaml:"max_captured_per_session"` // Max request/response pairs per session (default 100)
@@ -377,8 +377,20 @@ type StorageConfig struct {
 
 // EventsConfig holds event stream configuration
 type EventsConfig struct {
-	Enabled       bool `yaml:"enabled"`
-	RetentionDays int  `yaml:"retention_days"` // How long to keep events (default: 90)
+	Enabled bool `yaml:"enabled"`
+	// RetentionDays is how long events are kept. Unset (0) follows
+	// storage.retention_days; a negative value keeps events forever.
+	RetentionDays int `yaml:"retention_days"`
+}
+
+// EventRetentionDays is the effective retention period of the event log, in
+// days; zero or less means events are kept forever. Events follow
+// storage.retention_days unless storage.events.retention_days says otherwise.
+func (s StorageConfig) EventRetentionDays() int {
+	if s.Events.RetentionDays == 0 {
+		return s.RetentionDays
+	}
+	return s.Events.RetentionDays
 }
 
 // RedactionConfig holds redaction configuration

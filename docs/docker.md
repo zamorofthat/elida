@@ -42,6 +42,7 @@ Capture all requests/responses for compliance:
 
 ```bash
 docker run -d \
+  --stop-timeout 60 \
   -p 8080:8080 \
   -p 127.0.0.1:9090:9090 \
   -v elida-data:/data \
@@ -52,6 +53,16 @@ docker run -d \
   -e ELIDA_STORAGE_CAPTURE_MODE=all \
   zamorofthat/elida:latest
 ```
+
+## Stopping the Container
+
+On `docker stop` ELIDA waits up to 30 seconds (`ELIDA_SHUTDOWN_TIMEOUT`) for
+in-flight requests, then saves and exports every live session. Docker kills
+the container after 10 seconds by default, which loses the sessions not yet
+saved. When storage or telemetry is enabled, start the container with
+`--stop-timeout 60` (or stop it with `docker stop -t 60`), and allow longer
+with `ELIDA_STORAGE_CAPTURE_MODE=all` and many live sessions. Sizing guidance
+is in the [deployment guide](https://github.com/zamorofthat/elida/blob/main/docs/deployment.md#stopping-elida).
 
 ## With OpenTelemetry Export
 
@@ -177,6 +188,7 @@ docker run -d \
 | `ELIDA_STORAGE_CAPTURE_MODE` | Capture mode: `flagged_only` or `all` | `flagged_only` |
 | `ELIDA_SESSION_STORE` | Session store: `memory` or `redis` | `memory` |
 | `ELIDA_SESSION_TIMEOUT` | Session idle timeout | `5m` |
+| `ELIDA_SHUTDOWN_TIMEOUT` | How long to wait for in-flight requests on stop; keep `--stop-timeout` above it | `30s` |
 | `ELIDA_REDIS_ADDR` | Redis address for scaling | `localhost:6379` |
 | `ELIDA_TELEMETRY_ENABLED` | Enable OpenTelemetry export | `false` |
 | `ELIDA_TELEMETRY_EXPORTER` | Exporter: `otlp`, `stdout` | `none` |
