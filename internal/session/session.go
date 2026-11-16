@@ -545,6 +545,35 @@ func (s *Session) SetState(state State) {
 	}
 }
 
+// timeOutIfIdle ends an active session that has been idle for longer than
+// timeout and reports whether it did. The idle check and the state change
+// are one step under the session lock, so activity recorded by touchIfActive
+// either keeps the session alive or finds it already ended, never both.
+func (s *Session) timeOutIfIdle(timeout time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State != Active || time.Since(s.LastActivity) <= timeout {
+		return false
+	}
+	now := time.Now()
+	s.State = TimedOut
+	s.EndTime = &now
+	return true
+}
+
+// touchIfActive restarts the idle clock of an active session and reports
+// whether the session is active. It does not count a request; Touch and
+// TouchAndRecord do that once the request is under way.
+func (s *Session) touchIfActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State != Active {
+		return false
+	}
+	s.LastActivity = time.Now()
+	return true
+}
+
 // GetState returns the current session state
 func (s *Session) GetState() State {
 	s.mu.RLock()

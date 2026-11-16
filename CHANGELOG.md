@@ -198,6 +198,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- A session that times out is now saved and exported when it times out. The
+  timeout used to only mark the session: its history record and telemetry
+  export were written when the session was dropped from memory five minutes
+  later, so a timed-out session was missing from history for that long and
+  was lost if ELIDA crashed or was killed in between. If a request for the
+  session is still running at the timeout (a long stream, an open
+  WebSocket), the record is written when that request ends. Flags from
+  non-blocking violations are released at the same moment instead of five
+  minutes later; block and terminate decisions are kept as before.
 - Redis-backed deployments no longer lose request-scoped session state. Only
   eleven lifecycle fields were stored and nothing wrote the rest back, so
   tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`

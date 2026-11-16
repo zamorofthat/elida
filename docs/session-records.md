@@ -306,8 +306,13 @@ Session records are saved when:
 
 1. **Session killed** via API (`POST /control/sessions/{id}/kill`)
 2. **Session terminated** via API (`POST /control/sessions/{id}/terminate`)
-3. **Session timed out** (idle timeout or max duration)
+3. **Session timed out** (idle for `session.timeout`). The idle check runs
+   every 30 seconds and the record is saved as soon as it finds the session
+   timed out. If a request for the session is still running at that point (a
+   long stream, an open WebSocket), the record is saved when that request
+   ends.
 4. **Policy auto-terminate** (rule with `action: terminate`)
+5. **ELIDA stops** gracefully: every live session is saved before exit
 
 Records are **not** saved for:
 - Active sessions (still in progress)
