@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { apiFetch } from '../apiFetch'
 import { formatBytes, formatDuration, truncateId } from '../utils'
+import { killSessionRequest } from '../killSession'
 import { StateBadge } from './shared/Badge'
+import { KillControl } from './KillControl'
 import { SessionDetailModal } from './SessionDetailModal'
 
 // ---------------------------------------------------------------------------
@@ -193,11 +195,10 @@ export function DashboardPage() {
     return () => clearInterval(timerRef.current)
   }, [])
 
-  const killSession = async (id) => {
-    try {
-      await apiFetch('/control/sessions/' + id + '/kill', { method: 'POST' })
-      fetchAll()
-    } catch {}
+  // The kill control shows a failure next to the button, so this rejects.
+  const killSession = async (id, block) => {
+    await killSessionRequest(id, block)
+    fetchAll()
   }
 
   // Backend summary from sessions
@@ -312,12 +313,7 @@ export function DashboardPage() {
                     <td>{s.duration}</td>
                     <td>
                       {s.state === 'active' && (
-                        <button
-                          class="btn btn-danger btn-xs"
-                          onClick={(e) => { e.stopPropagation(); killSession(s.id); }}
-                        >
-                          Kill
-                        </button>
+                        <KillControl size="xs" onKill={(block) => killSession(s.id, block)} />
                       )}
                     </td>
                   </tr>
@@ -332,7 +328,7 @@ export function DashboardPage() {
         <SessionDetailModal
           session={detailSession}
           onClose={() => setDetailSession(null)}
-          onKill={(id) => { killSession(id); setDetailSession(null); }}
+          onKill={async (id, block) => { await killSession(id, block); setDetailSession(null); }}
         />
       )}
     </div>

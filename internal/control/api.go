@@ -791,7 +791,7 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		switch action {
 		case "kill":
-			h.killSession(w, sessionID)
+			h.killSession(w, r, sessionID)
 		case "terminate":
 			h.terminateSession(w, sessionID)
 		case "resume":
@@ -800,7 +800,7 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Unknown action", http.StatusBadRequest)
 		}
 	case http.MethodDelete:
-		h.killSession(w, sessionID)
+		h.killSession(w, r, sessionID)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -830,14 +830,50 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	writeJSON(w, http.StatusOK, info)
 }
 
-// killSession handles POST /control/sessions/{id}/kill
-func (h *Handler) killSession(w http.ResponseWriter, id string) {
-	slog.Info("kill request received", "session_id", id)
+// killRequest is the optional body of a kill: how long requests for the
+// session are refused. Omitted, "" or "default": the configured kill_block.
+// "permanent", "until_hour_change" or a duration such as "30m": that, for
+// this session only.
+type killRequest struct {
+	Block string `json:"block"`
+}
 
-	if h.manager.Kill(id) {
+// killSession handles POST /control/sessions/{id}/kill
+func (h *Handler) killSession(w http.ResponseWriter, r *http.Request, id string) {
+	var req killRequest
+	if r.Body != nil && r.Method == http.MethodPost {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+		if err != nil {
+			http.Error(w, "Cannot read request body", http.StatusBadRequest)
+			return
+		}
+		if len(strings.TrimSpace(string(body))) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, `Invalid body: want {"block": "permanent" | "until_hour_change" | "30m"}`, http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	kb, set, err := session.ParseKillBlock(req.Block)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	slog.Info("kill request received", "session_id", id, "block", req.Block)
+
+	var override *session.KillBlockConfig
+	if set {
+		override = &kb
+	}
+	if h.manager.KillWithBlock(id, override) {
+		block := req.Block
+		if !set {
+			block = "default"
+		}
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":     "killed",
 			"session_id": id,
+			"block":      block,
 		})
 	} else {
 		http.Error(w, "Session not found or already terminated", http.StatusNotFound)
@@ -921,6 +957,13 @@ type SessionInfo struct {
 	Terminated     bool           `json:"terminated,omitempty"`
 	MessageCount   int            `json:"message_count"`
 
+	// KillBlock is how a killed session blocks requests: "duration",
+	// "until_hour_change" or "permanent". BlockedUntil is when the block
+	// ends, absent for permanent. Both are absent for a session that is not
+	// killed.
+	KillBlock    string     `json:"kill_block,omitempty"`
+	BlockedUntil *time.Time `json:"blocked_until,omitempty"`
+
 	// SemanticShadow is populated only on the single-session detail path.
 	// Fifty entries per session would bloat every list response, and
 	// calibration review happens one session at a time.
@@ -962,6 +1005,9 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 	}
 	if snap.EndTime != nil {
 		info.EndTime = snap.EndTime
+	}
+	if mode, until := h.manager.KillBlockStatus(sess); mode != "" {
+		info.KillBlock, info.BlockedUntil = string(mode), until
 	}
 
 	// Enrich with policy engine data. Only two fields are needed, so read

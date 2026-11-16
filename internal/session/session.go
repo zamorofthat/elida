@@ -53,6 +53,12 @@ type Session struct {
 	// Terminated sessions cannot be resumed (for malicious agents)
 	Terminated bool `json:"terminated,omitempty"`
 
+	// KillBlockMode and KillBlockDuration are the block the kill that ended
+	// this session asked for, replacing the configured kill_block for this
+	// session. Empty means the configured block applies. Resume clears them.
+	KillBlockMode     KillBlockMode `json:"kill_block_mode,omitempty"`
+	KillBlockDuration time.Duration `json:"kill_block_duration,omitempty"`
+
 	// Hash of the session's most recent primary system prompt (the top-level
 	// `system` field, or the first role "system" message when there is none).
 	// Only tells "the prompt changed" from "the prompt is the same"; whether
@@ -588,12 +594,22 @@ func (s *Session) IsActive() bool {
 
 // Kill signals the session to terminate (can be resumed later)
 func (s *Session) Kill() {
+	s.killWith(nil)
+}
+
+// killWith kills an active session, recording the block the kill asked for
+// (nil: the configured one) in the same step, so no reader sees the session
+// killed without it.
+func (s *Session) killWith(kb *KillBlockConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.State == Active {
 		s.State = Killed
 		now := time.Now()
 		s.EndTime = &now
+		if kb != nil {
+			s.KillBlockMode, s.KillBlockDuration = kb.Mode, kb.Duration
+		}
 		close(s.killChan)
 	}
 }
@@ -636,6 +652,7 @@ func (s *Session) Resume() bool {
 	if s.State == Killed {
 		s.State = Active
 		s.EndTime = nil
+		s.KillBlockMode, s.KillBlockDuration = "", 0
 		s.LastActivity = time.Now()
 		// Create new kill channel for future kill operations
 		s.killChan = make(chan struct{})
@@ -647,15 +664,17 @@ func (s *Session) Resume() bool {
 // lifecycle is the part of a session that only the manager's lifecycle
 // methods (Kill, Resume, Terminate, Complete, timeout) change.
 type lifecycle struct {
-	State      State
-	EndTime    *time.Time
-	Terminated bool
+	State             State
+	EndTime           *time.Time
+	Terminated        bool
+	KillBlockMode     KillBlockMode
+	KillBlockDuration time.Duration
 }
 
 func (s *Session) lifecycleState() lifecycle {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	l := lifecycle{State: s.State, Terminated: s.Terminated}
+	l := lifecycle{State: s.State, Terminated: s.Terminated, KillBlockMode: s.KillBlockMode, KillBlockDuration: s.KillBlockDuration}
 	if s.EndTime != nil {
 		t := *s.EndTime
 		l.EndTime = &t

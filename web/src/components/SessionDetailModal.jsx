@@ -6,6 +6,7 @@ import { StateBadge, SeverityBadge, FingerprintBadge } from './shared/Badge'
 import { IconX } from './shared/Icons'
 import { SessionTurns } from './SessionTurns'
 import { TimelineBand } from './TimelineBand'
+import { KillControl, killBlockLabel } from './KillControl'
 import { SemanticEvidence, TurnLink, SECTIONS, evidenceMarkers, anchorId, anchoredViolations } from './SemanticEvidence'
 
 // ---------------------------------------------------------------------------
@@ -536,13 +537,9 @@ export function SessionDetailModal({ session, onClose, onKill }) {
           </div>
           <div class="detail-header-right">
             {s.state === 'active' && onKill && (
-              <button
-                class="btn btn-danger btn-sm"
-                onClick={() => { if (confirm('Kill this session?')) onKill(s.id) }}
-              >
-                Kill
-              </button>
+              <KillControl onKill={(block) => onKill(s.id, block)} />
             )}
+            {killBlockLabel(s) && <span class="kill-block-note">{killBlockLabel(s)}</span>}
             <button
               class="btn btn-secondary btn-sm"
               onClick={() => { navigator.clipboard?.writeText(s.id); }}
