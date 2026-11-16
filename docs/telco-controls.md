@@ -541,6 +541,9 @@ storage:
     retention_days: 90  # Typical compliance: 90 days
 ```
 
+Left unset, events follow `storage.retention_days`. See
+[Retention](session-records.md#retention) for what is deleted and when.
+
 ### 4. Monitor Circuit Breaker
 
 Watch for legitimate high-token sessions being blocked:

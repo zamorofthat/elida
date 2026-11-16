@@ -185,6 +185,11 @@ func main() {
 	defer cancel()
 	go a.manager.Run(ctx)
 
+	// Enforce storage retention: one sweep now, then one per interval.
+	if a.sqliteStore != nil {
+		go a.sqliteStore.RunRetention(ctx, a.retentionPolicy(), storage.DefaultRetentionInterval)
+	}
+
 	// Start fingerprint periodic flush (crash-resilient baseline persistence)
 	if a.fingerprinter != nil {
 		go a.fingerprinter.Run(ctx)
@@ -280,7 +285,24 @@ func (a *app) initSQLiteStorage() {
 		slog.Error("failed to initialize SQLite storage", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
+	policy := a.retentionPolicy()
+	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path,
+		"retention_days", policy.HistoryDays, "event_retention_days", policy.EventDays)
+	if policy.HistoryDays <= 0 {
+		slog.Warn("storage.retention_days is 0 or less: session history is kept forever")
+	}
+	if policy.EventDays <= 0 {
+		slog.Warn("event retention is 0 or less: the event log is kept forever")
+	}
+}
+
+// retentionPolicy maps the storage config onto what the retention sweep
+// enforces.
+func (a *app) retentionPolicy() storage.RetentionPolicy {
+	return storage.RetentionPolicy{
+		HistoryDays: a.cfg.Storage.RetentionDays,
+		EventDays:   a.cfg.Storage.EventRetentionDays(),
+	}
 }
 
 func (a *app) initRedactor() {

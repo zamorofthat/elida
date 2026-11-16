@@ -22,6 +22,10 @@ type Pattern struct {
 	Regex       *regexp.Regexp
 	Replacement string
 	Validate    func(match string) bool // nil validates everything (previous behavior)
+	// MayMatch is an optional cheap pre-check: when it returns false the
+	// pattern cannot match the text, so the regexp is not run. It must never
+	// return false for text the regexp would match. Nil means always run.
+	MayMatch func(text string) bool
 }
 
 // Options configures a PatternRedactor.
@@ -69,6 +73,63 @@ func isPrivateOrLoopbackIP(s string) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
+// hasDigit reports whether s contains an ASCII digit.
+func hasDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i]-'0' <= 9 {
+			return true
+		}
+	}
+	return false
+}
+
+// containsFold reports whether s contains lit, ignoring ASCII case. lit must
+// be lower case. It looks for the rarest-first byte with IndexByte, which is
+// vectorized, instead of running a regexp over the whole text.
+func containsFold(s, lit string) bool {
+	n := len(lit)
+	if n == 0 {
+		return true
+	}
+	// (?i) regexps also fold K to the Kelvin sign and S to the long s, so a
+	// byte search cannot rule those out: non-ASCII text is never skipped.
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return true
+		}
+	}
+	first, upper := lit[0], lit[0]-'a'+'A'
+	for i := 0; i+n <= len(s); i++ {
+		j1 := strings.IndexByte(s[i:], first)
+		j2 := strings.IndexByte(s[i:], upper)
+		switch {
+		case j1 < 0 && j2 < 0:
+			return false
+		case j1 < 0:
+			i += j2
+		case j2 < 0:
+			i += j1
+		default:
+			i += min(j1, j2)
+		}
+		if i+n <= len(s) && strings.EqualFold(s[i:i+n], lit) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyFold(lits ...string) func(string) bool {
+	return func(s string) bool {
+		for _, l := range lits {
+			if containsFold(s, l) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // DefaultPatterns returns the standard set of PII redaction patterns
 func DefaultPatterns() []Pattern {
 	return defaultPatterns(false)
@@ -79,16 +140,19 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 	return []Pattern{
 		{
 			Name:        "email",
+			MayMatch:    func(s string) bool { return strings.IndexByte(s, '@') >= 0 },
 			Regex:       regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`),
 			Replacement: "[REDACTED_EMAIL]",
 		},
 		{
 			Name:        "ssn",
+			MayMatch:    func(s string) bool { return strings.IndexByte(s, '-') >= 0 },
 			Regex:       regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
 			Replacement: "[REDACTED_SSN]",
 		},
 		{
 			Name:        "credit_card",
+			MayMatch:    hasDigit,
 			Regex:       regexp.MustCompile(`\b(?:\d[ -]?){13,16}\b`),
 			Replacement: "[REDACTED_CC]",
 			Validate: func(m string) bool {
@@ -98,36 +162,43 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			Name:        "phone_us",
+			MayMatch:    hasDigit,
 			Regex:       regexp.MustCompile(`(^|[^0-9.-])((?:\+?1[-.\s])?(?:\(\d{3}\)\s?|\d{3}[-.])\d{3}[-.]\d{4})\b`),
 			Replacement: "${1}[REDACTED_PHONE]",
 		},
 		{
 			Name:        "api_key_bearer",
+			MayMatch:    anyFold("bearer"),
 			Regex:       regexp.MustCompile(`(?i)(bearer\s+)([a-zA-Z0-9_.-]{20,})`),
 			Replacement: "$1[REDACTED_TOKEN]",
 		},
 		{
 			Name:        "api_key_sk",
+			MayMatch:    anyFold("sk-"),
 			Regex:       regexp.MustCompile(`(?i)(sk-[a-zA-Z0-9]{20,})`),
 			Replacement: "[REDACTED_API_KEY]",
 		},
 		{
 			Name:        "api_key_generic",
+			MayMatch:    anyFold("key", "token"),
 			Regex:       regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|auth[_-]?token)[:\s=]["']?([a-zA-Z0-9_.-]{16,})["']?`),
 			Replacement: "$1=[REDACTED_KEY]",
 		},
 		{
 			Name:        "password_json",
+			MayMatch:    anyFold("password", "passwd", "pwd"),
 			Regex:       regexp.MustCompile(`(?i)"(password|passwd|pwd)":\s*"([^"]{4,})"`),
 			Replacement: `"$1": "[REDACTED_PASSWORD]"`,
 		},
 		{
 			Name:        "password_field",
+			MayMatch:    anyFold("password", "passwd", "pwd"),
 			Regex:       regexp.MustCompile(`(?i)(password|passwd|pwd)[\s]*[=:][\s]*["']?([^\s"',}]{4,})["']?`),
 			Replacement: "$1=[REDACTED_PASSWORD]",
 		},
 		{
 			Name:        "ip_address",
+			MayMatch:    func(s string) bool { return strings.IndexByte(s, '.') >= 0 },
 			Regex:       regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`),
 			Replacement: "[REDACTED_IP]",
 			Validate: func(m string) bool {
@@ -136,16 +207,19 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			Name:        "jwt_token",
+			MayMatch:    func(s string) bool { return strings.Contains(s, "eyJ") },
 			Regex:       regexp.MustCompile(`eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*`),
 			Replacement: "[REDACTED_JWT]",
 		},
 		{
 			Name:        "aws_access_key",
+			MayMatch:    anyFold("akia"),
 			Regex:       regexp.MustCompile(`(?i)(AKIA[0-9A-Z]{16})`),
 			Replacement: "[REDACTED_AWS_KEY]",
 		},
 		{
 			Name:        "base64_secret",
+			MayMatch:    anyFold("secret", "private"),
 			Regex:       regexp.MustCompile(`(?i)(secret|private[_-]?key)[:\s=]["']?([A-Za-z0-9+/]{40,}={0,2})["']?`),
 			Replacement: "$1=[REDACTED_SECRET]",
 		},
@@ -219,6 +293,9 @@ func (r *PatternRedactor) Redact(content string) string {
 	result := content
 	for _, pattern := range r.patterns {
 		p := pattern
+		if p.MayMatch != nil && !p.MayMatch(result) {
+			continue
+		}
 		if p.Validate == nil {
 			result = p.Regex.ReplaceAllString(result, p.Replacement)
 		} else {

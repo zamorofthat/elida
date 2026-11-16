@@ -53,6 +53,11 @@ check "livenessProbe on /control/health" 'printf "%s" "$D" | grep -q "path: /con
 KEY=$(secret_key "$D")
 check "generated key is 32 chars"       '[ ${#KEY} -eq 32 ]'
 
+echo "--- the pod gets longer to stop than ELIDA's 30s shutdown_timeout ---"
+check "default grace period is 60s"     'printf "%s" "$D" | grep -qE "^      terminationGracePeriodSeconds: 60$"'
+G=$(render --set terminationGracePeriodSeconds=180)
+check "grace period follows the value"  'printf "%s" "$G" | grep -qE "^      terminationGracePeriodSeconds: 180$"'
+
 echo "--- controlIngress needs the control Service as a backend ---"
 I=$(render --set controlIngress.enabled=true)
 check "control Service created"         'printf "%s" "$I" | grep -qE "^  name: r-elida-control$"'

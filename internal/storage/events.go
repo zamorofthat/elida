@@ -310,15 +310,3 @@ func (s *SQLiteStore) GetEventStats(since *time.Time) (*EventStats, error) {
 
 	return stats, nil
 }
-
-// CleanupEvents removes old events based on retention
-func (s *SQLiteStore) CleanupEvents(retentionDays int) (int64, error) {
-	cutoff := time.Now().AddDate(0, 0, -retentionDays)
-	result, err := s.db.Exec("DELETE FROM events WHERE timestamp < ?", cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("failed to cleanup old events: %w", err)
-	}
-
-	deleted, _ := result.RowsAffected()
-	return deleted, nil
-}

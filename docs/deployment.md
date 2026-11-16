@@ -126,6 +126,51 @@ See `deploy/ecs/` for CloudFormation templates and task definitions.
 
 See `deploy/terraform/` for AWS infrastructure modules.
 
+### Stopping ELIDA
+
+On `SIGTERM` or `SIGINT` ELIDA stops in two phases:
+
+1. It stops accepting connections and waits up to `shutdown_timeout`
+   (default `30s`, env `ELIDA_SHUTDOWN_TIMEOUT`) for in-flight requests to
+   finish.
+2. It ends every live session: each one is saved to session history (when
+   storage is enabled) and exported (OpenTelemetry, OCSF). This phase is
+   **not** bounded by `shutdown_timeout`; it takes as long as the sessions
+   take to save.
+
+A live session is held in memory until it ends or is flagged. If the
+container runtime kills ELIDA before phase 2 finishes, the sessions it had not
+reached are missing from history and telemetry. So the runtime must allow more
+time than `shutdown_timeout`, and most defaults do not:
+
+| Runtime | Setting | Runtime default | Shipped here |
+|---------|---------|-----------------|--------------|
+| `docker run` / `docker stop` | `--stop-timeout 60` / `docker stop -t 60` | 10s | set it yourself |
+| Docker Compose | `stop_grace_period` | 10s | `60s` in `docker-compose.yaml` and `deploy/docker-compose.prod.yaml` |
+| Kubernetes | `terminationGracePeriodSeconds` | 30s | `60` in the Helm chart (`terminationGracePeriodSeconds`) |
+
+60 seconds is `shutdown_timeout` plus 30 seconds for phase 2. If you raise
+`shutdown_timeout`, raise the grace period by the same amount.
+
+How long phase 2 takes depends on the capture mode. Measured on v0.32.1
+(Apple M1 Max, memory session store, SQLite on a local SSD, redaction on):
+
+- `capture_mode: flagged_only` (default): about 0.5 ms per live session.
+  5,000 live sessions were saved in 2.5 s.
+- `capture_mode: all`: each session's captured bodies are redacted when the
+  session is saved, one session at a time on one core, at about 0.4 ms per KB
+  of captured content (roughly 2.6 MB/s). 1,000 live sessions holding 50 KB
+  each took 19 s; 100 sessions holding 1 MB each took 37 s. A session can
+  hold up to `max_captured_per_session` x 2 x `max_capture_size` (2 MB with
+  the defaults).
+
+Treat these as an order of magnitude: a CPU limit below one core (the chart's
+default is `500m`) or a slower disk makes it proportionally slower. To size
+your own deployment, compare the timestamps of the `shutting down gracefully`
+and `ELIDA stopped` log lines on a normal stop. With `capture_mode: all` and
+more than a few tens of MB of live captured content, raise the grace period
+to match.
+
 ---
 
 ## Configuration
@@ -221,6 +266,7 @@ For compliance or debugging, enable both:
 
 ```bash
 docker run -d \
+  --stop-timeout 60 \
   -v elida-data:/data \
   -e ELIDA_STORAGE_ENABLED=true \
   -e ELIDA_STORAGE_CAPTURE_MODE=all \
@@ -231,6 +277,9 @@ docker run -d \
   -e ELIDA_POLICY_PRESET=standard \
   zamorofthat/elida:latest
 ```
+
+`--stop-timeout 60` gives ELIDA time to save its live sessions on
+`docker stop`; see [Stopping ELIDA](#stopping-elida).
 
 ---
 
