@@ -207,6 +207,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WebSocket), the record is written when that request ends. Flags from
   non-blocking violations are released at the same moment instead of five
   minutes later; block and terminate decisions are kept as before.
+- A killed or terminated session keeps its saved record. Five minutes after
+  the kill, when the session was dropped from memory, ELIDA saved it a second
+  time. The captured content had already gone into the first save, so the
+  second one replaced the history record with one that had no captured
+  requests, and the session was exported to telemetry twice. Terminating a
+  session that was already killed did the same at once. A session is now
+  saved once each time it ends: at the kill, and again only if it is resumed
+  and ends again.
 - Redis-backed deployments no longer lose request-scoped session state. Only
   eleven lifecycle fields were stored and nothing wrote the rest back, so
   tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`

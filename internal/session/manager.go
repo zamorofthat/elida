@@ -71,18 +71,36 @@ type Manager struct {
 	// request is in flight has its end reported when that request finishes.
 	inflightIDs map[string]int
 	// ends holds, per session ID, how far reporting that session's end has
-	// got, so the end callback runs once per session instance: when it ends,
-	// not again when cleanup removes it. Guarded by inflightMu, so a timeout
-	// that decides to wait for a request and that request's end cannot miss
-	// each other. The marks are per process, like the callback's own state.
+	// got, so the end callback runs once each time a session ends: when it
+	// ends, not again when cleanup removes it. Guarded by inflightMu, so a
+	// timeout that decides to wait for a request and that request's end
+	// cannot miss each other. The marks are per process, like the callback's
+	// own state.
 	ends map[string]endMark
 }
 
-// endMark is the end-reporting state of one session instance.
+// endMark is the end-reporting state of one end of one session. The start
+// time tells instances apart (an ID can be reused) and the end time tells
+// one instance's ends apart (a killed session can be resumed and end again).
 type endMark struct {
-	start   time.Time // identifies the instance: an ID can be reused
+	start   time.Time
+	end     time.Time
 	waiting bool      // timed out with a request in flight; not reported yet
 	at      time.Time // when the mark was set, for dropping stale marks
+}
+
+// reportedFor reports whether the mark records that sess's current end,
+// which happened at end, has been reported.
+func (mk endMark) reportedFor(sess *Session, end time.Time) bool {
+	return !mk.waiting && mk.start.Equal(sess.StartTime) && mk.end.Equal(end)
+}
+
+// endTimeOf returns when sess ended, or the zero time if it has not.
+func endTimeOf(sess *Session) time.Time {
+	if l := sess.lifecycleState(); l.EndTime != nil {
+		return *l.EndTime
+	}
+	return time.Time{}
 }
 
 // NewManager creates a new session manager with default kill block settings
@@ -206,16 +224,19 @@ func (m *Manager) TrackRequest(sess *Session) (end func()) {
 }
 
 // reportEnd runs the session-end callback for sess, unless it already ran
-// for this session instance, and reports whether this call was the one that
-// reported it. Every path that ends or removes a session goes through here,
-// so a session is saved and exported once, when it ends.
+// for this end of the session, and reports whether this call was the one
+// that reported it. Every path that ends or removes a session goes through
+// here, so a session is saved and exported once, when it ends. The callback
+// is not safe to repeat: it drains the session's captured content, so a
+// second run replaces the saved record with one that has lost it.
 func (m *Manager) reportEnd(sess *Session) bool {
+	end := endTimeOf(sess)
 	m.inflightMu.Lock()
-	if mk, ok := m.ends[sess.ID]; ok && !mk.waiting && mk.start.Equal(sess.StartTime) {
+	if mk, ok := m.ends[sess.ID]; ok && mk.reportedFor(sess, end) {
 		m.inflightMu.Unlock()
 		return false
 	}
-	m.markEndLocked(sess, false)
+	m.markEndLocked(sess, end, false)
 	m.inflightMu.Unlock()
 
 	if m.onSessionEnd != nil {
@@ -224,24 +245,44 @@ func (m *Manager) reportEnd(sess *Session) bool {
 	return true
 }
 
+// endReported reports whether sess's current end has been reported.
+func (m *Manager) endReported(sess *Session) bool {
+	end := endTimeOf(sess)
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+	mk, ok := m.ends[sess.ID]
+	return ok && mk.reportedFor(sess, end)
+}
+
+// keepEndReported re-marks sess as reported after its end time moved
+// (terminating a killed session restarts its retention period), so the end
+// already reported is not reported again.
+func (m *Manager) keepEndReported(sess *Session) {
+	end := endTimeOf(sess)
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+	m.markEndLocked(sess, end, false)
+}
+
 // markEndLocked records sess's end as reported, or as waiting on a request.
 // The caller holds inflightMu.
-func (m *Manager) markEndLocked(sess *Session, waiting bool) {
+func (m *Manager) markEndLocked(sess *Session, end time.Time, waiting bool) {
 	if m.ends == nil {
 		m.ends = make(map[string]endMark)
 	}
-	m.ends[sess.ID] = endMark{start: sess.StartTime, waiting: waiting, at: time.Now()}
+	m.ends[sess.ID] = endMark{start: sess.StartTime, end: end, waiting: waiting, at: time.Now()}
 }
 
 // waitForInflight leaves sess's end to the request this process is still
 // serving for it, and reports whether there is one.
 func (m *Manager) waitForInflight(sess *Session) bool {
+	end := endTimeOf(sess)
 	m.inflightMu.Lock()
 	defer m.inflightMu.Unlock()
 	if m.inflightIDs[sess.ID] == 0 {
 		return false
 	}
-	m.markEndLocked(sess, true)
+	m.markEndLocked(sess, end, true)
 	return true
 }
 
@@ -254,13 +295,14 @@ func (m *Manager) reportWaitingEnd(id string) {
 	if !ok {
 		return
 	}
+	end := endTimeOf(cur)
 	m.inflightMu.Lock()
 	mk, ok := m.ends[id]
 	if !ok || !mk.waiting || !mk.start.Equal(cur.StartTime) {
 		m.inflightMu.Unlock()
 		return
 	}
-	m.markEndLocked(cur, false)
+	m.markEndLocked(cur, end, false)
 	m.inflightMu.Unlock()
 
 	if m.onSessionEnd != nil {
@@ -277,16 +319,15 @@ func (m *Manager) forgetEnd(sess *Session) {
 	}
 }
 
-// dropStaleEndMarks removes marks whose session should have been cleaned up
-// by now. Cleanup forgets a mark as it deletes the session; a mark outlives
-// that only if the session left the store some other way (a Redis expiry,
-// another replica's cleanup, a reuse of its ID).
-func (m *Manager) dropStaleEndMarks() {
-	limit := m.retentionPeriod + 2*m.cleanupInterval
+// dropEndMarksBefore removes marks set before cutoff. Cleanup forgets a mark
+// as it deletes the session; a mark outlives that only if the session left
+// the store some other way (a Redis expiry, another replica's cleanup, a
+// reuse of its ID) or was resumed.
+func (m *Manager) dropEndMarksBefore(cutoff time.Time) {
 	m.inflightMu.Lock()
 	defer m.inflightMu.Unlock()
 	for id, mk := range m.ends {
-		if time.Since(mk.at) > limit {
+		if mk.at.Before(cutoff) {
 			delete(m.ends, id)
 		}
 	}
@@ -570,10 +611,9 @@ func (m *Manager) Kill(id string) bool {
 		_ = rs.PublishKill(id)
 	}
 
-	// Export CDR immediately when session is killed
-	if m.onSessionEnd != nil {
-		m.onSessionEnd(sess)
-	}
+	// Export CDR immediately when session is killed. Cleanup finds it
+	// reported and only removes it.
+	m.reportEnd(sess)
 
 	slog.Info("session killed",
 		"session_id", id,
@@ -630,6 +670,10 @@ func (m *Manager) Terminate(id string) bool {
 		}
 	}
 
+	// Terminating a session that was killed first moves its end time, so
+	// note beforehand whether the kill already reported it.
+	reported := m.endReported(sess)
+
 	sess.Terminate()
 
 	// Persist the terminated state
@@ -640,9 +684,13 @@ func (m *Manager) Terminate(id string) bool {
 		_ = rs.PublishKill(id)
 	}
 
-	// Export session record immediately
-	if m.onSessionEnd != nil {
-		m.onSessionEnd(sess)
+	// Export session record immediately, unless the kill already did: the
+	// record has nothing to gain from the upgrade and its captured content
+	// to lose.
+	if reported {
+		m.keepEndReported(sess)
+	} else {
+		m.reportEnd(sess)
 	}
 
 	slog.Warn("session terminated (permanent)",
@@ -774,8 +822,12 @@ func (m *Manager) checkKilledSessionsForTermination() {
 
 	for _, sess := range sessions {
 		if sess.EndTime != nil && time.Since(*sess.EndTime) > m.killResumeTimeout {
+			reported := m.endReported(sess)
 			sess.Terminate()
 			m.store.Put(sess)
+			if reported {
+				m.keepEndReported(sess) // the end time moved
+			}
 
 			slog.Warn("killed session auto-terminated after resume timeout",
 				"session_id", sess.ID,
@@ -788,6 +840,12 @@ func (m *Manager) checkKilledSessionsForTermination() {
 
 // cleanup removes old completed/terminated sessions
 func (m *Manager) cleanup() {
+	// Marks older than this are dropped at the end of the pass. Taken before
+	// listing: a session with a mark that old is past its retention period
+	// in the listing, so this pass removes it and its mark together, however
+	// long the pass takes.
+	staleMarks := time.Now().Add(-(m.retentionPeriod + 2*m.cleanupInterval))
+
 	sessions := m.store.List(func(s *Session) bool {
 		// Keep active sessions
 		if s.IsActive() {
@@ -802,14 +860,14 @@ func (m *Manager) cleanup() {
 
 	for _, sess := range sessions {
 		// Report the end before deleting, if nothing has reported it yet: a
-		// session that timed out was reported then (or is still waiting on a
-		// request, which ends its wait here).
+		// session that was killed or timed out was reported then (or timed
+		// out and is still waiting on a request, which ends its wait here).
 		m.reportEnd(sess)
 		m.store.Delete(sess.ID)
 		m.forgetEnd(sess)
 		slog.Debug("session cleaned up", "session_id", sess.ID)
 	}
-	m.dropStaleEndMarks()
+	m.dropEndMarksBefore(staleMarks)
 }
 
 // DrainActiveSessions marks all active sessions as completed and invokes

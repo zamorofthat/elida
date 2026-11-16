@@ -292,3 +292,162 @@ func TestCleanup_ForgetsEndMarksOfSessionsThatLeftTheStore(t *testing.T) {
 		t.Fatalf("stale end marks kept: %v", m.ends)
 	}
 }
+
+// bothStores runs fn against the memory store and a copying store.
+func bothStores(t *testing.T, fn func(t *testing.T, store Store)) {
+	t.Helper()
+	for name, store := range map[string]Store{"memory": NewMemoryStore(), "copying": NewCopyStore()} {
+		t.Run(name, func(t *testing.T) { fn(t, store) })
+	}
+}
+
+func TestCleanup_DoesNotReportAKilledSessionAgain(t *testing.T) {
+	for name, end := range map[string]func(*Manager, string) bool{
+		"kill":      (*Manager).Kill,
+		"terminate": (*Manager).Terminate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bothStores(t, func(t *testing.T, store Store) {
+				m, rec := endManager(store)
+				m.GetOrCreate("e-kill", "http://b", "127.0.0.1")
+				if !end(m, "e-kill") {
+					t.Fatal("fixture: the session was not ended")
+				}
+				if n := len(rec.ends("e-kill")); n != 1 {
+					t.Fatalf("end callbacks at %s = %d, want 1", name, n)
+				}
+				time.Sleep(5 * time.Millisecond) // past the retention period
+
+				m.cleanup()
+
+				if n := len(rec.ends("e-kill")); n != 1 {
+					t.Fatalf("end callbacks after cleanup = %d, want 1 (a second report replaces the saved record with one that has lost its captured content)", n)
+				}
+				if _, ok := store.Get("e-kill"); ok {
+					t.Fatal("cleanup must still remove the session")
+				}
+				if len(m.ends) != 0 {
+					t.Fatalf("end marks kept after cleanup: %v", m.ends)
+				}
+			})
+		})
+	}
+}
+
+func TestTerminate_AfterKillDoesNotReportAgain(t *testing.T) {
+	bothStores(t, func(t *testing.T, store Store) {
+		m, rec := endManager(store)
+		m.retentionPeriod = 50 * time.Millisecond
+		m.cleanupInterval = time.Millisecond
+		m.GetOrCreate("e-upgrade", "http://b", "127.0.0.1")
+		m.Kill("e-upgrade")
+		time.Sleep(60 * time.Millisecond)
+
+		if !m.Terminate("e-upgrade") {
+			t.Fatal("a killed session must be upgradable to terminated")
+		}
+
+		sess, _ := m.Get("e-upgrade")
+		if !sess.IsTerminated() {
+			t.Fatal("the session must be terminated")
+		}
+		if n := len(rec.ends("e-upgrade")); n != 1 {
+			t.Fatalf("end callbacks after kill then terminate = %d, want 1", n)
+		}
+		// Terminating restarts the retention period. The session outlives
+		// the pass below and must still not be reported by the one after.
+		m.cleanup()
+		if _, ok := store.Get("e-upgrade"); !ok {
+			t.Fatal("fixture: the session must outlive the first cleanup pass")
+		}
+		time.Sleep(60 * time.Millisecond)
+		m.cleanup()
+		if n := len(rec.ends("e-upgrade")); n != 1 {
+			t.Fatalf("end callbacks after cleanup = %d, want 1", n)
+		}
+	})
+}
+
+func TestCheckTimeouts_AutoTerminatingAKilledSessionDoesNotReportAgain(t *testing.T) {
+	bothStores(t, func(t *testing.T, store Store) {
+		m, rec := endManager(store)
+		m.retentionPeriod = time.Hour
+		m.SetKillResumeTimeout(10 * time.Millisecond)
+		m.GetOrCreate("e-auto", "http://b", "127.0.0.1")
+		m.Kill("e-auto")
+		time.Sleep(20 * time.Millisecond)
+
+		m.checkTimeouts()
+
+		sess, _ := m.Get("e-auto")
+		if !sess.IsTerminated() {
+			t.Fatal("fixture: the killed session must be auto-terminated")
+		}
+		m.retentionPeriod = time.Millisecond
+		time.Sleep(5 * time.Millisecond)
+		m.cleanup()
+		if n := len(rec.ends("e-auto")); n != 1 {
+			t.Fatalf("end callbacks = %d, want 1 (the kill's)", n)
+		}
+	})
+}
+
+func TestResume_AResumedSessionIsReportedAgainWhenItEnds(t *testing.T) {
+	bothStores(t, func(t *testing.T, store Store) {
+		m, rec := endManager(store)
+		m.GetOrCreate("e-resume", "http://b", "127.0.0.1")
+		m.Kill("e-resume")
+		if !m.Resume("e-resume") {
+			t.Fatal("fixture: the killed session must resume")
+		}
+		idlePastTimeout()
+
+		m.checkTimeouts()
+
+		got := rec.ends("e-resume")
+		if len(got) != 2 || got[0].State != Killed || got[1].State != TimedOut {
+			t.Fatalf("a resumed session ends a second time and that end must be reported too: %+v", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+		m.cleanup()
+		if n := len(rec.ends("e-resume")); n != 2 {
+			t.Fatalf("end callbacks after cleanup = %d, want 2", n)
+		}
+	})
+}
+
+// A cleanup pass can take a long time: its callbacks save and export. A
+// session reported shortly before the pass must not lose its mark to the
+// pass's stale-mark sweep while it is still in the store.
+func TestCleanup_ASlowPassDoesNotDropTheMarkOfASessionStillInTheStore(t *testing.T) {
+	store := NewMemoryStore()
+	m, rec := endManager(store)
+	m.retentionPeriod = 50 * time.Millisecond
+	m.cleanupInterval = time.Millisecond
+	m.SetSessionEndCallback(func(s *Session) {
+		if s.ID == "e-slow" {
+			time.Sleep(100 * time.Millisecond)
+		}
+		rec.record(s)
+	})
+	m.GetOrCreate("e-fast", "http://b", "127.0.0.1")
+	idlePastTimeout()
+	m.checkTimeouts() // e-fast reported here
+	slow := NewSession("e-slow", "http://b", "127.0.0.1")
+	slow.SetState(TimedOut)
+	longAgo := time.Now().Add(-time.Hour)
+	slow.EndTime = &longAgo
+	store.Put(slow)
+
+	time.Sleep(30 * time.Millisecond)
+	m.cleanup() // reports e-slow; e-fast is not due yet
+	time.Sleep(60 * time.Millisecond)
+	m.cleanup() // e-fast is due
+
+	if n := len(rec.ends("e-slow")); n != 1 {
+		t.Fatalf("fixture: e-slow end callbacks = %d, want 1", n)
+	}
+	if n := len(rec.ends("e-fast")); n != 1 {
+		t.Fatalf("end callbacks for the session reported at its timeout = %d, want 1", n)
+	}
+}
