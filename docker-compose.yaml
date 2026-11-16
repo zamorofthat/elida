@@ -42,6 +42,11 @@ services:
     ports:
       - "8080:8080"
       - "9090:9090"
+    # On SIGTERM ELIDA waits up to shutdown_timeout (30s) for in-flight
+    # requests, then saves and exports every live session. Docker's default
+    # of 10s would SIGKILL it part-way and those sessions would be lost.
+    # Keep this above shutdown_timeout; see docs/deployment.md#stopping-elida.
+    stop_grace_period: 60s
     environment:
       - ELIDA_SESSION_STORE=redis
       - ELIDA_REDIS_ADDR=redis:6379
