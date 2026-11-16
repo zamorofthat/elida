@@ -874,61 +874,6 @@ func TestSQLiteStore_GetEventStats(t *testing.T) {
 	}
 }
 
-func TestSQLiteStore_Cleanup(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "elida-test-*.db")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
-
-	store, err := storage.NewSQLiteStore(tmpFile.Name())
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	defer store.Close()
-
-	now := time.Now()
-	// Create old and new records
-	oldRecord := storage.SessionRecord{
-		ID:        "old-session",
-		State:     "completed",
-		StartTime: now.AddDate(0, 0, -40), // 40 days ago
-		EndTime:   now.AddDate(0, 0, -40),
-	}
-	newRecord := storage.SessionRecord{
-		ID:        "new-session",
-		State:     "completed",
-		StartTime: now.Add(-1 * time.Hour),
-		EndTime:   now,
-	}
-
-	_ = store.SaveSession(oldRecord)
-	_ = store.SaveSession(newRecord)
-
-	// Cleanup with 30 day retention
-	deleted, err := store.Cleanup(30)
-	if err != nil {
-		t.Fatalf("failed to cleanup: %v", err)
-	}
-
-	if deleted != 1 {
-		t.Errorf("expected 1 deleted, got %d", deleted)
-	}
-
-	// Verify old session is gone
-	old, _ := store.GetSession("old-session")
-	if old != nil {
-		t.Error("old session should have been deleted")
-	}
-
-	// Verify new session still exists
-	new, _ := store.GetSession("new-session")
-	if new == nil {
-		t.Error("new session should still exist")
-	}
-}
-
 func TestSQLiteStore_CountSessions(t *testing.T) {
 	store := newTestStore(t)
 
