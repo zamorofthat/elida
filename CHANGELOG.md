@@ -141,6 +141,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   With the default the export is unchanged.
 
 ### Changed
+- Redaction skips a pattern when the text cannot contain a match, for example
+  the email pattern when there is no `@`. Redacting a 50 KB captured body took
+  about 37% less time in a benchmark on ordinary prose, which shortens the
+  save of captured sessions at timeout and shutdown. The output is unchanged;
+  a test compares it with the unfiltered patterns byte for byte. Custom
+  patterns are always run.
 - **Breaking, for anyone scraping `/control/health` without a credential:**
   the unauthenticated health payload is `{"status", "timestamp"}` again. The
   `decision` block — `capability`, `reason`, `effective_mode`,
