@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -479,13 +480,64 @@ func (m *Manager) GetOrCreateByClient(clientAddr, backendName, backendURL string
 	return sess
 }
 
+// killBlockOf returns the block that applies to a killed session: the one its
+// kill asked for, else the configured one.
+func (m *Manager) killBlockOf(sess *Session) KillBlockConfig {
+	if l := sess.lifecycleState(); l.KillBlockMode != "" {
+		return KillBlockConfig{Mode: l.KillBlockMode, Duration: l.KillBlockDuration}
+	}
+	return m.killBlockConfig
+}
+
+// KillBlockStatus describes the block on a killed session for display: the
+// mode that applies (its own or the configured one) and when it ends, nil
+// for permanent. It returns "" for a session that is not killed.
+func (m *Manager) KillBlockStatus(sess *Session) (mode KillBlockMode, until *time.Time) {
+	l := sess.lifecycleState()
+	if l.State != Killed || l.EndTime == nil {
+		return "", nil
+	}
+	kb := m.killBlockOf(sess)
+	switch kb.Mode {
+	case KillBlockDuration:
+		t := l.EndTime.Add(kb.Duration)
+		return kb.Mode, &t
+	case KillBlockUntilHourChange:
+		t := l.EndTime.In(time.Local).Truncate(time.Hour).Add(time.Hour)
+		return kb.Mode, &t
+	default:
+		return kb.Mode, nil
+	}
+}
+
+// ParseKillBlock reads the block a kill asks for: "permanent",
+// "until_hour_change", or a positive duration such as "30m" or "2h". The empty
+// string and "default" ask for nothing, so the configured kill_block applies
+// (set is false). Anything else is an error.
+func ParseKillBlock(s string) (cfg KillBlockConfig, set bool, err error) {
+	switch s {
+	case "", "default":
+		return KillBlockConfig{}, false, nil
+	case string(KillBlockPermanent):
+		return KillBlockConfig{Mode: KillBlockPermanent}, true, nil
+	case string(KillBlockUntilHourChange):
+		return KillBlockConfig{Mode: KillBlockUntilHourChange}, true, nil
+	}
+	d, perr := time.ParseDuration(s)
+	if perr != nil || d <= 0 {
+		return KillBlockConfig{}, false, fmt.Errorf("block %q: want permanent, until_hour_change or a positive duration such as 30m", s)
+	}
+	return KillBlockConfig{Mode: KillBlockDuration, Duration: d}, true, nil
+}
+
 // isKillBlockActive checks if a killed session should still be blocked
 func (m *Manager) isKillBlockActive(sess *Session) bool {
 	if sess.GetState() != Killed || sess.EndTime == nil {
 		return false
 	}
+	kb := m.killBlockOf(sess)
 
-	switch m.killBlockConfig.Mode {
+	switch kb.Mode {
 	case KillBlockPermanent:
 		// Permanent block - always active until server restart
 		return true
@@ -493,7 +545,7 @@ func (m *Manager) isKillBlockActive(sess *Session) bool {
 	case KillBlockDuration:
 		// Block for a specific duration after kill
 		elapsed := time.Since(*sess.EndTime)
-		return elapsed < m.killBlockConfig.Duration
+		return elapsed < kb.Duration
 
 	case KillBlockUntilHourChange:
 		// Block until the hour changes (session ID would regenerate)
@@ -601,11 +653,20 @@ func (m *Manager) Persist(sess *Session) {
 	sd := sessionToData(sess)
 	l := cur.lifecycleState()
 	sd.State, sd.EndTime, sd.Terminated = l.State, l.EndTime, l.Terminated
+	sd.KillBlockMode, sd.KillBlockDuration = l.KillBlockMode, l.KillBlockDuration
 	dp.putData(sd)
 }
 
-// Kill terminates a session
+// Kill terminates a session; the configured kill_block decides how long
+// requests for it are refused.
 func (m *Manager) Kill(id string) bool {
+	return m.KillWithBlock(id, nil)
+}
+
+// KillWithBlock is Kill with a block of its own for this session: kb replaces
+// the configured kill_block until the session is resumed or removed. A nil kb
+// is Kill.
+func (m *Manager) KillWithBlock(id string, kb *KillBlockConfig) bool {
 	sess, ok := m.store.Get(id)
 	if !ok {
 		return false
@@ -615,7 +676,7 @@ func (m *Manager) Kill(id string) bool {
 		return false
 	}
 
-	sess.Kill()
+	sess.killWith(kb)
 
 	// Persist the killed state (important for Redis store)
 	m.store.Put(sess)
@@ -862,11 +923,12 @@ func (m *Manager) killBlockRetains(sess *Session) bool {
 		return false
 	}
 	end := *sess.EndTime
-	switch m.killBlockConfig.Mode {
+	kb := m.killBlockOf(sess)
+	switch kb.Mode {
 	case KillBlockPermanent:
 		return true // until the process restarts, as documented
 	case KillBlockDuration:
-		return time.Since(end) < m.killBlockConfig.Duration
+		return time.Since(end) < kb.Duration
 	case KillBlockUntilHourChange:
 		// Client session IDs carry the hour, so once the hour of the kill is
 		// over the same client gets a new ID and the block has nothing left

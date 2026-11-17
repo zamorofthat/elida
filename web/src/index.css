@@ -2546,3 +2546,51 @@ body {
   text-overflow: ellipsis;
   max-width: 200px;
 }
+
+/* ============================================================================
+   Kill control: the choice of how long a kill blocks, made next to the button
+   ============================================================================ */
+
+.kill-control {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.kill-control-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.kill-control-label {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.kill-control-select,
+.kill-control-minutes {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  padding: 0.125rem 0.25rem;
+}
+
+.kill-control-minutes {
+  width: 4rem;
+}
+
+.kill-control-error {
+  flex-basis: 100%;
+  font-size: 0.6875rem;
+  color: #f87171;
+}
+
+.kill-block-note {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}

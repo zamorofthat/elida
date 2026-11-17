@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { apiFetch } from '../apiFetch'
 import { truncateId } from '../utils'
+import { killSessionRequest } from '../killSession'
 import { StateBadge } from './shared/Badge'
+import { KillControl } from './KillControl'
 import { SessionDetailModal } from './SessionDetailModal'
 
 // Risk tiers — same as SessionTurns
@@ -108,11 +110,10 @@ export function ToolUsePage() {
     return () => clearInterval(timerRef.current)
   }, [])
 
-  const killSession = async (id) => {
-    try {
-      await apiFetch('/control/sessions/' + id + '/kill', { method: 'POST' })
-      fetchSessions()
-    } catch {}
+  // The kill control shows a failure next to the button, so this rejects.
+  const killSession = async (id, block) => {
+    await killSessionRequest(id, block)
+    fetchSessions()
   }
 
   // Aggregate tool counts across all sessions
@@ -265,12 +266,7 @@ export function ToolUsePage() {
                     </td>
                     <td>
                       {s.state === 'active' && (
-                        <button
-                          class="btn btn-danger btn-xs"
-                          onClick={(e) => { e.stopPropagation(); killSession(s.id); }}
-                        >
-                          Kill
-                        </button>
+                        <KillControl size="xs" onKill={(block) => killSession(s.id, block)} />
                       )}
                     </td>
                   </tr>
@@ -285,7 +281,7 @@ export function ToolUsePage() {
         <SessionDetailModal
           session={detailSession}
           onClose={() => setDetailSession(null)}
-          onKill={(id) => { killSession(id); setDetailSession(null); }}
+          onKill={async (id, block) => { await killSession(id, block); setDetailSession(null); }}
         />
       )}
     </div>

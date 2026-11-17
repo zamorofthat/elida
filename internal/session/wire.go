@@ -40,6 +40,10 @@ type sessionData struct {
 	BackendsUsed map[string]int `json:"backends_used,omitempty"`
 	Terminated   bool           `json:"terminated,omitempty"`
 
+	// The block the kill asked for; empty: the configured one.
+	KillBlockMode     KillBlockMode `json:"kill_block_mode,omitempty"`
+	KillBlockDuration time.Duration `json:"kill_block_duration,omitempty"`
+
 	IsWebSocket  bool  `json:"is_websocket,omitempty"`
 	FrameCount   int64 `json:"frame_count,omitempty"`
 	TextFrames   int64 `json:"text_frames,omitempty"`
@@ -92,6 +96,8 @@ func sessionToData(sess *Session) *sessionData {
 		Metadata:          maps.Clone(sess.Metadata),
 		BackendsUsed:      maps.Clone(sess.BackendsUsed),
 		Terminated:        sess.Terminated,
+		KillBlockMode:     sess.KillBlockMode,
+		KillBlockDuration: sess.KillBlockDuration,
 		IsWebSocket:       sess.IsWebSocket,
 		FrameCount:        sess.FrameCount,
 		TextFrames:        sess.TextFrames,
@@ -136,6 +142,8 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		Metadata:          sd.Metadata,
 		BackendsUsed:      sd.BackendsUsed,
 		Terminated:        sd.Terminated,
+		KillBlockMode:     sd.KillBlockMode,
+		KillBlockDuration: sd.KillBlockDuration,
 		IsWebSocket:       sd.IsWebSocket,
 		FrameCount:        sd.FrameCount,
 		TextFrames:        sd.TextFrames,

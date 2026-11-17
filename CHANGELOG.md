@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
+  takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
+  that replaces the configured `session.kill_block` for that session; without
+  it the configured block applies as before, and a value that is not one of
+  those is a `400` that kills nothing. A killed session reports `kill_block`
+  and `blocked_until`. The dashboard's Kill button now opens the choice in
+  the row (Default, 5 minutes, 30 minutes, 1 hour, 24 hours, custom minutes,
+  Permanent) instead of a browser pop-up, shows a failed kill next to the
+  button instead of an alert, and labels a killed session with how long it is
+  blocked.
 - Semantic prompt-injection detection, disabled by default
   (`decision.enabled: false`). An embedded, pure-Go MiniLM classifier scores
   user content and tool results, including bounded decoded representations,
