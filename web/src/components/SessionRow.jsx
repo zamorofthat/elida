@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'preact/hooks'
 import { formatBytes, formatDuration, formatDurationStr, truncateId } from '../utils'
 import { StateBadge, FingerprintBadge } from './shared/Badge'
 import { SessionTurns } from './SessionTurns'
+import { KillControl, killBlockLabel } from './KillControl'
 
 function DurationTicker({ startTime, durationMs, duration, state }) {
   const [elapsed, setElapsed] = useState(null)
@@ -55,6 +56,7 @@ export function SessionRow({ session, onKill, onViewDetail }) {
           {session.state === 'active' && <span class="live-dot" />}
           <span class="mono session-row-id">{truncateId(session.id)}</span>
           <StateBadge state={session.state} />
+          {killBlockLabel(session) && <span class="kill-block-note">{killBlockLabel(session)}</span>}
         </div>
 
         <div class="session-row-center">
@@ -85,12 +87,7 @@ export function SessionRow({ session, onKill, onViewDetail }) {
             View
           </button>
           {session.state === 'active' && (
-            <button
-              class="btn btn-danger btn-sm"
-              onClick={(e) => { e.stopPropagation(); onKill(session.id); }}
-            >
-              Kill
-            </button>
+            <KillControl onKill={(block) => onKill(session.id, block)} />
           )}
         </div>
       </div>

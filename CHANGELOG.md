@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
+  takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
+  that replaces the configured `session.kill_block` for that session; without
+  it the configured block applies as before, and a value that is not one of
+  those is a `400` that kills nothing. A killed session reports `kill_block`
+  and `blocked_until`. The dashboard's Kill button now opens the choice in
+  the row (Default, 5 minutes, 30 minutes, 1 hour, 24 hours, custom minutes,
+  Permanent) instead of a browser pop-up, shows a failed kill next to the
+  button instead of an alert, and labels a killed session with how long it is
+  blocked.
 - Semantic prompt-injection detection, disabled by default
   (`decision.enabled: false`). An embedded, pure-Go MiniLM classifier scores
   user content and tool results, including bounded decoded representations,
@@ -204,6 +214,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- A killed session stays blocked for as long as `session.kill_block` says.
+  ELIDA removed every ended session five minutes after it ended, killed ones
+  included, and the next request then started a new session. So `permanent`
+  ("until server restart") lasted five minutes, as did any `duration` or
+  `until_hour_change` block longer than that, and the 30-minute resume window
+  for a killed session was cut to the same five. A killed session is now kept
+  until its block is over (until the process restarts for `permanent`, until
+  the end of the hour of the kill for `until_hour_change`), and its saved
+  record is still written once. Memory holds one entry per killed session
+  while its block lasts. The default is `until_hour_change`.
 - A session that times out is now saved and exported when it times out. The
   timeout used to only mark the session: its history record and telemetry
   export were written when the session was dropped from memory five minutes

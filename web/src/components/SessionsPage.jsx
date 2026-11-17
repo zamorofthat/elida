@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'preact/hooks'
 import { apiFetch } from '../apiFetch'
+import { killSessionRequest } from '../killSession'
 import { SearchInput } from './shared/SearchInput'
 import { IconEmpty } from './shared/Icons'
 import { SessionRow } from './SessionRow'
@@ -30,14 +31,10 @@ export function SessionsPage() {
     return () => clearInterval(timerRef.current)
   }, [])
 
-  const killSession = async (id) => {
-    if (!confirm('Kill this session?')) return
-    try {
-      await apiFetch('/control/sessions/' + id + '/kill', { method: 'POST' })
-      fetchSessions()
-    } catch {
-      alert('Failed to kill session')
-    }
+  // The kill control shows a failure next to the button, so this rejects.
+  const killSession = async (id, block) => {
+    await killSessionRequest(id, block)
+    fetchSessions()
   }
 
   // Filter and search
@@ -108,7 +105,7 @@ export function SessionsPage() {
         <SessionDetailModal
           session={detailSession}
           onClose={() => setDetailSession(null)}
-          onKill={(id) => { killSession(id); setDetailSession(null); }}
+          onKill={async (id, block) => { await killSession(id, block); setDetailSession(null); }}
         />
       )}
     </div>

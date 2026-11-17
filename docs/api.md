@@ -184,6 +184,41 @@ When you kill a session, ELIDA blocks subsequent requests from that client. The 
 
 Killed sessions return `403 Forbidden` until the block expires.
 
+### Choosing the block for one kill
+
+The kill request takes an optional JSON body that replaces the configured
+`kill_block` for that session only:
+
+```bash
+# Block requests for this session for 30 minutes
+curl -X POST http://localhost:9090/control/sessions/client-abc123/kill \
+  -H 'Content-Type: application/json' -d '{"block": "30m"}'
+# {"status":"killed","session_id":"client-abc123","block":"30m"}
+
+# Block it until ELIDA restarts
+curl -X POST http://localhost:9090/control/sessions/client-abc123/kill \
+  -d '{"block": "permanent"}'
+```
+
+`block` is `permanent`, `until_hour_change`, or a positive duration such as
+`90s`, `30m` or `2h`. Leave the body out, or send `{}` or `"default"`, to use
+the configured block. Anything else is a `400` and the session is not killed.
+Resuming a session forgets its block. A killed session's `kill_block` and
+`blocked_until` (absent for `permanent`) are in the session JSON.
+
+The dashboard's Kill button opens this choice next to the button, with
+Default, 5 minutes, 30 minutes, 1 hour, 24 hours, a custom number of minutes
+and Permanent.
+
+The block lasts as long as the mode says, however long that is. ELIDA keeps
+the killed session in memory for the duration of the block, and removes it
+(the next request then starts a new session) only after the block ends. A
+killed session is otherwise removed five minutes after it ended, like any
+other ended session. In `permanent` mode the killed sessions stay in memory
+until the process restarts, one entry per kill, and the block does not survive
+a restart with the in-memory store. An explicit `X-Session-ID` that was killed
+is blocked for the same time.
+
 ```bash
 # Kill a runaway Claude Code session
 curl -X POST http://localhost:9090/control/sessions/client-abc123/kill

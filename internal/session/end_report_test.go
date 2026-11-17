@@ -44,9 +44,10 @@ func (r *endRecorder) ends(id string) []endSeen {
 }
 
 // endManager is a manager with a short idle timeout whose cleanup removes an
-// ended session on its next pass, and the recorder wired as its end callback.
+// ended session on its next pass (a killed one too: its kill block is only a
+// millisecond), and the recorder wired as its end callback.
 func endManager(store Store) (*Manager, *endRecorder) {
-	m := NewManager(store, 50*time.Millisecond)
+	m := NewManagerWithKillBlock(store, 50*time.Millisecond, KillBlockConfig{Mode: KillBlockDuration, Duration: time.Millisecond})
 	m.retentionPeriod = time.Millisecond
 	rec := &endRecorder{}
 	m.SetSessionEndCallback(rec.record)
@@ -449,5 +450,123 @@ func TestCleanup_ASlowPassDoesNotDropTheMarkOfASessionStillInTheStore(t *testing
 	}
 	if n := len(rec.ends("e-fast")); n != 1 {
 		t.Fatalf("end callbacks for the session reported at its timeout = %d, want 1", n)
+	}
+}
+
+// killBlockManager is endManager with a kill-block setting. Retention is one
+// millisecond, so any retention beyond it is the kill block's doing.
+func killBlockManager(store Store, kb KillBlockConfig) (*Manager, *endRecorder) {
+	m := NewManagerWithKillBlock(store, time.Hour, kb)
+	m.retentionPeriod = time.Millisecond
+	m.cleanupInterval = time.Millisecond
+	rec := &endRecorder{}
+	m.SetSessionEndCallback(rec.record)
+	return m, rec
+}
+
+// A kill lasts as long as kill_block says. Cleanup used to delete every
+// ended session once its retention period (5 minutes) was over, killed ones
+// included, so the next request got a fresh session: "permanent" lasted five
+// minutes and a longer duration was cut to the same five.
+func TestCleanup_KeepsAKilledSessionWhileTheKillBlockHolds(t *testing.T) {
+	for name, kb := range map[string]KillBlockConfig{
+		"permanent":         {Mode: KillBlockPermanent},
+		"long duration":     {Mode: KillBlockDuration, Duration: time.Hour},
+		"until hour change": {Mode: KillBlockUntilHourChange},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bothStores(t, func(t *testing.T, store Store) {
+				m, _ := killBlockManager(store, kb)
+				m.GetOrCreate("kb-id", "http://b", "127.0.0.1")
+				m.GetOrCreateByClient("10.1.1.1:5000", "local", "http://b")
+				clientID := m.generateClientSessionID("10.1.1.1", "local")
+				for _, id := range []string{"kb-id", clientID} {
+					if !m.Kill(id) {
+						t.Fatalf("Kill(%s) = false", id)
+					}
+				}
+				time.Sleep(20 * time.Millisecond) // well past retention
+				m.cleanup()
+
+				for _, id := range []string{"kb-id", clientID} {
+					if _, ok := store.Get(id); !ok {
+						t.Errorf("%s was cleaned up while the kill block still holds", id)
+					}
+				}
+				if s := m.GetOrCreate("kb-id", "http://b", "127.0.0.1"); s != nil {
+					t.Error("a request for the killed session ID was accepted")
+				}
+				if s := m.GetOrCreateByClient("10.1.1.1:5000", "local", "http://b"); s != nil {
+					t.Error("a request from the killed client was accepted")
+				}
+			})
+		})
+	}
+}
+
+// Once the kill block is over, the killed session is retained no longer.
+func TestCleanup_RemovesAKilledSessionWhenTheKillBlockEnds(t *testing.T) {
+	bothStores(t, func(t *testing.T, store Store) {
+		m, _ := killBlockManager(store, KillBlockConfig{Mode: KillBlockDuration, Duration: 60 * time.Millisecond})
+		m.GetOrCreate("kb-end", "http://b", "127.0.0.1")
+		m.Kill("kb-end")
+
+		time.Sleep(20 * time.Millisecond)
+		m.cleanup()
+		if _, ok := store.Get("kb-end"); !ok {
+			t.Fatal("removed before the 60 ms block was over")
+		}
+
+		time.Sleep(60 * time.Millisecond)
+		m.cleanup()
+		if _, ok := store.Get("kb-end"); ok {
+			t.Fatal("still stored after the kill block ended")
+		}
+	})
+}
+
+// Keeping the session must not cost its end report: the mark that stops
+// cleanup reporting a killed session a second time has to outlast the
+// session, however long that is.
+func TestCleanup_KeepsTheEndMarkOfAKilledSessionItRetains(t *testing.T) {
+	bothStores(t, func(t *testing.T, store Store) {
+		m, rec := killBlockManager(store, KillBlockConfig{Mode: KillBlockDuration, Duration: 80 * time.Millisecond})
+		m.GetOrCreate("kb-mark", "http://b", "127.0.0.1")
+		m.Kill("kb-mark")
+
+		time.Sleep(30 * time.Millisecond) // past retention + 2 cleanup intervals
+		m.cleanup()
+		time.Sleep(70 * time.Millisecond) // block over
+		m.cleanup()
+
+		if _, ok := store.Get("kb-mark"); ok {
+			t.Fatal("fixture: session should be gone")
+		}
+		if n := len(rec.ends("kb-mark")); n != 1 {
+			t.Fatalf("end callbacks = %d, want 1: dropping the mark while the session was retained reported it again", n)
+		}
+	})
+}
+
+// Under until_hour_change the block ends with the hour of the kill: a client
+// session ID carries the hour, so the next hour's requests use a new one.
+func TestKillBlockRetains_UntilHourChangeEndsWithTheHourOfTheKill(t *testing.T) {
+	m := NewManagerWithKillBlock(NewMemoryStore(), time.Hour, KillBlockConfig{Mode: KillBlockUntilHourChange})
+	killedAt := func(at time.Time) *Session {
+		s := NewSession("hc", "http://b", "127.0.0.1")
+		s.Kill()
+		s.mu.Lock()
+		s.EndTime = &at
+		s.mu.Unlock()
+		return s
+	}
+	if !m.killBlockRetains(killedAt(time.Now())) {
+		t.Error("a session killed just now is not retained")
+	}
+	if m.killBlockRetains(killedAt(time.Now().Add(-2 * time.Hour))) {
+		t.Error("a session killed two hours ago is still retained")
+	}
+	if m.killBlockRetains(NewSession("active", "http://b", "127.0.0.1")) {
+		t.Error("a session that was not killed is retained")
 	}
 }
