@@ -204,6 +204,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- A session that times out is now saved and exported when it times out. The
+  timeout used to only mark the session: its history record and telemetry
+  export were written when the session was dropped from memory five minutes
+  later, so a timed-out session was missing from history for that long and
+  was lost if ELIDA crashed or was killed in between. If a request for the
+  session is still running at the timeout (a long stream, an open
+  WebSocket), the record is written when that request ends. Flags from
+  non-blocking violations are released at the same moment instead of five
+  minutes later; block and terminate decisions are kept as before.
+- A killed or terminated session keeps its saved record. Five minutes after
+  the kill, when the session was dropped from memory, ELIDA saved it a second
+  time. The captured content had already gone into the first save, so the
+  second one replaced the history record with one that had no captured
+  requests, and the session was exported to telemetry twice. Terminating a
+  session that was already killed did the same at once. A session is now
+  saved once each time it ends: at the kill, and again only if it is resumed
+  and ends again.
 - `storage.retention_days` is now enforced. It was read and logged but
   nothing ever deleted a record, so the database grew without bound. ELIDA now
   sweeps at startup and then hourly: session, voice session and TTS records
