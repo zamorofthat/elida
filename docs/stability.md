@@ -1,25 +1,23 @@
 # Stability and Compatibility
 
-This page says what ELIDA promises not to break once it reaches 1.0, and what it
-does not. Until 1.0, treat every surface below as subject to change in any minor
-release; the changelog calls out breaking changes.
+This page says how much to rely on each part of ELIDA staying the same between
+releases. ELIDA is versioned with [Semantic Versioning](https://semver.org/) and
+is still below version 1, so any release may change any surface; every breaking
+change is listed in the changelog under **Breaking**, with the migration. The
+levels below describe intent, not a guarantee, and may be tightened later.
 
-> **Status: proposed.** The classification below is a proposal for the 1.0
-> release. It becomes policy when it ships with 1.0.
-
-ELIDA follows [Semantic Versioning](https://semver.org/). From 1.0:
-
-- **Patch** releases fix bugs and security issues and never change a stable surface.
-- **Minor** releases may add to any surface. They never remove or change the
-  meaning of anything marked *stable*.
-- **Major** releases may break stable surfaces. Each break is listed in the
-  changelog under **Breaking**, with the migration.
+- **Stable:** changes are avoided. A breaking change is called out in the
+  changelog and, where ELIDA can detect it, warned about at startup before it
+  takes effect.
+- **Experimental:** works and is tested, but may change or be removed in any
+  release. Changes are still listed in the changelog.
+- **Internal:** not covered.
 
 ## Surfaces
 
 | Surface | Level | What is covered |
 |---------|-------|-----------------|
-| Config file keys and defaults | Stable | Existing YAML keys keep their name, type and meaning. A new key defaults to the old behavior. |
+| Config file keys and defaults | Stable | Existing YAML keys keep their name, type and meaning where possible. A new key defaults to the old behavior. |
 | Environment variable overrides | Stable | Existing `ELIDA_*` variables keep working. |
 | Proxy behavior | Stable | Session identity precedence (header, body path, `user` field, client-IP fallback), failover, kill and kill-block modes. |
 | Control API (`/control/*`) | Stable | Existing endpoints, methods and response fields. New fields may appear; clients must ignore fields they do not know. |
@@ -34,15 +32,10 @@ ELIDA follows [Semantic Versioning](https://semver.org/). From 1.0:
 | Go packages under `internal/` | Internal | Not importable by other modules and not covered. |
 | Metric and telemetry names | Stable once named in docs | Names documented in [semantic-detection.md](semantic-detection.md) or [integrations.md](integrations.md) are covered; others are not. |
 
-**Experimental** means the surface works and is tested, but it may change or be
-removed in a minor release. Experimental changes are still listed in the
-changelog.
-
 ## Deprecation
 
-A stable surface is deprecated for at least one minor release before it is
-removed in the next major release. The deprecation is announced in the
-changelog and, where ELIDA can detect it, logged at startup.
+A stable surface is deprecated, with a changelog entry, before it is removed.
+Where ELIDA can detect use of a deprecated surface it logs at startup.
 
 ## What the proxy does not promise
 
