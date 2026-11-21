@@ -218,6 +218,39 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 			Replacement: "[REDACTED_AWS_KEY]",
 		},
 		{
+			Name:        "aws_temporary_key",
+			MayMatch:    func(s string) bool { return strings.Contains(s, "ASIA") },
+			Regex:       regexp.MustCompile(`\bASIA[0-9A-Z]{16}\b`),
+			Replacement: "[REDACTED_AWS_KEY]",
+		},
+		{
+			Name:        "github_token",
+			MayMatch:    anyFold("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
+			Regex:       regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b`),
+			Replacement: "[REDACTED_GITHUB_TOKEN]",
+		},
+		{
+			Name:        "slack_token",
+			MayMatch:    func(s string) bool { return strings.Contains(s, "xox") },
+			Regex:       regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{20,}`),
+			Replacement: "[REDACTED_SLACK_TOKEN]",
+		},
+		{
+			Name:        "anthropic_api_key",
+			MayMatch:    anyFold("sk-ant-"),
+			Regex:       regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`),
+			Replacement: "[REDACTED_API_KEY]",
+		},
+		{
+			// The header marks the start of a key; the body that follows is the
+			// secret, so redact through the END line, or to the end of a
+			// truncated capture.
+			Name:        "private_key_block",
+			MayMatch:    func(s string) bool { return strings.Contains(s, "-----BEGIN") },
+			Regex:       regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*$)`),
+			Replacement: "[REDACTED_PRIVATE_KEY]",
+		},
+		{
 			Name:        "base64_secret",
 			MayMatch:    anyFold("secret", "private"),
 			Regex:       regexp.MustCompile(`(?i)(secret|private[_-]?key)[:\s=]["']?([A-Za-z0-9+/]{40,}={0,2})["']?`),
