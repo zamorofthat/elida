@@ -413,6 +413,25 @@ Detects requests that may expose PII or sensitive data.
   action: "flag"
   description: "LLM06: Credentials request"
 
+- name: "secret_in_request"
+  type: "content_match"
+  target: "request"
+  patterns:
+    - "\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"
+    - "\\bgh[pousr]_[A-Za-z0-9]{36,}\\b"
+    - "\\bgithub_pat_[A-Za-z0-9_]{40,}\\b"
+    - "\\bxox[abprs]-[A-Za-z0-9-]{20,}"
+    - "\\bsk-ant-[A-Za-z0-9_-]{20,}"
+    - "\\bsk-[A-Za-z0-9]{32,}\\b"
+    - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+  severity: "critical"
+  action: "flag"
+  description: "LLM06: Credential in request body (sent to the provider)"
+  # Present in the standard, strict and coding-agent presets. In coding-agent it
+  # is observe-only. ELIDA forwards the request unchanged: this rule records the
+  # leak, it does not remove the secret. Redefine the rule with action: block
+  # to stop requests that carry one.
+
 - name: "pii_bulk_extraction"
   type: "content_match"
   target: "request"
