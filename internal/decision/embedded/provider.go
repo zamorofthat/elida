@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,6 +82,14 @@ type Options struct {
 	RequireInline bool
 	ModelPath     string
 	ThresholdSet  string
+	// ExpectedChecksum pins the artifact: when set, the loaded manifest's
+	// SHA-256 (Manifest.Checksum) must equal it, compared case-insensitively
+	// with surrounding space ignored. The manifest lists the digest of every
+	// model file and Load verifies them, so pinning the manifest pins the
+	// whole artifact. A mismatch is a load failure: it degrades, or refuses
+	// startup when Required, and the model never reaches the pipeline.
+	// Empty means no pin.
+	ExpectedChecksum string
 	// Arch defaults to DefaultArch() and SIMD, when nil, defaults to
 	// SIMDEnabled(); tests set them to
 	// exercise the capability matrix.
@@ -174,6 +183,9 @@ func New(ctx context.Context, opts Options) (*Provider, error) {
 	}
 
 	m, err := Load(opts.ModelPath)
+	if err == nil {
+		err = checkChecksumPin(m, opts.ExpectedChecksum)
+	}
 	if err != nil {
 		p.capability = CapabilityDegraded
 		p.reason = err.Error()
@@ -634,3 +646,24 @@ var (
 	_ decision.Provider     = (*Provider)(nil)
 	_ decision.TokenCounter = (*Provider)(nil)
 )
+
+// checkChecksumPin returns ErrChecksumPinMismatch when a pin is configured
+// and the manifest's digest differs. Only the first 16 hex characters of each
+// side are reported, as in file-checksum errors.
+func checkChecksumPin(m *Manifest, pin string) error {
+	pin = strings.ToLower(strings.TrimSpace(pin))
+	if pin == "" {
+		return nil
+	}
+	if got := m.Checksum(); got != pin {
+		return fmt.Errorf("%w: manifest %s, pin %s", ErrChecksumPinMismatch, short(got), short(pin))
+	}
+	return nil
+}
+
+func short(s string) string {
+	if len(s) > 16 {
+		return s[:16]
+	}
+	return s
+}

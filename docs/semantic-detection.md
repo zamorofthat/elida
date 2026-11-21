@@ -284,6 +284,39 @@ detector, `[a-z0-9+/]{200,}={1,2}` (about 210 instructions, under the soft
 limit, so no WARN), raises the realistic taxonomy to about 37 ms per call
 at the default 16 KiB. Prefer literal-led patterns.
 
+## Pinning the model artifact
+
+The model directory's `manifest.json` lists the SHA-256 of every model file,
+and ELIDA refuses a directory whose files do not match it. That proves the
+directory is consistent with itself. It does not prove it is the artifact you
+meant to deploy: anyone who can write the directory can replace the model, the
+manifest and the digests together.
+
+`decision.model_checksum` closes that gap. Set it to the SHA-256 of the
+manifest, 64 hex characters, and ELIDA loads a model only when its manifest
+hashes to that value. The manifest pins every file, so this pins the artifact.
+
+```bash
+sha256sum /etc/elida/models/injection/manifest.json
+```
+
+```yaml
+decision:
+  model_checksum: "<64 hex characters>"
+```
+
+`ELIDA_DECISION_MODEL_CHECKSUM` sets the same value. The checksum of the model
+in force is reported as `model_checksum` at `/control/decision`, so you can copy the
+pin from a deployment you trust.
+
+A mismatch is a load failure like any other. With `decision.required: false`
+the provider is degraded and every semantic decision is unknown, with a WARN
+and a `reason` that names the checksum pin; with `required: true` ELIDA refuses
+to start. The mismatched model never reaches the inference pipeline. An empty
+value, the default, means no pin.
+
+Update the pin whenever you change the model.
+
 ## Residual risk
 
 ELIDA's semantic and temporal detection raises the cost of prompt injection;
