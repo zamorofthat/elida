@@ -95,3 +95,34 @@ func TestKeyPrefixSlugsAreLeftAlone(t *testing.T) {
 		}
 	}
 }
+
+// An encrypted key carries Proc-Type and DEK-Info header lines before its
+// base64 body; the body is still the secret.
+func TestEncryptedPrivateKeyBodyIsRedacted(t *testing.T) {
+	r := NewPatternRedactor()
+	body := strings.Repeat("Qk1x0Z9aLm", 7)
+	in := "-----BEGIN " + "RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\n" +
+		body + "\n-----END " + "RSA PRIVATE KEY-----\nafter"
+	out := r.Redact(in)
+	if strings.Contains(out, body) || strings.Contains(out, "DEK-Info") {
+		t.Errorf("encrypted key survived: %q", out)
+	}
+	if !strings.HasSuffix(out, "after") {
+		t.Errorf("text after the END line was lost: %q", out)
+	}
+}
+
+// A key inside a JSON string is written with \n escapes, and the redactor
+// can see that form (a body that is not valid JSON, or a captured fragment).
+func TestEscapedNewlinePrivateKeyIsRedacted(t *testing.T) {
+	r := NewPatternRedactor()
+	line := strings.Repeat("A1b2C3d4", 8)
+	in := `{"k":"-----BEGIN ` + `PRIVATE KEY-----\n` + line + `\n` + line + `\n-----END ` + `PRIVATE KEY-----\n","x":1`
+	out := r.Redact(in)
+	if strings.Contains(out, line) {
+		t.Errorf("escaped key body survived: %q", out)
+	}
+	if !strings.Contains(out, `"x":1`) {
+		t.Errorf("text after the escaped key was lost: %q", out)
+	}
+}

@@ -112,6 +112,16 @@ func loggedMatch(r Rule, match string) string {
 	return truncateMatch(match, 50)
 }
 
+// recordedSourceContent is the source message recorded on a violation: the
+// message, truncated, or RedactedMatch for a rule that redacts its match, since
+// the message holds whatever the rule matched.
+func recordedSourceContent(r Rule, content string, max int) string {
+	if r.RedactMatch {
+		return RedactedMatch
+	}
+	return truncateMatch(content, max)
+}
+
 // loggedSourceContent is the source message as written to the structured log.
 // The message holds whatever the rule matched, so a rule that redacts its match
 // does not log it.
@@ -1388,7 +1398,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				if source != nil {
 					violation.SourceRole = source.Role
 					violation.MessageIndex = source.MessageIndex
-					violation.SourceContent = truncateMatch(source.Content, e.maxCaptureSize)
+					violation.SourceContent = recordedSourceContent(cr.Rule, source.Content, e.maxCaptureSize)
 					violation.EffectiveSeverity = effectiveSeverity(cr.Severity, source.Role)
 				} else {
 					violation.EffectiveSeverity = cr.Severity

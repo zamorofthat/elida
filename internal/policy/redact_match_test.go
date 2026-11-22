@@ -42,3 +42,30 @@ func TestRedactMatchKeepsTheMatchedSecretOutOfTheViolation(t *testing.T) {
 		t.Errorf("without RedactMatch the match text must be recorded as before: %+v", res)
 	}
 }
+
+// The violation also carries the whole message it came from. That message
+// holds the secret, so a redacting rule must not record it either.
+func TestRedactMatchKeepsTheSecretOutOfTheViolationSourceContent(t *testing.T) {
+	secret := "AKIA" + strings.Repeat("Z", 16)
+	e := NewEngine(Config{
+		Enabled:        true,
+		Mode:           "enforce",
+		CaptureContent: true,
+		MaxCaptureSize: 4096,
+		Rules: []Rule{{
+			Name: "secret_in_request", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+			Patterns: []string{`\b(AKIA|ASIA)[0-9A-Z]{16}\b`}, Severity: SeverityCritical,
+			Action: "flag", RedactMatch: true,
+		}},
+	})
+	content := "deploy with " + secret + " now"
+	res := e.EvaluateContentWithSource("s1", content, RuleTargetRequest,
+		&ContentSource{Role: "user", MessageIndex: 1, Content: content})
+	if res == nil || len(res.Violations) != 1 {
+		t.Fatalf("want one violation, got %+v", res)
+	}
+	got := res.Violations[0].SourceContent
+	if strings.Contains(strings.ToLower(got), strings.ToLower(secret)) {
+		t.Errorf("SourceContent carries the secret: %q", got)
+	}
+}

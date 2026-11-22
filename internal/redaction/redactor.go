@@ -130,6 +130,22 @@ func anyFold(lits ...string) func(string) bool {
 	}
 }
 
+// privateKeyBlockRegexp matches a PEM private key: the header, any
+// Proc-Type/DEK-Info lines of an encrypted key, and the base64 body, through
+// the END line when it follows. Line breaks are real whitespace or the
+// two-character escapes \n and \r, which is how a key sits inside a JSON
+// string. The body is runs of 16 or more base64 characters with a short last
+// line, so text that does not look like a key body ends the match.
+var privateKeyBlockRegexp = func() *regexp.Regexp {
+	const (
+		brk    = `(?:\s|\\[nr])*`
+		header = `(?:` + brk + `[a-z-]+:[ \t]*[a-z0-9,.:+/=_ -]*)*`
+		body   = `(?:` + brk + `[a-z0-9+/=]{16,})*`
+	)
+	return regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----` + header +
+		`(?:` + body + brk + `[a-z0-9+/=]*` + brk + `-----END [A-Z ]*PRIVATE KEY-----|` + body + `)`)
+}()
+
 // DefaultPatterns returns the standard set of PII redaction patterns
 func DefaultPatterns() []Pattern {
 	return defaultPatterns(false)
@@ -257,7 +273,7 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 			// readable in the capture.
 			Name:        "private_key_block",
 			MayMatch:    anyFold("-----begin"),
-			Regex:       regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:\s*[a-z0-9+/=]{16,})*\s*[a-z0-9+/=]*\s*-----END [A-Z ]*PRIVATE KEY-----|(?:\s*[a-z0-9+/=]{16,})*)`),
+			Regex:       privateKeyBlockRegexp,
 			Replacement: "[REDACTED_PRIVATE_KEY]",
 		},
 		{
