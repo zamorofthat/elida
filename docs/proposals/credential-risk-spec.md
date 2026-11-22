@@ -3,8 +3,10 @@
 **Status:** specification, not implemented. Part A (per-client proxy keys,
 `proxy.auth.keys`) ships first. This is the follow-up that fixes what Part A
 does not: a keyed caller resetting its own risk by changing its session ID.
-Read [session-identity-credentials.md](session-identity-credentials.md) for the
-problem and Part A.
+The problem and Part A are in the S1 proposal
+(`docs/proposals/session-identity-credentials.md`, on branch
+`docs/session-identity-credentials-proposal`); Part A is implemented on this
+branch.
 
 ## Goal
 
