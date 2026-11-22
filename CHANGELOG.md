@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `GET /control/sessions` and `GET /control/sessions/{id}` report
+  `system_prompt_changes`: how many times a session's primary system prompt
+  changed to one it had not scanned before. A change was only a log line
+  (`system prompt changed mid-session`), so there was nothing to query or alert
+  on. A subagent that shares its parent's session and alternates prompts with
+  it every request is not counted.
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without

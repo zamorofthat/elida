@@ -60,6 +60,9 @@ type sessionData struct {
 	// TestSemanticShadow_CarriesNoContentFields proves the first content-free.
 	SemanticShadow    []SemanticShadow    `json:"semantic_shadow,omitempty"`
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+
+	// How many times the primary system prompt changed.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
 }
 
 // toolCallWire is the content-free projection of a ToolCallRecord: exactly
@@ -110,6 +113,7 @@ func sessionToData(sess *Session) *sessionData {
 		SemanticShadow:    slices.Clone(sess.SemanticShadow),
 		CorrelationShadow: cloneCorrelationShadow(sess.CorrelationShadow),
 	}
+	sd.SystemPromptChanges = sess.SystemPromptChanges
 	if sess.EndTime != nil {
 		t := *sess.EndTime
 		sd.EndTime = &t
@@ -157,6 +161,7 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		SemanticShadow:    clampHead(sd.SemanticShadow, MaxSemanticShadow),
 		CorrelationShadow: clampHead(sd.CorrelationShadow, MaxCorrelationShadow),
 	}
+	sess.SystemPromptChanges = sd.SystemPromptChanges
 	if sess.Metadata == nil {
 		sess.Metadata = make(map[string]string)
 	}
