@@ -60,6 +60,10 @@ type sessionData struct {
 	// TestSemanticShadow_CarriesNoContentFields proves the first content-free.
 	SemanticShadow    []SemanticShadow    `json:"semantic_shadow,omitempty"`
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+
+	// How many entries each shadow list discarded at its cap.
+	SemanticShadowDropped    int `json:"semantic_shadow_dropped,omitempty"`
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 }
 
 // toolCallWire is the content-free projection of a ToolCallRecord: exactly
@@ -109,6 +113,9 @@ func sessionToData(sess *Session) *sessionData {
 		FailedBackends:    slices.Clone(sess.FailedBackends),
 		SemanticShadow:    slices.Clone(sess.SemanticShadow),
 		CorrelationShadow: cloneCorrelationShadow(sess.CorrelationShadow),
+
+		SemanticShadowDropped:    sess.SemanticShadowDropped,
+		CorrelationShadowDropped: sess.CorrelationShadowDropped,
 	}
 	if sess.EndTime != nil {
 		t := *sess.EndTime
@@ -156,6 +163,9 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		FailedBackends:    sd.FailedBackends,
 		SemanticShadow:    clampHead(sd.SemanticShadow, MaxSemanticShadow),
 		CorrelationShadow: clampHead(sd.CorrelationShadow, MaxCorrelationShadow),
+
+		SemanticShadowDropped:    sd.SemanticShadowDropped,
+		CorrelationShadowDropped: sd.CorrelationShadowDropped,
 	}
 	if sess.Metadata == nil {
 		sess.Metadata = make(map[string]string)
