@@ -231,3 +231,32 @@ func TestEncryptedPrivateKeyHeaderSeparatorShapes(t *testing.T) {
 		}
 	}
 }
+
+// Both cases of the first byte can occur, with one far away: the rarer case
+// must not be searched for from scratch at every step. These are the shapes that
+// did that: a long run of one case with a single other-case byte at the end, and
+// a long run of dashes with one carriage return (the "other case" of "-" is
+// "\r").
+func TestContainsFoldIsLinearWhenBothCasesOccur(t *testing.T) {
+	cases := []struct{ name, s, lit string }{
+		{"A run then a", strings.Repeat("A", 128<<10) + "a", "akia-not-here"},
+		{"a run then A", strings.Repeat("a", 128<<10) + "A", "akia-not-here"},
+		{"dash run then CR", strings.Repeat("-", 128<<10) + "\r", "-----begin"},
+	}
+	for _, c := range cases {
+		start := time.Now()
+		if containsFold(c.s, c.lit) {
+			t.Errorf("%s: unexpected match", c.name)
+		}
+		if took := time.Since(start); took > 100*time.Millisecond {
+			t.Errorf("%s: containsFold took %v on 128 KB, want it linear (a few ms)", c.name, took)
+		}
+	}
+	// Matches are still found after a far-off other-case byte.
+	if !containsFold(strings.Repeat("A", 5000)+"akia", "akia") {
+		t.Error("missed a match after a run of the other case")
+	}
+	if !containsFold(strings.Repeat("-", 5000)+"-----BEGIN", "-----begin") {
+		t.Error("missed a dash-prefixed match after a dash run")
+	}
+}

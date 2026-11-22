@@ -99,33 +99,32 @@ func containsFold(s, lit string) bool {
 		}
 	}
 	first, upper := lit[0], lit[0]-'a'+'A'
-	// i only moves forward, so once one letter case no longer occurs in the
-	// rest of s it never will again: stop searching for it. Searching on every
-	// step made a long run of the other case quadratic.
-	noLower, noUpper := false, false
+	// Candidates are the positions of the literal's first byte in either case.
+	// Keep each case's next position and look again only once i has passed it,
+	// so every byte of s is scanned for each case at most once. Searching again
+	// from i at every step made an input with a far-off byte of one case
+	// quadratic. A position of len(s) means that case does not occur again.
+	nextLower, nextUpper := -1, -1
 	for i := 0; i+n <= len(s); i++ {
-		j1, j2 := -1, -1
-		if !noLower {
-			if j1 = strings.IndexByte(s[i:], first); j1 < 0 {
-				noLower = true
+		if nextLower < i {
+			if j := strings.IndexByte(s[i:], first); j < 0 {
+				nextLower = len(s)
+			} else {
+				nextLower = i + j
 			}
 		}
-		if !noUpper {
-			if j2 = strings.IndexByte(s[i:], upper); j2 < 0 {
-				noUpper = true
+		if nextUpper < i {
+			if j := strings.IndexByte(s[i:], upper); j < 0 {
+				nextUpper = len(s)
+			} else {
+				nextUpper = i + j
 			}
 		}
-		switch {
-		case j1 < 0 && j2 < 0:
+		i = min(nextLower, nextUpper)
+		if i+n > len(s) {
 			return false
-		case j1 < 0:
-			i += j2
-		case j2 < 0:
-			i += j1
-		default:
-			i += min(j1, j2)
 		}
-		if i+n <= len(s) && strings.EqualFold(s[i:i+n], lit) {
+		if strings.EqualFold(s[i:i+n], lit) {
 			return true
 		}
 	}
