@@ -320,7 +320,24 @@ type ProxyAuthConfig struct {
 	// calls work on a trusted network while the LAN still needs the key.
 	// The trust decision never consults X-Forwarded-For.
 	TrustedNetworks []string `yaml:"trusted_networks"`
+
+	// Keys are per-client keys, each naming the caller that holds it. A request
+	// that authenticates with one is that client: its session IDs are namespaced
+	// by the client's name, so two clients can never share a session, and the
+	// name is recorded on the session. The shared APIKey keeps working beside
+	// them and carries no client identity. Optional.
+	Keys []ProxyAuthKey `yaml:"keys"`
 }
+
+// ProxyAuthKey is one per-client proxy key.
+type ProxyAuthKey struct {
+	Name string `yaml:"name"` // the client; [A-Za-z0-9._-], up to 64 characters
+	Key  string `yaml:"key"`  // may be a ${ENV} reference
+}
+
+// proxyClientName is what a per-client key's name may contain. It is a prefix
+// of every session ID the client creates, so it excludes the separator.
+var proxyClientName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // WebSocketConfig holds WebSocket proxy configuration
 type WebSocketConfig struct {
@@ -831,6 +848,9 @@ func Load(path string) (*Config, error) {
 	// Expand environment variable references and auto-load provider keys
 	cfg.Backend = expandEnvRefs(cfg.Backend)
 	cfg.Proxy.Auth.APIKey = expandEnvRefs(cfg.Proxy.Auth.APIKey)
+	for i := range cfg.Proxy.Auth.Keys {
+		cfg.Proxy.Auth.Keys[i].Key = expandEnvRefs(cfg.Proxy.Auth.Keys[i].Key)
+	}
 	cfg.Control.Auth.APIKey = expandEnvRefs(cfg.Control.Auth.APIKey)
 	for name, b := range cfg.Backends {
 		b.URL = expandEnvRefs(b.URL)
@@ -1401,6 +1421,51 @@ func (c *Config) validate() error {
 	return result.Error()
 }
 
+// validateProxyAuthKeys checks the per-client keys: a usable name, a key, and
+// nothing ambiguous. Two clients must never share a name or a key, and a client
+// key must not equal the shared key, or the key could not say who is calling.
+func validateProxyAuthKeys(a ProxyAuthConfig) []ValidationError {
+	if len(a.Keys) == 0 {
+		return nil
+	}
+	var errs []ValidationError
+	bad := func(i int, msg, hint string) {
+		errs = append(errs, ValidationError{
+			Field:   fmt.Sprintf("proxy.auth.keys[%d]", i),
+			Message: msg,
+			Hint:    hint,
+		})
+	}
+	if !a.Enabled {
+		errs = append(errs, ValidationError{
+			Field:   "proxy.auth.keys",
+			Message: "keys are set but proxy.auth.enabled is false, so none would be checked",
+			Hint:    "set proxy.auth.enabled: true, or remove the keys",
+		})
+	}
+	names := map[string]bool{}
+	keys := map[string]bool{}
+	for i, k := range a.Keys {
+		switch {
+		case !proxyClientName.MatchString(k.Name):
+			bad(i, fmt.Sprintf("name %q is not usable", k.Name), "1 to 64 characters from A-Z a-z 0-9 . _ - (no colon: it separates the client from the session ID)")
+		case names[k.Name]:
+			bad(i, fmt.Sprintf("name %q is used twice", k.Name), "each client needs its own name")
+		}
+		names[k.Name] = true
+		switch {
+		case k.Key == "":
+			bad(i, "key is empty", "set the key, or a ${ENV} reference that resolves to one")
+		case keys[k.Key]:
+			bad(i, "key is the same as another client's", "each client needs its own key")
+		case a.APIKey != "" && k.Key == a.APIKey:
+			bad(i, "key is the same as proxy.auth.api_key", "the shared key carries no client; give this client its own key")
+		}
+		keys[k.Key] = true
+	}
+	return errs
+}
+
 // Validate performs comprehensive configuration validation
 func (c *Config) Validate() *ValidationResult {
 	result := &ValidationResult{Valid: true}
@@ -1580,13 +1645,14 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	// Proxy auth
-	if c.Proxy.Auth.Enabled && c.Proxy.Auth.APIKey == "" {
+	if c.Proxy.Auth.Enabled && c.Proxy.Auth.APIKey == "" && len(c.Proxy.Auth.Keys) == 0 {
 		errors = append(errors, ValidationError{
 			Field:   "proxy.auth.api_key",
 			Message: "API key required when proxy auth is enabled",
-			Hint:    "set ELIDA_PROXY_API_KEY env var",
+			Hint:    "set ELIDA_PROXY_API_KEY env var, or list per-client proxy.auth.keys",
 		})
 	}
+	errors = append(errors, validateProxyAuthKeys(c.Proxy.Auth)...)
 
 	for _, cidr := range c.Proxy.Auth.TrustedNetworks {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {

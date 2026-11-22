@@ -314,17 +314,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Proxy authentication check (skip health endpoints)
+	// Proxy authentication check (skip health endpoints). A request that
+	// authenticates with a per-client key is that client (authClient); the
+	// shared key and a trusted network carry no client name.
+	authClient := ""
 	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
 		if p.isTrustedClient(r) {
 			slog.Debug("proxy auth bypassed for trusted network client", "remote_addr", r.RemoteAddr)
-		} else if !p.validateProxyAuth(r) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
-				slog.Warn("write failed", "error", err)
+		} else {
+			client, ok := p.authenticateClient(r)
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
+					slog.Warn("write failed", "error", err)
+				}
+				return
 			}
-			return
+			authClient = client
 		}
 	}
 
@@ -368,6 +375,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// field / configured path; backend-independent so failover doesn't split
 	// a conversation) -> per-(client,backend) IP-hash fallback.
 	sessionID := p.resolveSessionID(r, requestBody)
+	// A keyed client's sessions live in its own namespace, whatever ID the
+	// caller chose, so two clients can never share a session. With no ID of its
+	// own the client still gets one session per backend, not the shared
+	// per-address fallback.
+	if authClient != "" {
+		if sessionID == "" && p.config.Session.GenerateIfMissing {
+			sessionID = "default-" + backend.Name
+		}
+		if sessionID != "" {
+			sessionID = authClient + ":" + sessionID
+		}
+	}
 
 	var sess *session.Session
 	if sessionID != "" {
@@ -392,6 +411,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the manager write it periodically while the request runs.
 	defer p.manager.TrackRequest(sess)()
 	sess.TouchAndRecord(int64(len(requestBody)), backend.Name)
+	if authClient != "" {
+		sess.SetMetadata("client", authClient)
+	}
 
 	// Check if session was killed
 	select {
@@ -1784,6 +1806,29 @@ func writeModelList(w http.ResponseWriter, models []router.ModelInfo) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Warn("write failed", "error", err)
 	}
+}
+
+// authenticateClient authenticates a request against the per-client keys, then
+// the shared key. It returns the client's name for a per-client key and "" for
+// the shared key. Every configured key is compared against every credential the
+// request carries, with no early exit, so the time taken does not say which key
+// (or how many) matched.
+func (p *Proxy) authenticateClient(r *http.Request) (client string, ok bool) {
+	provided := []string{r.Header.Get("X-Elida-API-Key")}
+	if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		provided = append(provided, strings.TrimPrefix(authHeader, "Bearer "))
+	}
+	for _, k := range p.config.Proxy.Auth.Keys {
+		for _, got := range provided {
+			if secureCompare(got, k.Key) && !ok {
+				client, ok = k.Name, true
+			}
+		}
+	}
+	if ok {
+		return client, true
+	}
+	return "", p.validateProxyAuth(r)
 }
 
 // validateProxyAuth checks if the request has valid proxy authentication

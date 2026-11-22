@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `proxy.auth.keys`: per-client proxy keys. A request that authenticates with
+  one is that client: its session IDs are namespaced `<name>:<id>`, so two
+  clients can never share a session, its sessions record the client name, and a
+  client with no session ID of its own gets one session per backend in its
+  namespace instead of the shared per-address fallback. The shared `api_key`
+  keeps working and carries no client, so nothing changes for callers without a
+  key. Auth with only `keys` is valid; validation rejects duplicate or unusable
+  names, duplicate keys and a key equal to the shared key. This stops callers
+  colliding. It does not stop a caller resetting its own risk by changing its
+  session ID.
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without
