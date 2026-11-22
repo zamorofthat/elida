@@ -105,8 +105,8 @@ const RedactedMatch = "[redacted]"
 
 // loggedMatch is the match as written to the structured log: the first 50
 // characters, or RedactedMatch for a rule that redacts its match.
-func loggedMatch(r Rule, match string) string {
-	if r.RedactMatch {
+func loggedMatch(redact bool, match string) string {
+	if redact {
 		return RedactedMatch
 	}
 	return truncateMatch(match, 50)
@@ -150,8 +150,8 @@ func redactsSource(rules []CompiledRule, contentLower string, target RuleTarget)
 }
 
 // matchedText returns the text to record for a match of rule r.
-func matchedText(r Rule, match string) string {
-	if r.RedactMatch {
+func matchedText(redact bool, match string) string {
+	if redact {
 		return RedactedMatch
 	}
 	return truncateMatch(match, 100)
@@ -1390,7 +1390,13 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 	result := &ContentCheckResult{}
 	contentLower := strings.ToLower(content)
+	// The decision covers the message the violation is recorded from. That is
+	// normally the content checked; check the source message too if a caller
+	// passes a different one.
 	redactSource := source != nil && redactsSource(compiledRules, contentLower, target)
+	if source != nil && !redactSource && source.Content != content {
+		redactSource = redactsSource(compiledRules, strings.ToLower(source.Content), target)
+	}
 
 	for _, cr := range compiledRules {
 		// Skip rules that don't apply to this target
@@ -1404,7 +1410,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					RuleName:       cr.Name,
 					Description:    cr.Description,
 					Severity:       cr.Severity,
-					MatchedText:    matchedText(cr.Rule, match),
+					MatchedText:    matchedText(cr.RedactMatch || redactSource, match),
 					MatchedPattern: cr.Patterns[i],
 					Action:         cr.Action,
 					Timestamp:      time.Now(),
@@ -1452,7 +1458,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					"severity", cr.Severity,
 					"action", actionMsg,
 					"target", targetStr,
-					"matched", loggedMatch(cr.Rule, match),
+					"matched", loggedMatch(cr.RedactMatch || redactSource, match),
 					"event_category", violation.EventCategory,
 					"framework_ref", violation.FrameworkRef,
 					"audit_mode", auditMode,
@@ -2901,7 +2907,7 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 							RuleName:       cr.Name,
 							Description:    cr.Description,
 							Severity:       cr.Severity,
-							MatchedText:    matchedText(cr.Rule, match),
+							MatchedText:    matchedText(cr.RedactMatch, match),
 							MatchedPattern: cr.Patterns[i],
 							Action:         cr.Action,
 							Timestamp:      time.Now(),

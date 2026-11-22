@@ -136,12 +136,12 @@ func anyFold(lits ...string) func(string) bool {
 // and \t, which is how a key sits inside a JSON string, and a "/" may be
 // written \/ . The body is runs of 16 or more base64 characters with a short
 // last line, so text that does not look like a key body ends the match. A key
-// header is only Proc-Type or DEK-Info, and only on a line of its own.
+// header is only Proc-Type or DEK-Info, on a line of its own or, when the key was flattened onto one line, after spaces.
 var privateKeyBlockRegexp = func() *regexp.Regexp {
 	const (
 		brk    = `(?:\s|\\[nrt])*`
 		eol    = `(?:\r?\n|\\[nr])+[ \t]*`
-		header = `(?:` + eol + `(?:proc-type|dek-info):[ \t]*[a-z0-9,.:+/=_ -]*)*`
+		header = `(?:(?:` + eol + `|[ \t]+)(?:proc-type:[ \t]*[0-9]+,[a-z]+|dek-info:[ \t]*[a-z0-9-]+,[0-9a-f]+))*`
 		b64    = `(?:[a-z0-9+=]|\\?/)`
 		body   = `(?:` + brk + b64 + `{16,})*`
 	)

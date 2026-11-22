@@ -157,3 +157,19 @@ func TestPrivateKeyHeaderLinesDoNotSwallowProse(t *testing.T) {
 		t.Errorf("colon-separated prose lines after a header were redacted: %q", out)
 	}
 }
+
+// An encrypted key pasted into one line (an environment variable, a chat box)
+// has its Proc-Type and DEK-Info fields separated by spaces, not newlines.
+func TestFlattenedEncryptedPrivateKeyIsRedacted(t *testing.T) {
+	r := NewPatternRedactor()
+	body := strings.Repeat("Qk1x0Z9aLm", 7)
+	in := "KEY=-----BEGIN " + "RSA PRIVATE KEY----- Proc-Type: 4,ENCRYPTED DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF " +
+		body + " -----END " + "RSA PRIVATE KEY----- done"
+	out := r.Redact(in)
+	if strings.Contains(out, body) || strings.Contains(out, "DEK-Info") {
+		t.Errorf("flattened encrypted key survived: %q", out)
+	}
+	if !strings.HasSuffix(out, "done") {
+		t.Errorf("text after the key was lost: %q", out)
+	}
+}
