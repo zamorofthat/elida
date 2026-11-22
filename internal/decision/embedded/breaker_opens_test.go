@@ -48,7 +48,7 @@ func TestProvider_CountsBreakerOpens(t *testing.T) {
 
 	// A failure from a call admitted before the trip lands while the breaker
 	// is already open: it is one outage, not a second one.
-	p.recordFailure(errors.New("late in-flight failure"))
+	p.recordFailure(errors.New("late in-flight failure"), halfOpenProbe{})
 	opens("late failure while open", 1)
 
 	// The cooldown elapses and the probe fails: the breaker re-opens.
