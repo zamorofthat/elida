@@ -219,9 +219,15 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			Name:        "aws_temporary_key",
-			MayMatch:    func(s string) bool { return strings.Contains(s, "ASIA") },
-			Regex:       regexp.MustCompile(`\bASIA[0-9A-Z]{16}\b`),
+			MayMatch:    anyFold("asia"),
+			Regex:       regexp.MustCompile(`(?i)\basia[0-9a-z]{16}\b`),
 			Replacement: "[REDACTED_AWS_KEY]",
+		},
+		{
+			Name:        "openai_project_key",
+			MayMatch:    anyFold("sk-proj-", "sk-svcacct-", "sk-admin-"),
+			Regex:       regexp.MustCompile(`(?i)\bsk-(?:proj|svcacct|admin)-[a-z0-9_-]{20,}`),
+			Replacement: "[REDACTED_API_KEY]",
 		},
 		{
 			Name:        "github_token",
@@ -231,8 +237,8 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			Name:        "slack_token",
-			MayMatch:    func(s string) bool { return strings.Contains(s, "xox") },
-			Regex:       regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{20,}`),
+			MayMatch:    anyFold("xox"),
+			Regex:       regexp.MustCompile(`(?i)\bxox[abprs]-[a-z0-9-]{20,}`),
 			Replacement: "[REDACTED_SLACK_TOKEN]",
 		},
 		{
@@ -243,11 +249,14 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			// The header marks the start of a key; the body that follows is the
-			// secret, so redact through the END line, or to the end of a
-			// truncated capture.
+			// secret. Redact through the END line. With no END line (a
+			// truncated capture, or a prompt that only mentions the header)
+			// redact only the base64 run that follows, which stops at the
+			// first character a key body cannot contain, so the text after
+			// it survives.
 			Name:        "private_key_block",
-			MayMatch:    func(s string) bool { return strings.Contains(s, "-----BEGIN") },
-			Regex:       regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*$)`),
+			MayMatch:    anyFold("-----begin"),
+			Regex:       regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[a-z0-9+/=\s]*)`),
 			Replacement: "[REDACTED_PRIVATE_KEY]",
 		},
 		{

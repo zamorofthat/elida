@@ -512,8 +512,9 @@ type PolicyRule struct {
 	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
 	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
-	Action         string   `yaml:"action"`  // flag, block, terminate (for content/tool rules)
-	Observe        bool     `yaml:"observe"` // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
+	Action         string   `yaml:"action"`       // flag, block, terminate (for content/tool rules)
+	Observe        bool     `yaml:"observe"`      // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
+	RedactMatch    bool     `yaml:"redact_match"` // Record "[redacted]" instead of the matched text, for rules that match credentials
 }
 
 // BackendConfig defines a single backend configuration
@@ -1975,17 +1976,17 @@ func (c *Config) ApplyPolicyPreset() {
 	}
 }
 
-// getMinimalPreset returns basic rate limiting rules only (development/testing)
 // secretInRequestRule flags a credential in an outgoing request body: the
 // prompt, tool results and attachments all travel to the model provider and
 // to every hop in front of it. High-precision provider formats only, and it
 // flags rather than blocks, so a developer pasting a key is recorded without
 // breaking their session. Redefine the rule by name to block. Coding-agent
 // sessions observe only (recorded, never feeding the risk ladder), because
-// those agents legitimately carry credentials in their context.
+// those agents legitimately carry credentials in their context. The rule
+// records "[redacted]" instead of the matched text: the match is the secret.
 func secretInRequestRule(observe bool) PolicyRule {
 	return PolicyRule{
-		Name: "secret_in_request", Type: "content_match", Target: "request", Observe: observe,
+		Name: "secret_in_request", Type: "content_match", Target: "request", Observe: observe, RedactMatch: true,
 		Patterns: []string{
 			`\b(AKIA|ASIA)[0-9A-Z]{16}\b`,
 			`\bgh[pousr]_[A-Za-z0-9]{36,}\b`,
@@ -1993,6 +1994,7 @@ func secretInRequestRule(observe bool) PolicyRule {
 			`\bxox[abprs]-[A-Za-z0-9-]{20,}`,
 			`\bsk-ant-[A-Za-z0-9_-]{20,}`,
 			`\bsk-[A-Za-z0-9]{32,}\b`,
+			`\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}`,
 			`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
 		},
 		Severity: "critical", Action: "flag",
@@ -2000,6 +2002,7 @@ func secretInRequestRule(observe bool) PolicyRule {
 	}
 }
 
+// getMinimalPreset returns basic rate limiting rules only (development/testing)
 func getMinimalPreset() []PolicyRule {
 	return []PolicyRule{
 		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 60, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 60/min"},

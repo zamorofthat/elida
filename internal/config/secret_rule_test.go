@@ -27,14 +27,15 @@ func matchesRule(t *testing.T, r *PolicyRule, text string) bool {
 // flag it, and must never block on it by default.
 func TestSecretInRequestRule(t *testing.T) {
 	secrets := map[string]string{
-		"aws access key":    "AKIA" + strings.Repeat("A", 16),
-		"aws temp key":      "ASIA" + strings.Repeat("B", 16),
-		"github token":      "ghp_" + strings.Repeat("a1", 18),
-		"github fine-grain": "github_pat_" + strings.Repeat("a1", 22),
-		"slack token":       "xoxb-" + strings.Repeat("1", 12) + "-" + strings.Repeat("a", 24),
-		"anthropic key":     "sk-ant-api03-" + strings.Repeat("Ab1_", 10),
-		"openai key":        "sk-" + strings.Repeat("a1", 24),
-		"private key":       "-----BEGIN " + "RSA PRIVATE KEY-----",
+		"aws access key":     "AKIA" + strings.Repeat("A", 16),
+		"aws temp key":       "ASIA" + strings.Repeat("B", 16),
+		"github token":       "ghp_" + strings.Repeat("a1", 18),
+		"github fine-grain":  "github_pat_" + strings.Repeat("a1", 22),
+		"slack token":        "xoxb-" + strings.Repeat("1", 12) + "-" + strings.Repeat("a", 24),
+		"anthropic key":      "sk-ant-api03-" + strings.Repeat("Ab1_", 10),
+		"openai key":         "sk-" + strings.Repeat("a1", 24),
+		"openai project key": "sk-proj-" + strings.Repeat("Ab1_-", 12),
+		"private key":        "-----BEGIN " + "RSA PRIVATE KEY-----",
 	}
 	benign := []string{
 		"the ghp_ prefix marks a GitHub personal access token",
@@ -56,6 +57,9 @@ func TestSecretInRequestRule(t *testing.T) {
 		}
 		if r.Type != "content_match" || r.Target != "request" {
 			t.Errorf("%s: rule is %s on %s, want content_match on request", preset, r.Type, r.Target)
+		}
+		if !r.RedactMatch {
+			t.Errorf("%s: the rule must not record the credential it matched", preset)
 		}
 		if r.Action != "flag" {
 			t.Errorf("%s: action = %q, want flag (a secret match must not block by default)", preset, r.Action)

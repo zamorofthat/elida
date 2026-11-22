@@ -92,6 +92,23 @@ type Rule struct {
 	// explicitly for observe rules as good practice. See
 	// docs/policy-rules-reference.md.
 	Observe bool `yaml:"observe" json:"observe,omitempty"`
+	// RedactMatch records RedactedMatch in place of the matched text, for a
+	// rule whose match is itself sensitive (a credential). The engine matches
+	// lowercased content, so the text it would record is the secret in
+	// lowercase, and violations are read by the control API and the block and
+	// websocket logs as well as stored.
+	RedactMatch bool `yaml:"redact_match" json:"redact_match,omitempty"`
+}
+
+// RedactedMatch is the MatchedText of a violation from a RedactMatch rule.
+const RedactedMatch = "[redacted]"
+
+// matchedText returns the text to record for a match of rule r.
+func matchedText(r Rule, match string) string {
+	if r.RedactMatch {
+		return RedactedMatch
+	}
+	return truncateMatch(match, 100)
 }
 
 // Violation represents a policy violation
@@ -1340,7 +1357,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					RuleName:       cr.Name,
 					Description:    cr.Description,
 					Severity:       cr.Severity,
-					MatchedText:    truncateMatch(match, 100),
+					MatchedText:    matchedText(cr.Rule, match),
 					MatchedPattern: cr.Patterns[i],
 					Action:         cr.Action,
 					Timestamp:      time.Now(),
@@ -2837,7 +2854,7 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 							RuleName:       cr.Name,
 							Description:    cr.Description,
 							Severity:       cr.Severity,
-							MatchedText:    truncateMatch(match, 100),
+							MatchedText:    matchedText(cr.Rule, match),
 							MatchedPattern: cr.Patterns[i],
 							Action:         cr.Action,
 							Timestamp:      time.Now(),

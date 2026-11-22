@@ -54,6 +54,15 @@ escalate.
 > this is defense in depth. Setting `Action: "flag"` explicitly on observe
 > rules is still good practice.
 
+### Rules that match credentials
+
+`redact_match: true` records `[redacted]` as the violation's matched text
+instead of the text that matched. Use it on any rule whose match is itself
+sensitive. Without it the violation carries the match (in lowercase, because
+the engine matches lowercased content), and violations are returned by the
+control API and written to the block and websocket logs as well as stored.
+The built-in `secret_in_request` rule sets it.
+
 ### Audit mode and the risk ladder
 
 `mode: audit` is a true dry run: rule actions don't enforce **and** the
@@ -423,10 +432,12 @@ Detects requests that may expose PII or sensitive data.
     - "\\bxox[abprs]-[A-Za-z0-9-]{20,}"
     - "\\bsk-ant-[A-Za-z0-9_-]{20,}"
     - "\\bsk-[A-Za-z0-9]{32,}\\b"
+    - "\\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
     - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
   severity: "critical"
   action: "flag"
   description: "LLM06: Credential in request body (sent to the provider)"
+  redact_match: true   # record "[redacted]", not the matched credential
   # Present in the standard, strict and coding-agent presets. In coding-agent it
   # is observe-only. ELIDA forwards the request unchanged: this rule records the
   # leak, it does not remove the secret. Redefine the rule with action: block
