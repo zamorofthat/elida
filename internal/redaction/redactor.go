@@ -141,7 +141,7 @@ var privateKeyBlockRegexp = func() *regexp.Regexp {
 	const (
 		brk    = `(?:\s|\\[nrt])*`
 		eol    = `(?:\r?\n|\\[nr])+[ \t]*`
-		header = `(?:(?:` + eol + `|[ \t]+)(?:proc-type:[ \t]*[0-9]+,[a-z]+|dek-info:[ \t]*[a-z0-9-]+,[0-9a-f]+))*`
+		header = `(?:(?:` + eol + `|[ \t]+|\\t)(?:proc-type:[ \t]*[0-9]+,[a-z]+|dek-info:[ \t]*[a-z0-9-]+,[0-9a-f]+))*`
 		b64    = `(?:[a-z0-9+=]|\\?/)`
 		body   = `(?:` + brk + b64 + `{16,})*`
 	)

@@ -173,3 +173,18 @@ func TestFlattenedEncryptedPrivateKeyIsRedacted(t *testing.T) {
 		t.Errorf("text after the key was lost: %q", out)
 	}
 }
+
+// A header field separated by the escape \t (a tab inside a JSON string).
+func TestEscapedTabEncryptedPrivateKeyIsRedacted(t *testing.T) {
+	r := NewPatternRedactor()
+	body := strings.Repeat("Qk1x0Z9aLm", 7)
+	in := `{"k":"-----BEGIN ` + `RSA PRIVATE KEY-----\tProc-Type: 4,ENCRYPTED\tDEK-Info: AES-128-CBC,0123456789ABCDEF\t` +
+		body + `\t-----END ` + `RSA PRIVATE KEY-----","x":1`
+	out := r.Redact(in)
+	if strings.Contains(out, body) || strings.Contains(out, "DEK-Info") {
+		t.Errorf("escaped-tab encrypted key survived: %q", out)
+	}
+	if !strings.Contains(out, `"x":1`) {
+		t.Errorf("text after the key was lost: %q", out)
+	}
+}

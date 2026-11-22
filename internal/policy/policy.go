@@ -1390,10 +1390,11 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 	result := &ContentCheckResult{}
 	contentLower := strings.ToLower(content)
-	// The decision covers the message the violation is recorded from. That is
-	// normally the content checked; check the source message too if a caller
-	// passes a different one.
-	redactSource := source != nil && redactsSource(compiledRules, contentLower, target)
+	// The decision covers the message the violations come from, and applies
+	// whether or not a caller passes a source: the raw-body fallback, the
+	// streaming scanner and the websocket handlers pass none. If a source
+	// message differs from the content checked, check it too.
+	redactSource := redactsSource(compiledRules, contentLower, target)
 	if source != nil && !redactSource && source.Content != content {
 		redactSource = redactsSource(compiledRules, strings.ToLower(source.Content), target)
 	}
