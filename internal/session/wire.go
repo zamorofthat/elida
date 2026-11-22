@@ -64,6 +64,8 @@ type sessionData struct {
 	// How many entries each shadow list discarded at its cap.
 	SemanticShadowDropped    int `json:"semantic_shadow_dropped,omitempty"`
 	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
+	// How many times the primary system prompt changed.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
 }
 
 // toolCallWire is the content-free projection of a ToolCallRecord: exactly
@@ -117,6 +119,7 @@ func sessionToData(sess *Session) *sessionData {
 		SemanticShadowDropped:    sess.SemanticShadowDropped,
 		CorrelationShadowDropped: sess.CorrelationShadowDropped,
 	}
+	sd.SystemPromptChanges = sess.SystemPromptChanges
 	if sess.EndTime != nil {
 		t := *sess.EndTime
 		sd.EndTime = &t
@@ -167,6 +170,7 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		SemanticShadowDropped:    sd.SemanticShadowDropped + overCap(sd.SemanticShadow, MaxSemanticShadow),
 		CorrelationShadowDropped: sd.CorrelationShadowDropped + overCap(sd.CorrelationShadow, MaxCorrelationShadow),
 	}
+	sess.SystemPromptChanges = sd.SystemPromptChanges
 	if sess.Metadata == nil {
 		sess.Metadata = make(map[string]string)
 	}

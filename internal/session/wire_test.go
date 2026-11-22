@@ -68,6 +68,7 @@ func fullWireSession() *Session {
 		})
 	}
 	s.SemanticShadowDropped, s.CorrelationShadowDropped = 7, 3
+	s.SystemPromptChanges = 3
 	for i := 0; i < MaxSemanticShadow; i++ {
 		s.SemanticShadow = append(s.SemanticShadow, SemanticShadow{
 			Timestamp: wireTime(i % 60), DecisionID: "dec", Signal: "injection", Probability: 0.4,
