@@ -820,6 +820,8 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
 	info.CorrelationShadow = snap.CorrelationShadow
+	info.SemanticShadowDropped = snap.SemanticShadowDropped
+	info.CorrelationShadowDropped = snap.CorrelationShadowDropped
 	// GetFlaggedSession returns a deep copy, so the list is the caller's.
 	if h.policyEngine != nil {
 		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
@@ -972,6 +974,10 @@ type SessionInfo struct {
 	// path, for the same reason as SemanticShadow: shadow-mode correlation
 	// matches, calibration data that is never a violation.
 	CorrelationShadow []session.CorrelationShadow `json:"correlation_shadow,omitempty"`
+	// SemanticShadowDropped and CorrelationShadowDropped count the entries each
+	// shadow list discarded at its cap. Detail path only, with the lists.
+	SemanticShadowDropped    int `json:"semantic_shadow_dropped,omitempty"`
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 
 	// SemanticDecisions is the policy engine's per-decision record list
 	// (detail path only, like SemanticShadow): what explains each semantic
