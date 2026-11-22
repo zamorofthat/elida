@@ -131,13 +131,16 @@ func loggedSourceContent(redact bool, content string) string {
 	return truncateMatch(content, 4096)
 }
 
-// redactsSource reports whether a rule that redacts its match applies to this
-// target and matches the (lowercased) content. The engine records the source
-// message on each violation it raises from that message, so the decision is
-// made once, up front, for the whole message.
-func redactsSource(rules []CompiledRule, contentLower string, target RuleTarget) bool {
+// redactsSource reports whether a rule that redacts its match matches this
+// (lowercased) content. Any such rule counts, whatever target it is on: the
+// secret does not stay on the side of the conversation the rule watches. A
+// model response can echo it, so a response rule that fires on the text must
+// not record it either. The engine records the source message on each
+// violation it raises from that message, so the decision is made once, up
+// front, for the whole message.
+func redactsSource(rules []CompiledRule, contentLower string) bool {
 	for _, cr := range rules {
-		if !cr.RedactMatch || !ruleAppliesToTarget(cr.Target, target) {
+		if !cr.RedactMatch {
 			continue
 		}
 		for _, re := range cr.CompiledPatterns {
@@ -149,11 +152,15 @@ func redactsSource(rules []CompiledRule, contentLower string, target RuleTarget)
 	return false
 }
 
-// redactsArguments reports whether a rule that redacts its match matches these
-// tool-call arguments. The arguments are one message: every argument rule that
-// fires on them redacts its match text, not only the redacting rule's own.
-func redactsArguments(rules []CompiledToolRule, arguments string) bool {
-	for _, cr := range rules {
+// redactsArguments reports whether a rule that redacts its match, a content
+// rule or a tool-argument rule, matches these tool-call arguments. The
+// arguments are one message: every argument rule that fires on them redacts its
+// match text, not only the redacting rule's own.
+func redactsArguments(toolRules []CompiledToolRule, contentRules []CompiledRule, arguments string) bool {
+	if redactsSource(contentRules, strings.ToLower(arguments)) {
+		return true
+	}
+	for _, cr := range toolRules {
 		if cr.Type != RuleTypeToolArgumentPattern || !cr.RedactMatch {
 			continue
 		}
@@ -1411,9 +1418,9 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 	// whether or not a caller passes a source: the raw-body fallback, the
 	// streaming scanner and the websocket handlers pass none. If a source
 	// message differs from the content checked, check it too.
-	redactSource := redactsSource(compiledRules, contentLower, target)
+	redactSource := redactsSource(compiledRules, contentLower)
 	if source != nil && !redactSource && source.Content != content {
-		redactSource = redactsSource(compiledRules, strings.ToLower(source.Content), target)
+		redactSource = redactsSource(compiledRules, strings.ToLower(source.Content))
 	}
 
 	for _, cr := range compiledRules {
@@ -2859,6 +2866,7 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 	// Snapshot rules, audit mode and the taxonomy under read lock
 	e.mu.RLock()
 	toolRules := e.compiledToolRules
+	contentRules := e.compiledRules
 	auditMode := e.auditMode
 	taxonomy := e.taxonomy
 	e.mu.RUnlock()
@@ -2878,6 +2886,12 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 	}
 
 	result := &ContentCheckResult{}
+
+	// Decided once per call, not once per rule and call.
+	redactArgs := make([]bool, len(toolCalls))
+	for i, tc := range toolCalls {
+		redactArgs[i] = tc.Arguments != "" && redactsArguments(toolRules, contentRules, tc.Arguments)
+	}
 
 	for _, cr := range toolRules {
 		switch cr.Type {
@@ -2915,18 +2929,17 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 				}
 			}
 		case RuleTypeToolArgumentPattern:
-			for _, tc := range toolCalls {
+			for ti, tc := range toolCalls {
 				if tc.Arguments == "" {
 					continue
 				}
-				redactArgs := redactsArguments(toolRules, tc.Arguments)
 				for i, re := range cr.CompiledPatterns {
 					if match := re.FindString(tc.Arguments); match != "" {
 						violation := Violation{
 							RuleName:       cr.Name,
 							Description:    cr.Description,
 							Severity:       cr.Severity,
-							MatchedText:    matchedText(cr.RedactMatch || redactArgs, match),
+							MatchedText:    matchedText(cr.RedactMatch || redactArgs[ti], match),
 							MatchedPattern: cr.Patterns[i],
 							Action:         cr.Action,
 							Timestamp:      time.Now(),

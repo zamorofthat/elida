@@ -151,3 +151,39 @@ func TestRedactMatchCoversOtherToolArgumentRules(t *testing.T) {
 		t.Errorf("arguments without a secret must record their match: %+v", res)
 	}
 }
+
+// The shipped secret rule is a request-side content rule, but the key travels
+// further: a model response can echo it, and a tool call can carry it. A rule on
+// any target or type that fires on text holding the secret must not record it.
+func TestRedactMatchCoversOtherTargetsAndRuleTypes(t *testing.T) {
+	secret := "AKIA" + strings.Repeat("S", 16)
+	e := NewEngine(Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []Rule{
+			{Name: "secret_in_request", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+				Patterns: []string{`\b(AKIA|ASIA)[0-9A-Z]{16}\b`}, Severity: SeverityCritical,
+				Action: "flag", RedactMatch: true},
+			{Name: "loose_response_rule", Type: RuleTypeContentMatch, Target: RuleTargetResponse,
+				Patterns: []string{`deploy\s+\S+\s+\S+`}, Severity: SeverityWarning, Action: "flag"},
+			{Name: "loose_arg_rule", Type: RuleTypeToolArgumentPattern, Patterns: []string{`"key":\s*"[^"]+"`},
+				Severity: SeverityWarning, Action: "flag"},
+		},
+	})
+
+	res := e.EvaluateResponseContent("s1", "I will deploy with "+secret+" to prod")
+	if res == nil || len(res.Violations) != 1 {
+		t.Fatalf("want the response rule to fire, got %+v", res)
+	}
+	if strings.Contains(strings.ToLower(res.Violations[0].MatchedText), strings.ToLower(secret)) {
+		t.Errorf("a response rule recorded the secret: %q", res.Violations[0].MatchedText)
+	}
+
+	res = e.EvaluateToolCallsUncorrelated("s2", []ToolCall{{Name: "deploy", Arguments: `{"key": "` + secret + `"}`}})
+	if res == nil || len(res.Violations) != 1 {
+		t.Fatalf("want the argument rule to fire, got %+v", res)
+	}
+	if strings.Contains(strings.ToLower(res.Violations[0].MatchedText), strings.ToLower(secret)) {
+		t.Errorf("an argument rule recorded the secret held by a content-rule match: %q", res.Violations[0].MatchedText)
+	}
+}

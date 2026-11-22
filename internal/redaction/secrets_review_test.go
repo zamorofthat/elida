@@ -3,6 +3,7 @@ package redaction
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // The policy engine matches against lowercased content, so the violation text
@@ -186,5 +187,47 @@ func TestEscapedTabEncryptedPrivateKeyIsRedacted(t *testing.T) {
 	}
 	if !strings.Contains(out, `"x":1`) {
 		t.Errorf("text after the key was lost: %q", out)
+	}
+}
+
+// The prefilter runs on every string redacted. When one letter case of the
+// literal's first byte never occurs, it must not rescan the rest of the string
+// at every step: 1 MB of "AAAA" took seconds.
+func TestContainsFoldIsLinearWhenOneCaseIsAbsent(t *testing.T) {
+	s := strings.Repeat("A", 128<<10)
+	start := time.Now()
+	if containsFold(s, "akia-not-here") {
+		t.Fatal("unexpected match")
+	}
+	if took := time.Since(start); took > 100*time.Millisecond {
+		t.Errorf("containsFold took %v on 128 KB, want it linear (a few ms)", took)
+	}
+	if !containsFold(strings.Repeat("A", 1000)+"akia", "akia") {
+		t.Error("a match after a long run of the other case was missed")
+	}
+	if !containsFold(strings.Repeat("a", 1000)+"AKIA", "akia") {
+		t.Error("an upper-case match after a long lower-case run was missed")
+	}
+}
+
+// Escaped whitespace of any mix separates the header fields of an encrypted key
+// written inside a JSON string.
+func TestEncryptedPrivateKeyHeaderSeparatorShapes(t *testing.T) {
+	r := NewPatternRedactor()
+	body := strings.Repeat("Qk1x0Z9aLm", 7)
+	for name, sep := range map[string]string{
+		"newline then escaped tab": `\n\t`,
+		"two escaped tabs":         `\t\t`,
+		"escaped tab then space":   `\t `,
+		"carriage return, newline": `\r\n`,
+	} {
+		in := `{"k":"-----BEGIN ` + `RSA PRIVATE KEY-----` + sep + `Proc-Type: 4,ENCRYPTED` + sep + `DEK-Info: AES-128-CBC,0123456789ABCDEF` + sep + body + `\n-----END ` + `RSA PRIVATE KEY-----","x":1`
+		out := r.Redact(in)
+		if strings.Contains(out, body) || strings.Contains(out, "DEK-Info") {
+			t.Errorf("%s: encrypted key survived: %q", name, out)
+		}
+		if !strings.Contains(out, `"x":1`) {
+			t.Errorf("%s: text after the key was lost: %q", name, out)
+		}
 	}
 }

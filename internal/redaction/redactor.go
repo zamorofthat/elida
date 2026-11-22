@@ -99,9 +99,22 @@ func containsFold(s, lit string) bool {
 		}
 	}
 	first, upper := lit[0], lit[0]-'a'+'A'
+	// i only moves forward, so once one letter case no longer occurs in the
+	// rest of s it never will again: stop searching for it. Searching on every
+	// step made a long run of the other case quadratic.
+	noLower, noUpper := false, false
 	for i := 0; i+n <= len(s); i++ {
-		j1 := strings.IndexByte(s[i:], first)
-		j2 := strings.IndexByte(s[i:], upper)
+		j1, j2 := -1, -1
+		if !noLower {
+			if j1 = strings.IndexByte(s[i:], first); j1 < 0 {
+				noLower = true
+			}
+		}
+		if !noUpper {
+			if j2 = strings.IndexByte(s[i:], upper); j2 < 0 {
+				noUpper = true
+			}
+		}
 		switch {
 		case j1 < 0 && j2 < 0:
 			return false
@@ -136,12 +149,12 @@ func anyFold(lits ...string) func(string) bool {
 // and \t, which is how a key sits inside a JSON string, and a "/" may be
 // written \/ . The body is runs of 16 or more base64 characters with a short
 // last line, so text that does not look like a key body ends the match. A key
-// header is only Proc-Type or DEK-Info, on a line of its own or, when the key was flattened onto one line, after spaces.
+// header is only Proc-Type or DEK-Info, separated from what precedes it by any mix of whitespace and the escapes \\n, \\r and \\t.
 var privateKeyBlockRegexp = func() *regexp.Regexp {
 	const (
 		brk    = `(?:\s|\\[nrt])*`
-		eol    = `(?:\r?\n|\\[nr])+[ \t]*`
-		header = `(?:(?:` + eol + `|[ \t]+|\\t)(?:proc-type:[ \t]*[0-9]+,[a-z]+|dek-info:[ \t]*[a-z0-9-]+,[0-9a-f]+))*`
+		sep    = `(?:\s|\\[nrt])+`
+		header = `(?:` + sep + `(?:proc-type:[ \t]*[0-9]+,[a-z]+|dek-info:[ \t]*[a-z0-9-]+,[0-9a-f]+))*`
 		b64    = `(?:[a-z0-9+=]|\\?/)`
 		body   = `(?:` + brk + b64 + `{16,})*`
 	)
