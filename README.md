@@ -3,7 +3,7 @@
 **Session-aware reverse proxy for AI agents**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.27+-00ADD8?logo=go)](https://go.dev/)
 [![CI](https://github.com/zamorofthat/elida/actions/workflows/ci.yml/badge.svg)](https://github.com/zamorofthat/elida/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/zamorofthat/elida/badge)](https://scorecard.dev/viewer/?uri=github.com/zamorofthat/elida)
 [![codecov](https://codecov.io/gh/zamorofthat/elida/branch/main/graph/badge.svg?token=BG6KR8BJ9N)](https://codecov.io/gh/zamorofthat/elida)
@@ -92,6 +92,10 @@ Every request flows through session tracking and policy evaluation before reachi
 - **Redis session store** — horizontal scaling across instances
 - **Helm chart** — production Kubernetes deployment
 - **WebSocket support** — voice sessions (OpenAI Realtime, Deepgram, ElevenLabs, LiveKit)
+
+## What ELIDA Is Not
+
+ELIDA watches and controls the traffic between an agent and its model API: it inspects content, redacts, records, and can kill a session. It does not isolate the agent. It does not sandbox code execution, restrict the agent's network, or hold its credentials, and it does not replace those controls. Run it alongside a sandbox or egress policy, not instead of one.
 
 ## Configuration
 
