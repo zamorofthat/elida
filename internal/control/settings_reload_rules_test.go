@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -178,5 +180,75 @@ func TestSettingsSaveAddsAndOverridesWithCustomRules(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("rate_limit_high appears %d times, want exactly 1", n)
+	}
+}
+
+// Rule settings saved before a restart (disabled_rules, custom rules) must be
+// in force after it. Nothing applied them at startup, so a disabled rule came
+// back until the next save. Only the rules are applied: the policy mode and the
+// risk ladder keep the values elida.yaml gave them.
+func TestSavedRuleSettingsApplyAtStartup(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Policy.Enabled = true
+	cfg.Policy.Preset = "standard"
+	cfg.ApplyPolicyPreset()
+	var rules []policy.Rule
+	for _, r := range cfg.Policy.Rules {
+		rules = append(rules, policy.Rule{
+			Name: r.Name, Type: policy.RuleType(r.Type), Target: policy.RuleTarget(r.Target),
+			Patterns: r.Patterns, Threshold: r.Threshold, Severity: policy.Severity(r.Severity),
+			Action: r.Action, Description: r.Description,
+		})
+	}
+	engine := policy.NewEngine(policy.Config{Enabled: true, Mode: "enforce", Rules: rules})
+	before := ruleNames(engine)
+
+	dir := t.TempDir()
+	saved := `policy:
+  mode: audit
+  disabled_rules: [rate_limit_high]
+  custom_rules:
+    - {name: my_saved_rule, type: content_match, target: request, patterns: [zzz], severity: warning, action: flag}
+`
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(saved), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.NewSettingsStoreFromConfig(cfg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(session.NewMemoryStore(), session.NewManager(session.NewMemoryStore(), time.Minute), WithPolicy(engine))
+	h.SetSettingsStore(store)
+	h.ApplySavedPolicyRules()
+
+	after := ruleNames(engine)
+	if has(after, "rate_limit_high") {
+		t.Error("a rule saved as disabled is active after startup")
+	}
+	if !has(after, "my_saved_rule") {
+		t.Error("a saved custom rule is not loaded after startup")
+	}
+	if len(after) != len(before) {
+		t.Errorf("rule count %d -> %d, want the same (one disabled, one added)", len(before), len(after))
+	}
+	if got := engine.GetConfig().Mode; got != "enforce" {
+		t.Errorf("mode = %q, want %q: only rules may be applied at startup", got, "enforce")
+	}
+}
+
+// With nothing saved there is nothing to apply and the engine is left alone.
+func TestApplySavedPolicyRulesWithNothingSavedChangesNothing(t *testing.T) {
+	engine, _ := reloadFixture(t)
+	before := ruleNames(engine)
+	cfg := config.DefaultConfig()
+	store, err := config.NewSettingsStoreFromConfig(cfg, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(session.NewMemoryStore(), session.NewManager(session.NewMemoryStore(), time.Minute), WithPolicy(engine))
+	h.SetSettingsStore(store)
+	h.ApplySavedPolicyRules()
+	if after := ruleNames(engine); len(after) != len(before) {
+		t.Errorf("rule count %d -> %d with nothing saved", len(before), len(after))
 	}
 }

@@ -1440,6 +1440,7 @@ func (a *app) initControlAPI() {
 	a.controlHandler = control.New(a.store, a.manager, controlOpts...)
 	if a.settingsStore != nil {
 		a.controlHandler.SetSettingsStore(a.settingsStore)
+		a.controlHandler.ApplySavedPolicyRules()
 	}
 	if a.wsHandler != nil {
 		a.controlHandler.SetWebSocketHandler(a.wsHandler)

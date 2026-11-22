@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the startup rules, applies `disabled_rules` (saved and merged before,
   but never applied), and lets a saved custom rule replace a startup rule of
   the same name.
+- Rule settings saved before a restart, `disabled_rules` and custom rules, now
+  take effect at startup. Nothing applied them, so a rule saved as disabled came
+  back after every restart until the next save. Only the rules are applied: the
+  policy mode and the risk ladder still come from `elida.yaml`.
 
 ### Added
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
