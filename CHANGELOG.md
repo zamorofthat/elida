@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- With `proxy.auth` enabled, a WebSocket upgrade was handed to the WebSocket
+  handler before the auth check ran, so a caller with no key, or a wrong one,
+  could open a WebSocket to the proxy. The auth check now runs first, so an
+  upgrade needs a valid key (or a trusted-network peer) like any other request.
+  With auth off nothing changes.
+
 ### Added
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`

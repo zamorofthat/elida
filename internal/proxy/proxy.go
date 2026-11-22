@@ -307,13 +307,6 @@ func parseTTSRequest(provider string, body []byte) *TTSRequestInfo {
 
 // ServeHTTP handles incoming requests
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Check for WebSocket upgrade BEFORE reading body
-	// Body cannot be read during WebSocket handshake
-	if p.wsHandler != nil && isWebSocketRequest(r) {
-		p.wsHandler.ServeHTTP(w, r)
-		return
-	}
-
 	// Proxy authentication check (skip health endpoints)
 	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
 		if p.isTrustedClient(r) {
@@ -326,6 +319,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	}
+
+	// Check for WebSocket upgrade BEFORE reading body
+	// Body cannot be read during WebSocket handshake. After the auth check
+	// above: an upgrade is a request like any other, and proxy.auth guards it.
+	if p.wsHandler != nil && isWebSocketRequest(r) {
+		p.wsHandler.ServeHTTP(w, r)
+		return
 	}
 
 	// Multi-backend model discovery: answer /v1/models from configuration so
