@@ -1505,6 +1505,20 @@ func (c *Config) Validate() *ValidationResult {
 		})
 	}
 
+	// Session identity is client-supplied (the session header, or a value in the
+	// request body), and it is the key the kill switch, risk ladder and
+	// evidence are indexed by. Without proxy authentication, any caller that
+	// can reach the listener can reset its own risk history or join another
+	// caller's session. Fine for mutually trusted callers; say so when the
+	// listener is reachable beyond this host.
+	if !c.Proxy.Auth.Enabled && c.Listen != "" && !IsLoopback(c.Listen) {
+		warnings = append(warnings, ValidationError{
+			Field:   "proxy.auth",
+			Message: fmt.Sprintf("proxy authentication is off and the proxy listens on %s, which is reachable beyond this host", c.Listen),
+			Hint:    "session identity is client-controlled, so any caller that can reach the port can reset its risk history or join another caller's session; enable proxy.auth, bind to 127.0.0.1, or see \"Session identity and trust\" in docs/security-controls.md",
+		})
+	}
+
 	// Capture-config coherence: telemetry.capture_content="all" emits only the
 	// bodies the proxy buffered, and the buffer is populated for every session
 	// only when storage is enabled with capture_mode="all". Any other combination
