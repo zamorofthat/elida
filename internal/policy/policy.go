@@ -113,23 +113,40 @@ func loggedMatch(r Rule, match string) string {
 }
 
 // recordedSourceContent is the source message recorded on a violation: the
-// message, truncated, or RedactedMatch for a rule that redacts its match, since
-// the message holds whatever the rule matched.
-func recordedSourceContent(r Rule, content string, max int) string {
-	if r.RedactMatch {
+// message, truncated, or RedactedMatch when redact is set. The message holds
+// whatever a redacting rule matched, so every violation recorded from a message
+// that such a rule matched redacts it, not only that rule's own.
+func recordedSourceContent(redact bool, content string, max int) string {
+	if redact {
 		return RedactedMatch
 	}
 	return truncateMatch(content, max)
 }
 
 // loggedSourceContent is the source message as written to the structured log.
-// The message holds whatever the rule matched, so a rule that redacts its match
-// does not log it.
-func loggedSourceContent(r Rule, content string) string {
-	if r.RedactMatch {
+func loggedSourceContent(redact bool, content string) string {
+	if redact {
 		return RedactedMatch
 	}
 	return truncateMatch(content, 4096)
+}
+
+// redactsSource reports whether a rule that redacts its match applies to this
+// target and matches the (lowercased) content. The engine records the source
+// message on each violation it raises from that message, so the decision is
+// made once, up front, for the whole message.
+func redactsSource(rules []CompiledRule, contentLower string, target RuleTarget) bool {
+	for _, cr := range rules {
+		if !cr.RedactMatch || !ruleAppliesToTarget(cr.Target, target) {
+			continue
+		}
+		for _, re := range cr.CompiledPatterns {
+			if re.MatchString(contentLower) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // matchedText returns the text to record for a match of rule r.
@@ -1373,6 +1390,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 	result := &ContentCheckResult{}
 	contentLower := strings.ToLower(content)
+	redactSource := source != nil && redactsSource(compiledRules, contentLower, target)
 
 	for _, cr := range compiledRules {
 		// Skip rules that don't apply to this target
@@ -1398,7 +1416,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				if source != nil {
 					violation.SourceRole = source.Role
 					violation.MessageIndex = source.MessageIndex
-					violation.SourceContent = recordedSourceContent(cr.Rule, source.Content, e.maxCaptureSize)
+					violation.SourceContent = recordedSourceContent(redactSource, source.Content, e.maxCaptureSize)
 					violation.EffectiveSeverity = effectiveSeverity(cr.Severity, source.Role)
 				} else {
 					violation.EffectiveSeverity = cr.Severity
@@ -1444,7 +1462,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 						"source_role", source.Role,
 						"message_index", source.MessageIndex,
 						"effective_severity", violation.EffectiveSeverity,
-						"source_content", loggedSourceContent(cr.Rule, source.Content),
+						"source_content", loggedSourceContent(redactSource, source.Content),
 					)
 				}
 
@@ -1471,7 +1489,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 		if !ruleAppliesToTarget(rule.Target, target) {
 			continue
 		}
-		if v := e.evaluateContentEntropy(content, rule, source); v != nil {
+		if v := e.evaluateContentEntropy(content, rule, source, redactSource); v != nil {
 			result.Violations = append(result.Violations, *v)
 			if !auditMode {
 				switch rule.Action {
@@ -1494,7 +1512,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 // evaluateContentEntropy checks if content has anomalously high Shannon entropy,
 // which indicates obfuscated/encoded content (base64, hex) evading regex patterns.
-func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *ContentSource) *Violation {
+func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *ContentSource, redactSource bool) *Violation {
 	minSamples := rule.MinSamples
 	if minSamples <= 0 {
 		minSamples = 50
@@ -1525,7 +1543,7 @@ func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *Conte
 	if source != nil {
 		v.SourceRole = source.Role
 		v.MessageIndex = source.MessageIndex
-		v.SourceContent = truncateMatch(source.Content, e.maxCaptureSize)
+		v.SourceContent = recordedSourceContent(redactSource, source.Content, e.maxCaptureSize)
 		v.EffectiveSeverity = effectiveSeverity(rule.Severity, source.Role)
 	} else {
 		v.EffectiveSeverity = rule.Severity
@@ -3041,7 +3059,7 @@ func (s *StreamingScanner) evaluateEntropy() *ContentCheckResult {
 		if !ruleAppliesToTarget(rule.Target, RuleTargetResponse) {
 			continue
 		}
-		if v := s.engine.evaluateContentEntropy(content, rule, nil); v != nil {
+		if v := s.engine.evaluateContentEntropy(content, rule, nil, false); v != nil {
 			if result == nil {
 				result = &ContentCheckResult{}
 			}

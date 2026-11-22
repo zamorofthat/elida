@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub and Slack tokens, Anthropic and OpenAI-style keys, private key
   headers). It flags and records only; the request is still forwarded, so
   redefine the rule with `action: block` (and keep `redact_match: true`) to stop it. In coding-agent it is
-  observe-only. It records `[redacted]` rather than the credential it matched;
+  observe-only. It records `[redacted]` rather than the credential it matched, and every
+  violation raised from a message it matched (other rules, the entropy rule)
+  records `[redacted]` in place of that message;
   a new `redact_match: true` rule option does the same for any rule.
 - Redaction now also covers AWS temporary keys (`ASIA...`), GitHub and Slack
   tokens, Anthropic API keys and private key blocks in captured content and

@@ -126,3 +126,34 @@ func TestEscapedNewlinePrivateKeyIsRedacted(t *testing.T) {
 		t.Errorf("text after the escaped key was lost: %q", out)
 	}
 }
+
+// Some JSON encoders (PHP's json_encode, a few JavaScript libraries) escape
+// "/" as "\\/" and may write a tab as "\\t". Base64 is full of "/", so a key
+// written that way must still be redacted whole.
+func TestEscapedSlashAndTabPrivateKeyIsRedacted(t *testing.T) {
+	r := NewPatternRedactor()
+	line := `A1b2C3d4\/E5f6G7h8\/I9j0K1l2\/M3n4O5p6\/Q7r8S9t0\/U1v2W3x4\/Y5z6A7b8\/C9d0E1f2`
+	in := `{"k":"-----BEGIN ` + `PRIVATE KEY-----\n` + line + `\t` + line + `\n-----END ` + `PRIVATE KEY-----\n","x":1`
+	out := r.Redact(in)
+	if strings.Contains(out, "A1b2C3d4") || strings.Contains(out, "E5f6G7h8") {
+		t.Errorf("escaped key body survived: %q", out)
+	}
+	if !strings.Contains(out, `"x":1`) {
+		t.Errorf("text after the key was lost: %q", out)
+	}
+}
+
+// Only a real Proc-Type or DEK-Info line, on its own line, is a key header.
+// Prose that happens to contain a colon is not eaten.
+func TestPrivateKeyHeaderLinesDoNotSwallowProse(t *testing.T) {
+	r := NewPatternRedactor()
+	same := "-----BEGIN " + "PRIVATE KEY----- note: hello world, this is prose that follows"
+	if out := r.Redact(same); !strings.Contains(out, "note: hello world, this is prose that follows") {
+		t.Errorf("prose after a header on the same line was redacted: %q", out)
+	}
+
+	lines := "-----BEGIN " + "PRIVATE KEY-----\nfoo: bar\nqux: quux\nhello: world 123 and more"
+	if out := r.Redact(lines); !strings.Contains(out, "hello: world 123 and more") {
+		t.Errorf("colon-separated prose lines after a header were redacted: %q", out)
+	}
+}

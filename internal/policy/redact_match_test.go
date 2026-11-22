@@ -69,3 +69,54 @@ func TestRedactMatchKeepsTheSecretOutOfTheViolationSourceContent(t *testing.T) {
 		t.Errorf("SourceContent carries the secret: %q", got)
 	}
 }
+
+// The secret is in the message, not in one rule's match. When a redacting rule
+// matches a message, every other violation recorded from that message (another
+// content rule, the entropy rule that fires on a pasted key) must keep the
+// message out of its record too.
+func TestRedactMatchRedactsSourceContentOfEveryViolationFromThatMessage(t *testing.T) {
+	secret := "AKIA" + strings.Repeat("Z", 16)
+	noise := ""
+	for i := 0; i < 40; i++ {
+		noise += string(rune('a'+(i*7)%26)) + string(rune('A'+(i*11)%26)) + string(rune('0'+(i*3)%10)) + "+/"
+	}
+	e := NewEngine(Config{
+		Enabled:        true,
+		Mode:           "enforce",
+		CaptureContent: true,
+		MaxCaptureSize: 4096,
+		Rules: []Rule{
+			{Name: "secret_in_request", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+				Patterns: []string{`\b(AKIA|ASIA)[0-9A-Z]{16}\b`}, Severity: SeverityCritical,
+				Action: "flag", RedactMatch: true},
+			{Name: "mentions_deploy", Type: RuleTypeContentMatch, Target: RuleTargetRequest,
+				Patterns: []string{`deploy`}, Severity: SeverityWarning, Action: "flag"},
+			{Name: "high_entropy", Type: RuleTypeContentEntropy, Target: RuleTargetRequest,
+				ThresholdFloat: 3.0, MinSamples: 10, Severity: SeverityWarning, Action: "flag"},
+		},
+	})
+	content := "deploy with " + secret + " " + noise
+	res := e.EvaluateContentWithSource("s1", content, RuleTargetRequest,
+		&ContentSource{Role: "user", MessageIndex: 1, Content: content})
+	if res == nil || len(res.Violations) < 3 {
+		t.Fatalf("test setup: want the three rules to fire, got %+v", res)
+	}
+	for _, v := range res.Violations {
+		if strings.Contains(strings.ToLower(v.SourceContent), strings.ToLower(secret)) {
+			t.Errorf("rule %s recorded the message with the secret in it: %q", v.RuleName, v.SourceContent)
+		}
+	}
+
+	// A message the redacting rule does not match is recorded as before.
+	other := "deploy to staging " + noise
+	res = e.EvaluateContentWithSource("s2", other, RuleTargetRequest,
+		&ContentSource{Role: "user", MessageIndex: 1, Content: other})
+	if res == nil {
+		t.Fatal("expected violations for the second message")
+	}
+	for _, v := range res.Violations {
+		if v.SourceContent == RedactedMatch {
+			t.Errorf("rule %s redacted the source of a message with no secret in it", v.RuleName)
+		}
+	}
+}
