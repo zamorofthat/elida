@@ -120,3 +120,34 @@ func TestRedactMatchRedactsSourceContentOfEveryViolationFromThatMessage(t *testi
 		}
 	}
 }
+
+// Tool arguments are a message too: a loose argument rule must not record a
+// secret that a redacting argument rule matched in the same arguments.
+func TestRedactMatchCoversOtherToolArgumentRules(t *testing.T) {
+	secret := "AKIA" + strings.Repeat("R", 16)
+	e := NewEngine(Config{
+		Enabled: true,
+		Mode:    "enforce",
+		Rules: []Rule{
+			{Name: "secret_in_tool_args", Type: RuleTypeToolArgumentPattern, Patterns: []string{`\b(AKIA|ASIA)[0-9A-Z]{16}\b`},
+				Severity: SeverityCritical, Action: "flag", RedactMatch: true},
+			{Name: "loose_arg_rule", Type: RuleTypeToolArgumentPattern, Patterns: []string{`"key":\s*"[^"]+"`},
+				Severity: SeverityWarning, Action: "flag"},
+		},
+	})
+	res := e.EvaluateToolCallsUncorrelated("s1", []ToolCall{{Name: "deploy", Arguments: `{"key": "` + secret + `"}`}})
+	if res == nil || len(res.Violations) != 2 {
+		t.Fatalf("want both argument rules to fire, got %+v", res)
+	}
+	for _, v := range res.Violations {
+		if strings.Contains(strings.ToLower(v.MatchedText), strings.ToLower(secret)) {
+			t.Errorf("rule %s recorded the secret in its match text: %q", v.RuleName, v.MatchedText)
+		}
+	}
+
+	// Arguments with no secret are recorded as before.
+	res = e.EvaluateToolCallsUncorrelated("s2", []ToolCall{{Name: "deploy", Arguments: `{"key": "staging"}`}})
+	if res == nil || len(res.Violations) != 1 || res.Violations[0].MatchedText == RedactedMatch {
+		t.Errorf("arguments without a secret must record their match: %+v", res)
+	}
+}

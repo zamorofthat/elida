@@ -149,6 +149,23 @@ func redactsSource(rules []CompiledRule, contentLower string, target RuleTarget)
 	return false
 }
 
+// redactsArguments reports whether a rule that redacts its match matches these
+// tool-call arguments. The arguments are one message: every argument rule that
+// fires on them redacts its match text, not only the redacting rule's own.
+func redactsArguments(rules []CompiledToolRule, arguments string) bool {
+	for _, cr := range rules {
+		if cr.Type != RuleTypeToolArgumentPattern || !cr.RedactMatch {
+			continue
+		}
+		for _, re := range cr.CompiledPatterns {
+			if re.MatchString(arguments) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // matchedText returns the text to record for a match of rule r.
 func matchedText(redact bool, match string) string {
 	if redact {
@@ -2902,13 +2919,14 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 				if tc.Arguments == "" {
 					continue
 				}
+				redactArgs := redactsArguments(toolRules, tc.Arguments)
 				for i, re := range cr.CompiledPatterns {
 					if match := re.FindString(tc.Arguments); match != "" {
 						violation := Violation{
 							RuleName:       cr.Name,
 							Description:    cr.Description,
 							Severity:       cr.Severity,
-							MatchedText:    matchedText(cr.RedactMatch, match),
+							MatchedText:    matchedText(cr.RedactMatch || redactArgs, match),
 							MatchedPattern: cr.Patterns[i],
 							Action:         cr.Action,
 							Timestamp:      time.Now(),
