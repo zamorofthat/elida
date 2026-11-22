@@ -284,6 +284,45 @@ detector, `[a-z0-9+/]{200,}={1,2}` (about 210 instructions, under the soft
 limit, so no WARN), raises the realistic taxonomy to about 37 ms per call
 at the default 16 KiB. Prefer literal-led patterns.
 
+## Resource requirements
+
+Semantic detection loads the model into memory and runs inference on the CPU.
+Plan for both before you enable it. These numbers were measured once, on one
+machine, and are a guide, not a guarantee.
+
+**Measured on an Apple M1 Max (arm64, no accelerated kernels), ELIDA built from
+`main` plus the model built from the pinned upstream commit, `decision.mode: shadow`:**
+
+| | Detection off | Detection on |
+|---|---|---|
+| Resident memory, idle | 28 MiB | 328 MiB |
+| Resident memory after 500 requests | 31 MiB | 431 MiB |
+| One 128-token window (benchmark) | n/a | 65 to 78 ms |
+| One 32-token window (benchmark) | n/a | 19 ms |
+| Proxy request p50, one client | 1.6 ms | 2.8 ms |
+
+The proxy adds little latency because on this build the capability is
+`async_only`: scoring runs off the request path. That is also the limit. With
+one async worker, a burst of 16 concurrent clients sending tool results of
+about six windows each had 1,677 of about 1,900 windows dropped with reason
+`async_queue_full`. A dropped window is counted under `coverage_gaps` and
+`async_dropped` at `/control/decision` and is never treated as safe, but it is
+not scored either. Sustained throughput on this build is roughly one worker's
+worth: about 13 windows per second.
+
+What this means for deployment:
+
+- **Raise the memory limit.** The Helm chart (`resources.limits.memory: 256Mi`)
+  and `deploy/docker-compose.prod.yaml` (`256M`) are sized for ELIDA without
+  the model. A container with detection enabled and that limit is
+  out-of-memory killed. Start from 768 MiB and watch the resident set.
+- **Size for windows, not requests.** Every user message and tool result is
+  split into windows of at most 128 tokens. Raise `decision.max_concurrency`
+  for more workers and watch `async_dropped` and `coverage_gaps`.
+- **amd64 with `GOEXPERIMENT=simd` is the build that can answer inline.** It
+  was not measured here. `/control/decision` reports the capability and the
+  reason for your build.
+
 ## Residual risk
 
 ELIDA's semantic and temporal detection raises the cost of prompt injection;
