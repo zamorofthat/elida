@@ -300,6 +300,11 @@ hashes to that value. The manifest pins every file, so this pins the artifact.
 sha256sum /etc/elida/models/injection/manifest.json
 ```
 
+For a model built from this repository, the value is `MANIFEST_SHA256` in
+`scripts/models/pins.env`, the same digest the build verifies. A model built
+from the pinned commit hashes to exactly that value, which was checked on a
+fresh `make model` build.
+
 ```yaml
 decision:
   model_checksum: "<64 hex characters>"
