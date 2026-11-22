@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation by `contextId` across the HTTP+JSON (`message.contextId`) and
   JSON-RPC (`params.message.contextId`) bindings. An unusable entry fails
   config validation. `body_path` is unchanged.
+- ELIDA warns at startup (and in `-validate`) when `proxy.auth` is off and the
+  proxy listens on an address reachable beyond the host. Session identity is
+  supplied by the caller, so on a reachable unauthenticated proxy any caller
+  can reset its own risk history or join another caller's session. The new
+  "Session Identity and Trust" section in `docs/security-controls.md` states
+  who ELIDA trusts, what a caller controls and what to do about it. This is a
+  warning only; nothing is refused.
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without
