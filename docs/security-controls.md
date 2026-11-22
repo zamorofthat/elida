@@ -160,9 +160,12 @@ before exposing the proxy to anyone you do not trust.
 
 A caller that can reach the proxy port sets:
 
-- **The session ID.** The `X-Session-ID` header is used as sent. If it is
-  absent, ELIDA derives an ID from the request body (`session.derive_from`, the
-  OpenAI `user` field by default), and from the client address after that.
+- **The session ID.** ELIDA takes it from the first of these that is present:
+  the session header (`X-Session-ID`, or whatever `session.header` is set to),
+  used as sent; then `X-Claude-Code-Session-Id`, when its value is a safe ID;
+  then a value derived from the request body (`session.derive_from`: the
+  OpenAI `user` field by default, or a configured body path). With none of
+  those, the ID comes from the client address and the backend.
 - **The `role` label on each message.**
 - The request body, its size and the request rate.
 
@@ -199,11 +202,13 @@ anchor session identity.
 ### What to do
 
 - Bind the proxy to a loopback or private address, or put it behind a gateway
-  that authenticates callers and sets the session ID for them (a gateway that
-  strips the client's `X-Session-ID` and writes its own gives you
-  trustworthy identity today).
-- Turn on `proxy.auth`, and set `session.derive_from.openai_user: false` and an
-  empty `body_path` when callers are not mutually trusted.
+  that authenticates callers and sets the session ID for them. The gateway must
+  strip the client's session header (`X-Session-ID`, or your `session.header`)
+  and `X-Claude-Code-Session-Id`, and write its own: either one, left in, is
+  taken from the client.
+- Turn on `proxy.auth`, and when callers are not mutually trusted set
+  `session.derive_from.openai_user: false` and leave every
+  `session.derive_from` body path empty, so no body field can name a session.
 - ELIDA warns at startup when proxy authentication is off and the listener is
   reachable beyond the host.
 
