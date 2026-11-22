@@ -103,6 +103,25 @@ type Rule struct {
 // RedactedMatch is the MatchedText of a violation from a RedactMatch rule.
 const RedactedMatch = "[redacted]"
 
+// loggedMatch is the match as written to the structured log: the first 50
+// characters, or RedactedMatch for a rule that redacts its match.
+func loggedMatch(r Rule, match string) string {
+	if r.RedactMatch {
+		return RedactedMatch
+	}
+	return truncateMatch(match, 50)
+}
+
+// loggedSourceContent is the source message as written to the structured log.
+// The message holds whatever the rule matched, so a rule that redacts its match
+// does not log it.
+func loggedSourceContent(r Rule, content string) string {
+	if r.RedactMatch {
+		return RedactedMatch
+	}
+	return truncateMatch(content, 4096)
+}
+
 // matchedText returns the text to record for a match of rule r.
 func matchedText(r Rule, match string) string {
 	if r.RedactMatch {
@@ -1405,7 +1424,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					"severity", cr.Severity,
 					"action", actionMsg,
 					"target", targetStr,
-					"matched", truncateMatch(match, 50),
+					"matched", loggedMatch(cr.Rule, match),
 					"event_category", violation.EventCategory,
 					"framework_ref", violation.FrameworkRef,
 					"audit_mode", auditMode,
@@ -1415,7 +1434,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 						"source_role", source.Role,
 						"message_index", source.MessageIndex,
 						"effective_severity", violation.EffectiveSeverity,
-						"source_content", truncateMatch(source.Content, 4096),
+						"source_content", loggedSourceContent(cr.Rule, source.Content),
 					)
 				}
 

@@ -226,7 +226,7 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		{
 			Name:        "openai_project_key",
 			MayMatch:    anyFold("sk-proj-", "sk-svcacct-", "sk-admin-"),
-			Regex:       regexp.MustCompile(`(?i)\bsk-(?:proj|svcacct|admin)-[a-z0-9_-]{20,}`),
+			Regex:       regexp.MustCompile(`(?i)\bsk-(?:proj|svcacct|admin)-[a-z0-9_-]{40,}`),
 			Replacement: "[REDACTED_API_KEY]",
 		},
 		{
@@ -249,14 +249,15 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 		},
 		{
 			// The header marks the start of a key; the body that follows is the
-			// secret. Redact through the END line. With no END line (a
-			// truncated capture, or a prompt that only mentions the header)
-			// redact only the base64 run that follows, which stops at the
-			// first character a key body cannot contain, so the text after
-			// it survives.
+			// secret. A body is base64: runs of 16 or more base64 characters,
+			// with a short last line. Redact the header and that body, through
+			// the END line when it follows directly. Text that does not look
+			// like a key body ends the match, so a prompt between a header and
+			// a later END line, or prose after an unterminated header, stays
+			// readable in the capture.
 			Name:        "private_key_block",
 			MayMatch:    anyFold("-----begin"),
-			Regex:       regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[a-z0-9+/=\s]*)`),
+			Regex:       regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:(?:\s*[a-z0-9+/=]{16,})*\s*[a-z0-9+/=]*\s*-----END [A-Z ]*PRIVATE KEY-----|(?:\s*[a-z0-9+/=]{16,})*)`),
 			Replacement: "[REDACTED_PRIVATE_KEY]",
 		},
 		{

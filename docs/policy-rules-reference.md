@@ -63,6 +63,11 @@ the engine matches lowercased content), and violations are returned by the
 control API and written to the block and websocket logs as well as stored.
 The built-in `secret_in_request` rule sets it.
 
+Two limits. Redefining a rule by name replaces it whole, so a redefinition of
+`secret_in_request` (to block, say) must keep `redact_match: true`, or the
+secret is recorded again. And `redact_match` is read from `elida.yaml`; a rule
+saved through the settings API has no such field and records its match.
+
 ### Audit mode and the risk ladder
 
 `mode: audit` is a true dry run: rule actions don't enforce **and** the
@@ -432,7 +437,7 @@ Detects requests that may expose PII or sensitive data.
     - "\\bxox[abprs]-[A-Za-z0-9-]{20,}"
     - "\\bsk-ant-[A-Za-z0-9_-]{20,}"
     - "\\bsk-[A-Za-z0-9]{32,}\\b"
-    - "\\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"
+    - "\\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}"
     - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
   severity: "critical"
   action: "flag"

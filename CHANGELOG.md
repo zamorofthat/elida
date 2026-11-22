@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   presets, flags a credential in a request body (AWS access and temporary keys,
   GitHub and Slack tokens, Anthropic and OpenAI-style keys, private key
   headers). It flags and records only; the request is still forwarded, so
-  redefine the rule with `action: block` to stop it. In coding-agent it is
+  redefine the rule with `action: block` (and keep `redact_match: true`) to stop it. In coding-agent it is
   observe-only. It records `[redacted]` rather than the credential it matched;
   a new `redact_match: true` rule option does the same for any rule.
 - Redaction now also covers AWS temporary keys (`ASIA...`), GitHub and Slack

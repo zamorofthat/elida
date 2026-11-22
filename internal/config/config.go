@@ -1994,7 +1994,7 @@ func secretInRequestRule(observe bool) PolicyRule {
 			`\bxox[abprs]-[A-Za-z0-9-]{20,}`,
 			`\bsk-ant-[A-Za-z0-9_-]{20,}`,
 			`\bsk-[A-Za-z0-9]{32,}\b`,
-			`\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}`,
+			`\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}`,
 			`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
 		},
 		Severity: "critical", Action: "flag",
