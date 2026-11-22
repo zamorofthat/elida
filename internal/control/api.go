@@ -173,6 +173,8 @@ type Handler struct {
 	wsHandler     *websocket.Handler
 	dashboard     *dashboard.Handler
 	settingsStore *config.SettingsStore
+	// baseRules are the policy rules the engine held when it was attached.
+	baseRules     []policy.Rule
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
 	// decisionProvider reports semantic detection status; nil means the
@@ -214,7 +216,16 @@ func WithHistory(store *storage.SQLiteStore) Option {
 
 // WithPolicy enables the policy engine.
 func WithPolicy(engine *policy.Engine) Option {
-	return func(h *Handler) { h.policyEngine = engine }
+	return func(h *Handler) {
+		h.policyEngine = engine
+		// The rules in force at startup (the preset and elida.yaml's rules)
+		// are not part of the settings. Keep them: every settings save
+		// reloads the engine, and the reload layers the saved settings over
+		// this base instead of replacing it.
+		if engine != nil {
+			h.baseRules = append([]policy.Rule(nil), engine.GetConfig().Rules...)
+		}
+	}
 }
 
 // WithInstructionRegistry attaches the instruction registry so /control/stats
@@ -436,6 +447,24 @@ func (h *Handler) reloadPolicyEngine() {
 				Action: policy.ActionTerminate,
 			})
 		}
+	}
+
+	// Start from the rules loaded at startup, minus the ones settings disable
+	// and the ones a saved custom rule of the same name replaces (the same
+	// local-overrides-default rule config loading applies to presets).
+	disabled := make(map[string]bool, len(merged.Policy.DisabledRules))
+	for _, name := range merged.Policy.DisabledRules {
+		disabled[name] = true
+	}
+	overridden := make(map[string]bool, len(merged.Policy.CustomRules))
+	for _, cr := range merged.Policy.CustomRules {
+		overridden[cr.Name] = true
+	}
+	for _, r := range h.baseRules {
+		if disabled[r.Name] || overridden[r.Name] {
+			continue
+		}
+		cfg.Rules = append(cfg.Rules, r)
 	}
 
 	// Convert custom rules from Settings to policy Rules
