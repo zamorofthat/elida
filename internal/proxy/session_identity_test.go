@@ -67,4 +67,36 @@ func TestDeriveFromDefaults(t *testing.T) {
 	if cfg.Session.DeriveFrom.BodyPath != "" {
 		t.Error("derive_from.body_path should default to empty")
 	}
+	if len(cfg.Session.DeriveFrom.BodyPaths) != 0 {
+		t.Error("derive_from.body_paths should default to empty")
+	}
+}
+
+// One config covers both A2A HTTP bindings: the same contextId resolves to
+// the same session ID from a REST body and from a JSON-RPC body.
+func TestResolveSessionIDBodyPaths(t *testing.T) {
+	p := identityProxy(false, "")
+	p.config.Session.DeriveFrom.BodyPaths = []string{"message.contextId", "params.message.contextId"}
+	r := httptest.NewRequest("POST", "/message:send", bytes.NewReader(nil))
+
+	rest := `{"message":{"contextId":"ctx-9","role":"ROLE_USER"}}`
+	rpc := `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"contextId":"ctx-9"}}}`
+	for name, body := range map[string]string{"rest": rest, "json-rpc": rpc} {
+		if got := p.resolveSessionID(r, []byte(body)); got != "user-ctx-9" {
+			t.Errorf("%s: got %q, want user-ctx-9", name, got)
+		}
+	}
+
+	// body_path is tried ahead of body_paths.
+	p.config.Session.DeriveFrom.BodyPath = "metadata.conversation_id"
+	both := `{"metadata":{"conversation_id":"c1"},"message":{"contextId":"ctx-9"}}`
+	if got := p.resolveSessionID(r, []byte(both)); got != "user-c1" {
+		t.Errorf("body_path should be tried first: got %q, want user-c1", got)
+	}
+
+	// The session header still wins over every body path.
+	r.Header.Set(p.config.Session.Header, "explicit-id")
+	if got := p.resolveSessionID(r, []byte(rest)); got != "explicit-id" {
+		t.Errorf("header should win, got %q", got)
+	}
 }
