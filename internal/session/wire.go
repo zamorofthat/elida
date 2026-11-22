@@ -164,8 +164,8 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		SemanticShadow:    clampHead(sd.SemanticShadow, MaxSemanticShadow),
 		CorrelationShadow: clampHead(sd.CorrelationShadow, MaxCorrelationShadow),
 
-		SemanticShadowDropped:    sd.SemanticShadowDropped,
-		CorrelationShadowDropped: sd.CorrelationShadowDropped,
+		SemanticShadowDropped:    sd.SemanticShadowDropped + overCap(sd.SemanticShadow, MaxSemanticShadow),
+		CorrelationShadowDropped: sd.CorrelationShadowDropped + overCap(sd.CorrelationShadow, MaxCorrelationShadow),
 	}
 	if sess.Metadata == nil {
 		sess.Metadata = make(map[string]string)
@@ -184,6 +184,11 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		}
 	}
 	return sess
+}
+
+// overCap is how many entries of in clampHead will discard.
+func overCap[T any](in []T, limit int) int {
+	return max(0, len(in)-limit)
 }
 
 func clampHead[T any](in []T, limit int) []T {

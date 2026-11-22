@@ -220,6 +220,25 @@ func TestSessionWire_RestoreClampsToTheCaps(t *testing.T) {
 	}
 }
 
+// Entries a restore trims above the cap are discarded evidence like any
+// other, so they join the carried drop count instead of vanishing.
+func TestSessionWire_RestoreCountsTrimmedShadowEntries(t *testing.T) {
+	sd := &sessionData{ID: "sess-trim", StartTime: wireTime(1), SemanticShadowDropped: 2, CorrelationShadowDropped: 5}
+	for i := 0; i < MaxSemanticShadow+10; i++ {
+		sd.SemanticShadow = append(sd.SemanticShadow, SemanticShadow{DecisionID: "d"})
+	}
+	for i := 0; i < MaxCorrelationShadow+3; i++ {
+		sd.CorrelationShadow = append(sd.CorrelationShadow, CorrelationShadow{MatchID: "m", Rule: "r"})
+	}
+	got := newSessionFromData(sd, make(chan struct{}))
+	if got.SemanticShadowDropped != 12 {
+		t.Errorf("SemanticShadowDropped = %d, want 12 (2 carried + 10 trimmed)", got.SemanticShadowDropped)
+	}
+	if got.CorrelationShadowDropped != 8 {
+		t.Errorf("CorrelationShadowDropped = %d, want 8 (5 carried + 3 trimmed)", got.CorrelationShadowDropped)
+	}
+}
+
 func TestSessionWire_OldElevenFieldBlobStillDecodes(t *testing.T) {
 	old := `{"id":"old","state":0,"start_time":"2026-11-07T10:00:01Z","last_activity":"2026-11-07T10:00:02Z","request_count":3,"bytes_in":1,"bytes_out":2,"backend":"b","client_addr":"c"}`
 	var sd sessionData
