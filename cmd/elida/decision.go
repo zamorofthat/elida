@@ -583,6 +583,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 	st.ThresholdSet = h.ThresholdSet
 	st.ThresholdSetMatches = h.ThresholdSetMatches
 	st.BreakerOpen = h.BreakerOpen
+	st.BreakerOpens = h.BreakerOpens
 	st.InputRejected = h.InputRejected
 	for _, s := range h.Signals {
 		st.Signals = append(st.Signals, string(s))

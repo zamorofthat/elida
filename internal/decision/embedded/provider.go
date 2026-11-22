@@ -62,6 +62,7 @@ type Health struct {
 	Errors              int64             // inference errors since start
 	Panics              int64             // recovered inference panics
 	Canceled            int64             // inferences abandoned because the caller's context ended; budget outcomes, not provider failures
+	BreakerOpens        int64             // times the breaker went from closed or cooled down to open; many errors in one run make one open
 	InputRejected       int64             // windows left unanswered because the input had nothing scoreable (ErrNothingToScore); input outcomes, not provider failures
 }
 
@@ -118,6 +119,7 @@ type Provider struct {
 	breakerUntil     atomic.Int64  // unix nanos the open state lasts until; 0 = closed
 	errors           atomic.Int64  // provider inference errors, including panics
 	panics           atomic.Int64  // recovered inference panics
+	breakerOpens     atomic.Int64  // transitions of the breaker to open
 	canceled         atomic.Int64  // caller-context ends; never counted as failures
 	inputRejected    atomic.Int64  // ErrNothingToScore; never counted as failures
 }
@@ -362,7 +364,7 @@ func (p *Provider) Decide(ctx context.Context, in decision.Input, signals []deci
 			p.releaseProbe(probe)
 			return p.unanswered(signals, latency), err
 		}
-		p.recordFailure(err)
+		p.recordFailure(err, probe)
 		return p.unanswered(signals, latency), err
 	}
 	p.recordSuccess()
@@ -479,6 +481,7 @@ func (p *Provider) Health() Health {
 		Panics:        p.panics.Load(),
 		Canceled:      p.canceled.Load(),
 		InputRejected: p.inputRejected.Load(),
+		BreakerOpens:  p.breakerOpens.Load(),
 	}
 	if m != nil {
 		h.Model = m.Name
@@ -601,13 +604,21 @@ func (p *Provider) recordSuccess() {
 // Consecutive, not cumulative: a provider that fails on one pathological
 // input among thousands of good ones is not broken, and tripping on a
 // lifetime total would eventually disable a healthy deployment.
-func (p *Provider) recordFailure(err error) {
+func (p *Provider) recordFailure(err error, probe halfOpenProbe) {
 	p.errors.Add(1)
 	n := p.consecutiveFails.Add(1)
 	if n < int64(p.breakerThreshold) {
 		return
 	}
-	p.breakerUntil.Store(p.clock().Add(p.breakerCooldown).UnixNano())
+	now := p.clock()
+	prev := p.breakerUntil.Swap(now.Add(p.breakerCooldown).UnixNano())
+	if probe.held || prev == 0 || now.UnixNano() >= prev {
+		// Closed, cooled down, or the failed half-open probe itself: this
+		// failure opens it. A failure from a call already in flight while it is
+		// open, even one that lands while a probe is out, is the same outage
+		// and is not counted again.
+		p.breakerOpens.Add(1)
+	}
 	// Log the trip itself at error level; later failures in the same run
 	// (the probe, or calls already in flight) are warnings, so a burst does
 	// not produce a burst of identical errors.
