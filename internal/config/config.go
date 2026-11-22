@@ -1130,10 +1130,10 @@ func DefaultConfig() *Config {
 	return defaults()
 }
 
-// applyEnvOverrides applies environment variable overrides
 // sha256HexPattern matches a SHA-256 digest written as 64 hex characters.
 var sha256HexPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 
+// applyEnvOverrides applies environment variable overrides
 func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_LISTEN"); v != "" {
 		c.Listen = v
@@ -1723,6 +1723,13 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 		})
 	}
 
+	if strings.TrimSpace(d.ModelChecksum) != "" && d.Provider != "embedded" {
+		warns = append(warns, ValidationError{
+			Field:   "decision.model_checksum",
+			Message: fmt.Sprintf("has no effect with provider %q: only the embedded model has a manifest to pin", d.Provider),
+			Hint:    "remove decision.model_checksum, or use provider: embedded",
+		})
+	}
 	if pin := strings.TrimSpace(d.ModelChecksum); pin != "" && !sha256HexPattern.MatchString(pin) {
 		errs = append(errs, ValidationError{
 			Field:   "decision.model_checksum",

@@ -60,3 +60,22 @@ func TestDecisionModelChecksumEnvOverride(t *testing.T) {
 		t.Errorf("env override: got %q, want %q", c.Decision.ModelChecksum, pin)
 	}
 }
+
+// The pin applies to the embedded model. With another provider there is no
+// manifest to check, and a pin that silently does nothing is a false assurance.
+func TestValidateWarnsWhenModelChecksumCannotApply(t *testing.T) {
+	c := defaults()
+	c.Decision.Enabled = true
+	c.Decision.Provider = "systemone"
+	c.Decision.Endpoint = "https://decide.internal/v1/score"
+	c.Decision.ModelChecksum = strings.Repeat("ab", 32)
+	found := false
+	for _, w := range c.Validate().Warnings {
+		if w.Field == "decision.model_checksum" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("model_checksum with a non-embedded provider: want a decision.model_checksum warning")
+	}
+}
