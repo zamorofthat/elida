@@ -1027,6 +1027,7 @@ func (a *app) setupPolicyEngine() error {
 			Description:    r.Description,
 			Action:         r.Action,
 			Observe:        r.Observe,
+			RedactMatch:    r.RedactMatch,
 		}
 	}
 

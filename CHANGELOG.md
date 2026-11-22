@@ -41,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Session Identity and Trust" section in `docs/security-controls.md` states
   who ELIDA trusts, what a caller controls and what to do about it. This is a
   warning only; nothing is refused.
+- A `secret_in_request` policy rule, in the standard, strict and coding-agent
+  presets, flags a credential in a request body (AWS access and temporary keys,
+  GitHub and Slack tokens, Anthropic and OpenAI-style keys, private key
+  headers). It flags and records only; the request is still forwarded, so
+  redefine the rule with `action: block` (and keep `redact_match: true`) to stop it. In coding-agent it is
+  observe-only. It records `[redacted]` rather than the credential it matched, and every
+  violation raised from a message it matched (other rules, on any target or
+  rule type, including tool-argument rules and the entropy rule) records
+  `[redacted]` in place of that message;
+  a new `redact_match: true` rule option does the same for any rule.
+- Redaction now also covers AWS temporary keys (`ASIA...`), GitHub and Slack
+  tokens, Anthropic API keys and private key blocks in captured content and
+  violation text. Redaction applies to what ELIDA stores, not to what it
+  forwards upstream.
+  The redactor's prefilter no longer takes quadratic time on a long run of one
+  letter case (1 MB of `AAAA` took seconds).
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without

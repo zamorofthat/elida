@@ -512,8 +512,9 @@ type PolicyRule struct {
 	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
 	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
-	Action         string   `yaml:"action"`  // flag, block, terminate (for content/tool rules)
-	Observe        bool     `yaml:"observe"` // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
+	Action         string   `yaml:"action"`       // flag, block, terminate (for content/tool rules)
+	Observe        bool     `yaml:"observe"`      // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
+	RedactMatch    bool     `yaml:"redact_match"` // Record "[redacted]" instead of the matched text, for rules that match credentials
 }
 
 // BackendConfig defines a single backend configuration
@@ -2040,6 +2041,32 @@ func (c *Config) ApplyPolicyPreset() {
 	}
 }
 
+// secretInRequestRule flags a credential in an outgoing request body: the
+// prompt, tool results and attachments all travel to the model provider and
+// to every hop in front of it. High-precision provider formats only, and it
+// flags rather than blocks, so a developer pasting a key is recorded without
+// breaking their session. Redefine the rule by name to block. Coding-agent
+// sessions observe only (recorded, never feeding the risk ladder), because
+// those agents legitimately carry credentials in their context. The rule
+// records "[redacted]" instead of the matched text: the match is the secret.
+func secretInRequestRule(observe bool) PolicyRule {
+	return PolicyRule{
+		Name: "secret_in_request", Type: "content_match", Target: "request", Observe: observe, RedactMatch: true,
+		Patterns: []string{
+			`\b(AKIA|ASIA)[0-9A-Z]{16}\b`,
+			`\bgh[pousr]_[A-Za-z0-9]{36,}\b`,
+			`\bgithub_pat_[A-Za-z0-9_]{40,}\b`,
+			`\bxox[abprs]-[A-Za-z0-9-]{20,}`,
+			`\bsk-ant-[A-Za-z0-9_-]{20,}`,
+			`\bsk-[A-Za-z0-9]{32,}\b`,
+			`\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}`,
+			`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
+		},
+		Severity: "critical", Action: "flag",
+		Description: "LLM06: Credential in request body (sent to the provider)",
+	}
+}
+
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
 func getMinimalPreset() []PolicyRule {
 	return []PolicyRule{
@@ -2057,7 +2084,7 @@ func getMinimalPreset() []PolicyRule {
 // output, and their rapid tool loops look like high-rate high-entropy
 // bursts to anomaly detectors (integration feedback #3).
 func getCodingAgentPreset() []PolicyRule {
-	return []PolicyRule{
+	return append([]PolicyRule{
 		// ---- Enforced: structural, can't false-fire on agent output ----
 		{Name: "block_dangerous_tools", Type: "tool_blocked", Target: "response", Patterns: []string{
 			"exec_*", "shell_*", "rm_*", "sudo_*", "eval_*",
@@ -2118,12 +2145,12 @@ func getCodingAgentPreset() []PolicyRule {
 			ThresholdFloat: 0.01, MinSamples: 10, Description: "ANOMALY: Request rate statistically abnormal (observe)"},
 		{Name: "compound_anomaly", Type: "compound_anomaly", Observe: true, Severity: "warning", Action: "flag",
 			ThresholdFloat: 0.15, MinSamples: 5, Description: "ANOMALY: Sustained high-rate + high-entropy burst (elevated rate/entropy signal, observe)"},
-	}
+	}, secretInRequestRule(true))
 }
 
 // getStandardPreset returns OWASP basics + rate limits (production default)
 func getStandardPreset() []PolicyRule {
-	return []PolicyRule{
+	return append([]PolicyRule{
 		// Rate limiting (applies to metrics, not content)
 		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 60, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 60/min"},
 		{Name: "rate_limit_warning", Type: "requests_per_minute", Threshold: 30, Severity: "warning", Action: "flag", Description: "FIREWALL: Elevated request rate (30/min)"},
@@ -2266,7 +2293,7 @@ func getStandardPreset() []PolicyRule {
 			"chmod\\s+777",
 			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 		}, Severity: "critical", Action: "terminate", Description: "LLM08: Dangerous patterns in tool arguments"},
-	}
+	}, secretInRequestRule(false))
 }
 
 // getStrictPreset returns full OWASP + NIST + PII detection (high-security)
