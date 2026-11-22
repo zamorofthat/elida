@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- With `proxy.auth` enabled, a WebSocket upgrade was handed to the WebSocket
+  handler before the auth check ran, so a caller with no key, or a wrong one,
+  could open a WebSocket to the proxy. The auth check now runs first, so an
+  upgrade needs a valid key (or a trusted-network peer) like any other request.
+  With auth off nothing changes.
 - Saving any setting through `PUT /control/settings` (or the dashboard) removed
   every policy rule the proxy had loaded at startup, the preset's rules and
   those in `elida.yaml`, until the next restart: the reload rebuilt the rule
