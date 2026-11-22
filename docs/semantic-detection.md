@@ -321,6 +321,7 @@ to start. The mismatched model never reaches the inference pipeline. An empty
 value, the default, means no pin.
 
 Update the pin whenever you change the model.
+
 ## Resource requirements
 
 Semantic detection loads the model into memory and runs inference on the CPU.
