@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Sessions now record the `User-Agent` their requests send, as the `user_agent`
+  metadata entry. The first value is kept (control characters removed, 200 bytes
+  at most); if a later request in the same session sends a different one,
+  `user_agent_changed` is set to `true`. The header is whatever the caller
+  claims, so it labels a session and is not an identity. A request with no
+  `User-Agent` records nothing and is not counted as a change.
 - Semantic prompt-injection detection, disabled by default
   (`decision.enabled: false`). An embedded, pure-Go MiniLM classifier scores
   user content and tool results, including bounded decoded representations,
