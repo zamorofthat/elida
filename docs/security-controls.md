@@ -143,6 +143,79 @@ ELIDA provides a security control plane for AI agent traffic with:
 
 ---
 
+## Session Identity and Trust
+
+ELIDA's per-session controls (cumulative risk, the risk ladder, temporal
+correlation, the kill switch, and the evidence kept for each session) all hang
+off one key: the session ID. ELIDA decides what a caller may do on the
+assumption that the caller does not choose its own key. Read this section
+before exposing the proxy to anyone you do not trust.
+
+### What ELIDA trusts
+
+- **The operator**, the control API credential, the configuration and the model
+  artifact's build chain.
+- **The calling application**, for session identity and message roles.
+
+### What a caller controls
+
+A caller that can reach the proxy port sets:
+
+- **The session ID.** ELIDA takes it from the first of these that is present:
+  the session header (`X-Session-ID`, or whatever `session.header` is set to),
+  used as sent; then `X-Claude-Code-Session-Id`, when its value is a safe ID;
+  then a value derived from the request body (`session.derive_from`: the
+  OpenAI `user` field by default, or a configured body path). With none of
+  those, the ID comes from the client address and the backend.
+- **The `role` label on each message.**
+- The request body, its size and the request rate.
+
+Proxy authentication (`proxy.auth`) is one shared key. It decides whether a
+caller may use the proxy at all. It does not tell callers apart, so it does not
+anchor session identity.
+
+### What that means
+
+- **Risk reset.** A caller that sends a new random session ID with every
+  request accumulates nothing: each request is scored alone, risk never
+  builds, and slow-burn and multi-message correlation cannot fire. This needs
+  no clever payload, only a header.
+- **Session collision.** Session IDs are not namespaced per caller. Two callers
+  that send the same ID share one session, its risk score and its evidence. In
+  a shared deployment one caller can push another's session toward throttling
+  or a kill, or fill it with noise.
+- **Relabelled roles.** Roles carry weight: `system` content scores a tenth and
+  `assistant` content a fifth of the same match in `user` content, and semantic
+  detection assesses only `user` and `tool` messages. A caller that labels
+  hostile text `system` is not assessed by semantic detection at all.
+
+### When this is fine, and when it is not
+
+- **Fine:** one trusted application, or a small set of mutually trusted agents,
+  talking to its own ELIDA, where the caller is honest but may carry hostile
+  content. This is the common deployment, and it is the one ELIDA's session
+  controls are built for.
+- **Not enough:** a shared or multi-tenant proxy, or any proxy reachable by a
+  caller who is itself the adversary. ELIDA still inspects content in that
+  setup, but its per-session guarantees do not hold against a caller who
+  manipulates session identity or roles.
+
+### What to do
+
+- Bind the proxy to a loopback or private address, or put it behind a gateway
+  that authenticates callers and sets the session ID for them. The gateway must
+  strip the client's session header (`X-Session-ID`, or your `session.header`)
+  and `X-Claude-Code-Session-Id`, and write its own: either one, left in, is
+  taken from the client.
+- Turn on `proxy.auth`, and when callers are not mutually trusted set
+  `session.derive_from.openai_user: false` and leave every
+  `session.derive_from` body path empty, so no body field can name a session.
+- ELIDA warns at startup when proxy authentication is off and the listener is
+  reachable beyond the host.
+
+Per-caller credentials, which would let ELIDA anchor session identity itself,
+are not implemented.
+
 ## Enforcement Actions
 
 | Action | Behavior | Use Case |
