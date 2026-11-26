@@ -66,6 +66,7 @@ nav:
     - Configuration: configuration.md
     - Deployment: deployment.md
     - Docker: docker.md
+    - Stability and Compatibility: stability.md
   - Architecture:
     - Overview: architecture.md
     - Enterprise Deployment: enterprise-deployment.md
