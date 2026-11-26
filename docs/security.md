@@ -4,9 +4,12 @@ ELIDA takes security seriously. As a security-focused proxy for AI model traffic
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+ELIDA is pre-1.0 and ships frequently. Security fixes go into the latest release only; there are no backports to older versions.
+
+| Version                        | Supported          |
+| ------------------------------ | ------------------ |
+| Latest release (currently 0.33.x) | :white_check_mark: |
+| Anything older                 | :x: — upgrade to the latest release |
 
 ## Reporting a Vulnerability
 

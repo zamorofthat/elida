@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // State represents the current state of a session
@@ -65,6 +67,12 @@ type Session struct {
 	// content still needs scanning is seenSystemHashes' question.
 	SystemPromptHash string `json:"-"` // Not persisted, session-local cache
 
+	// SystemPromptChanges counts how many times the session's primary system
+	// prompt changed to one it had not scanned before. A change is often
+	// legitimate (a deployment, a new agent) and sometimes the only trace of a
+	// caller rewriting the rules mid-session.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
+
 	// seenSystemHashes holds the hash of every piece of system content the
 	// policy engine has already scanned in this session. One session carries
 	// several at once: a top-level prompt, role "system" entries in the
@@ -98,11 +106,17 @@ type Session struct {
 	// Shadow-mode semantic decisions, newest first, capped at
 	// MaxSemanticShadow. Never contributes to risk.
 	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+	// SemanticShadowDropped counts the shadow decisions discarded because the
+	// list was at MaxSemanticShadow. It is the only trace of what was lost.
+	SemanticShadowDropped int `json:"semantic_shadow_dropped,omitempty"`
 
 	// Shadow-mode correlation matches, newest first, capped at
 	// MaxCorrelationShadow. Calibration data only: never a violation,
 	// never risk.
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+	// CorrelationShadowDropped counts the shadow correlation matches discarded
+	// because the list was at MaxCorrelationShadow.
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 
 	// Conversation history for failover/replay
 	Messages     []Message `json:"messages,omitempty"`
@@ -380,6 +394,7 @@ func (s *Session) RecordSemanticShadow(sh SemanticShadow) {
 	n := len(s.SemanticShadow) + 1
 	if n > MaxSemanticShadow {
 		n = MaxSemanticShadow
+		s.SemanticShadowDropped++
 	}
 	out := make([]SemanticShadow, n)
 	out[0] = sh
@@ -409,6 +424,7 @@ func (s *Session) RecordCorrelationShadow(cs CorrelationShadow) {
 	n := len(s.CorrelationShadow) + 1
 	if n > MaxCorrelationShadow {
 		n = MaxCorrelationShadow
+		s.CorrelationShadowDropped++
 	}
 	out := make([]CorrelationShadow, n)
 	out[0] = cs.clone()
@@ -469,6 +485,13 @@ func (s *Session) SetSystemPromptHash(hash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SystemPromptHash = hash
+}
+
+// RecordSystemPromptChange counts one change of the primary system prompt.
+func (s *Session) RecordSystemPromptChange() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SystemPromptChanges++
 }
 
 // FrameType represents the type of WebSocket frame
@@ -711,6 +734,48 @@ func (s *Session) SetMetadata(key, value string) {
 	s.Metadata[key] = value
 }
 
+// MaxUserAgentLen caps the stored User-Agent: the header is caller-controlled.
+const MaxUserAgentLen = 200
+
+// ObserveUserAgent records the client software a session's requests claim to
+// come from. The first non-empty value is kept as metadata "user_agent"; a
+// later request that sends a different one sets "user_agent_changed" to
+// "true" and leaves the first value in place. The value is self-asserted by
+// the caller, so it labels a session and is never an identity.
+func (s *Session) ObserveUserAgent(raw string) {
+	ua := sanitizeUserAgent(raw)
+	if ua == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	first, seen := s.Metadata["user_agent"]
+	switch {
+	case !seen:
+		s.Metadata["user_agent"] = ua
+	case first != ua:
+		s.Metadata["user_agent_changed"] = "true"
+	}
+}
+
+// sanitizeUserAgent drops control characters and truncates to MaxUserAgentLen
+// bytes on a rune boundary.
+func sanitizeUserAgent(raw string) string {
+	b := make([]rune, 0, len(raw))
+	n := 0
+	for _, r := range strings.TrimSpace(raw) {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+			continue
+		}
+		n += utf8.RuneLen(r)
+		if n > MaxUserAgentLen {
+			break
+		}
+		b = append(b, r)
+	}
+	return string(b)
+}
+
 // RecordMessage adds a message to the conversation history
 func (s *Session) RecordMessage(role, content, backend string) {
 	s.mu.Lock()
@@ -860,6 +925,7 @@ func (s *Session) Snapshot() Session {
 		copy(snap.SemanticShadow, s.SemanticShadow)
 	}
 	snap.CorrelationShadow = cloneCorrelationShadow(s.CorrelationShadow)
+	snap.SystemPromptChanges = s.SystemPromptChanges
 	if s.Messages != nil {
 		snap.Messages = make([]Message, len(s.Messages))
 		copy(snap.Messages, s.Messages)
