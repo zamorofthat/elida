@@ -67,6 +67,7 @@ func fullWireSession() *Session {
 			Timestamp: wireTime(i % 60), ToolName: "bash", ToolType: "function", RequestID: "req",
 		})
 	}
+	s.SemanticShadowDropped, s.CorrelationShadowDropped = 7, 3
 	for i := 0; i < MaxSemanticShadow; i++ {
 		s.SemanticShadow = append(s.SemanticShadow, SemanticShadow{
 			Timestamp: wireTime(i % 60), DecisionID: "dec", Signal: "injection", Probability: 0.4,
@@ -216,6 +217,25 @@ func TestSessionWire_RestoreClampsToTheCaps(t *testing.T) {
 	h := got.ToolCallHistory
 	if len(h) != maxToolCallHistory || h[maxToolCallHistory-1].ToolName != "newest" {
 		t.Fatalf("tool history clamp: len=%d last=%q (oldest-first list keeps its tail)", len(h), h[len(h)-1].ToolName)
+	}
+}
+
+// Entries a restore trims above the cap are discarded evidence like any
+// other, so they join the carried drop count instead of vanishing.
+func TestSessionWire_RestoreCountsTrimmedShadowEntries(t *testing.T) {
+	sd := &sessionData{ID: "sess-trim", StartTime: wireTime(1), SemanticShadowDropped: 2, CorrelationShadowDropped: 5}
+	for i := 0; i < MaxSemanticShadow+10; i++ {
+		sd.SemanticShadow = append(sd.SemanticShadow, SemanticShadow{DecisionID: "d"})
+	}
+	for i := 0; i < MaxCorrelationShadow+3; i++ {
+		sd.CorrelationShadow = append(sd.CorrelationShadow, CorrelationShadow{MatchID: "m", Rule: "r"})
+	}
+	got := newSessionFromData(sd, make(chan struct{}))
+	if got.SemanticShadowDropped != 12 {
+		t.Errorf("SemanticShadowDropped = %d, want 12 (2 carried + 10 trimmed)", got.SemanticShadowDropped)
+	}
+	if got.CorrelationShadowDropped != 8 {
+		t.Errorf("CorrelationShadowDropped = %d, want 8 (5 carried + 3 trimmed)", got.CorrelationShadowDropped)
 	}
 }
 

@@ -22,10 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy mode and the risk ladder still come from `elida.yaml`.
 
 ### Added
-- `GET /control/decision` reports `breaker_opens`: how many times the semantic
-  provider's circuit breaker has opened since start. Until now the transitions
-  were only in the log, so there was nothing to chart or alert on while the
-  breaker, which leaves detection off, kept opening.
+- `GET /control/sessions/{id}` reports `semantic_shadow_dropped` and
+  `correlation_shadow_dropped`: how many shadow decisions and shadow
+  correlation matches a session discarded after reaching its cap of 50 each.
+  Until now the discard was silent, so a long session's shadow evidence could
+  be incomplete with no way to tell. The counts cover live sessions; the
+  persisted history record does not carry them yet.
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without
