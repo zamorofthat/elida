@@ -195,6 +195,28 @@ Every violation includes structured fields for automated SIEM rules:
 
 ---
 
+## A2A Agents
+
+ELIDA proxies the A2A HTTP+JSON and JSON-RPC bindings as ordinary HTTP, including `message:stream` over SSE. To keep one A2A conversation in one session, derive the session ID from the conversation's `contextId`, which sits at a different place in each binding:
+
+```yaml
+session:
+  derive_from:
+    openai_user: false
+    body_paths:
+      - "message.contextId"          # HTTP+JSON: POST /message:send, /message:stream
+      - "params.message.contextId"   # JSON-RPC: SendMessage, SendStreamingMessage
+```
+
+### Limits
+
+- The first turn of a conversation has no `contextId` (the A2A server assigns one in its response), so that one request is recorded under the client-IP fallback session.
+- The gRPC binding is not grouped this way.
+- ELIDA does not parse A2A messages. Policy rules scan the request and response text as they do for any backend.
+- `contextId` is sent by the client. See the security note under [Body-Derived Session Identity](configuration.md#body-derived-session-identity-sessionderive_from).
+
+---
+
 ## Claude Code / Cursor / AI IDEs
 
 Any AI-powered development tool that uses the Anthropic or OpenAI API can be routed through ELIDA.

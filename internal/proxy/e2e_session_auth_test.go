@@ -236,3 +236,52 @@ func TestE2EKillSwitchOnDerivedSession(t *testing.T) {
 		t.Errorf("post-kill request reached the backend (%d hits), it should have been rejected before proxying", h)
 	}
 }
+
+// TestE2EA2AContextUnification sends one A2A conversation through the real
+// ServeHTTP path over both HTTP bindings. Both turns must land in one
+// session; a turn with no contextId (the first turn of a conversation, before
+// the server has assigned one) falls back to a client-IP session.
+func TestE2EA2AContextUnification(t *testing.T) {
+	var hits int64
+	backend := e2eBackend(&hits)
+	defer backend.Close()
+
+	p, manager := newE2EProxy(t, backend.URL, func(cfg *config.Config) {
+		cfg.Session.DeriveFrom.BodyPaths = []string{"message.contextId", "params.message.contextId"}
+	})
+
+	post := func(path, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/a2a+json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s: got status %d", path, rec.Code)
+		}
+	}
+
+	post("/message:send", `{"message":{"messageId":"m1","contextId":"ctx-e2e","role":"ROLE_USER","parts":[{"text":"hi"}]}}`)
+	post("/", `{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m2","contextId":"ctx-e2e","role":"ROLE_USER","parts":[{"text":"again"}]}}}`)
+	post("/message:send", `{"message":{"messageId":"m0","role":"ROLE_USER","parts":[{"text":"first turn"}]}}`)
+
+	sess, ok := manager.Get("user-ctx-e2e")
+	if !ok {
+		t.Fatal(`expected session "user-ctx-e2e" to exist`)
+	}
+	if sess.RequestCount != 2 {
+		t.Errorf("expected 2 requests on the conversation's session, got %d", sess.RequestCount)
+	}
+	all := manager.ListAll()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 sessions (conversation + fallback), got %d", len(all))
+	}
+	for _, s := range all {
+		if s.ID != "user-ctx-e2e" && !strings.HasPrefix(s.ID, "client-") {
+			t.Errorf("unexpected session ID %q", s.ID)
+		}
+	}
+	if hits != 3 {
+		t.Errorf("expected all 3 requests to reach the backend, got %d", hits)
+	}
+}

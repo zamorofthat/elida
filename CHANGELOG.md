@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy mode and the risk ladder still come from `elida.yaml`.
 
 ### Added
+- `session.derive_from.body_paths`: a list of body paths tried in order, after
+  `body_path`, when deriving a session ID. One config can now group an A2A
+  conversation by `contextId` across the HTTP+JSON (`message.contextId`) and
+  JSON-RPC (`params.message.contextId`) bindings. An unusable entry fails
+  config validation. `body_path` is unchanged.
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without

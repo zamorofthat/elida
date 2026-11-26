@@ -550,6 +550,20 @@ type SessionConfig struct {
 type SessionDeriveConfig struct {
 	OpenAIUser bool   `yaml:"openai_user"` // use the standard OpenAI `user` field (default true)
 	BodyPath   string `yaml:"body_path"`   // optional dot-path, e.g. "metadata.conversation_id"; takes precedence over the user field
+	// BodyPaths are further dot-paths tried in order after BodyPath, e.g. the
+	// A2A contextId at "message.contextId" (HTTP+JSON) and
+	// "params.message.contextId" (JSON-RPC). First non-empty string wins.
+	BodyPaths []string `yaml:"body_paths"`
+}
+
+// Paths returns every configured body path in precedence order: BodyPath
+// first when set, then BodyPaths. Nil when none is configured.
+func (d SessionDeriveConfig) Paths() []string {
+	var out []string
+	if d.BodyPath != "" {
+		out = append(out, d.BodyPath)
+	}
+	return append(out, d.BodyPaths...)
 }
 
 // KillBlockConfig configures how long killed sessions stay blocked
@@ -1488,6 +1502,15 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	// Session config
+	for i, bp := range c.Session.DeriveFrom.BodyPaths {
+		if bp == "" || bp != strings.TrimSpace(bp) || slices.Contains(strings.Split(bp, "."), "") {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("session.derive_from.body_paths[%d]", i),
+				Message: fmt.Sprintf("%q is not a usable path", bp),
+				Hint:    `dot-separated keys with no empty segment, e.g. "params.message.contextId"`,
+			})
+		}
+	}
 	if c.Session.Timeout <= 0 {
 		errors = append(errors, ValidationError{
 			Field:   "session.timeout",
