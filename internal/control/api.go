@@ -76,6 +76,10 @@ type DecisionStatus struct {
 	ThresholdSetMatches bool   `json:"threshold_set_matches"`
 
 	BreakerOpen bool `json:"breaker_open"`
+	// BreakerOpens counts how many times the circuit breaker opened since
+	// start, so a rate can be charted or alerted on. A run of failed inferences
+	// makes one open, however many errors it holds.
+	BreakerOpens int64 `json:"breaker_opens"`
 
 	// Capacity signals. These, not a fixed requests-per-second figure, are
 	// what tell an operator to add replicas or lower concurrency.
@@ -173,6 +177,8 @@ type Handler struct {
 	wsHandler     *websocket.Handler
 	dashboard     *dashboard.Handler
 	settingsStore *config.SettingsStore
+	// baseRules are the policy rules the engine held when it was attached.
+	baseRules     []policy.Rule
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
 	// decisionProvider reports semantic detection status; nil means the
@@ -214,7 +220,16 @@ func WithHistory(store *storage.SQLiteStore) Option {
 
 // WithPolicy enables the policy engine.
 func WithPolicy(engine *policy.Engine) Option {
-	return func(h *Handler) { h.policyEngine = engine }
+	return func(h *Handler) {
+		h.policyEngine = engine
+		// The rules in force at startup (the preset and elida.yaml's rules)
+		// are not part of the settings. Keep them: every settings save
+		// reloads the engine, and the reload layers the saved settings over
+		// this base instead of replacing it.
+		if engine != nil {
+			h.baseRules = append([]policy.Rule(nil), engine.GetConfig().Rules...)
+		}
+	}
 }
 
 // WithInstructionRegistry attaches the instruction registry so /control/stats
@@ -365,6 +380,72 @@ func (h *Handler) SetDecisionConfigurer(c DecisionConfigurer) {
 	h.decisionConfigurer = c
 }
 
+// layeredRules returns the policy rules the engine should run for the given
+// settings: the rules loaded at startup, minus the ones settings disable and the
+// ones a saved custom rule of the same name replaces, plus the saved custom rules.
+func (h *Handler) layeredRules(merged config.Settings) []policy.Rule {
+	var rules []policy.Rule
+	// Local overrides default, as config loading applies to presets.
+	disabled := make(map[string]bool, len(merged.Policy.DisabledRules))
+	for _, name := range merged.Policy.DisabledRules {
+		disabled[name] = true
+	}
+	overridden := make(map[string]bool, len(merged.Policy.CustomRules))
+	for _, cr := range merged.Policy.CustomRules {
+		overridden[cr.Name] = true
+	}
+	for _, r := range h.baseRules {
+		if disabled[r.Name] || overridden[r.Name] {
+			continue
+		}
+		rules = append(rules, r)
+	}
+
+	// Convert custom rules from Settings to policy Rules
+	for _, cr := range merged.Policy.CustomRules {
+		if config.ReservedRuleName(cr.Name) {
+			// saveSettings refuses new ones; one saved earlier (an older
+			// release, or a hand edit) is kept in settings.yaml. Skipped so
+			// a regex rule never records under the semantic runner's name
+			// or a correlation match's "correlation." name.
+			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
+			continue
+		}
+		rule := policy.Rule{
+			Name:           cr.Name,
+			Type:           policy.RuleType(cr.Type),
+			Target:         policy.RuleTarget(cr.Target),
+			Patterns:       cr.Patterns,
+			Threshold:      cr.Threshold,
+			ThresholdFloat: cr.ThresholdFloat,
+			MinSamples:     cr.MinSamples,
+			Severity:       policy.Severity(cr.Severity),
+			Description:    cr.Description,
+			Action:         cr.Action,
+		}
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+// ApplySavedPolicyRules puts the rule settings saved before this start
+// (disabled_rules and custom rules) in force. Nothing else applied them at
+// startup, so a rule saved as disabled came back after a restart until the next
+// save. Only the rules are applied: the policy mode and the risk ladder keep
+// the values elida.yaml gave them. With no saved rule settings it does nothing.
+func (h *Handler) ApplySavedPolicyRules() {
+	if h.settingsStore == nil || h.policyEngine == nil {
+		return
+	}
+	merged := h.settingsStore.GetMerged()
+	if len(merged.Policy.DisabledRules) == 0 && len(merged.Policy.CustomRules) == 0 {
+		return
+	}
+	cfg := h.policyEngine.GetConfig()
+	cfg.Rules = h.layeredRules(merged)
+	h.policyEngine.ReloadConfig(cfg)
+}
+
 // reloadPolicyEngine applies current settings to the policy engine and the
 // decision configurer without restart.
 func (h *Handler) reloadPolicyEngine() {
@@ -438,30 +519,7 @@ func (h *Handler) reloadPolicyEngine() {
 		}
 	}
 
-	// Convert custom rules from Settings to policy Rules
-	for _, cr := range merged.Policy.CustomRules {
-		if config.ReservedRuleName(cr.Name) {
-			// saveSettings refuses new ones; one saved earlier (an older
-			// release, or a hand edit) is kept in settings.yaml. Skipped so
-			// a regex rule never records under the semantic runner's name
-			// or a correlation match's "correlation." name.
-			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
-			continue
-		}
-		rule := policy.Rule{
-			Name:           cr.Name,
-			Type:           policy.RuleType(cr.Type),
-			Target:         policy.RuleTarget(cr.Target),
-			Patterns:       cr.Patterns,
-			Threshold:      cr.Threshold,
-			ThresholdFloat: cr.ThresholdFloat,
-			MinSamples:     cr.MinSamples,
-			Severity:       policy.Severity(cr.Severity),
-			Description:    cr.Description,
-			Action:         cr.Action,
-		}
-		cfg.Rules = append(cfg.Rules, rule)
-	}
+	cfg.Rules = h.layeredRules(merged)
 
 	h.policyEngine.ReloadConfig(cfg)
 	if h.decisionConfigurer == nil {
@@ -820,6 +878,8 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
 	info.CorrelationShadow = snap.CorrelationShadow
+	info.SemanticShadowDropped = snap.SemanticShadowDropped
+	info.CorrelationShadowDropped = snap.CorrelationShadowDropped
 	// GetFlaggedSession returns a deep copy, so the list is the caller's.
 	if h.policyEngine != nil {
 		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
@@ -972,6 +1032,10 @@ type SessionInfo struct {
 	// path, for the same reason as SemanticShadow: shadow-mode correlation
 	// matches, calibration data that is never a violation.
 	CorrelationShadow []session.CorrelationShadow `json:"correlation_shadow,omitempty"`
+	// SemanticShadowDropped and CorrelationShadowDropped count the entries each
+	// shadow list discarded at its cap. Detail path only, with the lists.
+	SemanticShadowDropped    int `json:"semantic_shadow_dropped,omitempty"`
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 
 	// SemanticDecisions is the policy engine's per-decision record list
 	// (detail path only, like SemanticShadow): what explains each semantic

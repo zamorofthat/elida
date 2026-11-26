@@ -104,11 +104,17 @@ type Session struct {
 	// Shadow-mode semantic decisions, newest first, capped at
 	// MaxSemanticShadow. Never contributes to risk.
 	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+	// SemanticShadowDropped counts the shadow decisions discarded because the
+	// list was at MaxSemanticShadow. It is the only trace of what was lost.
+	SemanticShadowDropped int `json:"semantic_shadow_dropped,omitempty"`
 
 	// Shadow-mode correlation matches, newest first, capped at
 	// MaxCorrelationShadow. Calibration data only: never a violation,
 	// never risk.
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+	// CorrelationShadowDropped counts the shadow correlation matches discarded
+	// because the list was at MaxCorrelationShadow.
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 
 	// Conversation history for failover/replay
 	Messages     []Message `json:"messages,omitempty"`
@@ -386,6 +392,7 @@ func (s *Session) RecordSemanticShadow(sh SemanticShadow) {
 	n := len(s.SemanticShadow) + 1
 	if n > MaxSemanticShadow {
 		n = MaxSemanticShadow
+		s.SemanticShadowDropped++
 	}
 	out := make([]SemanticShadow, n)
 	out[0] = sh
@@ -415,6 +422,7 @@ func (s *Session) RecordCorrelationShadow(cs CorrelationShadow) {
 	n := len(s.CorrelationShadow) + 1
 	if n > MaxCorrelationShadow {
 		n = MaxCorrelationShadow
+		s.CorrelationShadowDropped++
 	}
 	out := make([]CorrelationShadow, n)
 	out[0] = cs.clone()

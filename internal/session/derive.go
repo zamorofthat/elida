@@ -21,20 +21,31 @@ func SafeID(v string) bool {
 }
 
 // DeriveIDFromBody derives a session ID from a JSON request body.
-// Precedence: bodyPath (explicit config) over the OpenAI "user" field.
+// Precedence: bodyPaths (explicit config, tried in order, first non-empty
+// string wins) over the OpenAI "user" field. Empty path entries are skipped.
 // Returns "" when nothing derivable — callers fall back to IP-hash sessions.
 // Derived IDs deliberately contain no backend component, so one conversation
 // keeps one session across backend failover (integration feedback #4).
-func DeriveIDFromBody(body []byte, openaiUser bool, bodyPath string) string {
-	if len(body) == 0 || (!openaiUser && bodyPath == "") {
+func DeriveIDFromBody(body []byte, openaiUser bool, bodyPaths ...string) string {
+	hasPath := false
+	for _, p := range bodyPaths {
+		if p != "" {
+			hasPath = true
+			break
+		}
+	}
+	if len(body) == 0 || (!openaiUser && !hasPath) {
 		return ""
 	}
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return ""
 	}
-	if bodyPath != "" {
-		if v := lookupPath(data, bodyPath); v != "" {
+	for _, p := range bodyPaths {
+		if p == "" {
+			continue
+		}
+		if v := lookupPath(data, p); v != "" {
 			return formatDerivedID(v)
 		}
 	}

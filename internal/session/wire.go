@@ -112,6 +112,9 @@ func sessionToData(sess *Session) *sessionData {
 		FailedBackends:    slices.Clone(sess.FailedBackends),
 		SemanticShadow:    slices.Clone(sess.SemanticShadow),
 		CorrelationShadow: cloneCorrelationShadow(sess.CorrelationShadow),
+
+		SemanticShadowDropped:    sess.SemanticShadowDropped,
+		CorrelationShadowDropped: sess.CorrelationShadowDropped,
 	}
 	sd.SystemPromptChanges = sess.SystemPromptChanges
 	if sess.EndTime != nil {
@@ -160,6 +163,9 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		FailedBackends:    sd.FailedBackends,
 		SemanticShadow:    clampHead(sd.SemanticShadow, MaxSemanticShadow),
 		CorrelationShadow: clampHead(sd.CorrelationShadow, MaxCorrelationShadow),
+
+		SemanticShadowDropped:    sd.SemanticShadowDropped + overCap(sd.SemanticShadow, MaxSemanticShadow),
+		CorrelationShadowDropped: sd.CorrelationShadowDropped + overCap(sd.CorrelationShadow, MaxCorrelationShadow),
 	}
 	sess.SystemPromptChanges = sd.SystemPromptChanges
 	if sess.Metadata == nil {
@@ -179,6 +185,11 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		}
 	}
 	return sess
+}
+
+// overCap is how many entries of in clampHead will discard.
+func overCap[T any](in []T, limit int) int {
+	return max(0, len(in)-limit)
 }
 
 func clampHead[T any](in []T, limit int) []T {
