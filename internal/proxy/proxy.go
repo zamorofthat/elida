@@ -411,6 +411,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the manager write it periodically while the request runs.
 	defer p.manager.TrackRequest(sess)()
 	sess.TouchAndRecord(int64(len(requestBody)), backend.Name)
+	if authClient != "" {
+		sess.SetMetadata("client", authClient)
+	}
 	sess.ObserveUserAgent(r.Header.Get("User-Agent"))
 
 	// Check if session was killed
