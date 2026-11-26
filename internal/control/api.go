@@ -1041,6 +1041,10 @@ type SessionInfo struct {
 	// (detail path only, like SemanticShadow): what explains each semantic
 	// violation and enforcement action on this session.
 	SemanticDecisions []policy.SemanticDecision `json:"semantic_decisions,omitempty"`
+
+	// SystemPromptChanges counts how many times the session's primary system
+	// prompt changed to one it had not scanned before.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
@@ -1083,6 +1087,7 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 		}
 	}
 
+	info.SystemPromptChanges = snap.SystemPromptChanges
 	return info
 }
 

@@ -65,6 +65,12 @@ type Session struct {
 	// content still needs scanning is seenSystemHashes' question.
 	SystemPromptHash string `json:"-"` // Not persisted, session-local cache
 
+	// SystemPromptChanges counts how many times the session's primary system
+	// prompt changed to one it had not scanned before. A change is often
+	// legitimate (a deployment, a new agent) and sometimes the only trace of a
+	// caller rewriting the rules mid-session.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
+
 	// seenSystemHashes holds the hash of every piece of system content the
 	// policy engine has already scanned in this session. One session carries
 	// several at once: a top-level prompt, role "system" entries in the
@@ -479,6 +485,13 @@ func (s *Session) SetSystemPromptHash(hash string) {
 	s.SystemPromptHash = hash
 }
 
+// RecordSystemPromptChange counts one change of the primary system prompt.
+func (s *Session) RecordSystemPromptChange() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SystemPromptChanges++
+}
+
 // FrameType represents the type of WebSocket frame
 type FrameType int
 
@@ -868,8 +881,7 @@ func (s *Session) Snapshot() Session {
 		copy(snap.SemanticShadow, s.SemanticShadow)
 	}
 	snap.CorrelationShadow = cloneCorrelationShadow(s.CorrelationShadow)
-	snap.SemanticShadowDropped = s.SemanticShadowDropped
-	snap.CorrelationShadowDropped = s.CorrelationShadowDropped
+	snap.SystemPromptChanges = s.SystemPromptChanges
 	if s.Messages != nil {
 		snap.Messages = make([]Message, len(s.Messages))
 		copy(snap.Messages, s.Messages)

@@ -2239,6 +2239,7 @@ func systemMessageIfNew(content string, sess *session.Session, index int, primar
 
 	switch {
 	case primary && previous != "" && previous != hash:
+		sess.RecordSystemPromptChange()
 		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", previous[:16], "new_hash", hash[:16])
 	case primary:
 		slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
