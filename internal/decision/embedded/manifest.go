@@ -27,6 +27,9 @@ var (
 	ErrManifestMissing  = errors.New("embedded: model manifest not found")
 	ErrChecksumMismatch = errors.New("embedded: model file checksum mismatch")
 	ErrHeadOrder        = errors.New("embedded: model head order must be [injection, human_directed]")
+	// ErrChecksumPinMismatch is returned when decision.model_checksum is set
+	// and the loaded manifest's SHA-256 is not that value.
+	ErrChecksumPinMismatch = errors.New("embedded: model manifest does not match the configured checksum pin")
 )
 
 // Calibration is the threshold artifact that travels with a model.

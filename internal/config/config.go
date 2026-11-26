@@ -756,7 +756,14 @@ type DecisionConfig struct {
 	Mode          string `yaml:"mode"`           // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
 	Provider      string `yaml:"provider"`       // embedded or systemone (default: embedded)
 	ModelPath     string `yaml:"model_path"`     // Model directory (default: /etc/elida/models/injection)
-	Endpoint      string `yaml:"endpoint"`       // systemone only; content leaves the deployment
+	// ModelChecksum pins the model artifact: the SHA-256 of the model
+	// directory's manifest.json, 64 hex characters. When set, a model whose
+	// manifest hashes to anything else is not loaded (degraded, or a startup
+	// error with required: true). The manifest lists every model file's
+	// digest, so this pins the whole artifact. Empty means no pin. Embedded
+	// provider only.
+	ModelChecksum string `yaml:"model_checksum"`
+	Endpoint      string `yaml:"endpoint"` // systemone only; content leaves the deployment
 
 	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
@@ -1138,6 +1145,9 @@ func DefaultConfig() *Config {
 	return defaults()
 }
 
+// sha256HexPattern matches a SHA-256 digest written as 64 hex characters.
+var sha256HexPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
 // applyEnvOverrides applies environment variable overrides
 func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_LISTEN"); v != "" {
@@ -1251,6 +1261,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ELIDA_DECISION_MODEL_PATH"); v != "" {
 		c.Decision.ModelPath = v
+	}
+	if v := os.Getenv("ELIDA_DECISION_MODEL_CHECKSUM"); v != "" {
+		c.Decision.ModelChecksum = v
 	}
 	if v := os.Getenv("ELIDA_DECISION_ENDPOINT"); v != "" {
 		c.Decision.Endpoint = v
@@ -1731,6 +1744,21 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 			Field:   "decision.mode",
 			Message: fmt.Sprintf("unknown mode %q", d.Mode),
 			Hint:    "one of: disabled, shadow, audit, enforce",
+		})
+	}
+
+	if strings.TrimSpace(d.ModelChecksum) != "" && d.Provider != "embedded" {
+		warns = append(warns, ValidationError{
+			Field:   "decision.model_checksum",
+			Message: fmt.Sprintf("has no effect with provider %q: only the embedded model has a manifest to pin", d.Provider),
+			Hint:    "remove decision.model_checksum, or use provider: embedded",
+		})
+	}
+	if pin := strings.TrimSpace(d.ModelChecksum); pin != "" && !sha256HexPattern.MatchString(pin) {
+		errs = append(errs, ValidationError{
+			Field:   "decision.model_checksum",
+			Message: fmt.Sprintf("%q is not a SHA-256 digest", d.ModelChecksum),
+			Hint:    "64 hex characters: the SHA-256 of the model directory's manifest.json",
 		})
 	}
 
