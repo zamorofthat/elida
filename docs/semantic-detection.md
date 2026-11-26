@@ -284,43 +284,44 @@ detector, `[a-z0-9+/]{200,}={1,2}` (about 210 instructions, under the soft
 limit, so no WARN), raises the realistic taxonomy to about 37 ms per call
 at the default 16 KiB. Prefer literal-led patterns.
 
-## Pinning the model artifact
+## Resource requirements
 
-The model directory's `manifest.json` lists the SHA-256 of every model file,
-and ELIDA refuses a directory whose files do not match it. That proves the
-directory is consistent with itself. It does not prove it is the artifact you
-meant to deploy: anyone who can write the directory can replace the model, the
-manifest and the digests together.
+Semantic detection loads the model into memory and runs inference on the CPU.
+Plan for both before you enable it. These numbers were measured once, on one
+machine, and are a guide, not a guarantee.
 
-`decision.model_checksum` closes that gap. Set it to the SHA-256 of the
-manifest, 64 hex characters, and ELIDA loads a model only when its manifest
-hashes to that value. The manifest pins every file, so this pins the artifact.
+**Measured on an Apple M1 Max (arm64, no accelerated kernels), ELIDA built from
+`main` plus the model built from the pinned upstream commit, `decision.mode: shadow`:**
 
-```bash
-sha256sum /etc/elida/models/injection/manifest.json
-```
+| | Detection off | Detection on |
+|---|---|---|
+| Resident memory, idle | 28 MiB | 328 MiB |
+| Resident memory after 500 requests | 31 MiB | 431 MiB |
+| One 128-token window (benchmark) | n/a | 65 to 78 ms |
+| One 32-token window (benchmark) | n/a | 19 ms |
+| Proxy request p50, one client | 1.6 ms | 2.8 ms |
 
-For a model built from this repository, the value is `MANIFEST_SHA256` in
-`scripts/models/pins.env`, the same digest the build verifies. A model built
-from the pinned commit hashes to exactly that value, which was checked on a
-fresh `make model` build.
+The proxy adds little latency because on this build the capability is
+`async_only`: scoring runs off the request path. That is also the limit. With
+one async worker, a burst of 16 concurrent clients sending tool results of
+about six windows each had 1,677 of about 1,900 windows dropped with reason
+`async_queue_full`. A dropped window is counted under `coverage_gaps` and
+`async_dropped` at `/control/decision` and is never treated as safe, but it is
+not scored either. Sustained throughput on this build is roughly one worker's
+worth: about 13 windows per second.
 
-```yaml
-decision:
-  model_checksum: "<64 hex characters>"
-```
+What this means for deployment:
 
-`ELIDA_DECISION_MODEL_CHECKSUM` sets the same value. The checksum of the model
-in force is reported as `model_checksum` at `/control/decision`, so you can copy the
-pin from a deployment you trust.
-
-A mismatch is a load failure like any other. With `decision.required: false`
-the provider is degraded and every semantic decision is unknown, with a WARN
-and a `reason` that names the checksum pin; with `required: true` ELIDA refuses
-to start. The mismatched model never reaches the inference pipeline. An empty
-value, the default, means no pin.
-
-Update the pin whenever you change the model.
+- **Raise the memory limit.** The Helm chart (`resources.limits.memory: 256Mi`)
+  and `deploy/docker-compose.prod.yaml` (`256M`) are sized for ELIDA without
+  the model. A container with detection enabled and that limit is
+  out-of-memory killed. Start from 768 MiB and watch the resident set.
+- **Size for windows, not requests.** Every user message and tool result is
+  split into windows of at most 128 tokens. Raise `decision.max_concurrency`
+  for more workers and watch `async_dropped` and `coverage_gaps`.
+- **amd64 with `GOEXPERIMENT=simd` is the build that can answer inline.** It
+  was not measured here. `/control/decision` reports the capability and the
+  reason for your build.
 
 ## Residual risk
 
