@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Saving any setting through `PUT /control/settings` (or the dashboard) removed
+  every policy rule the proxy had loaded at startup, the preset's rules and
+  those in `elida.yaml`, until the next restart: the reload rebuilt the rule
+  list from the settings file alone, which holds only custom rules, so a
+  deployment with 38 rules was left with none and no warning. The reload now
+  keeps the startup rules, applies `disabled_rules` (saved and merged before,
+  but never applied), and lets a saved custom rule replace a startup rule of
+  the same name.
+- Rule settings saved before a restart, `disabled_rules` and custom rules, now
+  take effect at startup. Nothing applied them, so a rule saved as disabled came
+  back after every restart until the next save. Only the rules are applied: the
+  policy mode and the risk ladder still come from `elida.yaml`.
+
 ### Added
 - A `secret_in_request` policy rule, in the standard, strict and coding-agent
   presets, flags a credential in a request body (AWS access and temporary keys,
