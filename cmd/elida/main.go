@@ -185,6 +185,11 @@ func main() {
 	defer cancel()
 	go a.manager.Run(ctx)
 
+	// Enforce storage retention: one sweep now, then one per interval.
+	if a.sqliteStore != nil {
+		go a.sqliteStore.RunRetention(ctx, a.retentionPolicy(), storage.DefaultRetentionInterval)
+	}
+
 	// Start fingerprint periodic flush (crash-resilient baseline persistence)
 	if a.fingerprinter != nil {
 		go a.fingerprinter.Run(ctx)
@@ -280,7 +285,24 @@ func (a *app) initSQLiteStorage() {
 		slog.Error("failed to initialize SQLite storage", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path, "retention_days", a.cfg.Storage.RetentionDays)
+	policy := a.retentionPolicy()
+	slog.Info("SQLite storage enabled", "path", a.cfg.Storage.Path,
+		"retention_days", policy.HistoryDays, "event_retention_days", policy.EventDays)
+	if policy.HistoryDays <= 0 {
+		slog.Warn("storage.retention_days is 0 or less: session history is kept forever")
+	}
+	if policy.EventDays <= 0 {
+		slog.Warn("event retention is 0 or less: the event log is kept forever")
+	}
+}
+
+// retentionPolicy maps the storage config onto what the retention sweep
+// enforces.
+func (a *app) retentionPolicy() storage.RetentionPolicy {
+	return storage.RetentionPolicy{
+		HistoryDays: a.cfg.Storage.RetentionDays,
+		EventDays:   a.cfg.Storage.EventRetentionDays(),
+	}
 }
 
 func (a *app) initRedactor() {
@@ -1005,6 +1027,7 @@ func (a *app) setupPolicyEngine() error {
 			Description:    r.Description,
 			Action:         r.Action,
 			Observe:        r.Observe,
+			RedactMatch:    r.RedactMatch,
 		}
 	}
 
@@ -1187,6 +1210,15 @@ func (a *app) logCorrelationSummary() {
 	)
 }
 
+// warnRulesBlockingOutsideNarrowSet logs, by rule name only, the block-action
+// rules that no longer refuse a request.
+func warnRulesBlockingOutsideNarrowSet(rules []instruction.Rule) {
+	if names := instruction.RulesBlockingOutsideNarrowSet(rules); len(names) > 0 {
+		slog.Warn("instruction rules set to block no longer refuse requests; they raise the session's risk score instead. Only instruction_pipe_to_shell and instruction_hidden_* rules can refuse. Move any curl|sh or wget|sh pattern into a rule named instruction_pipe_to_shell to keep refusing on it.",
+			"rules", names)
+	}
+}
+
 func (a *app) initInstructionIntegrity() {
 	if !a.cfg.Policy.Enabled || !a.cfg.Policy.InstructionIntegrity.Enabled {
 		return
@@ -1207,6 +1239,8 @@ func (a *app) initInstructionIntegrity() {
 		})
 	}
 
+	warnRulesBlockingOutsideNarrowSet(instrRules)
+
 	scanner, err := instruction.NewScanner(instrRules)
 	if err != nil {
 		slog.Error("failed to create instruction scanner", "error", err)
@@ -1218,6 +1252,20 @@ func (a *app) initInstructionIntegrity() {
 	if a.redactor != nil {
 		a.instructionRegistry.SetRedactor(a.redactor)
 	}
+
+	a.instructionRegistry.SetChangedSinceLastSeen(iiCfg.ChangedSinceLastSeen)
+	pathVersionsLoaded := true
+	if err := a.instructionRegistry.LoadPathVersions(); err != nil {
+		pathVersionsLoaded = false
+		slog.Warn("failed to load instruction path versions; the first new version of each path after this start has an unknown diff", "error", err)
+	}
+	slog.Info("instruction provenance",
+		"session_header", a.cfg.Session.Header,
+		"claude_code_header", true,
+		"changed_since_last_seen", iiCfg.ChangedSinceLastSeen,
+		"path_versions_loaded", pathVersionsLoaded,
+		"note", "sessions identified by neither header are tracked but produce no change findings",
+	)
 
 	slog.Info("instruction integrity enabled",
 		"tracked_types", iiCfg.TrackedTypes,
@@ -1372,12 +1420,28 @@ func (a *app) initControlAPI() {
 	if a.policyEngine != nil {
 		controlOpts = append(controlOpts, control.WithPolicy(a.policyEngine))
 	}
+	if a.instructionRegistry != nil {
+		controlOpts = append(controlOpts, control.WithInstructionRegistry(a.instructionRegistry))
+	}
 	if a.cfg.Control.Auth.Enabled {
 		controlOpts = append(controlOpts, control.WithAuth(a.cfg.Control.Auth.APIKey))
+	}
+	// Deprecated compatibility shim, deliberately an environment variable and
+	// not a config key: it is temporary, it changes nothing at runtime, and it
+	// should not grow a home in the settings API. It restores the detector
+	// posture block on the unauthenticated /control/health for deployments
+	// that scraped it from v0.30.0 or v0.31.0.
+	if os.Getenv("ELIDA_CONTROL_HEALTH_LEGACY_DECISION") == "true" {
+		controlOpts = append(controlOpts, control.WithLegacyHealthDecision())
+		slog.Warn("ELIDA_CONTROL_HEALTH_LEGACY_DECISION is set: the detector posture block is served on the unauthenticated /control/health, which tells any caller that can reach the control port whether anything is enforcing and whether it is working — move those readers to the authenticated /control/decision; this switch will be removed",
+			"route", "/control/health",
+			"fields", "capability,reason,effective_mode,threshold_set_matches,breaker_open",
+		)
 	}
 	a.controlHandler = control.New(a.store, a.manager, controlOpts...)
 	if a.settingsStore != nil {
 		a.controlHandler.SetSettingsStore(a.settingsStore)
+		a.controlHandler.ApplySavedPolicyRules()
 	}
 	if a.wsHandler != nil {
 		a.controlHandler.SetWebSocketHandler(a.wsHandler)

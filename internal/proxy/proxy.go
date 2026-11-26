@@ -314,17 +314,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Proxy authentication check (skip health endpoints)
+	// Proxy authentication check (skip health endpoints). A request that
+	// authenticates with a per-client key is that client (authClient); the
+	// shared key and a trusted network carry no client name.
+	authClient := ""
 	if p.config.Proxy.Auth.Enabled && !isHealthEndpoint(r.URL.Path) {
 		if p.isTrustedClient(r) {
 			slog.Debug("proxy auth bypassed for trusted network client", "remote_addr", r.RemoteAddr)
-		} else if !p.validateProxyAuth(r) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
-				slog.Warn("write failed", "error", err)
+		} else {
+			client, ok := p.authenticateClient(r)
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				if _, err := w.Write([]byte(`{"error":"unauthorized","message":"Valid API key required"}`)); err != nil {
+					slog.Warn("write failed", "error", err)
+				}
+				return
 			}
-			return
+			authClient = client
 		}
 	}
 
@@ -363,10 +370,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get or create session.
-	// Identity precedence: X-Session-ID header -> body-derived (OpenAI user
+	// Identity precedence: configured session header -> Claude Code's
+	// X-Claude-Code-Session-Id (when safe) -> body-derived (OpenAI user
 	// field / configured path; backend-independent so failover doesn't split
 	// a conversation) -> per-(client,backend) IP-hash fallback.
 	sessionID := p.resolveSessionID(r, requestBody)
+	// A keyed client's sessions live in its own namespace, whatever ID the
+	// caller chose, so two clients can never share a session. With no ID of its
+	// own the client still gets one session per backend, not the shared
+	// per-address fallback.
+	if authClient != "" {
+		if sessionID == "" && p.config.Session.GenerateIfMissing {
+			sessionID = "default-" + backend.Name
+		}
+		if sessionID != "" {
+			sessionID = authClient + ":" + sessionID
+		}
+	}
 
 	var sess *session.Session
 	if sessionID != "" {
@@ -421,13 +441,33 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The request's tool calls, parsed once: possible causes of an
+	// instruction file change below, and recorded on the session further on.
+	var toolCalls []ToolCallInfo
+	if len(requestBody) > 0 {
+		toolCalls = ExtractToolCalls(requestBody)
+	}
+
 	// Instruction file integrity check — runs BEFORE policy scanning
 	// Extracts instruction files from trusted tag content (which policy skips)
 	if p.instructionRegistry != nil && len(requestBody) > 0 {
+		// Tool calls in the history are possible causes of a file change.
+		p.instructionRegistry.MarkCauses(sess.ID, instructionToolUses(toolCalls))
 		if files := p.extractInstructionFiles(requestBody); len(files) > 0 {
-			for _, file := range files {
+			auditMode := p.policy != nil && p.policy.IsAuditMode()
+			results := make([]instruction.ScanResult, len(files))
+			for i, file := range files {
 				result := p.instructionRegistry.Check(sess.ID, file)
-				if result.ShouldBlock {
+				results[i] = result
+				if result.ShouldBlock && auditMode {
+					slog.Warn("instruction integrity would block (audit mode)",
+						"session_id", sess.ID,
+						"hash", file.Hash,
+						"type", file.Type.String(),
+						"violations", len(result.Violations),
+					)
+				}
+				if instructionBlocks(result, auditMode) {
 					slog.Warn("request blocked by instruction integrity check",
 						"session_id", sess.ID,
 						"hash", file.Hash,
@@ -439,6 +479,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if _, err := w.Write([]byte(`{"error":"instruction_integrity_violation","message":"Instruction file contains prohibited content"}`)); err != nil {
 						slog.Warn("write failed", "session_id", sess.ID, "error", err)
 					}
+					return
+				}
+			}
+
+			// Not refused: track each file and score what comes back. This
+			// runs only once no file refused the request, so a refused
+			// request scores nothing and leaves no chain behind. A file past
+			// the per-request tracking cap is observed as an unnamed block
+			// (a copy with no path): its rule hits are still scored, once
+			// per content hash, but it gets no chain and no change tracking.
+			identified := sessionID != ""
+			recorded := false
+			for i, file := range files {
+				observed := file
+				if i >= instruction.MaxInstructionFilesPerRequest {
+					unnamed := *file
+					unnamed.SourcePath = ""
+					observed = &unnamed
+				}
+				obs := p.instructionRegistry.Observe(sess.ID, identified, observed, results[i])
+				if p.policy != nil && p.recordInstructionFindings(sess.ID, file, obs) {
+					recorded = true
+				}
+			}
+			if recorded {
+				// The ladder check above ran before these findings existed.
+				// Passing throttled keeps a request from being delayed twice.
+				var blocked bool
+				if blocked, throttled = p.applyRiskLadder(w, sess, throttled); blocked {
 					return
 				}
 			}
@@ -537,13 +606,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract tool calls from request (tools being defined or tool results being sent)
-	if len(requestBody) > 0 {
-		if toolCalls := ExtractToolCalls(requestBody); len(toolCalls) > 0 {
-			for _, tc := range toolCalls {
-				sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
-			}
-		}
+	// Record the request's tool calls (tools being defined or tool results
+	// being sent), parsed once above.
+	for _, tc := range toolCalls {
+		sess.RecordToolCall(tc.Name, tc.Type, tc.ID, tc.Arguments)
 	}
 
 	// Capture request body for capture-all mode (policy-independent)
@@ -700,16 +766,21 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 	}
 }
 
-// resolveSessionID returns the session ID for a request: the session header
-// if present, else an ID derived from the request body (OpenAI `user` field
-// or session.derive_from.body_path). Returns "" when neither applies, which
-// selects the per-(client,backend) fallback in the caller.
+// resolveSessionID returns the session ID for a request: the configured
+// session header if present, else Claude Code's session header when its value
+// is a safe ID (an unsafe one is ignored), else an ID derived from the request
+// body (session.derive_from.body_path / body_paths, then the OpenAI `user`
+// field). Returns "" only when none applies, which selects the
+// per-(client,backend) fallback in the caller.
 func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
 	if id := r.Header.Get(p.config.Session.Header); id != "" {
 		return id
 	}
+	if id := r.Header.Get(session.ClaudeCodeSessionHeader); session.SafeID(id) {
+		return id
+	}
 	df := p.config.Session.DeriveFrom
-	return session.DeriveIDFromBody(body, df.OpenAIUser, df.BodyPath)
+	return session.DeriveIDFromBody(body, df.OpenAIUser, df.Paths()...)
 }
 
 // isStreamingRequest determines if the request expects a streaming response
@@ -1735,6 +1806,29 @@ func writeModelList(w http.ResponseWriter, models []router.ModelInfo) {
 	}
 }
 
+// authenticateClient authenticates a request against the per-client keys, then
+// the shared key. It returns the client's name for a per-client key and "" for
+// the shared key. Every configured key is compared against every credential the
+// request carries, with no early exit, so the time taken does not say which key
+// (or how many) matched.
+func (p *Proxy) authenticateClient(r *http.Request) (client string, ok bool) {
+	provided := []string{r.Header.Get("X-Elida-API-Key")}
+	if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		provided = append(provided, strings.TrimPrefix(authHeader, "Bearer "))
+	}
+	for _, k := range p.config.Proxy.Auth.Keys {
+		for _, got := range provided {
+			if secureCompare(got, k.Key) && !ok {
+				client, ok = k.Name, true
+			}
+		}
+	}
+	if ok {
+		return client, true
+	}
+	return "", p.validateProxyAuth(r)
+}
+
 // validateProxyAuth checks if the request has valid proxy authentication
 // Uses constant-time comparison to prevent timing attacks
 func (p *Proxy) validateProxyAuth(r *http.Request) bool {
@@ -1899,9 +1993,10 @@ func (p *Proxy) persistFlaggedSession(sess *session.Session, backendName string)
 }
 
 // extractScannableMessages parses a chat request and returns individual messages to scan
-// with role/index attribution. System prompts are hash-cached — only scanned once per session
-// unless the content changes. Supports both Anthropic (top-level "system") and OpenAI
-// (role: "system" message) formats. Returns nil for non-chat requests (caller should fallback).
+// with role/index attribution. System content is hash-cached: each distinct piece is scanned
+// once per session. That covers the Anthropic top-level "system" field, OpenAI-style
+// role "system" messages, and requests that carry both, as Claude Code's do.
+// Returns nil for non-chat requests (caller should fallback).
 //
 // This is the policy engine's view only. The semantic assessor gets its own
 // view from extractSemanticMessages.
@@ -1929,18 +2024,22 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 	}
 
 	var messages []policy.MessageToScan
-	cachedHash := sess.GetSystemPromptHash()
+
+	// The primary system prompt is the top-level system field, or the first
+	// role "system" message when there is none. Only the primary prompt can
+	// "change"; further role "system" entries are additions to the list.
+	primaryClaimed := false
 
 	// Handle Anthropic top-level system field (scan once, then skip via hash cache)
 	if req.System != nil {
 		systemContent := extractMessageContent(req.System)
 		if systemContent != "" {
+			primaryClaimed = true
 			if len(trustedTagRegexs) > 0 {
 				systemContent = stripTrustedTags(systemContent, trustedTagRegexs)
 			}
-			if msg, newHash := systemMessageIfChanged(systemContent, cachedHash, sess, -1); msg != nil {
+			if msg := systemMessageIfNew(systemContent, sess, -1, true); msg != nil {
 				messages = append(messages, *msg)
-				cachedHash = newHash
 			}
 		}
 	}
@@ -1957,11 +2056,10 @@ func extractScannableMessages(body []byte, sess *session.Session, trustedTagRege
 		}
 
 		if msg.Role == "system" {
-			// OpenAI-style system message — same hash-cache logic
-			if m, newHash := systemMessageIfChanged(content, cachedHash, sess, i); m != nil {
+			if m := systemMessageIfNew(content, sess, i, !primaryClaimed); m != nil {
 				messages = append(messages, *m)
-				cachedHash = newHash
 			}
+			primaryClaimed = true
 		} else {
 			messages = append(messages, policy.MessageToScan{
 				Role:    msg.Role,
@@ -2159,27 +2257,37 @@ func (p *Proxy) applyRiskLadder(w http.ResponseWriter, sess *session.Session, al
 	return false, alreadyThrottled
 }
 
-// systemMessageIfChanged returns a MessageToScan for the system prompt only if it's new or changed.
-// Returns nil if the hash matches the cached version (already scanned).
-func systemMessageIfChanged(content, cachedHash string, sess *session.Session, index int) (*policy.MessageToScan, string) {
+// systemMessageIfNew returns a MessageToScan for system content the session
+// has not scanned before, and nil for content it has.
+//
+// primary marks the session's main system prompt. A primary prompt whose hash
+// differs from the previous one and is new to the session is logged as
+// changed. Returning to a prompt already scanned is not: a subagent that
+// shares its parent's session ID alternates with it on every request.
+func systemMessageIfNew(content string, sess *session.Session, index int, primary bool) *policy.MessageToScan {
 	hash := hashContent(content)
 
-	if cachedHash == "" {
-		// First time seeing system prompt — scan it and cache hash
-		sess.SetSystemPromptHash(hash)
+	previous := ""
+	if primary {
+		previous = sess.GetSystemPromptHash()
+		if previous != hash {
+			sess.SetSystemPromptHash(hash)
+		}
+	}
+
+	if !sess.MarkSystemContentSeen(hash) {
+		// Already scanned in this session — skip.
+		return nil
+	}
+
+	switch {
+	case primary && previous != "" && previous != hash:
+		sess.RecordSystemPromptChange()
+		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", previous[:16], "new_hash", hash[:16])
+	case primary:
 		slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
-		return &policy.MessageToScan{Role: "system", Index: index, Content: content}, hash
 	}
-
-	if hash != cachedHash {
-		// System prompt changed — scan it and update cache
-		sess.SetSystemPromptHash(hash)
-		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", cachedHash[:16], "new_hash", hash[:16])
-		return &policy.MessageToScan{Role: "system", Index: index, Content: content}, hash
-	}
-
-	// Hash matches cache — skip scanning (already validated)
-	return nil, cachedHash
+	return &policy.MessageToScan{Role: "system", Index: index, Content: content}
 }
 
 // containsOnlyAllowlistedTools checks if the most recent assistant message only uses allowlisted tools.
@@ -2281,6 +2389,13 @@ func extractTrustedTagContent(content string, extractRegexs []*regexp.Regexp) []
 	return extracted
 }
 
+// instructionBlocks reports whether an instruction integrity result stops the
+// request. Audit mode records the finding and enforces nothing, as it does for
+// policy rules.
+func instructionBlocks(result instruction.ScanResult, auditMode bool) bool {
+	return result.ShouldBlock && !auditMode
+}
+
 // extractInstructionFiles parses the request body and extracts instruction files
 // from trusted tag content in the system prompt and user messages.
 func (p *Proxy) extractInstructionFiles(body []byte) []*instruction.InstructionFile {
@@ -2303,9 +2418,7 @@ func (p *Proxy) extractInstructionFiles(body []byte) []*instruction.InstructionF
 		systemContent := extractMessageContent(req.System)
 		if systemContent != "" {
 			for _, tagContent := range extractTrustedTagContent(systemContent, p.trustedTagExtractRegexs) {
-				if file := instruction.Extract(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold); file != nil {
-					files = append(files, file)
-				}
+				files = append(files, instruction.ExtractAll(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold)...)
 			}
 		}
 	}
@@ -2320,9 +2433,7 @@ func (p *Proxy) extractInstructionFiles(body []byte) []*instruction.InstructionF
 			continue
 		}
 		for _, tagContent := range extractTrustedTagContent(content, p.trustedTagExtractRegexs) {
-			if file := instruction.Extract(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold); file != nil {
-				files = append(files, file)
-			}
+			files = append(files, instruction.ExtractAll(tagContent, cfg.ShapeDetection, cfg.ShapeConfidenceThreshold)...)
 		}
 	}
 

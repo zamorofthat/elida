@@ -14,7 +14,18 @@ websocket:
       - openai_realtime    # OpenAI Realtime API
       - deepgram           # Deepgram STT
       - elevenlabs         # ElevenLabs TTS
+      # - livekit          # LiveKit
 ```
+
+`protocols` restricts which parsers may claim a frame. Leaving it out enables
+every built-in protocol; naming an unrecognised one enables nothing, so a typo
+fails closed rather than quietly widening what a frame may be parsed as.
+
+Both switches are off by default, and both are required: `websocket.enabled`
+brings up the transport, and `voice_sessions.enabled` records sessions on it.
+`GET /control/stats` reports the combination as `capabilities.voice`, and the
+dashboard hides the Voice tab when it is false — a tab that can only say "No
+voice sessions" reads as "none happened" rather than "this is switched off".
 
 ## Session Lifecycle
 

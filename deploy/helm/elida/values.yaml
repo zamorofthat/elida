@@ -212,6 +212,13 @@ autoscaling:
   maxReplicas: 10
   targetCPUUtilizationPercentage: 80
 
+# Seconds Kubernetes waits after SIGTERM before it kills the pod. ELIDA waits
+# up to shutdown_timeout (30s) for in-flight requests, then saves and exports
+# every live session; a pod killed before that finishes loses those sessions.
+# Keep this above 30, and raise it when storage capture_mode is "all" and many
+# sessions are live at once (see docs/deployment.md#stopping-elida).
+terminationGracePeriodSeconds: 60
+
 nodeSelector: {}
 
 tolerations: []

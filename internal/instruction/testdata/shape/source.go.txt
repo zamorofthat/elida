@@ -1,0 +1,35 @@
+package stock
+
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrUnknownItem is returned when a record names an item that is not stocked.
+var ErrUnknownItem = errors.New("stock: unknown item")
+
+// Counter applies feed records to the stored counts. Callers must not share
+// a Counter between goroutines, and should always call Close when done.
+type Counter struct {
+	seen   map[string]bool
+	counts map[string]int
+}
+
+// Apply adds one record to the counts. A record whose identifier has been
+// seen before is ignored, so the caller never needs to deduplicate the feed.
+func (c *Counter) Apply(id, item string, n int) error {
+	if c.seen[id] {
+		return nil
+	}
+	if _, ok := c.counts[item]; !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownItem, item)
+	}
+	c.seen[id] = true
+	c.counts[item] += n
+	return nil
+}
+
+// Close releases the seen-set. Do not use the Counter after Close.
+func (c *Counter) Close() {
+	c.seen = nil
+}

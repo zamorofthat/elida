@@ -17,6 +17,7 @@ import (
 	"elida/internal/correlation"
 	"elida/internal/dashboard"
 	"elida/internal/fingerprint"
+	"elida/internal/instruction"
 	"elida/internal/panel"
 	"elida/internal/policy"
 	"elida/internal/session"
@@ -75,6 +76,10 @@ type DecisionStatus struct {
 	ThresholdSetMatches bool   `json:"threshold_set_matches"`
 
 	BreakerOpen bool `json:"breaker_open"`
+	// BreakerOpens counts how many times the circuit breaker opened since
+	// start, so a rate can be charted or alerted on. A run of failed inferences
+	// makes one open, however many errors it holds.
+	BreakerOpens int64 `json:"breaker_opens"`
 
 	// Capacity signals. These, not a fixed requests-per-second figure, are
 	// what tell an operator to add replicas or lower concurrency.
@@ -172,6 +177,8 @@ type Handler struct {
 	wsHandler     *websocket.Handler
 	dashboard     *dashboard.Handler
 	settingsStore *config.SettingsStore
+	// baseRules are the policy rules the engine held when it was attached.
+	baseRules     []policy.Rule
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
 	// decisionProvider reports semantic detection status; nil means the
@@ -192,8 +199,15 @@ type Handler struct {
 	authEnabled bool
 	apiKey      string
 
+	// instructionRegistry, when set, adds instruction_integrity to /control/stats
+	instructionRegistry *instruction.Registry
+
 	// Capture mode for display in health endpoint
 	captureMode string
+
+	// legacyHealthDecision restores the deprecated posture block on the
+	// unauthenticated health route. See WithLegacyHealthDecision.
+	legacyHealthDecision bool
 }
 
 // Option configures a Handler.
@@ -206,7 +220,22 @@ func WithHistory(store *storage.SQLiteStore) Option {
 
 // WithPolicy enables the policy engine.
 func WithPolicy(engine *policy.Engine) Option {
-	return func(h *Handler) { h.policyEngine = engine }
+	return func(h *Handler) {
+		h.policyEngine = engine
+		// The rules in force at startup (the preset and elida.yaml's rules)
+		// are not part of the settings. Keep them: every settings save
+		// reloads the engine, and the reload layers the saved settings over
+		// this base instead of replacing it.
+		if engine != nil {
+			h.baseRules = append([]policy.Rule(nil), engine.GetConfig().Rules...)
+		}
+	}
+}
+
+// WithInstructionRegistry attaches the instruction registry so /control/stats
+// can report instruction provenance state.
+func WithInstructionRegistry(reg *instruction.Registry) Option {
+	return func(h *Handler) { h.instructionRegistry = reg }
 }
 
 // WithAuth enables API key authentication on /control/* endpoints.
@@ -215,6 +244,21 @@ func WithAuth(apiKey string) Option {
 		h.authEnabled = true
 		h.apiKey = apiKey
 	}
+}
+
+// WithLegacyHealthDecision puts the detector posture block back on the
+// unauthenticated /control/health, in exactly the shape v0.30.0 and v0.31.0
+// served: capability, a fixed content-free reason, the effective mode, the
+// threshold-set match and the breaker state.
+//
+// Deprecated: those five facts together tell any caller who can reach the
+// control port whether anything is enforcing and whether it is working right
+// now, which is reconnaissance an attacker would otherwise have to pay for.
+// This exists so a deployment that already scrapes them can upgrade without
+// losing them, and it will be removed. Read them from the authenticated
+// /control/decision instead.
+func WithLegacyHealthDecision() Option {
+	return func(h *Handler) { h.legacyHealthDecision = true }
 }
 
 // New creates a new control API handler with the given options.
@@ -283,6 +327,7 @@ func New(store session.Store, manager *session.Manager, opts ...Option) *Handler
 
 	// Instruction file integrity
 	h.mux.HandleFunc("/control/instructions", h.handleInstructionFiles)
+	h.mux.HandleFunc("/control/instructions/paths", h.handleInstructionPaths)
 	h.mux.HandleFunc("/control/instructions/{hash}", h.handleInstructionFile)
 
 	// Fingerprint baseline visibility
@@ -333,6 +378,72 @@ func (h *Handler) SetDecisionProvider(p DecisionProvider) {
 // settings on every settings save. Call it before serving starts.
 func (h *Handler) SetDecisionConfigurer(c DecisionConfigurer) {
 	h.decisionConfigurer = c
+}
+
+// layeredRules returns the policy rules the engine should run for the given
+// settings: the rules loaded at startup, minus the ones settings disable and the
+// ones a saved custom rule of the same name replaces, plus the saved custom rules.
+func (h *Handler) layeredRules(merged config.Settings) []policy.Rule {
+	var rules []policy.Rule
+	// Local overrides default, as config loading applies to presets.
+	disabled := make(map[string]bool, len(merged.Policy.DisabledRules))
+	for _, name := range merged.Policy.DisabledRules {
+		disabled[name] = true
+	}
+	overridden := make(map[string]bool, len(merged.Policy.CustomRules))
+	for _, cr := range merged.Policy.CustomRules {
+		overridden[cr.Name] = true
+	}
+	for _, r := range h.baseRules {
+		if disabled[r.Name] || overridden[r.Name] {
+			continue
+		}
+		rules = append(rules, r)
+	}
+
+	// Convert custom rules from Settings to policy Rules
+	for _, cr := range merged.Policy.CustomRules {
+		if config.ReservedRuleName(cr.Name) {
+			// saveSettings refuses new ones; one saved earlier (an older
+			// release, or a hand edit) is kept in settings.yaml. Skipped so
+			// a regex rule never records under the semantic runner's name
+			// or a correlation match's "correlation." name.
+			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
+			continue
+		}
+		rule := policy.Rule{
+			Name:           cr.Name,
+			Type:           policy.RuleType(cr.Type),
+			Target:         policy.RuleTarget(cr.Target),
+			Patterns:       cr.Patterns,
+			Threshold:      cr.Threshold,
+			ThresholdFloat: cr.ThresholdFloat,
+			MinSamples:     cr.MinSamples,
+			Severity:       policy.Severity(cr.Severity),
+			Description:    cr.Description,
+			Action:         cr.Action,
+		}
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+// ApplySavedPolicyRules puts the rule settings saved before this start
+// (disabled_rules and custom rules) in force. Nothing else applied them at
+// startup, so a rule saved as disabled came back after a restart until the next
+// save. Only the rules are applied: the policy mode and the risk ladder keep
+// the values elida.yaml gave them. With no saved rule settings it does nothing.
+func (h *Handler) ApplySavedPolicyRules() {
+	if h.settingsStore == nil || h.policyEngine == nil {
+		return
+	}
+	merged := h.settingsStore.GetMerged()
+	if len(merged.Policy.DisabledRules) == 0 && len(merged.Policy.CustomRules) == 0 {
+		return
+	}
+	cfg := h.policyEngine.GetConfig()
+	cfg.Rules = h.layeredRules(merged)
+	h.policyEngine.ReloadConfig(cfg)
 }
 
 // reloadPolicyEngine applies current settings to the policy engine and the
@@ -408,30 +519,7 @@ func (h *Handler) reloadPolicyEngine() {
 		}
 	}
 
-	// Convert custom rules from Settings to policy Rules
-	for _, cr := range merged.Policy.CustomRules {
-		if config.ReservedRuleName(cr.Name) {
-			// saveSettings refuses new ones; one saved earlier (an older
-			// release, or a hand edit) is kept in settings.yaml. Skipped so
-			// a regex rule never records under the semantic runner's name
-			// or a correlation match's "correlation." name.
-			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
-			continue
-		}
-		rule := policy.Rule{
-			Name:           cr.Name,
-			Type:           policy.RuleType(cr.Type),
-			Target:         policy.RuleTarget(cr.Target),
-			Patterns:       cr.Patterns,
-			Threshold:      cr.Threshold,
-			ThresholdFloat: cr.ThresholdFloat,
-			MinSamples:     cr.MinSamples,
-			Severity:       policy.Severity(cr.Severity),
-			Description:    cr.Description,
-			Action:         cr.Action,
-		}
-		cfg.Rules = append(cfg.Rules, rule)
-	}
+	cfg.Rules = h.layeredRules(merged)
 
 	h.policyEngine.ReloadConfig(cfg)
 	if h.decisionConfigurer == nil {
@@ -566,10 +654,41 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// would otherwise have to pay for. All of it is on /control/decision,
 	// behind the credential. /control/ready carries the one bit an operator
 	// needs without a credential, as a status code.
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"status":    "ok",
 		"timestamp": time.Now(),
-	})
+	}
+	// Opt-in and deprecated: see WithLegacyHealthDecision. Off by default, so
+	// the route above is what an unconfigured deployment serves.
+	if h.legacyHealthDecision && h.decisionProvider != nil {
+		st := h.decisionProvider.DecisionStatus()
+		response["decision"] = map[string]any{
+			"capability":            st.Capability,
+			"reason":                healthCapabilityReason(st.Capability),
+			"effective_mode":        st.EffectiveMode,
+			"threshold_set_matches": st.ThresholdSetMatches,
+			"breaker_open":          st.BreakerOpen,
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// healthCapabilityReason maps a capability to a fixed, content-free sentence.
+// It never reports a path, a model identity or a provider error string, which
+// is why the deprecated health block could carry a reason at all.
+func healthCapabilityReason(capability string) string {
+	switch capability {
+	case "inline":
+		return "accelerated inference is available; inline results can protect the current request"
+	case "async_only":
+		return "this build cannot meet an inline budget; results protect later activity only"
+	case "degraded":
+		return "semantic detection was enabled but the model could not be loaded or verified; no detection is active"
+	case "disabled":
+		return "semantic detection is off"
+	default:
+		return "unknown capability"
+	}
 }
 
 // handleReady handles GET /control/ready: the readiness probe.
@@ -615,8 +734,59 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := h.manager.Stats()
-	writeJSON(w, http.StatusOK, stats)
+	resp := statsResponse{
+		Stats:        h.manager.Stats(),
+		Capabilities: h.capabilities(),
+	}
+	if h.instructionRegistry != nil {
+		ii := h.instructionRegistry.Stats()
+		resp.InstructionIntegrity = &ii
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// statsResponse carries the session statistics plus what this ELIDA can do.
+// Stats is embedded, so every field it has always had stays at the top level
+// of the response and existing consumers are unaffected.
+type statsResponse struct {
+	session.Stats
+	Capabilities         capabilities       `json:"capabilities"`
+	InstructionIntegrity *instruction.Stats `json:"instruction_integrity,omitempty"`
+}
+
+// capabilities describes optional subsystems so a client can tell a feature
+// that is switched off from one that is on and simply has no data. Without
+// it the dashboard has to infer that from an error status, which it cannot
+// do for a subsystem that answers 200 with an empty list.
+type capabilities struct {
+	Voice voiceCapability `json:"voice"`
+}
+
+// voiceCapability reports whether voice sessions can be recorded at all.
+//
+// It is deliberately computed rather than read from config: voice needs the
+// WebSocket transport AND voice_sessions.enabled, and each is off by default,
+// so either one being false means the Voice view can never show anything.
+// Protocols lists what will actually be parsed, which is not necessarily what
+// the config names.
+type voiceCapability struct {
+	Enabled   bool     `json:"enabled"`
+	Protocols []string `json:"protocols"`
+}
+
+// capabilities reports the optional subsystems that are live in this process.
+func (h *Handler) capabilities() capabilities {
+	caps := capabilities{Voice: voiceCapability{Protocols: []string{}}}
+	if h.wsHandler == nil {
+		// No WebSocket transport: no handler was ever constructed, so no
+		// frame can arrive to start a voice session.
+		return caps
+	}
+	caps.Voice.Enabled = h.wsHandler.VoiceTrackingEnabled()
+	if protos := h.wsHandler.EnabledVoiceProtocols(); len(protos) > 0 {
+		caps.Voice.Protocols = protos
+	}
+	return caps
 }
 
 // handleSessions handles GET /control/sessions
@@ -679,7 +849,7 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		switch action {
 		case "kill":
-			h.killSession(w, sessionID)
+			h.killSession(w, r, sessionID)
 		case "terminate":
 			h.terminateSession(w, sessionID)
 		case "resume":
@@ -688,7 +858,7 @@ func (h *Handler) handleSession(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Unknown action", http.StatusBadRequest)
 		}
 	case http.MethodDelete:
-		h.killSession(w, sessionID)
+		h.killSession(w, r, sessionID)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -708,6 +878,8 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	// the session lock.
 	info.SemanticShadow = snap.SemanticShadow
 	info.CorrelationShadow = snap.CorrelationShadow
+	info.SemanticShadowDropped = snap.SemanticShadowDropped
+	info.CorrelationShadowDropped = snap.CorrelationShadowDropped
 	// GetFlaggedSession returns a deep copy, so the list is the caller's.
 	if h.policyEngine != nil {
 		if fs := h.policyEngine.GetFlaggedSession(id); fs != nil {
@@ -718,14 +890,50 @@ func (h *Handler) getSession(w http.ResponseWriter, id string) {
 	writeJSON(w, http.StatusOK, info)
 }
 
-// killSession handles POST /control/sessions/{id}/kill
-func (h *Handler) killSession(w http.ResponseWriter, id string) {
-	slog.Info("kill request received", "session_id", id)
+// killRequest is the optional body of a kill: how long requests for the
+// session are refused. Omitted, "" or "default": the configured kill_block.
+// "permanent", "until_hour_change" or a duration such as "30m": that, for
+// this session only.
+type killRequest struct {
+	Block string `json:"block"`
+}
 
-	if h.manager.Kill(id) {
+// killSession handles POST /control/sessions/{id}/kill
+func (h *Handler) killSession(w http.ResponseWriter, r *http.Request, id string) {
+	var req killRequest
+	if r.Body != nil && r.Method == http.MethodPost {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+		if err != nil {
+			http.Error(w, "Cannot read request body", http.StatusBadRequest)
+			return
+		}
+		if len(strings.TrimSpace(string(body))) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, `Invalid body: want {"block": "permanent" | "until_hour_change" | "30m"}`, http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	kb, set, err := session.ParseKillBlock(req.Block)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	slog.Info("kill request received", "session_id", id, "block", req.Block)
+
+	var override *session.KillBlockConfig
+	if set {
+		override = &kb
+	}
+	if h.manager.KillWithBlock(id, override) {
+		block := req.Block
+		if !set {
+			block = "default"
+		}
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":     "killed",
 			"session_id": id,
+			"block":      block,
 		})
 	} else {
 		http.Error(w, "Session not found or already terminated", http.StatusNotFound)
@@ -809,6 +1017,13 @@ type SessionInfo struct {
 	Terminated     bool           `json:"terminated,omitempty"`
 	MessageCount   int            `json:"message_count"`
 
+	// KillBlock is how a killed session blocks requests: "duration",
+	// "until_hour_change" or "permanent". BlockedUntil is when the block
+	// ends, absent for permanent. Both are absent for a session that is not
+	// killed.
+	KillBlock    string     `json:"kill_block,omitempty"`
+	BlockedUntil *time.Time `json:"blocked_until,omitempty"`
+
 	// SemanticShadow is populated only on the single-session detail path.
 	// Fifty entries per session would bloat every list response, and
 	// calibration review happens one session at a time.
@@ -817,11 +1032,19 @@ type SessionInfo struct {
 	// path, for the same reason as SemanticShadow: shadow-mode correlation
 	// matches, calibration data that is never a violation.
 	CorrelationShadow []session.CorrelationShadow `json:"correlation_shadow,omitempty"`
+	// SemanticShadowDropped and CorrelationShadowDropped count the entries each
+	// shadow list discarded at its cap. Detail path only, with the lists.
+	SemanticShadowDropped    int `json:"semantic_shadow_dropped,omitempty"`
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 
 	// SemanticDecisions is the policy engine's per-decision record list
 	// (detail path only, like SemanticShadow): what explains each semantic
 	// violation and enforcement action on this session.
 	SemanticDecisions []policy.SemanticDecision `json:"semantic_decisions,omitempty"`
+
+	// SystemPromptChanges counts how many times the session's primary system
+	// prompt changed to one it had not scanned before.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
 }
 
 // buildSessionInfo creates a SessionInfo from a snapshot, enriching with policy data.
@@ -851,6 +1074,9 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 	if snap.EndTime != nil {
 		info.EndTime = snap.EndTime
 	}
+	if mode, until := h.manager.KillBlockStatus(sess); mode != "" {
+		info.KillBlock, info.BlockedUntil = string(mode), until
+	}
 
 	// Enrich with policy engine data. Only two fields are needed, so read
 	// them directly rather than deep-copying the flagged session per row.
@@ -861,6 +1087,7 @@ func (h *Handler) buildSessionInfo(snap *session.Session, sess *session.Session)
 		}
 	}
 
+	info.SystemPromptChanges = snap.SystemPromptChanges
 	return info
 }
 
@@ -2299,4 +2526,86 @@ func (h *Handler) handleInstructionFile(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, file)
+}
+
+// Bounds for GET /control/instructions/paths.
+const (
+	defaultInstructionPaths = 500
+	maxInstructionPaths     = 5000
+)
+
+type instructionPathVersion struct {
+	Hash          string    `json:"hash"`
+	PrevHash      string    `json:"prev_hash"`
+	FirstSeen     time.Time `json:"first_seen"`
+	LastSeen      time.Time `json:"last_seen"`
+	ChangeType    string    `json:"change_type"`
+	Caused        bool      `json:"caused"`
+	CauseTool     string    `json:"cause_tool"`
+	DiffKnown     bool      `json:"diff_known"`
+	LinesAdded    int       `json:"lines_added"`
+	LinesRemoved  int       `json:"lines_removed"`
+	AddedRuleHits []string  `json:"added_rule_hits"`
+}
+
+type instructionPathHistory struct {
+	SourcePath string                   `json:"source_path"`
+	Versions   []instructionPathVersion `json:"versions"`
+}
+
+// handleInstructionPaths handles GET /control/instructions/paths: the version
+// history of each named instruction file. It carries hashes, counts, rule and
+// tool names, timestamps and the path; never file text.
+func (h *Handler) handleInstructionPaths(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.historyStore == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"paths": []interface{}{}, "total": 0})
+		return
+	}
+
+	limit := defaultInstructionPaths
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			http.Error(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = min(n, maxInstructionPaths)
+	}
+
+	rows, err := h.historyStore.ListInstructionPathVersions(limit)
+	if err != nil {
+		slog.Error("failed to list instruction path versions", "error", err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	paths := []instructionPathHistory{}
+	index := map[string]int{}
+	for _, v := range rows {
+		i, ok := index[v.SourcePath]
+		if !ok {
+			i = len(paths)
+			index[v.SourcePath] = i
+			paths = append(paths, instructionPathHistory{SourcePath: v.SourcePath, Versions: []instructionPathVersion{}})
+		}
+		hits := v.AddedRuleHits
+		if hits == nil {
+			hits = []string{}
+		}
+		paths[i].Versions = append(paths[i].Versions, instructionPathVersion{
+			Hash: v.Hash, PrevHash: v.PrevHash, FirstSeen: v.FirstSeen, LastSeen: v.LastSeen,
+			ChangeType: v.ChangeType, Caused: v.Caused, CauseTool: v.CauseTool,
+			DiffKnown: v.DiffKnown, LinesAdded: v.LinesAdded, LinesRemoved: v.LinesRemoved,
+			AddedRuleHits: hits,
+		})
+	}
+	for i := range paths {
+		vs := paths[i].Versions
+		sort.SliceStable(vs, func(a, b int) bool { return vs[a].FirstSeen.Before(vs[b].FirstSeen) })
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"paths": paths, "total": len(paths)})
 }

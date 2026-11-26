@@ -291,14 +291,46 @@ For a typical agentic session (10 requests, 2 violations):
 
 ### Retention
 
-Configure `retention_days` to automatically clean up old records:
+ELIDA deletes stored records once they are older than the configured period.
+It sweeps once when it starts and then every hour while it runs.
 
 ```yaml
 storage:
-  retention_days: 30  # Keep 30 days of history
+  retention_days: 30      # Session history (default 30)
+  events:
+    retention_days: 90    # Event log (default: same as retention_days above)
 ```
 
-The cleanup runs periodically when ELIDA is running.
+| Setting | Applies to | Measured from | Default |
+|---------|-----------|---------------|---------|
+| `storage.retention_days` | Session records, voice session records, TTS request records | The record's end time (a voice session that never ended: its start time; a TTS request: its timestamp) | 30 |
+| `storage.events.retention_days` | The event log | The event's timestamp | Follows `storage.retention_days` |
+
+- `storage.retention_days: 0` (or less) keeps session history forever, and
+  the event log too unless it has its own period. ELIDA logs a warning at
+  startup for each class of record it will never delete.
+- `storage.events.retention_days` left unset follows `storage.retention_days`.
+  A negative value keeps events forever while session history is still pruned.
+- The two periods are independent. With a longer event period, a session's
+  events outlive its record; with a shorter one, the record outlives its events.
+- A session's integrity root (the Merkle root over its events) is deleted
+  together with the first of its events to expire, because a root cannot be
+  proven without every event it covers. The session's remaining events stay,
+  and a session ID that is used again gets a new root when it next ends.
+- Instruction file records, instruction path versions and fingerprint
+  baselines are not history and are never deleted by retention.
+- A session ID that keeps being reused carries up to 100 earlier captures in
+  its newest record. Those are bounded by count, not by age, and live as long
+  as that record does.
+- Deleting rows does not shrink the database file: SQLite reuses the freed
+  space for new records. Run `VACUUM` with ELIDA stopped to return it to the
+  filesystem.
+
+> **Upgrading from a version before this one:** earlier versions accepted
+> `retention_days` but never deleted anything. The first start after the
+> upgrade deletes every record older than the configured period (30 days if
+> you never set it). To keep older data, back up the database first or set
+> `storage.retention_days: 0`.
 
 ## When Sessions Are Captured
 
@@ -306,8 +338,13 @@ Session records are saved when:
 
 1. **Session killed** via API (`POST /control/sessions/{id}/kill`)
 2. **Session terminated** via API (`POST /control/sessions/{id}/terminate`)
-3. **Session timed out** (idle timeout or max duration)
+3. **Session timed out** (idle for `session.timeout`). The idle check runs
+   every 30 seconds and the record is saved as soon as it finds the session
+   timed out. If a request for the session is still running at that point (a
+   long stream, an open WebSocket), the record is saved when that request
+   ends.
 4. **Policy auto-terminate** (rule with `action: terminate`)
+5. **ELIDA stops** gracefully: every live session is saved before exit
 
 Records are **not** saved for:
 - Active sessions (still in progress)

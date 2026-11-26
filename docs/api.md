@@ -20,6 +20,12 @@ Open `http://localhost:9090/` in your browser for the web dashboard.
 # v0.31.0.
 curl http://localhost:9090/control/health
 
+# Compatibility escape hatch, deprecated: if something already scrapes the
+# five removed fields, ELIDA_CONTROL_HEALTH_LEGACY_DECISION=true restores the
+# decision block on this route in exactly the shape v0.30.0 and v0.31.0
+# served. It logs a warning at startup and will be removed; move readers to
+# /control/decision. It does not affect /control/ready.
+
 # Readiness (unauthenticated): a status code with no body. 200 normally; 503
 # when semantic detection is enabled but the model could not be loaded or
 # verified, so an orchestrator takes the instance out of service rather than
@@ -28,7 +34,14 @@ curl http://localhost:9090/control/health
 # restart the container on a loop.
 curl -i http://localhost:9090/control/ready
 
-# Aggregate stats
+# Aggregate stats. Alongside the session counters the response carries
+# capabilities, which reports optional subsystems that are switched off in
+# this process so a client can tell "disabled" from "enabled with no data":
+#   "capabilities": {"voice": {"enabled": false, "protocols": []}}
+# Voice is true only when the WebSocket transport AND
+# websocket.voice_sessions.enabled are both on; protocols lists what will
+# actually be parsed. The dashboard uses it to decide whether to offer the
+# Voice tab at all.
 curl http://localhost:9090/control/stats
 ```
 
@@ -99,7 +112,11 @@ A `correlation.<rule>` violation (in `violations[]` of the flagged, history and 
 
 Shadow-mode matches are `correlation_shadow` (array) on `GET /control/sessions/{id}` (live) and `GET /control/history/{id}` (persisted), omitted when empty. Each entry has `timestamp`, `match_id`, `rule`, `shape`, `severity`, `mode`, `event_ids` (shadow decision IDs), `categories`, `first_event` and `last_event`. Entries are newest first, at most 50; on reuse of a session ID the earlier sessions' entries are carried behind the current session's, deduplicated by `match_id`, 50 in total, and carrying does not recover entries already dropped. The list endpoints omit it. `semantic_shadow` is exported to OTEL logs only under `telemetry.semantic_shadow_logs: true`; this endpoint is unaffected.
 
+A session keeps its newest 50 `semantic_shadow` decisions and its newest 50 `correlation_shadow` matches. `GET /control/sessions/{id}` reports `semantic_shadow_dropped` and `correlation_shadow_dropped` (integers, omitted when 0): how many entries each list discarded at that cap. They are the only trace of what was lost. They describe live sessions; the persisted record under `/control/history` does not carry them yet.
+
 `GET /control/decision` reports `shadow_matches_dropped` (integer: shadow matches discarded because their session ended or its ID was reused while the match was computed) and `shadow_correlation` (object, present only when a shadow correlator runs): the shadow correlator's engine counters, the same engine fields policy correlation reports under `correlation` on `GET /control/flagged/stats` (`rules`, `shards`, `sessions`, `history_events`, `events_observed`, `events_ignored`, `duplicate_events`, `events_dropped`, `history_evicted`, `sessions_evicted`, `matches`, `cooldown_suppressed`, `duplicate_matches`).
+
+`GET /control/sessions` and `GET /control/sessions/{id}` report `system_prompt_changes` (integer, omitted when 0): how many times the session's primary system prompt changed to one the session had not scanned before. A change is often legitimate (a deployment, a new agent) and sometimes the only trace of a caller rewriting the rules mid-session, so it is worth alerting on a session that shows several. Returning to a prompt already scanned, which a subagent sharing its parent's session ID does on every request, and other system messages are not counted. The count is kept with the session, including in Redis, and is not part of the persisted history record.
 
 `GET /control/sessions/{id}/turns` violation turns carry `event_id` (string), `event_category` (string), `source_role` (string), `evidence_only` (bool) and, for a correlation match only, `correlation` (object: `match_id` string, `event_count` integer, the full count of contributing events), each omitted when empty. The full evidence is on the flagged and history responses. Message turns carry the message content and tool-call turns carry the raw tool arguments; the endpoint is authenticated but is not content-free (it is the conversation-stream API).
 
@@ -170,6 +187,41 @@ When you kill a session, ELIDA blocks subsequent requests from that client. The 
 | `permanent` | Blocks until server restart | Compromised sessions |
 
 Killed sessions return `403 Forbidden` until the block expires.
+
+### Choosing the block for one kill
+
+The kill request takes an optional JSON body that replaces the configured
+`kill_block` for that session only:
+
+```bash
+# Block requests for this session for 30 minutes
+curl -X POST http://localhost:9090/control/sessions/client-abc123/kill \
+  -H 'Content-Type: application/json' -d '{"block": "30m"}'
+# {"status":"killed","session_id":"client-abc123","block":"30m"}
+
+# Block it until ELIDA restarts
+curl -X POST http://localhost:9090/control/sessions/client-abc123/kill \
+  -d '{"block": "permanent"}'
+```
+
+`block` is `permanent`, `until_hour_change`, or a positive duration such as
+`90s`, `30m` or `2h`. Leave the body out, or send `{}` or `"default"`, to use
+the configured block. Anything else is a `400` and the session is not killed.
+Resuming a session forgets its block. A killed session's `kill_block` and
+`blocked_until` (absent for `permanent`) are in the session JSON.
+
+The dashboard's Kill button opens this choice next to the button, with
+Default, 5 minutes, 30 minutes, 1 hour, 24 hours, a custom number of minutes
+and Permanent.
+
+The block lasts as long as the mode says, however long that is. ELIDA keeps
+the killed session in memory for the duration of the block, and removes it
+(the next request then starts a new session) only after the block ends. A
+killed session is otherwise removed five minutes after it ended, like any
+other ended session. In `permanent` mode the killed sessions stay in memory
+until the process restarts, one entry per kill, and the block does not survive
+a restart with the in-memory store. An explicit `X-Session-ID` that was killed
+is blocked for the same time.
 
 ```bash
 # Kill a runaway Claude Code session

@@ -40,6 +40,10 @@ type sessionData struct {
 	BackendsUsed map[string]int `json:"backends_used,omitempty"`
 	Terminated   bool           `json:"terminated,omitempty"`
 
+	// The block the kill asked for; empty: the configured one.
+	KillBlockMode     KillBlockMode `json:"kill_block_mode,omitempty"`
+	KillBlockDuration time.Duration `json:"kill_block_duration,omitempty"`
+
 	IsWebSocket  bool  `json:"is_websocket,omitempty"`
 	FrameCount   int64 `json:"frame_count,omitempty"`
 	TextFrames   int64 `json:"text_frames,omitempty"`
@@ -56,6 +60,9 @@ type sessionData struct {
 	// TestSemanticShadow_CarriesNoContentFields proves the first content-free.
 	SemanticShadow    []SemanticShadow    `json:"semantic_shadow,omitempty"`
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+
+	// How many times the primary system prompt changed.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
 }
 
 // toolCallWire is the content-free projection of a ToolCallRecord: exactly
@@ -92,6 +99,8 @@ func sessionToData(sess *Session) *sessionData {
 		Metadata:          maps.Clone(sess.Metadata),
 		BackendsUsed:      maps.Clone(sess.BackendsUsed),
 		Terminated:        sess.Terminated,
+		KillBlockMode:     sess.KillBlockMode,
+		KillBlockDuration: sess.KillBlockDuration,
 		IsWebSocket:       sess.IsWebSocket,
 		FrameCount:        sess.FrameCount,
 		TextFrames:        sess.TextFrames,
@@ -103,7 +112,11 @@ func sessionToData(sess *Session) *sessionData {
 		FailedBackends:    slices.Clone(sess.FailedBackends),
 		SemanticShadow:    slices.Clone(sess.SemanticShadow),
 		CorrelationShadow: cloneCorrelationShadow(sess.CorrelationShadow),
+
+		SemanticShadowDropped:    sess.SemanticShadowDropped,
+		CorrelationShadowDropped: sess.CorrelationShadowDropped,
 	}
+	sd.SystemPromptChanges = sess.SystemPromptChanges
 	if sess.EndTime != nil {
 		t := *sess.EndTime
 		sd.EndTime = &t
@@ -136,6 +149,8 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		Metadata:          sd.Metadata,
 		BackendsUsed:      sd.BackendsUsed,
 		Terminated:        sd.Terminated,
+		KillBlockMode:     sd.KillBlockMode,
+		KillBlockDuration: sd.KillBlockDuration,
 		IsWebSocket:       sd.IsWebSocket,
 		FrameCount:        sd.FrameCount,
 		TextFrames:        sd.TextFrames,
@@ -148,7 +163,11 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		FailedBackends:    sd.FailedBackends,
 		SemanticShadow:    clampHead(sd.SemanticShadow, MaxSemanticShadow),
 		CorrelationShadow: clampHead(sd.CorrelationShadow, MaxCorrelationShadow),
+
+		SemanticShadowDropped:    sd.SemanticShadowDropped + overCap(sd.SemanticShadow, MaxSemanticShadow),
+		CorrelationShadowDropped: sd.CorrelationShadowDropped + overCap(sd.CorrelationShadow, MaxCorrelationShadow),
 	}
+	sess.SystemPromptChanges = sd.SystemPromptChanges
 	if sess.Metadata == nil {
 		sess.Metadata = make(map[string]string)
 	}
@@ -166,6 +185,11 @@ func newSessionFromData(sd *sessionData, killChan chan struct{}) *Session {
 		}
 	}
 	return sess
+}
+
+// overCap is how many entries of in clampHead will discard.
+func overCap[T any](in []T, limit int) int {
+	return max(0, len(in)-limit)
 }
 
 func clampHead[T any](in []T, limit int) []T {

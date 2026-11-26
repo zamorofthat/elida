@@ -60,6 +60,7 @@ session:
   derive_from:
     openai_user: true   # use the OpenAI `user` field (default true)
     body_path: ""        # optional dot-path, e.g. "metadata.conversation_id"
+    body_paths: []       # more dot-paths, tried in order after body_path
 
   # Kill block configuration
   kill_block:
@@ -404,6 +405,54 @@ proxy:
 - **Constant-time comparison** — Uses `crypto/subtle.ConstantTimeCompare` to prevent timing attacks
 - **Header stripping** — `X-Elida-API-Key` is stripped before forwarding to backend (not leaked)
 - **Health bypass** — `/health`, `/healthz`, `/ready`, `/readyz` bypass auth for load balancer probes
+
+### Per-client keys (`proxy.auth.keys`)
+
+By default every caller presents the same key, so ELIDA cannot tell callers
+apart and two callers that send the same session ID share one session, its risk
+score and its evidence. Per-client keys name the caller:
+
+```yaml
+proxy:
+  auth:
+    enabled: true
+    keys:
+      - name: team-a
+        key: ${TEAM_A_KEY}
+      - name: team-b
+        key: ${TEAM_B_KEY}
+```
+
+A request that authenticates with one of these keys, by `X-Elida-API-Key` or as
+a bearer token, is that client:
+
+- Its session IDs are namespaced by the client's name: `team-a:<id>`, whatever
+  `<id>` the caller chose or ELIDA derived. Two clients can never share a
+  session, and killing one client's session does not touch another's.
+- With no session ID of its own, a keyed client gets one session per backend in
+  its namespace (`team-a:default-<backend>`) instead of the per-address
+  fallback shared by everything behind one address.
+- The name is recorded on the session as the `client` metadata entry, which the
+  control API returns with the session.
+
+The shared `api_key` keeps working beside the keys. A request that uses it, or
+that comes from a trusted network, carries no client name and keeps the session
+IDs it always had, so adopting keys changes nothing for callers you do not give
+one.
+
+Validation rejects a name that is empty, longer than 64 characters or outside
+`A-Z a-z 0-9 . _ -` (a colon would blur the client from the ID), two clients with
+the same name or the same key, a key equal to the shared key, an empty key, and
+keys set while `enabled` is false. Auth enabled with only `keys` and no shared
+`api_key` is valid.
+
+**What this does not fix.** A keyed caller can still send a new session ID on
+every request and so start its own history again each time; risk is still kept
+per session. Per-client keys stop callers colliding and make each one
+attributable. They do not stop a caller resetting itself. Callers that
+authenticate with the shared key or sit on a trusted network keep the original
+weakness. WebSocket connections do not carry a client name: their sessions are
+not namespaced.
 
 ### Trusted Networks (`proxy.auth.trusted_networks`)
 
@@ -842,19 +891,22 @@ session:
   derive_from:
     openai_user: true   # derive from the OpenAI `user` field (default: true)
     body_path: ""       # optional dot-path, e.g. "metadata.conversation_id"
+    body_paths: []      # more dot-paths, tried in order after body_path
 ```
 
 Precedence when deriving from the body:
 
-1. `session.derive_from.body_path`, if configured and the path resolves to a non-empty string in the body — takes precedence over the `user` field.
+1. `session.derive_from.body_path`, then each entry of `session.derive_from.body_paths` in order. The first path that resolves to a non-empty string in the body is used; a path that is missing, empty or not a string is skipped. All of them take precedence over the `user` field.
 2. `session.derive_from.openai_user` — the standard OpenAI `user` field, on by default.
 3. Neither applies (or both are disabled) — falls through to the client-IP + backend fallback above.
 
+Use `body_paths` when one deployment sees the same conversation ID at different places in the body. Paths are dot-separated object keys; array indices are not supported. An entry that is empty, has surrounding spaces, or has an empty segment (`a..b`) fails config validation.
+
 Derived values are formatted as `user-<value>` when the value is short and contains only `[A-Za-z0-9._:-]`, or `user-<16 hex chars>` (a SHA-256-based hash) otherwise — so arbitrary or long `user`/body values never leak verbatim into the session ID.
 
-Set `openai_user: false` and leave `body_path` empty to disable body-derived identity entirely and always use the client-IP + backend fallback when no `X-Session-ID` header is sent.
+Set `openai_user: false` and leave `body_path` and `body_paths` empty to disable body-derived identity entirely and always use the client-IP + backend fallback when no `X-Session-ID` header is sent.
 
-**Security note:** the OpenAI `user` field is client-controlled input — ELIDA trusts whatever value the caller puts in the request body. Session identity is not a cosmetic label: it's the key the kill-switch, risk ladder, and forensic capture all index by. In a single-tenant deployment — one trusted agent stack talking to its own ELIDA instance, ELIDA's common case — this is fine, and it's the whole point of the feature: the agent's own conversation ID keeps its session coherent across failover. In a multi-tenant, shared-key, or unauthenticated deployment, it's a liability: any client that knows or guesses another client's `user` value joins that client's session, and can then trigger a targeted session-kill, poison its risk score toward (or away from) enforcement, or pollute its forensic capture with noise. If clients are mutually untrusted, set `derive_from: {openai_user: false}` and either leave `body_path` empty or point it at a value the clients cannot guess or set for each other.
+**Security note:** the OpenAI `user` field is client-controlled input — ELIDA trusts whatever value the caller puts in the request body. Session identity is not a cosmetic label: it's the key the kill-switch, risk ladder, and forensic capture all index by. In a single-tenant deployment — one trusted agent stack talking to its own ELIDA instance, ELIDA's common case — this is fine, and it's the whole point of the feature: the agent's own conversation ID keeps its session coherent across failover. In a multi-tenant, shared-key, or unauthenticated deployment, it's a liability: any client that knows or guesses another client's `user` value joins that client's session, and can then trigger a targeted session-kill, poison its risk score toward (or away from) enforcement, or pollute its forensic capture with noise. If clients are mutually untrusted, set `derive_from: {openai_user: false}` and either leave `body_path` empty or point it at a value the clients cannot guess or set for each other. The same holds for every configured body path: the value is whatever the client sent, and each path you add is another field a client can use to name a session.
 
 ## Settings Hierarchy (Layered Configuration)
 
@@ -1142,3 +1194,80 @@ count) while correlation is enabled.
 index; index 0 is a real message, so several windows of one long first
 message count once). Events with no message at all (metric and anomaly
 violations, which carry no source role) count individually.
+
+## Instruction integrity
+
+`policy.instruction_integrity` watches instruction files (CLAUDE.md, AGENTS.md, cursor and windsurf rule
+files) and unnamed blocks addressed to an agent. It needs `policy.enabled: true` and the SQLite history
+store.
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Turns the feature on. |
+| `tracked_types` | File types tracked: `claude_md`, `cursorrules`, `cursor_rules`, `agents_md`, `windsurfrules`. |
+| `shape_detection` | Also tracks unnamed text whose shape suggests it is addressed to an agent, at medium confidence. |
+| `shape_confidence_threshold` | A 0-1 score for that shape test. A lower value tracks more text, including some documentation. |
+| `async_queue_size` | Length of the queue to the background writer. A full queue drops the write, never the request. |
+| `rules` | The scan rules (name, patterns, severity, action). Omitted, the defaults load. |
+| `changed_since_last_seen` | Grades a named file that a session first shows with bytes the proxy has not seen at that path. YAML only. Default true. |
+
+### How a session is identified
+
+A session counts as identified when the configured `session.header` is present, or when Claude Code's own
+session header carries a safe ID. A session identified by neither is a fallback session (one per client and
+backend). Fallback sessions are still tracked and still scored for rule hits, but they produce no change
+findings, because a fallback session can mix several unrelated conversations. Their changes are counted as
+suppressed findings.
+
+### Control routes
+
+Both routes sit behind the same authentication as the other control routes.
+
+- `GET /control/stats` keeps every existing key and adds `instruction_integrity` when the feature is on:
+  `identified_sessions` and `fallback_sessions` (sessions currently tracked, counted once an observation has
+  run for them), `tracked_paths`, `changes` and `suppressed_findings` (since start), and
+  `changed_since_last_seen`.
+- `GET /control/instructions/paths` lists the version history of each named file, oldest version first:
+  hashes, change type, whether a tool call caused it, the cause tool name, line counts, rule names and
+  timestamps. It holds no file text. The optional `limit` caps the number of versions read (default 500,
+  at most 5000). Without a history store it returns an empty list.
+
+### Upgrading
+
+A rule set copied from the old defaults that gives `instruction_shell_exec` the action block no longer refuses
+requests on it; the hit raises the session's risk score. Startup logs a warning that names every such rule.
+
+### Limits
+
+- Line hashes do not survive a restart. The first new version of a path after a restart is reported with an
+  unknown diff, at info level, until some session shows the newest known version again.
+- A path is a string. The same absolute path on two machines behind one proxy is one history, so a
+  since-last-seen finding can be two different checkouts.
+- If another session shows an edited file before the editing session's next request carries the tool call,
+  the change is graded uncaused in that other session. The version is marked caused afterwards, and only
+  when the editing session is identified.
+- A tool call that names a file is a possible cause of that file's next change for 10 minutes from the
+  request that first carried it. A change after that is graded uncaused.
+- A conversation resumed after a restart, or after its session was dropped from tracking, replays its
+  history before the file has a change history in the proxy. A tool call already in that history is not
+  counted as a cause for the first change shown in that request.
+- A fallback session can use up a since-last-seen finding: its observation makes the version known and its
+  own finding is suppressed.
+- Only tool calls in the request count as causes. A call whose result has not come back is not seen, and a
+  tool that names the file only by a directory or a glob is not matched.
+- The diff is a set difference of lines. A moved or re-indented line counts as added and removed; a
+  duplicated line counts as nothing.
+- Beyond 4096 tracked sessions the least recently seen is dropped, and its next request is a baseline.
+- A session keeps at most 1024 shown versions across all its files. Past that its oldest is forgotten, and
+  that version shown again is reported again, once. At most 64 versions per path and 4096 paths are kept in
+  memory across sessions.
+- Only the first 32 instruction files of a request get change tracking. A file past the 32nd is still
+  checked against the rules (it can still refuse the request) and its rule hits are still scored, but it is
+  handled like an unnamed block: no change history, and its hits are counted once per content hash.
+- A file whose path is longer than 1024 bytes is handled like an unnamed block: no change history, and its
+  findings do not name the path. A tool name is kept to its first 128 bytes, with control characters
+  replaced by `?`.
+- `instruction_path_versions` has no retention, like `instruction_files`: session history retention does
+  not prune either table.
+- There is no dashboard view of the chain. It is available through `/control/instructions/paths` and the
+  events table.

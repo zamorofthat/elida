@@ -11,21 +11,41 @@ import (
 // safeIDValue matches derived values usable verbatim in a session ID.
 var safeIDValue = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
 
+// ClaudeCodeSessionHeader is the header Claude Code sends to identify a
+// conversation; its subagents share it.
+const ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+
+// SafeID reports whether v can be used verbatim as a session ID.
+func SafeID(v string) bool {
+	return safeIDValue.MatchString(v)
+}
+
 // DeriveIDFromBody derives a session ID from a JSON request body.
-// Precedence: bodyPath (explicit config) over the OpenAI "user" field.
+// Precedence: bodyPaths (explicit config, tried in order, first non-empty
+// string wins) over the OpenAI "user" field. Empty path entries are skipped.
 // Returns "" when nothing derivable — callers fall back to IP-hash sessions.
 // Derived IDs deliberately contain no backend component, so one conversation
 // keeps one session across backend failover (integration feedback #4).
-func DeriveIDFromBody(body []byte, openaiUser bool, bodyPath string) string {
-	if len(body) == 0 || (!openaiUser && bodyPath == "") {
+func DeriveIDFromBody(body []byte, openaiUser bool, bodyPaths ...string) string {
+	hasPath := false
+	for _, p := range bodyPaths {
+		if p != "" {
+			hasPath = true
+			break
+		}
+	}
+	if len(body) == 0 || (!openaiUser && !hasPath) {
 		return ""
 	}
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return ""
 	}
-	if bodyPath != "" {
-		if v := lookupPath(data, bodyPath); v != "" {
+	for _, p := range bodyPaths {
+		if p == "" {
+			continue
+		}
+		if v := lookupPath(data, p); v != "" {
 			return formatDerivedID(v)
 		}
 	}
@@ -57,7 +77,7 @@ func lookupPath(data map[string]any, path string) string {
 // formatDerivedID returns "user-<value>" for safe values, or a bounded
 // stable hash form for long/unsafe ones.
 func formatDerivedID(v string) string {
-	if safeIDValue.MatchString(v) {
+	if SafeID(v) {
 		return "user-" + v
 	}
 	sum := sha256.Sum256([]byte(v))

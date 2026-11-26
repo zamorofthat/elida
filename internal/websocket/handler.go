@@ -66,9 +66,27 @@ func NewHandler(cfg *config.WebSocketConfig, sessionHeader string, manager *sess
 		sessionHeader: sessionHeader,
 		manager:       manager,
 		router:        router,
-		controlParser: NewSessionControlParser(customPatterns),
+		controlParser: NewSessionControlParserFor(customPatterns, cfg.VoiceSessions.Protocols),
 		voiceManagers: make(map[string]*VoiceSessionManager),
 	}
+}
+
+// VoiceTrackingEnabled reports whether this handler will create voice session
+// managers. Voice tracking needs both the WebSocket transport (without it no
+// handler exists at all) and voice_sessions.enabled, so a caller holding a
+// handler still has to ask: the transport being up does not imply tracking.
+func (h *Handler) VoiceTrackingEnabled() bool {
+	return h.config.VoiceSessions.Enabled
+}
+
+// EnabledVoiceProtocols reports the protocols voice tracking will attempt, in
+// the order they are tried. It is empty when tracking is off, so a caller
+// cannot present a protocol list for a feature that will never parse a frame.
+func (h *Handler) EnabledVoiceProtocols() []string {
+	if !h.config.VoiceSessions.Enabled {
+		return nil
+	}
+	return h.controlParser.EnabledProtocols()
 }
 
 // SetVoiceSessionCallbacks sets callbacks for voice session lifecycle events

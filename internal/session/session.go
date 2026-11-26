@@ -55,8 +55,30 @@ type Session struct {
 	// Terminated sessions cannot be resumed (for malicious agents)
 	Terminated bool `json:"terminated,omitempty"`
 
-	// Cached system prompt hash (avoids re-scanning identical prompts)
+	// KillBlockMode and KillBlockDuration are the block the kill that ended
+	// this session asked for, replacing the configured kill_block for this
+	// session. Empty means the configured block applies. Resume clears them.
+	KillBlockMode     KillBlockMode `json:"kill_block_mode,omitempty"`
+	KillBlockDuration time.Duration `json:"kill_block_duration,omitempty"`
+
+	// Hash of the session's most recent primary system prompt (the top-level
+	// `system` field, or the first role "system" message when there is none).
+	// Only tells "the prompt changed" from "the prompt is the same"; whether
+	// content still needs scanning is seenSystemHashes' question.
 	SystemPromptHash string `json:"-"` // Not persisted, session-local cache
+
+	// SystemPromptChanges counts how many times the session's primary system
+	// prompt changed to one it had not scanned before. A change is often
+	// legitimate (a deployment, a new agent) and sometimes the only trace of a
+	// caller rewriting the rules mid-session.
+	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
+
+	// seenSystemHashes holds the hash of every piece of system content the
+	// policy engine has already scanned in this session. One session carries
+	// several at once: a top-level prompt, role "system" entries in the
+	// message list, and a different prompt for each subagent sharing the ID.
+	// Not persisted; bounded by maxSeenSystemHashes.
+	seenSystemHashes map[string]struct{}
 
 	// WebSocket session fields
 	IsWebSocket  bool  `json:"is_websocket,omitempty"`
@@ -84,11 +106,17 @@ type Session struct {
 	// Shadow-mode semantic decisions, newest first, capped at
 	// MaxSemanticShadow. Never contributes to risk.
 	SemanticShadow []SemanticShadow `json:"semantic_shadow,omitempty"`
+	// SemanticShadowDropped counts the shadow decisions discarded because the
+	// list was at MaxSemanticShadow. It is the only trace of what was lost.
+	SemanticShadowDropped int `json:"semantic_shadow_dropped,omitempty"`
 
 	// Shadow-mode correlation matches, newest first, capped at
 	// MaxCorrelationShadow. Calibration data only: never a violation,
 	// never risk.
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
+	// CorrelationShadowDropped counts the shadow correlation matches discarded
+	// because the list was at MaxCorrelationShadow.
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
 
 	// Conversation history for failover/replay
 	Messages     []Message `json:"messages,omitempty"`
@@ -366,6 +394,7 @@ func (s *Session) RecordSemanticShadow(sh SemanticShadow) {
 	n := len(s.SemanticShadow) + 1
 	if n > MaxSemanticShadow {
 		n = MaxSemanticShadow
+		s.SemanticShadowDropped++
 	}
 	out := make([]SemanticShadow, n)
 	out[0] = sh
@@ -395,6 +424,7 @@ func (s *Session) RecordCorrelationShadow(cs CorrelationShadow) {
 	n := len(s.CorrelationShadow) + 1
 	if n > MaxCorrelationShadow {
 		n = MaxCorrelationShadow
+		s.CorrelationShadowDropped++
 	}
 	out := make([]CorrelationShadow, n)
 	out[0] = cs.clone()
@@ -423,6 +453,26 @@ func cloneCorrelationShadow(in []CorrelationShadow) []CorrelationShadow {
 	return out
 }
 
+// maxSeenSystemHashes bounds seenSystemHashes, which is filled from
+// client-supplied content. A session that exceeds it starts the set again,
+// at the cost of scanning its current system content one more time.
+const maxSeenSystemHashes = 4096
+
+// MarkSystemContentSeen records hash as scanned and reports whether this is
+// the first time the session has seen it.
+func (s *Session) MarkSystemContentSeen(hash string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, seen := s.seenSystemHashes[hash]; seen {
+		return false
+	}
+	if s.seenSystemHashes == nil || len(s.seenSystemHashes) >= maxSeenSystemHashes {
+		s.seenSystemHashes = make(map[string]struct{})
+	}
+	s.seenSystemHashes[hash] = struct{}{}
+	return true
+}
+
 // GetSystemPromptHash returns the cached system prompt hash
 func (s *Session) GetSystemPromptHash() string {
 	s.mu.RLock()
@@ -435,6 +485,13 @@ func (s *Session) SetSystemPromptHash(hash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SystemPromptHash = hash
+}
+
+// RecordSystemPromptChange counts one change of the primary system prompt.
+func (s *Session) RecordSystemPromptChange() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SystemPromptChanges++
 }
 
 // FrameType represents the type of WebSocket frame
@@ -517,6 +574,35 @@ func (s *Session) SetState(state State) {
 	}
 }
 
+// timeOutIfIdle ends an active session that has been idle for longer than
+// timeout and reports whether it did. The idle check and the state change
+// are one step under the session lock, so activity recorded by touchIfActive
+// either keeps the session alive or finds it already ended, never both.
+func (s *Session) timeOutIfIdle(timeout time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State != Active || time.Since(s.LastActivity) <= timeout {
+		return false
+	}
+	now := time.Now()
+	s.State = TimedOut
+	s.EndTime = &now
+	return true
+}
+
+// touchIfActive restarts the idle clock of an active session and reports
+// whether the session is active. It does not count a request; Touch and
+// TouchAndRecord do that once the request is under way.
+func (s *Session) touchIfActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.State != Active {
+		return false
+	}
+	s.LastActivity = time.Now()
+	return true
+}
+
 // GetState returns the current session state
 func (s *Session) GetState() State {
 	s.mu.RLock()
@@ -531,12 +617,22 @@ func (s *Session) IsActive() bool {
 
 // Kill signals the session to terminate (can be resumed later)
 func (s *Session) Kill() {
+	s.killWith(nil)
+}
+
+// killWith kills an active session, recording the block the kill asked for
+// (nil: the configured one) in the same step, so no reader sees the session
+// killed without it.
+func (s *Session) killWith(kb *KillBlockConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.State == Active {
 		s.State = Killed
 		now := time.Now()
 		s.EndTime = &now
+		if kb != nil {
+			s.KillBlockMode, s.KillBlockDuration = kb.Mode, kb.Duration
+		}
 		close(s.killChan)
 	}
 }
@@ -579,6 +675,7 @@ func (s *Session) Resume() bool {
 	if s.State == Killed {
 		s.State = Active
 		s.EndTime = nil
+		s.KillBlockMode, s.KillBlockDuration = "", 0
 		s.LastActivity = time.Now()
 		// Create new kill channel for future kill operations
 		s.killChan = make(chan struct{})
@@ -590,15 +687,17 @@ func (s *Session) Resume() bool {
 // lifecycle is the part of a session that only the manager's lifecycle
 // methods (Kill, Resume, Terminate, Complete, timeout) change.
 type lifecycle struct {
-	State      State
-	EndTime    *time.Time
-	Terminated bool
+	State             State
+	EndTime           *time.Time
+	Terminated        bool
+	KillBlockMode     KillBlockMode
+	KillBlockDuration time.Duration
 }
 
 func (s *Session) lifecycleState() lifecycle {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	l := lifecycle{State: s.State, Terminated: s.Terminated}
+	l := lifecycle{State: s.State, Terminated: s.Terminated, KillBlockMode: s.KillBlockMode, KillBlockDuration: s.KillBlockDuration}
 	if s.EndTime != nil {
 		t := *s.EndTime
 		l.EndTime = &t
@@ -826,6 +925,7 @@ func (s *Session) Snapshot() Session {
 		copy(snap.SemanticShadow, s.SemanticShadow)
 	}
 	snap.CorrelationShadow = cloneCorrelationShadow(s.CorrelationShadow)
+	snap.SystemPromptChanges = s.SystemPromptChanges
 	if s.Messages != nil {
 		snap.Messages = make([]Message, len(s.Messages))
 		copy(snap.Messages, s.Messages)

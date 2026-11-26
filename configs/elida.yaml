@@ -4,8 +4,12 @@
 # Address to listen on for proxied traffic
 listen: ":8080"
 
-# Graceful shutdown timeout — how long to wait for in-flight requests
-# and session draining before force-exiting (default 30s)
+# Graceful shutdown timeout — how long to wait for in-flight requests to
+# finish after SIGTERM/SIGINT (default 30s). Saving the live sessions comes
+# after that and is not bounded by it, so the container's stop grace period
+# (docker --stop-timeout, compose stop_grace_period, Kubernetes
+# terminationGracePeriodSeconds) must be longer than this value.
+# See docs/deployment.md#stopping-elida.
 # shutdown_timeout: 30s
 
 # Single Backend Mode (backward compatible) - commented out when using multi-backend
@@ -189,7 +193,9 @@ storage:
   enabled: true
   # Path to SQLite database file
   path: "data/elida.db"
-  # How many days to retain session history
+  # Days to keep session, voice and TTS history. Older records are deleted at
+  # startup and then hourly. 0 keeps history forever.
+  # The event log follows this value unless storage.events.retention_days is set.
   retention_days: 30
   # Capture mode: "flagged_only" (default) or "all" (CDR-style full audit)
   #   flagged_only - Only capture request/response bodies for policy-flagged sessions
@@ -287,11 +293,19 @@ policy:
       - cursor_rules
       - agents_md
       - windsurfrules
+    # Tracks unnamed text that is addressed to an agent (hook context, MCP
+    # server instructions) at medium confidence. The threshold is a 0-1
+    # "directed at an agent" score; lower it to catch more, at the cost of
+    # more documentation being tracked. A "no" here never means "safe".
     shape_detection: true
     shape_confidence_threshold: 0.7
     async_queue_size: 100
-    # Rules are loaded from defaults — see internal/config/config.go
-    # Override here to customize
+    # Grade a named file that a session first shows with bytes the proxy has
+    # not seen at that path before. Findings only for identified sessions.
+    changed_since_last_seen: true
+    # Rules are loaded from defaults (see internal/config/config.go). Only
+    # instruction_pipe_to_shell refuses a request; every other default rule
+    # raises the session's risk score instead.
 
   # Circuit breaker — automatic limits on runaway sessions
   circuit_breaker:

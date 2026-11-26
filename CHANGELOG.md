@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Saving any setting through `PUT /control/settings` (or the dashboard) removed
+  every policy rule the proxy had loaded at startup, the preset's rules and
+  those in `elida.yaml`, until the next restart: the reload rebuilt the rule
+  list from the settings file alone, which holds only custom rules, so a
+  deployment with 38 rules was left with none and no warning. The reload now
+  keeps the startup rules, applies `disabled_rules` (saved and merged before,
+  but never applied), and lets a saved custom rule replace a startup rule of
+  the same name.
+- Rule settings saved before a restart, `disabled_rules` and custom rules, now
+  take effect at startup. Nothing applied them, so a rule saved as disabled came
+  back after every restart until the next save. Only the rules are applied: the
+  policy mode and the risk ladder still come from `elida.yaml`.
+
 ### Added
 - Sessions now record the `User-Agent` their requests send, as the `user_agent`
   metadata entry. The first value is kept (control characters removed, 200 bytes
@@ -147,6 +161,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   With the default the export is unchanged.
 
 ### Changed
+- Redaction skips a pattern when the text cannot contain a match, for example
+  the email pattern when there is no `@`. Redacting a 50 KB captured body took
+  about 37% less time in a benchmark on ordinary prose, which shortens the
+  save of captured sessions at timeout and shutdown. The output is unchanged;
+  a test compares it with the unfiltered patterns byte for byte. Custom
+  patterns are always run.
 - **Breaking, for anyone scraping `/control/health` without a credential:**
   the unauthenticated health payload is `{"status", "timestamp"}` again. The
   `decision` block — `capability`, `reason`, `effective_mode`,
@@ -157,6 +177,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one of them is still on the authenticated `GET /control/decision`, where
   they also were before. Liveness and readiness probes are unaffected: both
   read a status code, and `status` is unchanged.
+  Deployments that already scrape those fields can set
+  `ELIDA_CONTROL_HEALTH_LEGACY_DECISION=true` to restore the block in exactly
+  the shape v0.30.0 and v0.31.0 served, byte for byte. It is deprecated from
+  the day it ships, logs a warning naming the disclosure at startup, and will
+  be removed — it exists so an upgrade is never forced to break a reader on
+  the same day it closes the disclosure.
 - **Breaking (Helm chart).** The control API is now authenticated by default:
   `elida.controlAuth.enabled` defaults to `true` and
   `elida.controlAuth.allowInsecure` to `false`. The control API serves session
@@ -198,6 +224,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
 
 ### Fixed
+- A killed session stays blocked for as long as `session.kill_block` says.
+  ELIDA removed every ended session five minutes after it ended, killed ones
+  included, and the next request then started a new session. So `permanent`
+  ("until server restart") lasted five minutes, as did any `duration` or
+  `until_hour_change` block longer than that, and the 30-minute resume window
+  for a killed session was cut to the same five. A killed session is now kept
+  until its block is over (until the process restarts for `permanent`, until
+  the end of the hour of the kill for `until_hour_change`), and its saved
+  record is still written once. Memory holds one entry per killed session
+  while its block lasts. The default is `until_hour_change`.
+- A session that times out is now saved and exported when it times out. The
+  timeout used to only mark the session: its history record and telemetry
+  export were written when the session was dropped from memory five minutes
+  later, so a timed-out session was missing from history for that long and
+  was lost if ELIDA crashed or was killed in between. If a request for the
+  session is still running at the timeout (a long stream, an open
+  WebSocket), the record is written when that request ends. Flags from
+  non-blocking violations are released at the same moment instead of five
+  minutes later; block and terminate decisions are kept as before.
+- A killed or terminated session keeps its saved record. Five minutes after
+  the kill, when the session was dropped from memory, ELIDA saved it a second
+  time. The captured content had already gone into the first save, so the
+  second one replaced the history record with one that had no captured
+  requests, and the session was exported to telemetry twice. Terminating a
+  session that was already killed did the same at once. A session is now
+  saved once each time it ends: at the kill, and again only if it is resumed
+  and ends again.
+- `storage.retention_days` is now enforced. It was read and logged but
+  nothing ever deleted a record, so the database grew without bound. ELIDA now
+  sweeps at startup and then hourly: session, voice session and TTS records
+  older than `storage.retention_days` (default 30), and events older than
+  `storage.events.retention_days` (unset: same as `storage.retention_days`).
+  `storage.retention_days: 0` keeps history forever; a negative
+  `storage.events.retention_days` keeps events forever. A session's integrity
+  root is removed with the first of its events to expire, so a pruned session
+  reports no root instead of a proof that fails. **On upgrade, the first start
+  deletes everything older than the configured period**: back up the database
+  or set `storage.retention_days: 0` first if you need the older data. See
+  [Retention](docs/session-records.md#retention).
 - Redis-backed deployments no longer lose request-scoped session state. Only
   eleven lifecycle fields were stored and nothing wrote the rest back, so
   tokens, tool-call accounting, `semantic_shadow` and `correlation_shadow`
@@ -213,6 +278,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   system-prompt-change WARN cannot fire under Redis. Replicas serving one
   session concurrently are last-writer-wins, and the write-back has no
   compare-and-set (a follow-up).
+- The shipped Compose files and the Helm chart now give ELIDA time to stop.
+  On SIGTERM ELIDA waits up to `shutdown_timeout` (30s) for in-flight requests
+  and then saves and exports every live session, but neither Compose file set
+  `stop_grace_period` (Docker's default is 10s) and the chart set no
+  `terminationGracePeriodSeconds` (Kubernetes' default is 30s), so a routine
+  stop or rollout could kill ELIDA before its live sessions reached history
+  or telemetry. Both Compose files now set `stop_grace_period: 60s` and the
+  chart has a `terminationGracePeriodSeconds` value, default `60`. Plain
+  `docker run` deployments need `--stop-timeout 60` (or `docker stop -t 60`).
+  Saving the sessions is not bounded by `shutdown_timeout`, and with
+  `capture_mode: all` it can take longer than 30 seconds; see
+  [Stopping ELIDA](docs/deployment.md#stopping-elida) for measurements and
+  sizing.
 - A terminated session now keeps its terminated flag across Redis reloads
   (so it cannot be resumed), and an idle session now times out under Redis
   instead of staying active until its key expires. Kill-then-resume is still

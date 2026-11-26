@@ -32,39 +32,42 @@ func wireTime(sec int) time.Time {
 func fullWireSession() *Session {
 	end := wireTime(59)
 	s := &Session{
-		ID:               "sess-wire",
-		State:            Killed,
-		StartTime:        wireTime(1),
-		LastActivity:     wireTime(2),
-		EndTime:          &end,
-		RequestCount:     7,
-		BytesIn:          100,
-		BytesOut:         200,
-		Backend:          "http://b1",
-		ClientAddr:       "10.0.0.1:1234",
-		Metadata:         map[string]string{"k": "v"},
-		BackendsUsed:     map[string]int{"b1": 3, "b2": 4},
-		Terminated:       true,
-		SystemPromptHash: "hash",
-		IsWebSocket:      true,
-		FrameCount:       11,
-		TextFrames:       6,
-		BinaryFrames:     5,
-		RequestTimes:     []time.Time{wireTime(3)},
-		killChan:         make(chan struct{}),
-		TokensIn:         31,
-		TokensOut:        32,
-		ToolCalls:        2,
-		ToolCallCounts:   map[string]int{"bash": 2},
-		Messages:         []Message{{Role: "user", Content: "hi", Timestamp: wireTime(4)}},
-		SystemPrompt:     "be nice",
-		FailedBackends:   []string{"b9"},
+		ID:                "sess-wire",
+		State:             Killed,
+		StartTime:         wireTime(1),
+		LastActivity:      wireTime(2),
+		EndTime:           &end,
+		RequestCount:      7,
+		BytesIn:           100,
+		BytesOut:          200,
+		Backend:           "http://b1",
+		ClientAddr:        "10.0.0.1:1234",
+		Metadata:          map[string]string{"k": "v"},
+		BackendsUsed:      map[string]int{"b1": 3, "b2": 4},
+		Terminated:        true,
+		KillBlockMode:     KillBlockDuration,
+		KillBlockDuration: 90 * time.Second,
+		SystemPromptHash:  "hash",
+		IsWebSocket:       true,
+		FrameCount:        11,
+		TextFrames:        6,
+		BinaryFrames:      5,
+		RequestTimes:      []time.Time{wireTime(3)},
+		killChan:          make(chan struct{}),
+		TokensIn:          31,
+		TokensOut:         32,
+		ToolCalls:         2,
+		ToolCallCounts:    map[string]int{"bash": 2},
+		Messages:          []Message{{Role: "user", Content: "hi", Timestamp: wireTime(4)}},
+		SystemPrompt:      "be nice",
+		FailedBackends:    []string{"b9"},
 	}
 	for i := 0; i < maxToolCallHistory; i++ {
 		s.ToolCallHistory = append(s.ToolCallHistory, ToolCallRecord{
 			Timestamp: wireTime(i % 60), ToolName: "bash", ToolType: "function", RequestID: "req",
 		})
 	}
+	s.SystemPromptChanges = 3
 	for i := 0; i < MaxSemanticShadow; i++ {
 		s.SemanticShadow = append(s.SemanticShadow, SemanticShadow{
 			Timestamp: wireTime(i % 60), DecisionID: "dec", Signal: "injection", Probability: 0.4,
@@ -214,6 +217,25 @@ func TestSessionWire_RestoreClampsToTheCaps(t *testing.T) {
 	h := got.ToolCallHistory
 	if len(h) != maxToolCallHistory || h[maxToolCallHistory-1].ToolName != "newest" {
 		t.Fatalf("tool history clamp: len=%d last=%q (oldest-first list keeps its tail)", len(h), h[len(h)-1].ToolName)
+	}
+}
+
+// Entries a restore trims above the cap are discarded evidence like any
+// other, so they join the carried drop count instead of vanishing.
+func TestSessionWire_RestoreCountsTrimmedShadowEntries(t *testing.T) {
+	sd := &sessionData{ID: "sess-trim", StartTime: wireTime(1), SemanticShadowDropped: 2, CorrelationShadowDropped: 5}
+	for i := 0; i < MaxSemanticShadow+10; i++ {
+		sd.SemanticShadow = append(sd.SemanticShadow, SemanticShadow{DecisionID: "d"})
+	}
+	for i := 0; i < MaxCorrelationShadow+3; i++ {
+		sd.CorrelationShadow = append(sd.CorrelationShadow, CorrelationShadow{MatchID: "m", Rule: "r"})
+	}
+	got := newSessionFromData(sd, make(chan struct{}))
+	if got.SemanticShadowDropped != 12 {
+		t.Errorf("SemanticShadowDropped = %d, want 12 (2 carried + 10 trimmed)", got.SemanticShadowDropped)
+	}
+	if got.CorrelationShadowDropped != 8 {
+		t.Errorf("CorrelationShadowDropped = %d, want 8 (5 carried + 3 trimmed)", got.CorrelationShadowDropped)
 	}
 }
 

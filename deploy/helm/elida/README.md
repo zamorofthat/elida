@@ -47,6 +47,7 @@ helm install elida ./elida -f my-values.yaml
 | `elida.policy.enabled` | Enable policy engine | `true` |
 | `elida.storage.enabled` | Enable SQLite storage | `false` |
 | `elida.telemetry.enabled` | Enable OpenTelemetry | `false` |
+| `terminationGracePeriodSeconds` | Seconds the pod gets to stop; must exceed ELIDA's 30s `shutdown_timeout` so live sessions are saved | `60` |
 | `redis.enabled` | Deploy Redis sub-chart | `true` |
 | `ingress.enabled` | Enable ingress for proxy | `false` |
 | `controlIngress.enabled` | Enable ingress for dashboard | `false` |

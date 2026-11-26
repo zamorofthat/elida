@@ -80,15 +80,47 @@ type ProtocolParser interface {
 	Parse(data []byte) *SessionControlMessage
 }
 
-// NewSessionControlParser creates a parser with default protocol support
+// NewSessionControlParser creates a parser with every built-in protocol
+// enabled. It is equivalent to NewSessionControlParserFor with no protocol
+// filter.
 func NewSessionControlParser(customPatterns *CustomPatternConfig) *SessionControlParser {
-	parser := &SessionControlParser{
-		protocols: []ProtocolParser{
-			&OpenAIRealtimeParser{},
-			&DeepgramParser{},
-			&ElevenLabsParser{},
-			&LiveKitParser{},
-		},
+	return NewSessionControlParserFor(customPatterns, nil)
+}
+
+// NewSessionControlParserFor creates a parser carrying only the named
+// protocols, which is how websocket.voice_sessions.protocols is honored.
+//
+// An empty list means every built-in protocol, so a deployment that never
+// names any keeps the behavior it had before this filter existed. Names are
+// matched against ProtocolParser.Name (openai_realtime, deepgram, elevenlabs,
+// livekit) and compared case-insensitively after trimming, since they are
+// hand-written in YAML. An unrecognized name selects nothing rather than
+// everything: silently widening what a frame may be parsed as would defeat
+// the point of naming protocols at all.
+//
+// Custom patterns are configured separately and are appended whenever they
+// are present, exactly as before.
+func NewSessionControlParserFor(customPatterns *CustomPatternConfig, enabled []string) *SessionControlParser {
+	all := []ProtocolParser{
+		&OpenAIRealtimeParser{},
+		&DeepgramParser{},
+		&ElevenLabsParser{},
+		&LiveKitParser{},
+	}
+
+	parser := &SessionControlParser{}
+	if len(enabled) == 0 {
+		parser.protocols = all
+	} else {
+		want := make(map[string]bool, len(enabled))
+		for _, name := range enabled {
+			want[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+		for _, p := range all {
+			if want[p.Name()] {
+				parser.protocols = append(parser.protocols, p)
+			}
+		}
 	}
 
 	// Add custom pattern parser if configured
@@ -97,6 +129,17 @@ func NewSessionControlParser(customPatterns *CustomPatternConfig) *SessionContro
 	}
 
 	return parser
+}
+
+// EnabledProtocols reports the built-in protocol names this parser will
+// attempt, in order. The control API reports it so the dashboard describes
+// what is actually running rather than what was requested.
+func (p *SessionControlParser) EnabledProtocols() []string {
+	names := make([]string, 0, len(p.protocols))
+	for _, proto := range p.protocols {
+		names = append(names, proto.Name())
+	}
+	return names
 }
 
 // Parse attempts to parse a session control message from frame data

@@ -600,7 +600,7 @@ func TestDecisionWiring_StatusEndpointIsAuthenticatedAndComplete(t *testing.T) {
 	for _, key := range []string{
 		"enabled", "mode", "effective_mode", "capability", "reason", "arch", "simd",
 		"inline_queue_wait_ms", "model", "model_version", "model_checksum", "signals",
-		"threshold_set", "threshold_set_matches", "breaker_open",
+		"threshold_set", "threshold_set_matches", "breaker_open", "breaker_opens",
 		"inline_completion_ratio", "inline_admission_ratio", "async_fallback_ratio",
 		"async_queue_depth", "async_dropped", "max_in_flight", "admission_reasons",
 		"inline_slots", "async_workers", "inline_panics", "async_canceled", "input_rejected",

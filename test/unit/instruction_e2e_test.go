@@ -1,6 +1,7 @@
 package unit
 
 import (
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ func TestInstructionIntegrityEndToEnd(t *testing.T) {
 	store := &memStore{files: make(map[string]*instruction.Record)}
 
 	rules := []instruction.Rule{
-		{Name: "shell_exec", Patterns: []string{`curl.*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
+		{Name: instruction.RulePipeToShell, Patterns: []string{`curl.*\|\s*(ba)?sh`}, Severity: "critical", Action: "block"},
 		{Name: "prompt_injection", Patterns: []string{`ignore\s+all\s+previous`}, Severity: "critical", Action: "block"},
 		{Name: "perm_escalation", Patterns: []string{`always\s+approve`}, Severity: "high", Action: "flag"},
 	}
@@ -45,8 +46,8 @@ func TestInstructionIntegrityEndToEnd(t *testing.T) {
 	if !result.ShouldBlock {
 		t.Error("poisoned file should block")
 	}
-	if len(result.Violations) == 0 || result.Violations[0].RuleName != "shell_exec" {
-		t.Error("expected shell_exec violation")
+	if len(result.Violations) == 0 || result.Violations[0].RuleName != instruction.RulePipeToShell {
+		t.Error("expected pipe-to-shell violation")
 	}
 
 	// Test 3: Cache hit for same clean file
@@ -87,8 +88,9 @@ func TestInstructionIntegrityEndToEnd(t *testing.T) {
 
 // memStore is a minimal in-memory store for testing.
 type memStore struct {
-	mu    sync.Mutex
-	files map[string]*instruction.Record
+	mu       sync.Mutex
+	files    map[string]*instruction.Record
+	versions map[string]instruction.PathVersion // key: source_path + "\x00" + hash
 }
 
 func (m *memStore) get(hash string) *instruction.Record {
@@ -122,4 +124,38 @@ func (m *memStore) IncrementInstructionFileSessionCount(hash string, lastSeen ti
 
 func (m *memStore) SaveEvent(evt instruction.Event) error {
 	return nil
+}
+
+func (m *memStore) SavePathVersion(v instruction.PathVersion) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.versions == nil {
+		m.versions = make(map[string]instruction.PathVersion)
+	}
+	key := v.SourcePath + "\x00" + v.Hash
+	if old, ok := m.versions[key]; ok {
+		if v.LastSeen.After(old.LastSeen) {
+			old.LastSeen = v.LastSeen
+		}
+		if v.Caused && !old.Caused {
+			old.Caused, old.CauseTool = true, v.CauseTool
+		}
+		v = old
+	}
+	m.versions[key] = v
+	return nil
+}
+
+func (m *memStore) ListPathVersions(limit int) ([]instruction.PathVersion, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]instruction.PathVersion, 0, len(m.versions))
+	for _, v := range m.versions {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSeen.After(out[j].LastSeen) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

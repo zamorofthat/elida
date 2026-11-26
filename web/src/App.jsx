@@ -1145,6 +1145,13 @@ function AppShell() {
   const [historyTotal, setHistoryTotal] = useState(0)
   const historyPageSize = 50
 
+  // Voice needs both the WebSocket transport and voice_sessions.enabled, and
+  // /control/stats reports the combination. Until it answers we treat voice as
+  // unavailable, so a tab that can never hold data is not offered at all: the
+  // dashboard is served by the same binary as the control API, so the field is
+  // always present in practice.
+  const voiceEnabled = stats?.capabilities?.voice?.enabled === true
+
   // Sparkline data (last 20 values)
   const fetchStats = async () => {
     try {
@@ -1274,7 +1281,7 @@ function AppShell() {
       fetchFlagged()
       fetchFlaggedStats()
     }
-    if (page === 'voice') {
+    if (page === 'voice' && voiceEnabled) {
       fetchVoiceSessions()
       fetchVoiceHistory()
     }
@@ -1285,7 +1292,10 @@ function AppShell() {
       if (controller.signal.aborted || document.hidden) return
       refreshData()
       if (page === 'flagged') fetchFlagged()
-      if (page === 'voice') {
+      // Without this guard the voice endpoints are polled every 5s for a
+      // subsystem that is switched off, which answers 503 (no transport) or
+      // 200 with an empty list (transport up, tracking off) forever.
+      if (page === 'voice' && voiceEnabled) {
         fetchVoiceSessions()
         fetchVoiceHistory()
       }
@@ -1298,7 +1308,14 @@ function AppShell() {
       clearInterval(interval)
       clearInterval(healthInterval)
     }
-  }, [page])
+  }, [page, voiceEnabled])
+
+  // Voice can be switched off while the tab is open (an ELIDA restart with a
+  // different config). Leave that view rather than stranding the reader on a
+  // page the nav no longer offers.
+  useEffect(() => {
+    if (page === 'voice' && !voiceEnabled) setPage('dashboard')
+  }, [page, voiceEnabled])
 
   // Combine active and historical voice sessions for the voice tab
   const allVoiceSessions = [...voiceSessions, ...voiceHistory]
@@ -1312,6 +1329,7 @@ function AppShell() {
         status={status}
         lastUpdated={lastUpdated}
         isRefreshing={isRefreshing}
+        voiceEnabled={voiceEnabled}
       />
 
       <main class="main-content">
