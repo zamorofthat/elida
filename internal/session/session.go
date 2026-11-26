@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // State represents the current state of a session
@@ -730,6 +732,48 @@ func (s *Session) SetMetadata(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Metadata[key] = value
+}
+
+// MaxUserAgentLen caps the stored User-Agent: the header is caller-controlled.
+const MaxUserAgentLen = 200
+
+// ObserveUserAgent records the client software a session's requests claim to
+// come from. The first non-empty value is kept as metadata "user_agent"; a
+// later request that sends a different one sets "user_agent_changed" to
+// "true" and leaves the first value in place. The value is self-asserted by
+// the caller, so it labels a session and is never an identity.
+func (s *Session) ObserveUserAgent(raw string) {
+	ua := sanitizeUserAgent(raw)
+	if ua == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	first, seen := s.Metadata["user_agent"]
+	switch {
+	case !seen:
+		s.Metadata["user_agent"] = ua
+	case first != ua:
+		s.Metadata["user_agent_changed"] = "true"
+	}
+}
+
+// sanitizeUserAgent drops control characters and truncates to MaxUserAgentLen
+// bytes on a rune boundary.
+func sanitizeUserAgent(raw string) string {
+	b := make([]rune, 0, len(raw))
+	n := 0
+	for _, r := range strings.TrimSpace(raw) {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+			continue
+		}
+		n += utf8.RuneLen(r)
+		if n > MaxUserAgentLen {
+			break
+		}
+		b = append(b, r)
+	}
+	return string(b)
 }
 
 // RecordMessage adds a message to the conversation history

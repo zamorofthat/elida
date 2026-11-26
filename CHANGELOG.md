@@ -22,26 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy mode and the risk ladder still come from `elida.yaml`.
 
 ### Added
-- `proxy.auth.keys`: per-client proxy keys. A request that authenticates with
-  one is that client: its session IDs are namespaced `<name>:<id>`, so two
-  clients can never share a session, its sessions record the client name, and a
-  client with no session ID of its own gets one session per backend in its
-  namespace instead of the shared per-address fallback. The shared `api_key`
-  keeps working and carries no client, so nothing changes for callers without a
-  key. Auth with only `keys` is valid; validation rejects duplicate or unusable
-  names, duplicate keys and a key equal to the shared key. This stops callers
-  colliding. It does not stop a caller resetting its own risk by changing its
-  session ID.
-- A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
-  takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
-  that replaces the configured `session.kill_block` for that session; without
-  it the configured block applies as before, and a value that is not one of
-  those is a `400` that kills nothing. A killed session reports `kill_block`
-  and `blocked_until`. The dashboard's Kill button now opens the choice in
-  the row (Default, 5 minutes, 30 minutes, 1 hour, 24 hours, custom minutes,
-  Permanent) instead of a browser pop-up, shows a failed kill next to the
-  button instead of an alert, and labels a killed session with how long it is
-  blocked.
+- Sessions now record the `User-Agent` their requests send, as the `user_agent`
+  metadata entry. The first value is kept (control characters removed, 200 bytes
+  at most); if a later request in the same session sends a different one,
+  `user_agent_changed` is set to `true`. The header is whatever the caller
+  claims, so it labels a session and is not an identity. A request with no
+  `User-Agent` records nothing and is not counted as a change.
 - Semantic prompt-injection detection, disabled by default
   (`decision.enabled: false`). An embedded, pure-Go MiniLM classifier scores
   user content and tool results, including bounded decoded representations,
