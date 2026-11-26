@@ -99,20 +99,32 @@ func containsFold(s, lit string) bool {
 		}
 	}
 	first, upper := lit[0], lit[0]-'a'+'A'
+	// Candidates are the positions of the literal's first byte in either case.
+	// Keep each case's next position and look again only once i has passed it,
+	// so every byte of s is scanned for each case at most once. Searching again
+	// from i at every step made an input with a far-off byte of one case
+	// quadratic. A position of len(s) means that case does not occur again.
+	nextLower, nextUpper := -1, -1
 	for i := 0; i+n <= len(s); i++ {
-		j1 := strings.IndexByte(s[i:], first)
-		j2 := strings.IndexByte(s[i:], upper)
-		switch {
-		case j1 < 0 && j2 < 0:
-			return false
-		case j1 < 0:
-			i += j2
-		case j2 < 0:
-			i += j1
-		default:
-			i += min(j1, j2)
+		if nextLower < i {
+			if j := strings.IndexByte(s[i:], first); j < 0 {
+				nextLower = len(s)
+			} else {
+				nextLower = i + j
+			}
 		}
-		if i+n <= len(s) && strings.EqualFold(s[i:i+n], lit) {
+		if nextUpper < i {
+			if j := strings.IndexByte(s[i:], upper); j < 0 {
+				nextUpper = len(s)
+			} else {
+				nextUpper = i + j
+			}
+		}
+		i = min(nextLower, nextUpper)
+		if i+n > len(s) {
+			return false
+		}
+		if strings.EqualFold(s[i:i+n], lit) {
 			return true
 		}
 	}
@@ -129,6 +141,25 @@ func anyFold(lits ...string) func(string) bool {
 		return false
 	}
 }
+
+// privateKeyBlockRegexp matches a PEM private key: the header, the Proc-Type
+// and DEK-Info lines of an encrypted key, and the base64 body, through the END
+// line when it follows. Line breaks are real whitespace or the escapes \n, \r
+// and \t, which is how a key sits inside a JSON string, and a "/" may be
+// written \/ . The body is runs of 16 or more base64 characters with a short
+// last line, so text that does not look like a key body ends the match. A key
+// header is only Proc-Type or DEK-Info, separated from what precedes it by any mix of whitespace and the escapes \\n, \\r and \\t.
+var privateKeyBlockRegexp = func() *regexp.Regexp {
+	const (
+		brk    = `(?:\s|\\[nrt])*`
+		sep    = `(?:\s|\\[nrt])+`
+		header = `(?:` + sep + `(?:proc-type:[ \t]*[0-9]+,[a-z]+|dek-info:[ \t]*[a-z0-9-]+,[0-9a-f]+))*`
+		b64    = `(?:[a-z0-9+=]|\\?/)`
+		body   = `(?:` + brk + b64 + `{16,})*`
+	)
+	return regexp.MustCompile(`(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----` + header +
+		`(?:` + body + brk + b64 + `*` + brk + `-----END [A-Z ]*PRIVATE KEY-----|` + body + `)`)
+}()
 
 // DefaultPatterns returns the standard set of PII redaction patterns
 func DefaultPatterns() []Pattern {
@@ -216,6 +247,49 @@ func defaultPatterns(redactPrivateIPs bool) []Pattern {
 			MayMatch:    anyFold("akia"),
 			Regex:       regexp.MustCompile(`(?i)(AKIA[0-9A-Z]{16})`),
 			Replacement: "[REDACTED_AWS_KEY]",
+		},
+		{
+			Name:        "aws_temporary_key",
+			MayMatch:    anyFold("asia"),
+			Regex:       regexp.MustCompile(`(?i)\basia[0-9a-z]{16}\b`),
+			Replacement: "[REDACTED_AWS_KEY]",
+		},
+		{
+			Name:        "openai_project_key",
+			MayMatch:    anyFold("sk-proj-", "sk-svcacct-", "sk-admin-"),
+			Regex:       regexp.MustCompile(`(?i)\bsk-(?:proj|svcacct|admin)-[a-z0-9_-]{40,}`),
+			Replacement: "[REDACTED_API_KEY]",
+		},
+		{
+			Name:        "github_token",
+			MayMatch:    anyFold("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
+			Regex:       regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})\b`),
+			Replacement: "[REDACTED_GITHUB_TOKEN]",
+		},
+		{
+			Name:        "slack_token",
+			MayMatch:    anyFold("xox"),
+			Regex:       regexp.MustCompile(`(?i)\bxox[abprs]-[a-z0-9-]{20,}`),
+			Replacement: "[REDACTED_SLACK_TOKEN]",
+		},
+		{
+			Name:        "anthropic_api_key",
+			MayMatch:    anyFold("sk-ant-"),
+			Regex:       regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`),
+			Replacement: "[REDACTED_API_KEY]",
+		},
+		{
+			// The header marks the start of a key; the body that follows is the
+			// secret. A body is base64: runs of 16 or more base64 characters,
+			// with a short last line. Redact the header and that body, through
+			// the END line when it follows directly. Text that does not look
+			// like a key body ends the match, so a prompt between a header and
+			// a later END line, or prose after an unterminated header, stays
+			// readable in the capture.
+			Name:        "private_key_block",
+			MayMatch:    anyFold("-----begin"),
+			Regex:       privateKeyBlockRegexp,
+			Replacement: "[REDACTED_PRIVATE_KEY]",
 		},
 		{
 			Name:        "base64_secret",

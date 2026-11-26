@@ -22,11 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy mode and the risk ladder still come from `elida.yaml`.
 
 ### Added
-- `session.derive_from.body_paths`: a list of body paths tried in order, after
-  `body_path`, when deriving a session ID. One config can now group an A2A
-  conversation by `contextId` across the HTTP+JSON (`message.contextId`) and
-  JSON-RPC (`params.message.contextId`) bindings. An unusable entry fails
-  config validation. `body_path` is unchanged.
+- A `secret_in_request` policy rule, in the standard, strict and coding-agent
+  presets, flags a credential in a request body (AWS access and temporary keys,
+  GitHub and Slack tokens, Anthropic and OpenAI-style keys, private key
+  headers). It flags and records only; the request is still forwarded, so
+  redefine the rule with `action: block` (and keep `redact_match: true`) to stop it. In coding-agent it is
+  observe-only. It records `[redacted]` rather than the credential it matched, and every
+  violation raised from a message it matched (other rules, on any target or
+  rule type, including tool-argument rules and the entropy rule) records
+  `[redacted]` in place of that message;
+  a new `redact_match: true` rule option does the same for any rule.
+- Redaction now also covers AWS temporary keys (`ASIA...`), GitHub and Slack
+  tokens, Anthropic API keys and private key blocks in captured content and
+  violation text. Redaction applies to what ELIDA stores, not to what it
+  forwards upstream.
+  The redactor's prefilter no longer takes quadratic time on a long run of one
+  letter case (1 MB of `AAAA` took seconds).
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without
