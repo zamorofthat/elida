@@ -60,6 +60,7 @@ session:
   derive_from:
     openai_user: true   # use the OpenAI `user` field (default true)
     body_path: ""        # optional dot-path, e.g. "metadata.conversation_id"
+    body_paths: []       # more dot-paths, tried in order after body_path
 
   # Kill block configuration
   kill_block:
@@ -890,19 +891,22 @@ session:
   derive_from:
     openai_user: true   # derive from the OpenAI `user` field (default: true)
     body_path: ""       # optional dot-path, e.g. "metadata.conversation_id"
+    body_paths: []      # more dot-paths, tried in order after body_path
 ```
 
 Precedence when deriving from the body:
 
-1. `session.derive_from.body_path`, if configured and the path resolves to a non-empty string in the body — takes precedence over the `user` field.
+1. `session.derive_from.body_path`, then each entry of `session.derive_from.body_paths` in order. The first path that resolves to a non-empty string in the body is used; a path that is missing, empty or not a string is skipped. All of them take precedence over the `user` field.
 2. `session.derive_from.openai_user` — the standard OpenAI `user` field, on by default.
 3. Neither applies (or both are disabled) — falls through to the client-IP + backend fallback above.
 
+Use `body_paths` when one deployment sees the same conversation ID at different places in the body. Paths are dot-separated object keys; array indices are not supported. An entry that is empty, has surrounding spaces, or has an empty segment (`a..b`) fails config validation.
+
 Derived values are formatted as `user-<value>` when the value is short and contains only `[A-Za-z0-9._:-]`, or `user-<16 hex chars>` (a SHA-256-based hash) otherwise — so arbitrary or long `user`/body values never leak verbatim into the session ID.
 
-Set `openai_user: false` and leave `body_path` empty to disable body-derived identity entirely and always use the client-IP + backend fallback when no `X-Session-ID` header is sent.
+Set `openai_user: false` and leave `body_path` and `body_paths` empty to disable body-derived identity entirely and always use the client-IP + backend fallback when no `X-Session-ID` header is sent.
 
-**Security note:** the OpenAI `user` field is client-controlled input — ELIDA trusts whatever value the caller puts in the request body. Session identity is not a cosmetic label: it's the key the kill-switch, risk ladder, and forensic capture all index by. In a single-tenant deployment — one trusted agent stack talking to its own ELIDA instance, ELIDA's common case — this is fine, and it's the whole point of the feature: the agent's own conversation ID keeps its session coherent across failover. In a multi-tenant, shared-key, or unauthenticated deployment, it's a liability: any client that knows or guesses another client's `user` value joins that client's session, and can then trigger a targeted session-kill, poison its risk score toward (or away from) enforcement, or pollute its forensic capture with noise. If clients are mutually untrusted, set `derive_from: {openai_user: false}` and either leave `body_path` empty or point it at a value the clients cannot guess or set for each other.
+**Security note:** the OpenAI `user` field is client-controlled input — ELIDA trusts whatever value the caller puts in the request body. Session identity is not a cosmetic label: it's the key the kill-switch, risk ladder, and forensic capture all index by. In a single-tenant deployment — one trusted agent stack talking to its own ELIDA instance, ELIDA's common case — this is fine, and it's the whole point of the feature: the agent's own conversation ID keeps its session coherent across failover. In a multi-tenant, shared-key, or unauthenticated deployment, it's a liability: any client that knows or guesses another client's `user` value joins that client's session, and can then trigger a targeted session-kill, poison its risk score toward (or away from) enforcement, or pollute its forensic capture with noise. If clients are mutually untrusted, set `derive_from: {openai_user: false}` and either leave `body_path` empty or point it at a value the clients cannot guess or set for each other. The same holds for every configured body path: the value is whatever the client sent, and each path you add is another field a client can use to name a session.
 
 ## Settings Hierarchy (Layered Configuration)
 

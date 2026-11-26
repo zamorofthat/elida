@@ -771,9 +771,9 @@ func (p *Proxy) evaluatePolicy(sess *session.Session, method, path string, reque
 // resolveSessionID returns the session ID for a request: the configured
 // session header if present, else Claude Code's session header when its value
 // is a safe ID (an unsafe one is ignored), else an ID derived from the request
-// body (OpenAI `user` field or session.derive_from.body_path). Returns ""
-// only when none applies, which selects the per-(client,backend) fallback in
-// the caller.
+// body (session.derive_from.body_path / body_paths, then the OpenAI `user`
+// field). Returns "" only when none applies, which selects the
+// per-(client,backend) fallback in the caller.
 func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
 	if id := r.Header.Get(p.config.Session.Header); id != "" {
 		return id
@@ -782,7 +782,7 @@ func (p *Proxy) resolveSessionID(r *http.Request, body []byte) string {
 		return id
 	}
 	df := p.config.Session.DeriveFrom
-	return session.DeriveIDFromBody(body, df.OpenAIUser, df.BodyPath)
+	return session.DeriveIDFromBody(body, df.OpenAIUser, df.Paths()...)
 }
 
 // isStreamingRequest determines if the request expects a streaming response
@@ -2284,6 +2284,7 @@ func systemMessageIfNew(content string, sess *session.Session, index int, primar
 
 	switch {
 	case primary && previous != "" && previous != hash:
+		sess.RecordSystemPromptChange()
 		slog.Warn("system prompt changed mid-session", "session_id", sess.ID, "old_hash", previous[:16], "new_hash", hash[:16])
 	case primary:
 		slog.Debug("cached system prompt hash", "session_id", sess.ID, "hash", hash[:16])
