@@ -6,7 +6,7 @@ This guide walks you through setting up ELIDA and proxying your first AI agent s
 
 ## Prerequisites
 
-- **Go 1.24+** (for building from source) or **Docker**
+- **Go 1.27+** (for building from source) or **Docker**
 - An AI backend: [Ollama](https://ollama.ai) (local) or API key for OpenAI/Anthropic
 
 ---
