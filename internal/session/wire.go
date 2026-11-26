@@ -61,6 +61,11 @@ type sessionData struct {
 	SemanticShadow    []SemanticShadow    `json:"semantic_shadow,omitempty"`
 	CorrelationShadow []CorrelationShadow `json:"correlation_shadow,omitempty"`
 
+	// Shadow entries discarded at the cap, so lost evidence stays countable
+	// across a restart.
+	SemanticShadowDropped    int `json:"semantic_shadow_dropped,omitempty"`
+	CorrelationShadowDropped int `json:"correlation_shadow_dropped,omitempty"`
+
 	// How many times the primary system prompt changed.
 	SystemPromptChanges int `json:"system_prompt_changes,omitempty"`
 }

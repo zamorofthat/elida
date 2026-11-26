@@ -925,6 +925,8 @@ func (s *Session) Snapshot() Session {
 		copy(snap.SemanticShadow, s.SemanticShadow)
 	}
 	snap.CorrelationShadow = cloneCorrelationShadow(s.CorrelationShadow)
+	snap.SemanticShadowDropped = s.SemanticShadowDropped
+	snap.CorrelationShadowDropped = s.CorrelationShadowDropped
 	snap.SystemPromptChanges = s.SystemPromptChanges
 	if s.Messages != nil {
 		snap.Messages = make([]Message, len(s.Messages))
