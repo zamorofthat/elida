@@ -1027,6 +1027,7 @@ func (a *app) setupPolicyEngine() error {
 			Description:    r.Description,
 			Action:         r.Action,
 			Observe:        r.Observe,
+			RedactMatch:    r.RedactMatch,
 		}
 	}
 
@@ -1440,6 +1441,7 @@ func (a *app) initControlAPI() {
 	a.controlHandler = control.New(a.store, a.manager, controlOpts...)
 	if a.settingsStore != nil {
 		a.controlHandler.SetSettingsStore(a.settingsStore)
+		a.controlHandler.ApplySavedPolicyRules()
 	}
 	if a.wsHandler != nil {
 		a.controlHandler.SetWebSocketHandler(a.wsHandler)
