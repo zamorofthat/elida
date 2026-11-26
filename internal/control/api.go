@@ -173,6 +173,8 @@ type Handler struct {
 	wsHandler     *websocket.Handler
 	dashboard     *dashboard.Handler
 	settingsStore *config.SettingsStore
+	// baseRules are the policy rules the engine held when it was attached.
+	baseRules     []policy.Rule
 	fingerprinter FingerprintProvider
 	panelProvider PanelProvider
 	// decisionProvider reports semantic detection status; nil means the
@@ -214,7 +216,16 @@ func WithHistory(store *storage.SQLiteStore) Option {
 
 // WithPolicy enables the policy engine.
 func WithPolicy(engine *policy.Engine) Option {
-	return func(h *Handler) { h.policyEngine = engine }
+	return func(h *Handler) {
+		h.policyEngine = engine
+		// The rules in force at startup (the preset and elida.yaml's rules)
+		// are not part of the settings. Keep them: every settings save
+		// reloads the engine, and the reload layers the saved settings over
+		// this base instead of replacing it.
+		if engine != nil {
+			h.baseRules = append([]policy.Rule(nil), engine.GetConfig().Rules...)
+		}
+	}
 }
 
 // WithInstructionRegistry attaches the instruction registry so /control/stats
@@ -365,6 +376,72 @@ func (h *Handler) SetDecisionConfigurer(c DecisionConfigurer) {
 	h.decisionConfigurer = c
 }
 
+// layeredRules returns the policy rules the engine should run for the given
+// settings: the rules loaded at startup, minus the ones settings disable and the
+// ones a saved custom rule of the same name replaces, plus the saved custom rules.
+func (h *Handler) layeredRules(merged config.Settings) []policy.Rule {
+	var rules []policy.Rule
+	// Local overrides default, as config loading applies to presets.
+	disabled := make(map[string]bool, len(merged.Policy.DisabledRules))
+	for _, name := range merged.Policy.DisabledRules {
+		disabled[name] = true
+	}
+	overridden := make(map[string]bool, len(merged.Policy.CustomRules))
+	for _, cr := range merged.Policy.CustomRules {
+		overridden[cr.Name] = true
+	}
+	for _, r := range h.baseRules {
+		if disabled[r.Name] || overridden[r.Name] {
+			continue
+		}
+		rules = append(rules, r)
+	}
+
+	// Convert custom rules from Settings to policy Rules
+	for _, cr := range merged.Policy.CustomRules {
+		if config.ReservedRuleName(cr.Name) {
+			// saveSettings refuses new ones; one saved earlier (an older
+			// release, or a hand edit) is kept in settings.yaml. Skipped so
+			// a regex rule never records under the semantic runner's name
+			// or a correlation match's "correlation." name.
+			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
+			continue
+		}
+		rule := policy.Rule{
+			Name:           cr.Name,
+			Type:           policy.RuleType(cr.Type),
+			Target:         policy.RuleTarget(cr.Target),
+			Patterns:       cr.Patterns,
+			Threshold:      cr.Threshold,
+			ThresholdFloat: cr.ThresholdFloat,
+			MinSamples:     cr.MinSamples,
+			Severity:       policy.Severity(cr.Severity),
+			Description:    cr.Description,
+			Action:         cr.Action,
+		}
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
+// ApplySavedPolicyRules puts the rule settings saved before this start
+// (disabled_rules and custom rules) in force. Nothing else applied them at
+// startup, so a rule saved as disabled came back after a restart until the next
+// save. Only the rules are applied: the policy mode and the risk ladder keep
+// the values elida.yaml gave them. With no saved rule settings it does nothing.
+func (h *Handler) ApplySavedPolicyRules() {
+	if h.settingsStore == nil || h.policyEngine == nil {
+		return
+	}
+	merged := h.settingsStore.GetMerged()
+	if len(merged.Policy.DisabledRules) == 0 && len(merged.Policy.CustomRules) == 0 {
+		return
+	}
+	cfg := h.policyEngine.GetConfig()
+	cfg.Rules = h.layeredRules(merged)
+	h.policyEngine.ReloadConfig(cfg)
+}
+
 // reloadPolicyEngine applies current settings to the policy engine and the
 // decision configurer without restart.
 func (h *Handler) reloadPolicyEngine() {
@@ -438,30 +515,7 @@ func (h *Handler) reloadPolicyEngine() {
 		}
 	}
 
-	// Convert custom rules from Settings to policy Rules
-	for _, cr := range merged.Policy.CustomRules {
-		if config.ReservedRuleName(cr.Name) {
-			// saveSettings refuses new ones; one saved earlier (an older
-			// release, or a hand edit) is kept in settings.yaml. Skipped so
-			// a regex rule never records under the semantic runner's name
-			// or a correlation match's "correlation." name.
-			slog.Warn("custom rule skipped: the name is reserved for semantic detection or temporal correlation", "rule", cr.Name)
-			continue
-		}
-		rule := policy.Rule{
-			Name:           cr.Name,
-			Type:           policy.RuleType(cr.Type),
-			Target:         policy.RuleTarget(cr.Target),
-			Patterns:       cr.Patterns,
-			Threshold:      cr.Threshold,
-			ThresholdFloat: cr.ThresholdFloat,
-			MinSamples:     cr.MinSamples,
-			Severity:       policy.Severity(cr.Severity),
-			Description:    cr.Description,
-			Action:         cr.Action,
-		}
-		cfg.Rules = append(cfg.Rules, rule)
-	}
+	cfg.Rules = h.layeredRules(merged)
 
 	h.policyEngine.ReloadConfig(cfg)
 	if h.decisionConfigurer == nil {
