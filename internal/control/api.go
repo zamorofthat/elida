@@ -76,6 +76,10 @@ type DecisionStatus struct {
 	ThresholdSetMatches bool   `json:"threshold_set_matches"`
 
 	BreakerOpen bool `json:"breaker_open"`
+	// BreakerOpens counts how many times the circuit breaker opened since
+	// start, so a rate can be charted or alerted on. A run of failed inferences
+	// makes one open, however many errors it holds.
+	BreakerOpens int64 `json:"breaker_opens"`
 
 	// Capacity signals. These, not a fixed requests-per-second figure, are
 	// what tell an operator to add replicas or lower concurrency.

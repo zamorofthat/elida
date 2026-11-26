@@ -22,11 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy mode and the risk ladder still come from `elida.yaml`.
 
 ### Added
-- `decision.model_checksum` (also `ELIDA_DECISION_MODEL_CHECKSUM`) pins the
-  semantic model artifact: the SHA-256 of the model directory's
-  `manifest.json`. A model whose manifest hashes to anything else is not loaded
-  (degraded, or a startup error with `decision.required: true`). Unset by
-  default, so nothing changes until you set it. See `docs/semantic-detection.md`.
+- `GET /control/decision` reports `breaker_opens`: how many times the semantic
+  provider's circuit breaker has opened since start. Until now the transitions
+  were only in the log, so there was nothing to chart or alert on while the
+  breaker, which leaves detection off, kept opening.
 - A kill can choose how long it blocks. `POST /control/sessions/{id}/kill`
   takes an optional `{"block": "permanent" | "until_hour_change" | "30m"}`
   that replaces the configured `session.kill_block` for that session; without
