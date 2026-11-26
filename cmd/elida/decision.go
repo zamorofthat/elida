@@ -98,14 +98,15 @@ func (a *app) setupDecision(ctx context.Context) error {
 	}
 
 	provider, err := embedded.New(ctx, embedded.Options{
-		Enabled:       true,
-		Required:      d.Required,
-		RequireInline: d.RequireInline,
-		ModelPath:     d.ModelPath,
-		ThresholdSet:  d.ThresholdSet,
-		NewPipeline:   a.decisionPipeline,
-		Arch:          a.decisionArch,
-		SIMD:          a.decisionSIMD,
+		Enabled:          true,
+		Required:         d.Required,
+		RequireInline:    d.RequireInline,
+		ModelPath:        d.ModelPath,
+		ExpectedChecksum: d.ModelChecksum,
+		ThresholdSet:     d.ThresholdSet,
+		NewPipeline:      a.decisionPipeline,
+		Arch:             a.decisionArch,
+		SIMD:             a.decisionSIMD,
 	})
 	if err != nil {
 		// Only reachable with required: true or require_inline: true, both
@@ -583,6 +584,7 @@ func (a *app) DecisionStatus() control.DecisionStatus {
 	st.ThresholdSet = h.ThresholdSet
 	st.ThresholdSetMatches = h.ThresholdSetMatches
 	st.BreakerOpen = h.BreakerOpen
+	st.BreakerOpens = h.BreakerOpens
 	st.InputRejected = h.InputRejected
 	for _, s := range h.Signals {
 		st.Signals = append(st.Signals, string(s))

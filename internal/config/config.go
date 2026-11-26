@@ -320,7 +320,24 @@ type ProxyAuthConfig struct {
 	// calls work on a trusted network while the LAN still needs the key.
 	// The trust decision never consults X-Forwarded-For.
 	TrustedNetworks []string `yaml:"trusted_networks"`
+
+	// Keys are per-client keys, each naming the caller that holds it. A request
+	// that authenticates with one is that client: its session IDs are namespaced
+	// by the client's name, so two clients can never share a session, and the
+	// name is recorded on the session. The shared APIKey keeps working beside
+	// them and carries no client identity. Optional.
+	Keys []ProxyAuthKey `yaml:"keys"`
 }
+
+// ProxyAuthKey is one per-client proxy key.
+type ProxyAuthKey struct {
+	Name string `yaml:"name"` // the client; [A-Za-z0-9._-], up to 64 characters
+	Key  string `yaml:"key"`  // may be a ${ENV} reference
+}
+
+// proxyClientName is what a per-client key's name may contain. It is a prefix
+// of every session ID the client creates, so it excludes the separator.
+var proxyClientName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // WebSocketConfig holds WebSocket proxy configuration
 type WebSocketConfig struct {
@@ -512,8 +529,9 @@ type PolicyRule struct {
 	Patterns       []string `yaml:"patterns"`        // For content_match (regex), tool_blocked (glob), tool_argument_pattern (regex)
 	Severity       string   `yaml:"severity"`        // info, warning, critical
 	Description    string   `yaml:"description"`
-	Action         string   `yaml:"action"`  // flag, block, terminate (for content/tool rules)
-	Observe        bool     `yaml:"observe"` // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
+	Action         string   `yaml:"action"`       // flag, block, terminate (for content/tool rules)
+	Observe        bool     `yaml:"observe"`      // Observe only: flag + capture, never enforces, contributes 0 to the risk ladder
+	RedactMatch    bool     `yaml:"redact_match"` // Record "[redacted]" instead of the matched text, for rules that match credentials
 }
 
 // BackendConfig defines a single backend configuration
@@ -550,6 +568,20 @@ type SessionConfig struct {
 type SessionDeriveConfig struct {
 	OpenAIUser bool   `yaml:"openai_user"` // use the standard OpenAI `user` field (default true)
 	BodyPath   string `yaml:"body_path"`   // optional dot-path, e.g. "metadata.conversation_id"; takes precedence over the user field
+	// BodyPaths are further dot-paths tried in order after BodyPath, e.g. the
+	// A2A contextId at "message.contextId" (HTTP+JSON) and
+	// "params.message.contextId" (JSON-RPC). First non-empty string wins.
+	BodyPaths []string `yaml:"body_paths"`
+}
+
+// Paths returns every configured body path in precedence order: BodyPath
+// first when set, then BodyPaths. Nil when none is configured.
+func (d SessionDeriveConfig) Paths() []string {
+	var out []string
+	if d.BodyPath != "" {
+		out = append(out, d.BodyPath)
+	}
+	return append(out, d.BodyPaths...)
 }
 
 // KillBlockConfig configures how long killed sessions stay blocked
@@ -741,7 +773,14 @@ type DecisionConfig struct {
 	Mode          string `yaml:"mode"`           // disabled, shadow, audit, enforce (default: shadow); enforce with a mismatched threshold_set fails startup regardless of Required
 	Provider      string `yaml:"provider"`       // embedded or systemone (default: embedded)
 	ModelPath     string `yaml:"model_path"`     // Model directory (default: /etc/elida/models/injection)
-	Endpoint      string `yaml:"endpoint"`       // systemone only; content leaves the deployment
+	// ModelChecksum pins the model artifact: the SHA-256 of the model
+	// directory's manifest.json, 64 hex characters. When set, a model whose
+	// manifest hashes to anything else is not loaded (degraded, or a startup
+	// error with required: true). The manifest lists every model file's
+	// digest, so this pins the whole artifact. Empty means no pin. Embedded
+	// provider only.
+	ModelChecksum string `yaml:"model_checksum"`
+	Endpoint      string `yaml:"endpoint"` // systemone only; content leaves the deployment
 
 	ThresholdSet      string        `yaml:"threshold_set"`      // Versioned threshold artifact (default: v1); must match the loaded model's for enforce
 	ElevatedThreshold float64       `yaml:"elevated_threshold"` // Emits injection_elevated evidence (default: 0.3)
@@ -831,6 +870,9 @@ func Load(path string) (*Config, error) {
 	// Expand environment variable references and auto-load provider keys
 	cfg.Backend = expandEnvRefs(cfg.Backend)
 	cfg.Proxy.Auth.APIKey = expandEnvRefs(cfg.Proxy.Auth.APIKey)
+	for i := range cfg.Proxy.Auth.Keys {
+		cfg.Proxy.Auth.Keys[i].Key = expandEnvRefs(cfg.Proxy.Auth.Keys[i].Key)
+	}
 	cfg.Control.Auth.APIKey = expandEnvRefs(cfg.Control.Auth.APIKey)
 	for name, b := range cfg.Backends {
 		b.URL = expandEnvRefs(b.URL)
@@ -1123,6 +1165,9 @@ func DefaultConfig() *Config {
 	return defaults()
 }
 
+// sha256HexPattern matches a SHA-256 digest written as 64 hex characters.
+var sha256HexPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+
 // applyEnvOverrides applies environment variable overrides
 func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("ELIDA_LISTEN"); v != "" {
@@ -1236,6 +1281,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("ELIDA_DECISION_MODEL_PATH"); v != "" {
 		c.Decision.ModelPath = v
+	}
+	if v := os.Getenv("ELIDA_DECISION_MODEL_CHECKSUM"); v != "" {
+		c.Decision.ModelChecksum = v
 	}
 	if v := os.Getenv("ELIDA_DECISION_ENDPOINT"); v != "" {
 		c.Decision.Endpoint = v
@@ -1401,6 +1449,51 @@ func (c *Config) validate() error {
 	return result.Error()
 }
 
+// validateProxyAuthKeys checks the per-client keys: a usable name, a key, and
+// nothing ambiguous. Two clients must never share a name or a key, and a client
+// key must not equal the shared key, or the key could not say who is calling.
+func validateProxyAuthKeys(a ProxyAuthConfig) []ValidationError {
+	if len(a.Keys) == 0 {
+		return nil
+	}
+	var errs []ValidationError
+	bad := func(i int, msg, hint string) {
+		errs = append(errs, ValidationError{
+			Field:   fmt.Sprintf("proxy.auth.keys[%d]", i),
+			Message: msg,
+			Hint:    hint,
+		})
+	}
+	if !a.Enabled {
+		errs = append(errs, ValidationError{
+			Field:   "proxy.auth.keys",
+			Message: "keys are set but proxy.auth.enabled is false, so none would be checked",
+			Hint:    "set proxy.auth.enabled: true, or remove the keys",
+		})
+	}
+	names := map[string]bool{}
+	keys := map[string]bool{}
+	for i, k := range a.Keys {
+		switch {
+		case !proxyClientName.MatchString(k.Name):
+			bad(i, fmt.Sprintf("name %q is not usable", k.Name), "1 to 64 characters from A-Z a-z 0-9 . _ - (no colon: it separates the client from the session ID)")
+		case names[k.Name]:
+			bad(i, fmt.Sprintf("name %q is used twice", k.Name), "each client needs its own name")
+		}
+		names[k.Name] = true
+		switch {
+		case k.Key == "":
+			bad(i, "key is empty", "set the key, or a ${ENV} reference that resolves to one")
+		case keys[k.Key]:
+			bad(i, "key is the same as another client's", "each client needs its own key")
+		case a.APIKey != "" && k.Key == a.APIKey:
+			bad(i, "key is the same as proxy.auth.api_key", "the shared key carries no client; give this client its own key")
+		}
+		keys[k.Key] = true
+	}
+	return errs
+}
+
 // Validate performs comprehensive configuration validation
 func (c *Config) Validate() *ValidationResult {
 	result := &ValidationResult{Valid: true}
@@ -1488,6 +1581,15 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	// Session config
+	for i, bp := range c.Session.DeriveFrom.BodyPaths {
+		if bp == "" || bp != strings.TrimSpace(bp) || slices.Contains(strings.Split(bp, "."), "") {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("session.derive_from.body_paths[%d]", i),
+				Message: fmt.Sprintf("%q is not a usable path", bp),
+				Hint:    `dot-separated keys with no empty segment, e.g. "params.message.contextId"`,
+			})
+		}
+	}
 	if c.Session.Timeout <= 0 {
 		errors = append(errors, ValidationError{
 			Field:   "session.timeout",
@@ -1594,13 +1696,14 @@ func (c *Config) Validate() *ValidationResult {
 	}
 
 	// Proxy auth
-	if c.Proxy.Auth.Enabled && c.Proxy.Auth.APIKey == "" {
+	if c.Proxy.Auth.Enabled && c.Proxy.Auth.APIKey == "" && len(c.Proxy.Auth.Keys) == 0 {
 		errors = append(errors, ValidationError{
 			Field:   "proxy.auth.api_key",
 			Message: "API key required when proxy auth is enabled",
-			Hint:    "set ELIDA_PROXY_API_KEY env var",
+			Hint:    "set ELIDA_PROXY_API_KEY env var, or list per-client proxy.auth.keys",
 		})
 	}
+	errors = append(errors, validateProxyAuthKeys(c.Proxy.Auth)...)
 
 	for _, cidr := range c.Proxy.Auth.TrustedNetworks {
 		if _, _, err := net.ParseCIDR(cidr); err != nil {
@@ -1721,6 +1824,21 @@ func validateDecision(c *Config) (errs, warns []ValidationError) {
 			Field:   "decision.mode",
 			Message: fmt.Sprintf("unknown mode %q", d.Mode),
 			Hint:    "one of: disabled, shadow, audit, enforce",
+		})
+	}
+
+	if strings.TrimSpace(d.ModelChecksum) != "" && d.Provider != "embedded" {
+		warns = append(warns, ValidationError{
+			Field:   "decision.model_checksum",
+			Message: fmt.Sprintf("has no effect with provider %q: only the embedded model has a manifest to pin", d.Provider),
+			Hint:    "remove decision.model_checksum, or use provider: embedded",
+		})
+	}
+	if pin := strings.TrimSpace(d.ModelChecksum); pin != "" && !sha256HexPattern.MatchString(pin) {
+		errs = append(errs, ValidationError{
+			Field:   "decision.model_checksum",
+			Message: fmt.Sprintf("%q is not a SHA-256 digest", d.ModelChecksum),
+			Hint:    "64 hex characters: the SHA-256 of the model directory's manifest.json",
 		})
 	}
 
@@ -1989,6 +2107,32 @@ func (c *Config) ApplyPolicyPreset() {
 	}
 }
 
+// secretInRequestRule flags a credential in an outgoing request body: the
+// prompt, tool results and attachments all travel to the model provider and
+// to every hop in front of it. High-precision provider formats only, and it
+// flags rather than blocks, so a developer pasting a key is recorded without
+// breaking their session. Redefine the rule by name to block. Coding-agent
+// sessions observe only (recorded, never feeding the risk ladder), because
+// those agents legitimately carry credentials in their context. The rule
+// records "[redacted]" instead of the matched text: the match is the secret.
+func secretInRequestRule(observe bool) PolicyRule {
+	return PolicyRule{
+		Name: "secret_in_request", Type: "content_match", Target: "request", Observe: observe, RedactMatch: true,
+		Patterns: []string{
+			`\b(AKIA|ASIA)[0-9A-Z]{16}\b`,
+			`\bgh[pousr]_[A-Za-z0-9]{36,}\b`,
+			`\bgithub_pat_[A-Za-z0-9_]{40,}\b`,
+			`\bxox[abprs]-[A-Za-z0-9-]{20,}`,
+			`\bsk-ant-[A-Za-z0-9_-]{20,}`,
+			`\bsk-[A-Za-z0-9]{32,}\b`,
+			`\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}`,
+			`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
+		},
+		Severity: "critical", Action: "flag",
+		Description: "LLM06: Credential in request body (sent to the provider)",
+	}
+}
+
 // getMinimalPreset returns basic rate limiting rules only (development/testing)
 func getMinimalPreset() []PolicyRule {
 	return []PolicyRule{
@@ -2006,7 +2150,7 @@ func getMinimalPreset() []PolicyRule {
 // output, and their rapid tool loops look like high-rate high-entropy
 // bursts to anomaly detectors (integration feedback #3).
 func getCodingAgentPreset() []PolicyRule {
-	return []PolicyRule{
+	return append([]PolicyRule{
 		// ---- Enforced: structural, can't false-fire on agent output ----
 		{Name: "block_dangerous_tools", Type: "tool_blocked", Target: "response", Patterns: []string{
 			"exec_*", "shell_*", "rm_*", "sudo_*", "eval_*",
@@ -2067,12 +2211,12 @@ func getCodingAgentPreset() []PolicyRule {
 			ThresholdFloat: 0.01, MinSamples: 10, Description: "ANOMALY: Request rate statistically abnormal (observe)"},
 		{Name: "compound_anomaly", Type: "compound_anomaly", Observe: true, Severity: "warning", Action: "flag",
 			ThresholdFloat: 0.15, MinSamples: 5, Description: "ANOMALY: Sustained high-rate + high-entropy burst (elevated rate/entropy signal, observe)"},
-	}
+	}, secretInRequestRule(true))
 }
 
 // getStandardPreset returns OWASP basics + rate limits (production default)
 func getStandardPreset() []PolicyRule {
-	return []PolicyRule{
+	return append([]PolicyRule{
 		// Rate limiting (applies to metrics, not content)
 		{Name: "rate_limit_high", Type: "requests_per_minute", Threshold: 60, Severity: "critical", Action: "block", Description: "FIREWALL: Request rate exceeds 60/min"},
 		{Name: "rate_limit_warning", Type: "requests_per_minute", Threshold: 30, Severity: "warning", Action: "flag", Description: "FIREWALL: Elevated request rate (30/min)"},
@@ -2215,7 +2359,7 @@ func getStandardPreset() []PolicyRule {
 			"chmod\\s+777",
 			"curl\\s+[^|]*\\|\\s*(ba)?sh",
 		}, Severity: "critical", Action: "terminate", Description: "LLM08: Dangerous patterns in tool arguments"},
-	}
+	}, secretInRequestRule(false))
 }
 
 // getStrictPreset returns full OWASP + NIST + PII detection (high-security)

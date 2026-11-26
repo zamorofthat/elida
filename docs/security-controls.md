@@ -102,6 +102,7 @@ ELIDA provides a security control plane for AI agent traffic with:
 | `pii_credit_card` | Credit card numbers, CVV | Flag |
 | `pii_personal_data` | Bulk PII extraction requests | Flag |
 | `credentials_request` | API keys, passwords, secrets | Flag |
+| `secret_in_request` | A credential in the request body: AWS keys, GitHub, Slack, Anthropic and OpenAI-style keys, private key headers | Flag |
 | `internal_system_info` | Internal IPs, infrastructure details | Flag |
 
 ### 5. Tool/Plugin Security (LLM07)
