@@ -406,6 +406,54 @@ proxy:
 - **Header stripping** — `X-Elida-API-Key` is stripped before forwarding to backend (not leaked)
 - **Health bypass** — `/health`, `/healthz`, `/ready`, `/readyz` bypass auth for load balancer probes
 
+### Per-client keys (`proxy.auth.keys`)
+
+By default every caller presents the same key, so ELIDA cannot tell callers
+apart and two callers that send the same session ID share one session, its risk
+score and its evidence. Per-client keys name the caller:
+
+```yaml
+proxy:
+  auth:
+    enabled: true
+    keys:
+      - name: team-a
+        key: ${TEAM_A_KEY}
+      - name: team-b
+        key: ${TEAM_B_KEY}
+```
+
+A request that authenticates with one of these keys, by `X-Elida-API-Key` or as
+a bearer token, is that client:
+
+- Its session IDs are namespaced by the client's name: `team-a:<id>`, whatever
+  `<id>` the caller chose or ELIDA derived. Two clients can never share a
+  session, and killing one client's session does not touch another's.
+- With no session ID of its own, a keyed client gets one session per backend in
+  its namespace (`team-a:default-<backend>`) instead of the per-address
+  fallback shared by everything behind one address.
+- The name is recorded on the session as the `client` metadata entry, which the
+  control API returns with the session.
+
+The shared `api_key` keeps working beside the keys. A request that uses it, or
+that comes from a trusted network, carries no client name and keeps the session
+IDs it always had, so adopting keys changes nothing for callers you do not give
+one.
+
+Validation rejects a name that is empty, longer than 64 characters or outside
+`A-Z a-z 0-9 . _ -` (a colon would blur the client from the ID), two clients with
+the same name or the same key, a key equal to the shared key, an empty key, and
+keys set while `enabled` is false. Auth enabled with only `keys` and no shared
+`api_key` is valid.
+
+**What this does not fix.** A keyed caller can still send a new session ID on
+every request and so start its own history again each time; risk is still kept
+per session. Per-client keys stop callers colliding and make each one
+attributable. They do not stop a caller resetting itself. Callers that
+authenticate with the shared key or sit on a trusted network keep the original
+weakness. WebSocket connections do not carry a client name: their sessions are
+not namespaced.
+
 ### Trusted Networks (`proxy.auth.trusted_networks`)
 
 A CIDR allowlist whose **direct peers** skip the API-key check entirely. This lets un-keyed auxiliary agent calls (compression, title generation) work on a trusted network while the wider LAN still needs the key.
