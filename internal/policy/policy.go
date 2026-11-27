@@ -92,6 +92,93 @@ type Rule struct {
 	// explicitly for observe rules as good practice. See
 	// docs/policy-rules-reference.md.
 	Observe bool `yaml:"observe" json:"observe,omitempty"`
+	// RedactMatch records RedactedMatch in place of the matched text, for a
+	// rule whose match is itself sensitive (a credential). The engine matches
+	// lowercased content, so the text it would record is the secret in
+	// lowercase, and violations are read by the control API and the block and
+	// websocket logs as well as stored.
+	RedactMatch bool `yaml:"redact_match" json:"redact_match,omitempty"`
+}
+
+// RedactedMatch is the MatchedText of a violation from a RedactMatch rule.
+const RedactedMatch = "[redacted]"
+
+// loggedMatch is the match as written to the structured log: the first 50
+// characters, or RedactedMatch for a rule that redacts its match.
+func loggedMatch(redact bool, match string) string {
+	if redact {
+		return RedactedMatch
+	}
+	return truncateMatch(match, 50)
+}
+
+// recordedSourceContent is the source message recorded on a violation: the
+// message, truncated, or RedactedMatch when redact is set. The message holds
+// whatever a redacting rule matched, so every violation recorded from a message
+// that such a rule matched redacts it, not only that rule's own.
+func recordedSourceContent(redact bool, content string, max int) string {
+	if redact {
+		return RedactedMatch
+	}
+	return truncateMatch(content, max)
+}
+
+// loggedSourceContent is the source message as written to the structured log.
+func loggedSourceContent(redact bool, content string) string {
+	if redact {
+		return RedactedMatch
+	}
+	return truncateMatch(content, 4096)
+}
+
+// redactsSource reports whether a rule that redacts its match matches this
+// (lowercased) content. Any such rule counts, whatever target it is on: the
+// secret does not stay on the side of the conversation the rule watches. A
+// model response can echo it, so a response rule that fires on the text must
+// not record it either. The engine records the source message on each
+// violation it raises from that message, so the decision is made once, up
+// front, for the whole message.
+func redactsSource(rules []CompiledRule, contentLower string) bool {
+	for _, cr := range rules {
+		if !cr.RedactMatch {
+			continue
+		}
+		for _, re := range cr.CompiledPatterns {
+			if re.MatchString(contentLower) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// redactsArguments reports whether a rule that redacts its match, a content
+// rule or a tool-argument rule, matches these tool-call arguments. The
+// arguments are one message: every argument rule that fires on them redacts its
+// match text, not only the redacting rule's own.
+func redactsArguments(toolRules []CompiledToolRule, contentRules []CompiledRule, arguments string) bool {
+	if redactsSource(contentRules, strings.ToLower(arguments)) {
+		return true
+	}
+	for _, cr := range toolRules {
+		if cr.Type != RuleTypeToolArgumentPattern || !cr.RedactMatch {
+			continue
+		}
+		for _, re := range cr.CompiledPatterns {
+			if re.MatchString(arguments) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchedText returns the text to record for a match of rule r.
+func matchedText(redact bool, match string) string {
+	if redact {
+		return RedactedMatch
+	}
+	return truncateMatch(match, 100)
 }
 
 // Violation represents a policy violation
@@ -1327,6 +1414,14 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 	result := &ContentCheckResult{}
 	contentLower := strings.ToLower(content)
+	// The decision covers the message the violations come from, and applies
+	// whether or not a caller passes a source: the raw-body fallback, the
+	// streaming scanner and the websocket handlers pass none. If a source
+	// message differs from the content checked, check it too.
+	redactSource := redactsSource(compiledRules, contentLower)
+	if source != nil && !redactSource && source.Content != content {
+		redactSource = redactsSource(compiledRules, strings.ToLower(source.Content))
+	}
 
 	for _, cr := range compiledRules {
 		// Skip rules that don't apply to this target
@@ -1340,7 +1435,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					RuleName:       cr.Name,
 					Description:    cr.Description,
 					Severity:       cr.Severity,
-					MatchedText:    truncateMatch(match, 100),
+					MatchedText:    matchedText(cr.RedactMatch || redactSource, match),
 					MatchedPattern: cr.Patterns[i],
 					Action:         cr.Action,
 					Timestamp:      time.Now(),
@@ -1352,7 +1447,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 				if source != nil {
 					violation.SourceRole = source.Role
 					violation.MessageIndex = source.MessageIndex
-					violation.SourceContent = truncateMatch(source.Content, e.maxCaptureSize)
+					violation.SourceContent = recordedSourceContent(redactSource, source.Content, e.maxCaptureSize)
 					violation.EffectiveSeverity = effectiveSeverity(cr.Severity, source.Role)
 				} else {
 					violation.EffectiveSeverity = cr.Severity
@@ -1388,7 +1483,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 					"severity", cr.Severity,
 					"action", actionMsg,
 					"target", targetStr,
-					"matched", truncateMatch(match, 50),
+					"matched", loggedMatch(cr.RedactMatch || redactSource, match),
 					"event_category", violation.EventCategory,
 					"framework_ref", violation.FrameworkRef,
 					"audit_mode", auditMode,
@@ -1398,7 +1493,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 						"source_role", source.Role,
 						"message_index", source.MessageIndex,
 						"effective_severity", violation.EffectiveSeverity,
-						"source_content", truncateMatch(source.Content, 4096),
+						"source_content", loggedSourceContent(redactSource, source.Content),
 					)
 				}
 
@@ -1425,7 +1520,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 		if !ruleAppliesToTarget(rule.Target, target) {
 			continue
 		}
-		if v := e.evaluateContentEntropy(content, rule, source); v != nil {
+		if v := e.evaluateContentEntropy(content, rule, source, redactSource); v != nil {
 			result.Violations = append(result.Violations, *v)
 			if !auditMode {
 				switch rule.Action {
@@ -1448,7 +1543,7 @@ func (e *Engine) evaluateContentWithTarget(sessionID, content string, target Rul
 
 // evaluateContentEntropy checks if content has anomalously high Shannon entropy,
 // which indicates obfuscated/encoded content (base64, hex) evading regex patterns.
-func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *ContentSource) *Violation {
+func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *ContentSource, redactSource bool) *Violation {
 	minSamples := rule.MinSamples
 	if minSamples <= 0 {
 		minSamples = 50
@@ -1479,7 +1574,7 @@ func (e *Engine) evaluateContentEntropy(content string, rule Rule, source *Conte
 	if source != nil {
 		v.SourceRole = source.Role
 		v.MessageIndex = source.MessageIndex
-		v.SourceContent = truncateMatch(source.Content, e.maxCaptureSize)
+		v.SourceContent = recordedSourceContent(redactSource, source.Content, e.maxCaptureSize)
 		v.EffectiveSeverity = effectiveSeverity(rule.Severity, source.Role)
 	} else {
 		v.EffectiveSeverity = rule.Severity
@@ -2771,6 +2866,7 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 	// Snapshot rules, audit mode and the taxonomy under read lock
 	e.mu.RLock()
 	toolRules := e.compiledToolRules
+	contentRules := e.compiledRules
 	auditMode := e.auditMode
 	taxonomy := e.taxonomy
 	e.mu.RUnlock()
@@ -2790,6 +2886,12 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 	}
 
 	result := &ContentCheckResult{}
+
+	// Decided once per call, not once per rule and call.
+	redactArgs := make([]bool, len(toolCalls))
+	for i, tc := range toolCalls {
+		redactArgs[i] = tc.Arguments != "" && redactsArguments(toolRules, contentRules, tc.Arguments)
+	}
 
 	for _, cr := range toolRules {
 		switch cr.Type {
@@ -2827,7 +2929,7 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 				}
 			}
 		case RuleTypeToolArgumentPattern:
-			for _, tc := range toolCalls {
+			for ti, tc := range toolCalls {
 				if tc.Arguments == "" {
 					continue
 				}
@@ -2837,7 +2939,7 @@ func (e *Engine) evaluateToolCalls(sessionID string, toolCalls []ToolCall, corre
 							RuleName:       cr.Name,
 							Description:    cr.Description,
 							Severity:       cr.Severity,
-							MatchedText:    truncateMatch(match, 100),
+							MatchedText:    matchedText(cr.RedactMatch || redactArgs[ti], match),
 							MatchedPattern: cr.Patterns[i],
 							Action:         cr.Action,
 							Timestamp:      time.Now(),
@@ -2995,7 +3097,7 @@ func (s *StreamingScanner) evaluateEntropy() *ContentCheckResult {
 		if !ruleAppliesToTarget(rule.Target, RuleTargetResponse) {
 			continue
 		}
-		if v := s.engine.evaluateContentEntropy(content, rule, nil); v != nil {
+		if v := s.engine.evaluateContentEntropy(content, rule, nil, false); v != nil {
 			if result == nil {
 				result = &ContentCheckResult{}
 			}

@@ -198,6 +198,10 @@ controlIngress:
           pathType: Prefix
   tls: []
 
+# These limits are sized for ELIDA without semantic detection. With
+# decision.enabled the loaded model alone needs about 330 to 430 MiB (see
+# docs/semantic-detection.md, "Resource requirements"): raise the memory limit
+# to at least 768Mi or the pod is out-of-memory killed.
 resources:
   limits:
     cpu: 500m

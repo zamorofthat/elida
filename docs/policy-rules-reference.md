@@ -54,6 +54,20 @@ escalate.
 > this is defense in depth. Setting `Action: "flag"` explicitly on observe
 > rules is still good practice.
 
+### Rules that match credentials
+
+`redact_match: true` records `[redacted]` as the violation's matched text
+instead of the text that matched. Use it on any rule whose match is itself
+sensitive. Without it the violation carries the match (in lowercase, because
+the engine matches lowercased content), and violations are returned by the
+control API and written to the block and websocket logs as well as stored.
+The built-in `secret_in_request` rule sets it.
+
+Two limits. Redefining a rule by name replaces it whole, so a redefinition of
+`secret_in_request` (to block, say) must keep `redact_match: true`, or the
+secret is recorded again. And `redact_match` is read from `elida.yaml`; a rule
+saved through the settings API has no such field and records its match.
+
 ### Audit mode and the risk ladder
 
 `mode: audit` is a true dry run: rule actions don't enforce **and** the
@@ -412,6 +426,27 @@ Detects requests that may expose PII or sensitive data.
   severity: "warning"
   action: "flag"
   description: "LLM06: Credentials request"
+
+- name: "secret_in_request"
+  type: "content_match"
+  target: "request"
+  patterns:
+    - "\\b(AKIA|ASIA)[0-9A-Z]{16}\\b"
+    - "\\bgh[pousr]_[A-Za-z0-9]{36,}\\b"
+    - "\\bgithub_pat_[A-Za-z0-9_]{40,}\\b"
+    - "\\bxox[abprs]-[A-Za-z0-9-]{20,}"
+    - "\\bsk-ant-[A-Za-z0-9_-]{20,}"
+    - "\\bsk-[A-Za-z0-9]{32,}\\b"
+    - "\\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}"
+    - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+  severity: "critical"
+  action: "flag"
+  description: "LLM06: Credential in request body (sent to the provider)"
+  redact_match: true   # record "[redacted]", not the matched credential
+  # Present in the standard, strict and coding-agent presets. In coding-agent it
+  # is observe-only. ELIDA forwards the request unchanged: this rule records the
+  # leak, it does not remove the secret. Redefine the rule with action: block
+  # to stop requests that carry one.
 
 - name: "pii_bulk_extraction"
   type: "content_match"
